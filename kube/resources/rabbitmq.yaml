@@ -1,0 +1,20 @@
+apiVersion: rabbitmq.com/v1beta1
+kind: RabbitmqCluster
+metadata:
+  name: rabbitmq
+  namespace: nervix-rabbitmq
+spec:
+  replicas: 3
+  persistence:
+    storage: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  rabbitmq:
+    additionalConfig: |
+      default_user = guest
+      default_pass = guest
+      loopback_users.guest = false

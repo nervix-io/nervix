@@ -1,0 +1,18 @@
+image:
+  repository: nervix-mock-server
+  tag: local
+  pullPolicy: IfNotPresent
+
+service:
+  httpPort: 8080
+  httpsPort: 8443
+
+tls:
+  secretName: nervix-mock-server-wildcard-tls
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

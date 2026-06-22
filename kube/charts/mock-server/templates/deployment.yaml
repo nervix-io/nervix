@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mock-server.fullname" . }}
+  labels:
+    {{- include "mock-server.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mock-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mock-server.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: mock-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+            - name: https
+              containerPort: {{ .Values.service.httpsPort }}
+          volumeMounts:
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /http/health
+              port: http
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /http/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+            items:
+              - key: tls.crt
+                path: node.pem
+              - key: tls.key
+                path: node-key.pem

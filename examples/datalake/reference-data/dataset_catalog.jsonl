@@ -1,0 +1,4 @@
+{"dataset_id":"orders","data_domain":"commerce","retention_tier":"hot","owner_team":"team-ordering"}
+{"dataset_id":"clickstream","data_domain":"engagement","retention_tier":"warm","owner_team":"team-growth"}
+{"dataset_id":"payments","data_domain":"finance","retention_tier":"hot","owner_team":"team-payments"}
+{"dataset_id":"telemetry","data_domain":"operations","retention_tier":"cold","owner_team":"team-platform"}

@@ -1,0 +1,171 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUST_VERSION=1.96
+ARG DEBIAN_VERSION=trixie
+ARG LLVM_VERSION=22
+
+ARG SONIC_PARALLELISM=2
+ARG SONIC_TARGET_CPUS=x86-64-v3
+ARG ONNXRUNTIME_VERSION=1.24.2
+
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
+
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+ARG BUILDARCH
+ARG TARGETARCH
+ARG DEBIAN_VERSION
+ARG LLVM_VERSION
+ARG SONIC_PARALLELISM
+ARG SONIC_TARGET_CPUS
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binutils-aarch64-linux-gnu \
+        ca-certificates \
+        cmake \
+        curl \
+        g++-aarch64-linux-gnu \
+        gcc-aarch64-linux-gnu \
+        git \
+        gnupg \
+        libc6-dev-arm64-cross \
+        libssl-dev \
+        lsb-release \
+        make \
+        perl \
+        pkg-config \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+    | gpg --dearmor -o /etc/apt/keyrings/llvm.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/${DEBIAN_VERSION}/ llvm-toolchain-${DEBIAN_VERSION}-${LLVM_VERSION} main" \
+        >/etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        clang-${LLVM_VERSION} \
+        libclang1-${LLVM_VERSION} \
+        libclang-${LLVM_VERSION}-dev \
+        lld-${LLVM_VERSION} \
+        llvm-${LLVM_VERSION} \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -L --proto '=https' --tlsv1.2 -sSf \
+    https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh \
+    | bash \
+    && cargo binstall --no-confirm cargo-auditable \
+    && cargo binstall --no-confirm trunk \
+    && cargo install cargo-sonic
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
+COPY src ./src
+COPY crates ./crates
+COPY proto ./proto
+COPY tests/scenarios.rs ./tests/scenarios.rs
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    case "${TARGETARCH}" in \
+    amd64) export RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+    arm64) export RUST_TARGET=aarch64-unknown-linux-gnu ;; \
+    *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && case "${TARGETARCH}" in \
+    amd64) \
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang-${LLVM_VERSION}; \
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--target=x86_64-unknown-linux-gnu -C link-arg=-fuse-ld=lld"; \
+      export CC_x86_64_unknown_linux_gnu=clang-${LLVM_VERSION}; \
+      export CXX_x86_64_unknown_linux_gnu=clang++-${LLVM_VERSION}; \
+      export AR_x86_64_unknown_linux_gnu=llvm-ar-${LLVM_VERSION}; \
+      export CFLAGS_x86_64_unknown_linux_gnu="--target=x86_64-unknown-linux-gnu"; \
+      export CARGO_SONIC_LOADER_RUSTFLAGS="-C link-arg=--target=x86_64-unknown-linux-gnu -C link-arg=-fuse-ld=lld";; \
+    arm64) \
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=clang-${LLVM_VERSION}; \
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--target=aarch64-unknown-linux-gnu -C link-arg=--gcc-toolchain=/usr -C link-arg=-fuse-ld=lld"; \
+      export CC_aarch64_unknown_linux_gnu=clang-${LLVM_VERSION}; \
+      export CXX_aarch64_unknown_linux_gnu=clang++-${LLVM_VERSION}; \
+      export AR_aarch64_unknown_linux_gnu=llvm-ar-${LLVM_VERSION}; \
+      export CFLAGS_aarch64_unknown_linux_gnu="--target=aarch64-unknown-linux-gnu --gcc-toolchain=/usr -I/usr/include/aarch64-linux-gnu"; \
+      export CXXFLAGS_aarch64_unknown_linux_gnu="--target=aarch64-unknown-linux-gnu --gcc-toolchain=/usr -I/usr/include/aarch64-linux-gnu"; \
+      export CARGO_SONIC_LOADER_RUSTFLAGS="-C link-arg=--target=aarch64-unknown-linux-gnu -C link-arg=--gcc-toolchain=/usr -C link-arg=-fuse-ld=lld";; \
+    esac \
+    && export LIBCLANG_PATH="$(dirname "$(find /usr -type f \
+      \( -name 'libclang.so' -o -name 'libclang.so.*' -o -name 'libclang-*.so' -o -name 'libclang-*.so.*' \) \
+      | head -n1)")" \
+    && if [ -z "${LIBCLANG_PATH}" ] || [ "${LIBCLANG_PATH}" = "." ]; then \
+      echo "failed to locate libclang shared library under /usr" >&2; \
+      find /usr -type f | grep -E 'clang|llvm' || true; \
+      exit 1; \
+    fi \
+    && echo "building on ${BUILDPLATFORM} for ${TARGETPLATFORM} (${RUST_TARGET})" \
+    && echo "using LIBCLANG_PATH=${LIBCLANG_PATH}" \
+    && echo "using cargo-sonic target CPUs: ${SONIC_TARGET_CPUS}" \
+    && rustup target add "${RUST_TARGET}" wasm32-unknown-unknown \
+    && cd crates/web-console \
+    && RUSTFLAGS= trunk build --release \
+    && cd /app \
+    && cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --bin nervix \
+    && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
+    && mkdir -p /artifacts \
+    && cp "/app/target/sonic/${RUST_TARGET}/release/nervix" /artifacts/nervix \
+    && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix.bundle" /artifacts/nervix.bundle \
+    && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/nervix-cli
+
+ARG DEBIAN_VERSION=trixie
+FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS onnxruntime
+
+ARG ONNXRUNTIME_VERSION
+ARG TARGETARCH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && case "${TARGETARCH}" in \
+        amd64) export ORT_ARCH=x64; export ORT_FLAVOR=gpu_cuda13 ;; \
+        arm64) export ORT_ARCH=aarch64; export ORT_FLAVOR=cpu ;; \
+        *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && if [ "${ORT_FLAVOR}" = "gpu_cuda13" ]; then \
+        export ORT_PACKAGE="onnxruntime-linux-${ORT_ARCH}-gpu_cuda13-${ONNXRUNTIME_VERSION}"; \
+    else \
+        export ORT_PACKAGE="onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}"; \
+    fi \
+    && curl -L --proto '=https' --tlsv1.2 -sSf \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${ORT_PACKAGE}.tgz" \
+        -o /tmp/onnxruntime.tgz \
+    && mkdir -p /onnxruntime \
+    && tar -xzf /tmp/onnxruntime.tgz -C /onnxruntime --strip-components=1 \
+    && rm /tmp/onnxruntime.tgz
+
+ARG DEBIAN_VERSION=trixie
+FROM debian:${DEBIAN_VERSION}-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+RUN groupadd --system --gid 10001 nervix \
+    && useradd --system --uid 10001 --gid nervix --home-dir /var/lib/nervix --shell /usr/sbin/nologin nervix \
+    && mkdir -p /var/lib/nervix \
+    && chown -R nervix:nervix /var/lib/nervix
+VOLUME ["/var/lib/nervix"]
+ENV NERVIX_DB_PATH=/var/lib/nervix/db
+ENV LD_LIBRARY_PATH=/usr/local/lib
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+
+COPY --from=onnxruntime /onnxruntime/lib/libonnxruntime*.so* /usr/local/lib/
+COPY --from=builder /artifacts/nervix /usr/local/bin/nervix
+COPY --from=builder /artifacts/nervix.bundle /usr/local/bin/nervix.bundle
+COPY --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
+
+USER nervix:nervix
+
+CMD ["/usr/local/bin/nervix"]

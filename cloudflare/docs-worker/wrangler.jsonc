@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nervix-docs",
+  "main": "src/index.js",
+  "compatibility_date": "2026-04-12",
+  "workers_dev": true,
+  "r2_buckets": [
+    {
+      "binding": "DOCS_BUCKET",
+      "bucket_name": "nervix-docs"
+    }
+  ]
+}

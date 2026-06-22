@@ -1,0 +1,31 @@
+[package]
+edition = "2024"
+name = "nervix-datalake-geo-wasm-guest"
+publish = false
+version = "0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+arrow-array = "54"
+arrow-ipc = "54"
+arrow-schema = "54"
+ciborium = "0.2"
+geo = { version = "0.33.1", default-features = false }
+geohash = "0.13.2"
+maxminddb = "0.28"
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+flate2 = "1.1"
+maxminddb = "0.28"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = true
+
+[workspace]

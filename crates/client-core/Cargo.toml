@@ -1,0 +1,33 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-client-core"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+autocomplete = []
+default = []
+
+[dependencies]
+async-tar = { workspace = true, features = ["runtime-tokio"] }
+base64 = { workspace = true }
+nervix-models = { workspace = true }
+nervix-nspl = { workspace = true, features = ["client"] }
+nervix-proto = { workspace = true, features = ["client"] }
+prost = { workspace = true }
+rustls = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+  "fs",
+  "io-util",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+] }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+triomphe = { workspace = true }
+url = { workspace = true }

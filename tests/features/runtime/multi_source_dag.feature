@@ -1,0 +1,146 @@
+Feature: Multi-source DAG routing
+  Scenario Outline: Multiple ingestors flow through dedicated and shared branches
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And RabbitMQ queue "dag_rabbit_{{test_id}}" exists
+    And Redis channel "dag_out_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64,
+        source STRING
+      );
+
+      CREATE JSON WIRE SCHEMA notification_wire (
+        user_id integer,
+        source string
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+      CREATE RELAY kafka_ingress SCHEMA notification PARAMETERIZED BY user_id_branch;
+      CREATE RELAY rabbit_ingress SCHEMA notification PARAMETERIZED BY user_id_branch;
+      CREATE RELAY kafka_projected SCHEMA notification PARAMETERIZED BY user_id_branch;
+      CREATE RELAY rabbit_projected SCHEMA notification PARAMETERIZED BY user_id_branch;
+      CREATE RELAY shared_dispatch SCHEMA notification PARAMETERIZED BY user_id_branch;
+
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '127.0.0.1:9092'
+        };
+
+      CREATE CLIENT rabbit_main
+        TYPE RABBITMQ
+        CONFIG {
+          'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
+        };
+
+      CREATE CLIENT redis_main
+        TYPE REDIS
+        CONFIG {
+          'addr' = 'redis://127.0.0.1:6379/'
+        };
+
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+        TO kafka_ingress
+        DECODE USING notification_codec
+        PARAMETERIZED BY user_id_branch VALUES { user_id = kafka_ingress.user_id } TTL 5m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM KAFKA kafka_main
+        TOPIC dag_kafka_{{test_id}}
+        OFFSET BY CONSUMER GROUP dag_cucumber_{{test_id}}
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR rabbit_notifications
+        TO rabbit_ingress
+        DECODE USING notification_codec
+        PARAMETERIZED BY user_id_branch VALUES { user_id = rabbit_ingress.user_id } TTL 5m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM RABBITMQ rabbit_main
+        QUEUE dag_rabbit_{{test_id}}
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      CREATE DEDUPLICATOR kafka_branch
+        FROM kafka_ingress
+        TO kafka_projected PARAMETERIZED BY user_id_branch
+        DEDUPLICATE ON kafka_ingress.user_id
+        MAX TIME 10m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+
+      CREATE DEDUPLICATOR rabbit_branch
+        FROM rabbit_ingress
+        TO rabbit_projected PARAMETERIZED BY user_id_branch
+        DEDUPLICATE ON rabbit_ingress.user_id
+        MAX TIME 10m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+
+      CREATE DEDUPLICATOR kafka_shared
+        FROM kafka_projected
+        TO shared_dispatch PARAMETERIZED BY user_id_branch
+        DEDUPLICATE ON kafka_projected.user_id
+        MAX TIME 10m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+
+      CREATE DEDUPLICATOR rabbit_shared
+        FROM rabbit_projected
+        TO shared_dispatch PARAMETERIZED BY user_id_branch
+        DEDUPLICATE ON rabbit_projected.user_id
+        MAX TIME 10m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+
+      CREATE EMITTER kafka_out
+        FROM kafka_projected
+        ENCODE USING notification_codec
+        TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+      CREATE EMITTER rabbit_out
+        FROM rabbit_projected
+        ENCODE USING notification_codec
+        TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+      CREATE EMITTER shared_out
+        FROM shared_dispatch
+        ENCODE USING notification_codec
+        TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+      SUBSCRIBE SESSION TO kafka_projected;
+      SUBSCRIBE SESSION TO rabbit_projected;
+      SUBSCRIBE SESSION TO shared_dispatch;
+      START;
+      """
+    When Kafka message is published to topic "dag_kafka_{{test_id}}"
+      """
+      {"user_id":11,"source":"kafka"}
+      """
+    And RabbitMQ message is published to queue "dag_rabbit_{{test_id}}"
+      """
+      {"user_id":22,"source":"rabbit"}
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      "source":"kafka"
+      "source":"kafka"
+      "source":"rabbit"
+      "source":"rabbit"
+      """
+    And within "5s" the observed broker receives payloads
+      """
+      "source":"kafka"
+      "source":"kafka"
+      "source":"rabbit"
+      "source":"rabbit"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+      | 3            | 1             |

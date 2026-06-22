@@ -1,0 +1,21 @@
+[package]
+build = "build.rs"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-proto"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+client = ["tonic"]
+default = []
+server = ["tonic"]
+
+[dependencies]
+prost = { workspace = true }
+tonic = { workspace = true, optional = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }

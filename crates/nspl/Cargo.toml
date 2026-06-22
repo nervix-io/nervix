@@ -1,0 +1,27 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-nspl"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+client = []
+default = ["client", "server"]
+server = []
+
+[dependencies]
+arrow-schema = { workspace = true }
+chumsky = { workspace = true }
+humantime = { workspace = true }
+nervix-models = { workspace = true }
+sorted_vec = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+ubyte = { workspace = true }
+
+[dev-dependencies]
+ariadne = { workspace = true }
+bolero = { workspace = true }
+rustyline = { workspace = true }

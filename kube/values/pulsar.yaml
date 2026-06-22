@@ -1,0 +1,69 @@
+initialize: true
+
+components:
+  zookeeper: true
+  bookkeeper: true
+  autorecovery: true
+  broker: true
+  proxy: true
+  toolset: false
+
+standalone:
+  enabled: false
+
+affinity:
+  anti_affinity: false
+
+persistence: false
+
+volumes:
+  persistence: false
+
+victoria-metrics-k8s-stack:
+  enabled: false
+
+zookeeper:
+  replicaCount: 3
+  affinity:
+    anti_affinity: false
+  volumes:
+    persistence: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+bookkeeper:
+  replicaCount: 3
+  affinity:
+    anti_affinity: false
+  volumes:
+    persistence: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+
+broker:
+  replicaCount: 2
+  affinity:
+    anti_affinity: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+  configData:
+    PULSAR_MEM: >
+      -Xms128m -Xmx256m -XX:MaxDirectMemorySize=256m
+    managedLedgerDefaultEnsembleSize: "2"
+    managedLedgerDefaultWriteQuorum: "2"
+    managedLedgerDefaultAckQuorum: "2"
+
+proxy:
+  replicaCount: 2
+  affinity:
+    anti_affinity: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi

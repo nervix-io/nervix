@@ -1,0 +1,23 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-wasm"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ciborium = { workspace = true }
+nervix-models = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+wasmtime = { workspace = true }
+
+[dev-dependencies]
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

@@ -1,0 +1,27 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-interconnect"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+dashmap = { workspace = true }
+ed25519-dalek = { workspace = true }
+futures-util = { workspace = true }
+nervix-models = { workspace = true }
+rand_core = { workspace = true }
+rkyv = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-rustls = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

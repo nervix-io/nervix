@@ -1,0 +1,137 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  meta:
+    name: metadata
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 40
+    outputs:
+      timestamp: ${{ steps.meta.outputs.timestamp }}
+    steps:
+      - name: Compute image metadata
+        id: meta
+        run: |
+          ts="$(date -u +'%Y%m%d%H%M%S')"
+          echo "timestamp=${ts}" >> "${GITHUB_OUTPUT}"
+
+  build-arch:
+    name: build-${{ matrix.image }}-${{ matrix.arch }}
+    needs: meta
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian
+            version: trixie
+            platform: linux/amd64
+            arch: amd64
+            llvm: "22"
+          - image: debian
+            version: trixie
+            platform: linux/arm64
+            arch: arm64
+            llvm: "22"
+          # - image: alpine
+          #   version: "3.23"
+          #   platform: linux/amd64
+          #   arch: amd64
+          #   llvm: "21"
+          # - image: alpine
+          #   version: "3.23"
+          #   platform: linux/arm64
+          #   arch: arm64
+          #   llvm: "21"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push arch image
+        run: |
+          image_repo="ghcr.io/nervix-io/nervix"
+          tag="${image_repo}:${{ needs.meta.outputs.timestamp }}-${{ matrix.image }}-${{ matrix.arch }}"
+          push_image="true"
+          if [[ "${{ github.event_name }}" == "pull_request" \
+            && "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
+            push_image="false"
+          fi
+          if [[ "${{ matrix.image }}" == "debian" ]]; then
+            just docker-build-debian \
+              "${{ matrix.version }}" \
+              "${{ matrix.llvm }}" \
+              "${tag}" \
+              "${{ matrix.platform }}" \
+              "${push_image}"
+          else
+            just docker-build-alpine \
+              "${{ matrix.version }}" \
+              "${{ matrix.llvm }}" \
+              "${tag}" \
+              "${{ matrix.platform }}" \
+              "${push_image}"
+          fi
+
+  publish-manifest:
+    name: manifest-${{ matrix.image }}
+    needs: [meta, build-arch]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian
+          # - alpine
+    steps:
+      - name: Setup Docker Buildx
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish multi-arch manifest
+        run: |
+          base="ghcr.io/nervix-io/nervix"
+          ts="${{ needs.meta.outputs.timestamp }}"
+          docker buildx imagetools create \
+            -t "${base}:${ts}-${{ matrix.image }}" \
+            -t "${base}:${{ matrix.image }}-latest" \
+            "${base}:${ts}-${{ matrix.image }}-amd64" \
+            "${base}:${ts}-${{ matrix.image }}-arm64"

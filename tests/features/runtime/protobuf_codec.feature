@@ -1,0 +1,68 @@
+Feature: Protobuf codec
+  Scenario Outline: HTTP endpoint ingestor decodes protobuf through JAQ transformation
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "proto_dir" containing
+      """
+      {
+        "notification.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Notification {\n  uint32 user_id = 1;\n  string tenant = 2;\n  string payload = 3;\n}\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE proto_bundle;
+      UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
+      """
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        user_id I64,
+        payload STRING
+      );
+
+      CREATE CODEC notification_codec
+        FROM PROTOBUF
+        USING RESOURCE proto_bundle VERSION 1
+        CONFIG {'file' = 'notification.proto', 'include' = '.'}
+        MESSAGE 'nervix.test.Notification'
+        TO SCHEMA notification
+        WITH JAQ TRANSFORMATION '{user_id: .user_id, payload: .payload}';
+
+      CREATE RELAY notifications SCHEMA notification;
+
+      CREATE VHOST edge http-{{test_id}}.example.com;
+
+      CREATE ENDPOINT http_notifications_endpoint
+        ON edge
+        PATH '/ingest'
+        TYPE HTTP;
+
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+        TO notifications
+        DECODE USING notification_codec
+        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO notifications;
+      START;
+      """
+    And protobuf payload fixture "notification" is posted to host "http-{{test_id}}.example.com" path "/ingest"
+    Then the relay subscription receives a payload
+      """
+      {"payload":"aligned","user_id":42}
+      """
+    And the last relay subscription payload contains key fragment '{"user_id":42}'
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

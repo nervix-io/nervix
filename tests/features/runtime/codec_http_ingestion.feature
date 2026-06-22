@@ -1,0 +1,230 @@
+Feature: HTTP codec ingestion
+  Scenario Outline: HTTP endpoint ingestor delivers a single <wire_format> payload through a schemaful codec
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        tenant STRING,
+        user_id I64
+      );
+
+      CREATE <wire_format> WIRE SCHEMA notification_wire (
+        tenant <tenant_wire_type>,
+        user_id <user_id_wire_type>
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE <wire_format> SCHEMA notification_wire
+        TO SCHEMA notification;
+
+      CREATE RELAY notifications SCHEMA notification;
+
+      CREATE VHOST edge http-{{test_id}}.example.com;
+
+      CREATE ENDPOINT http_notifications_endpoint
+        ON edge
+        PATH '/ingest'
+        TYPE HTTP;
+
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+        TO notifications
+        DECODE USING notification_codec
+        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO notifications;
+      START;
+      """
+    When http payload encoded as "<wire_format>" is posted to host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","user_id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"tenant":"acme","user_id":42}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"acme","user_id":42}'
+
+    Examples:
+      | cluster_size | replica_count | wire_format | tenant_wire_type | user_id_wire_type |
+      | 1            | 0             | JSON        | string           | integer           |
+      | 1            | 0             | AVRO        | STRING           | LONG              |
+      | 3            | 0             | JSON        | string           | integer           |
+      | 3            | 0             | AVRO        | STRING           | LONG              |
+      | 3            | 1             | JSON        | string           | integer           |
+      | 3            | 1             | AVRO        | STRING           | LONG              |
+
+  Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a schemaful codec
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA metrics (
+        device STRING,
+        cpu_last_64 <cpu_type>,
+        labels <labels_type> OPTIONAL
+      );
+
+      CREATE <wire_format> WIRE SCHEMA metrics_wire (
+        device STRING,
+        cpu_last_64 ARRAY,
+        labels ARRAY OPTIONAL
+      );
+
+      CREATE CODEC metrics_codec
+        FROM WIRE <wire_format> SCHEMA metrics_wire
+        TO SCHEMA metrics;
+
+      CREATE RELAY metrics_stream SCHEMA metrics;
+
+      CREATE VHOST edge http-arrays-{{test_id}}.example.com;
+
+      CREATE ENDPOINT metrics_endpoint
+        ON edge
+        PATH '/ingest'
+        TYPE HTTP;
+
+      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE INGESTOR metrics_ingestor
+        TO metrics_stream
+        DECODE USING metrics_codec
+        PARAMETERIZED BY device_branch VALUES { device = metrics_stream.device } TTL 5m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO metrics_stream;
+      START;
+      """
+    When http payload encoded as "<wire_format>" is posted to host "http-arrays-{{test_id}}.example.com" path "/ingest"
+      """
+      {"device":"edge-1","cpu_last_64":[1.0,2.5,3.25],"labels":["prod","api"]}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"cpu_last_64":[1.0,2.5,3.25],"device":"edge-1","labels":["prod","api"]}
+      """
+    And the last relay subscription payload contains key fragment '{"device":"edge-1"}'
+
+    Examples:
+      | cluster_size | wire_format | cpu_type      | labels_type |
+      | 1            | JSON        | ARRAY<F32, 3> | VEC<STRING> |
+      | 1            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
+      | 3            | JSON        | ARRAY<F32, 3> | VEC<STRING> |
+      | 3            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
+
+  Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a JAQ-native codec
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA metrics (
+        device STRING,
+        cpu_last_64 <cpu_type>,
+        labels <labels_type> OPTIONAL
+      );
+
+      CREATE CODEC metrics_codec
+        FROM <wire_format>
+        TO SCHEMA metrics
+        WITH JAQ TRANSFORMATION '.';
+
+      CREATE RELAY metrics_stream SCHEMA metrics;
+
+      CREATE VHOST edge http-binary-arrays-{{test_id}}.example.com;
+
+      CREATE ENDPOINT metrics_endpoint
+        ON edge
+        PATH '/ingest'
+        TYPE HTTP;
+
+      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE INGESTOR metrics_ingestor
+        TO metrics_stream
+        DECODE USING metrics_codec
+        PARAMETERIZED BY device_branch VALUES { device = metrics_stream.device } TTL 5m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO metrics_stream;
+      START;
+      """
+    When http payload encoded as "<wire_format>" is posted to host "http-binary-arrays-{{test_id}}.example.com" path "/ingest"
+      """
+      {"device":"edge-1","cpu_last_64":[1.0,2.5,3.25],"labels":["prod","api"]}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"cpu_last_64":[1.0,2.5,3.25],"device":"edge-1","labels":["prod","api"]}
+      """
+    And the last relay subscription payload contains key fragment '{"device":"edge-1"}'
+
+    Examples:
+      | cluster_size | wire_format | cpu_type      | labels_type |
+      | 1            | CBOR        | ARRAY<F32, 3> | VEC<STRING> |
+      | 3            | CBOR        | ARRAY<F32, 3> | VEC<STRING> |
+
+  Scenario Outline: HTTP endpoint ingestor delivers a single <wire_format> payload through a JAQ-native codec
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        tenant STRING,
+        user_id I64
+      );
+
+      CREATE CODEC notification_codec
+        FROM <wire_format>
+        TO SCHEMA notification
+        WITH JAQ TRANSFORMATION '.';
+
+      CREATE RELAY notifications SCHEMA notification;
+
+      CREATE VHOST edge http-{{test_id}}.example.com;
+
+      CREATE ENDPOINT http_notifications_endpoint
+        ON edge
+        PATH '/ingest'
+        TYPE HTTP;
+
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+        TO notifications
+        DECODE USING notification_codec
+        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO notifications;
+      START;
+      """
+    When http payload encoded as "<wire_format>" is posted to host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","user_id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"tenant":"acme","user_id":42}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"acme","user_id":42}'
+
+    Examples:
+      | cluster_size | replica_count | wire_format |
+      | 1            | 0             | CBOR        |
+      | 3            | 0             | CBOR        |
+      | 3            | 1             | CBOR        |

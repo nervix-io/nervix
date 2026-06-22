@@ -1,0 +1,14 @@
+<clickhouse>
+  <https_port>8443</https_port>
+  <openSSL>
+    <server>
+      <certificateFile>/etc/clickhouse-server/certs/node.pem</certificateFile>
+      <privateKeyFile>/etc/clickhouse-server/certs/node-key.pem</privateKeyFile>
+      <caConfig>/etc/clickhouse-server/certs/ca.pem</caConfig>
+      <verificationMode>none</verificationMode>
+      <cacheSessions>true</cacheSessions>
+      <disableProtocols>sslv2,sslv3</disableProtocols>
+      <preferServerCiphers>true</preferServerCiphers>
+    </server>
+  </openSSL>
+</clickhouse>

@@ -1,0 +1,27 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-registry"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+arrow-schema = { workspace = true }
+error-stack = { workspace = true }
+fjall = { workspace = true }
+humantime = { workspace = true }
+nervix-dataflow-graph = { workspace = true }
+nervix-models = { workspace = true }
+nervix-nspl = { workspace = true }
+nervix-vm = { workspace = true }
+petgraph = { workspace = true }
+rkyv = { workspace = true }
+serde = { workspace = true }
+sorted_vec = { workspace = true }
+storekey = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }

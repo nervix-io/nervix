@@ -1,0 +1,6 @@
+apiVersion: v2
+name: mock-server
+description: Local Nervix mock server chart for development dependencies.
+type: application
+version: 0.1.0
+appVersion: local

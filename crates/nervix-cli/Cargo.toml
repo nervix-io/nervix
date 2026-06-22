@@ -1,0 +1,21 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-cli"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ariadne = { workspace = true }
+byte-unit = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+clap_complete = { workspace = true }
+error-stack = { workspace = true }
+nervix-client-core = { workspace = true, features = ["autocomplete"] }
+nervix-nspl = { workspace = true, features = ["client"] }
+reedline = { workspace = true, features = ["external_printer"] }
+rpassword = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }

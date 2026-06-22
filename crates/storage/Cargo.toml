@@ -1,0 +1,17 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-storage"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+error-stack = { workspace = true }
+fjall = { workspace = true }
+nervix-models = { workspace = true }
+rkyv = { workspace = true }
+serde = { workspace = true }
+storekey = { workspace = true }
+thiserror = { workspace = true }

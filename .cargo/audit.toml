@@ -1,0 +1,14 @@
+[advisories]
+ignore = [
+  "RUSTSEC-2025-0134",
+  "RUSTSEC-2026-0049",
+  "RUSTSEC-2026-0097",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0104",
+  # hickory-proto/hickory-net DNS advisories pulled in transitively via
+  # reqwest and amq-protocol; no patched upstream release is consumable yet.
+  "RUSTSEC-2026-0118",
+  "RUSTSEC-2026-0119",
+  "RUSTSEC-2026-0120",
+]

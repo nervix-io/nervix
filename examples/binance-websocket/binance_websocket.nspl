@@ -1,0 +1,92 @@
+// Example: Binance spot WebSocket subscription with an explicit signaling protocol.
+//
+// This connects to the real Binance public WebSocket API and subscribes to two
+// BTC streams. The JAQ transformation normalizes aggTrade and depthUpdate
+// messages into one schema before ingestion.
+// Binance may restrict API access by jurisdiction or network location. If this
+// example cannot connect from your environment, run it only from a location
+// where Binance permits API access.
+
+CREATE UNPACED DOMAIN binance_ws_example;
+
+USE binance_ws_example;
+
+CREATE SCHEMA binance_ws_event (
+  event_type STRING,
+  event_time I64,
+  symbol STRING,
+  aggregate_trade_id I64 OPTIONAL,
+  price STRING OPTIONAL,
+  quantity STRING OPTIONAL,
+  first_trade_id I64 OPTIONAL,
+  last_trade_id I64 OPTIONAL,
+  trade_time I64 OPTIONAL,
+  maker_side BOOL OPTIONAL,
+  first_update_id I64 OPTIONAL,
+  final_update_id I64 OPTIONAL,
+  bid_count I64 OPTIONAL,
+  ask_count I64 OPTIONAL
+);
+
+CREATE CODEC binance_ws_event_codec
+  FROM JSON
+  TO SCHEMA binance_ws_event
+  WITH JAQ TRANSFORMATION '{
+    event_type: .e,
+    event_time: .E,
+    symbol: .s,
+    aggregate_trade_id: (if .e == "aggTrade" then .a else null end),
+    price: (if .e == "aggTrade" then .p else null end),
+    quantity: (if .e == "aggTrade" then .q else null end),
+    first_trade_id: (if .e == "aggTrade" then .f else null end),
+    last_trade_id: (if .e == "aggTrade" then .l else null end),
+    trade_time: (if .e == "aggTrade" then .T else null end),
+    maker_side: (if .e == "aggTrade" then .m else null end),
+    first_update_id: (if .e == "depthUpdate" then .U else null end),
+    final_update_id: (if .e == "depthUpdate" then .u else null end),
+    bid_count: (if .e == "depthUpdate" then (.b | length) else null end),
+    ask_count: (if .e == "depthUpdate" then (.a | length) else null end)
+  }';
+
+CREATE RELAY binance_ws_events
+  SCHEMA binance_ws_event;
+
+CREATE SIGNALING PROTOCOL binance_ws_subscribe_to_btcusd
+  ON CONNECT
+  SEND BODY '{
+    "method": "SUBSCRIBE",
+    "params": [
+      "btcusdt@aggTrade",
+      "btcusdt@depth"
+    ],
+    "id": 1
+  }', '{
+    "method": "SUBSCRIBE",
+    "params": [
+      "btcusdc@aggTrade",
+      "btcusdc@depth"
+    ],
+    "id": 2
+  }'
+  WAIT BODY '{"id": 1, "result": null}', '{"id": 2, "result": null}' TIMEOUT 5s;
+
+CREATE CLIENT binance_ws
+  TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_ws_subscribe_to_btcusd
+  CONFIG {
+    'endpoint' = 'wss://stream.binance.com:9443/ws'
+  };
+
+CREATE IF NOT EXISTS SCHEMA symbol_branch (
+  symbol STRING
+);
+
+CREATE INGESTOR ingest_binance_ws
+  TO binance_ws_events
+  DECODE USING binance_ws_event_codec
+  PARAMETERIZED BY symbol_branch VALUES { symbol = binance_ws_events.symbol } TTL 5m
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+SUBSCRIBE SESSION TO binance_ws_events;
+START;

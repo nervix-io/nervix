@@ -1,0 +1,19 @@
+replicaCount: 3
+
+persistence:
+  enabled: false
+
+service:
+  type: ClusterIP
+
+emqxConfig:
+  EMQX_CLUSTER__DISCOVERY_STRATEGY: "dns"
+  EMQX_DASHBOARD__DEFAULT_USERNAME: "admin"
+  EMQX_DASHBOARD__DEFAULT_PASSWORD: "public"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi

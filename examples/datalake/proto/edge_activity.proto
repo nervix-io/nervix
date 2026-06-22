@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package nervix.examples.datalake;
+
+message EdgeActivity {
+  string source = 1;
+  string event_id = 2;
+  string tenant_id = 3;
+  string device_id = 4;
+  string session_id = 5;
+  string edge_id = 6;
+  string edge_name = 7;
+  string event_type = 8;
+  string protocol = 9;
+  string ts = 10;
+  int64 seq = 11;
+}

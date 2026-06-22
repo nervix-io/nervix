@@ -1,0 +1,22 @@
+[book]
+authors = ["Nervix Contributors"]
+description = "User manual and architecture reference for Nervix."
+language = "en"
+#multilingual = false
+src = "src"
+title = "The Nervix Book"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+additional-css = ["theme/nervix.css"]
+default-theme = "navy"
+edit-url-template = "https://github.com/nervix-io/nervix/edit/main/docs/{path}"
+favicon-svg = "theme/nervix-mark.svg"
+git-repository-url = "https://github.com/nervix-io/nervix"
+preferred-dark-theme = "navy"
+
+# [output.pandoc]
+# profile.pdf = {}

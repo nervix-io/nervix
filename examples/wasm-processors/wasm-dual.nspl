@@ -1,0 +1,86 @@
+// Dual WASM processor demo.
+//
+// This graph loads both prototype WASM guests:
+// - Rust guest from examples/wasm-processors/rust-guest
+// - Go guest from examples/wasm-processors/go-guest
+//
+// Build both guests first:
+//
+//   just wasm-processor-guests
+//
+// Then execute this file from the repository root with the Nervix client.
+// Post four one-row payloads to /wasm-metrics:
+//
+//   {"value":1}
+//   {"value":2}
+//   {"value":3}
+//   {"value":4}
+//
+// The Rust stage emits every second global input row into rust_filtered_metrics:
+// values 1,2,3,4 produce Rust outputs 2 and 4.
+//
+// The Go stage then applies the same every-second-row contract to the Rust
+// output stream. Its first input is 2, so it drops 2; its second input is 4, so
+// go_filtered_metrics emits 4. Posting only 1 and 2 is expected to produce Rust
+// output but no Go output yet.
+
+CREATE UNPACED DOMAIN wasm_dual_demo;
+
+USE wasm_dual_demo;
+
+CREATE RESOURCE rust_wasm_filter;
+UPLOAD RESOURCE rust_wasm_filter VERSION './examples/wasm-processors/rust-guest/target/wasm32-unknown-unknown/release';
+
+CREATE RESOURCE go_wasm_filter;
+UPLOAD RESOURCE go_wasm_filter VERSION './examples/wasm-processors/go-guest';
+
+CREATE SCHEMA metric (
+  value I32
+);
+
+CREATE JSON WIRE SCHEMA metric_wire (
+  value integer
+);
+
+CREATE CODEC metric_codec
+  FROM WIRE JSON SCHEMA metric_wire
+  TO SCHEMA metric;
+
+CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
+CREATE RELAY rust_filtered_metrics SCHEMA metric UNPARAMETERIZED;
+CREATE RELAY go_filtered_metrics SCHEMA metric UNPARAMETERIZED;
+
+CREATE VHOST edge http-wasm-dual.example.com;
+
+CREATE ENDPOINT wasm_metrics_ingress
+  ON edge
+  PATH '/wasm-metrics'
+  TYPE HTTP;
+
+CREATE INGESTOR metric_source
+  TO raw_metrics
+  DECODE USING metric_codec
+  UNPARAMETERIZED
+  FLUSH EACH 100ms MAX BATCH SIZE 100kb
+  FROM ENDPOINT wasm_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+CREATE WASM PROCESSOR rust_filter_even_rows
+  USING RESOURCE rust_wasm_filter VERSION 1
+  FILE 'nervix_wasm_processor_rust_guest.wasm'
+  FROM raw_metrics
+  TO rust_filtered_metrics
+  UNPARAMETERIZED
+  ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+
+CREATE WASM PROCESSOR go_filter_even_rows
+  USING RESOURCE go_wasm_filter VERSION 1
+  FILE 'nervix_wasm_processor_go_guest.wasm'
+  FROM rust_filtered_metrics
+  TO go_filtered_metrics
+  UNPARAMETERIZED
+  ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+
+SUBSCRIBE SESSION TO rust_filtered_metrics;
+SUBSCRIBE SESSION TO go_filtered_metrics;
+
+START;

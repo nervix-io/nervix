@@ -1,0 +1,23 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-consensus"
+version.workspace = true
+
+[dependencies]
+ciborium = { workspace = true }
+fjall = { workspace = true }
+futures-util = { workspace = true }
+nervix-models = { workspace = true }
+openraft = { workspace = true }
+parking_lot = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+sorted_vec = { workspace = true }
+storekey = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

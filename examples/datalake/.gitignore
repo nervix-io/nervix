@@ -1,0 +1,4 @@
+geo-wasm-guest/target/
+geo-wasm-guest/resource/
+geo-wasm-guest/dbip-city-lite-*.mmdb.gz
+__pycache__/

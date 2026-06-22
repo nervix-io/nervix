@@ -1,0 +1,172 @@
+// Smart-factory IoT telemetry demo.
+//
+// The graph ingests device telemetry from MQTT, normalizes a few fields at the
+// ingestor boundary, routes quality/lifecycle events by site branch, repartitions
+// clean telemetry by concrete device branch, then routes anomalies with ordered
+// conditions. Critical device alerts are reingested back to the site branch for
+// operations-level consumers.
+
+CREATE UNPACED DOMAIN iot_demo;
+
+USE iot_demo;
+
+CREATE SCHEMA iot_telemetry (
+  site STRING,
+  line STRING,
+  device_id STRING,
+  sensor STRING,
+  value F64,
+  unit STRING,
+  warn_high F64,
+  critical_high F64,
+  battery_pct F64,
+  status STRING,
+  ts DATETIME,
+  seq U64
+);
+
+CREATE JSON WIRE SCHEMA iot_telemetry_wire (
+  site string,
+  line string,
+  device_id string,
+  sensor string,
+  value number,
+  unit string,
+  warn_high number,
+  critical_high number,
+  battery_pct number,
+  status string,
+  ts string,
+  seq integer
+);
+
+CREATE CODEC iot_telemetry_codec
+  FROM WIRE JSON SCHEMA iot_telemetry_wire
+  TO SCHEMA iot_telemetry
+  ENCODE ts AS RFC3339;
+
+CREATE IF NOT EXISTS SCHEMA site_branch (
+  site STRING
+);
+
+CREATE IF NOT EXISTS SCHEMA device_branch (
+  site STRING,
+  line STRING,
+  device_id STRING
+);
+
+CREATE RELAY telemetry_by_site SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
+CREATE RELAY telemetry_rejected SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
+CREATE RELAY battery_alerts SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
+CREATE RELAY telemetry_clean SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
+CREATE RELAY telemetry_by_device SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
+CREATE RELAY telemetry_ordered SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
+CREATE RELAY critical_alerts SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
+CREATE RELAY thermal_alerts SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
+CREATE RELAY maintenance_alerts SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
+CREATE RELAY normal_telemetry SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
+CREATE RELAY site_critical_alerts SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
+
+CREATE CLIENT mqtt_edge
+  TYPE MQTT
+  CONFIG {
+    'addr' = 'mqtt://127.0.0.1:1883',
+    'client_id' = 'nervix-iot-demo-{{instance}}'
+  };
+
+CREATE CLIENT redis_alerts
+  TYPE REDIS
+  CONFIG {
+    'addr' = 'redis://127.0.0.1:6379/'
+  };
+
+CREATE INGESTOR mqtt_telemetry
+  TO telemetry_by_site
+  DECODE USING iot_telemetry_codec
+  PARAMETERIZED BY site_branch VALUES { site = telemetry_by_site.site } TTL 5m
+  FLUSH EACH 250ms MAX BATCH SIZE 10kb
+  TIMESTAMP AT ts
+  FROM MQTT mqtt_edge
+  TOPIC factory_telemetry
+  INSTANCES 4
+  MODE NO_ACK PARALLEL MAX 1024
+  SET telemetry_by_site.status = lower(trim(message.status)),
+      telemetry_by_site.sensor = lower(trim(message.sensor)),
+      telemetry_by_site.unit = lower(trim(message.unit))
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+CREATE ROUTER quality_gate
+  FROM telemetry_by_site
+  TO telemetry_rejected WHERE telemetry_by_site.device_id = "" OR telemetry_by_site.sensor = "" OR telemetry_by_site.status = "offline"
+  TO battery_alerts WHERE telemetry_by_site.battery_pct < 15.0
+  DEFAULT TO telemetry_clean
+  PARAMETERIZED BY site_branch
+  FLUSH EACH 250ms MAX BATCH SIZE 10kb
+  ON MESSAGE ERROR LOG;
+
+CREATE REINGESTOR device_repartition
+  FROM telemetry_clean
+  TO telemetry_by_device
+  PARAMETERIZED BY device_branch VALUES {
+    site = telemetry_by_device.site,
+    line = telemetry_by_device.line,
+    device_id = telemetry_by_device.device_id
+  } TTL 5m
+  FLUSH EACH 250ms MAX BATCH SIZE 10kb
+  ON MESSAGE ERROR LOG;
+
+CREATE REORDERER device_event_reorderer
+  FROM telemetry_by_device
+  TO telemetry_ordered
+  PARAMETERIZED BY device_branch
+  BY telemetry_by_device.ts, telemetry_by_device.seq
+  MAX TIME 5s
+  FLUSH EACH 500ms MAX BATCH SIZE 10kb
+  ON MESSAGE ERROR LOG;
+
+CREATE ROUTER anomaly_router
+  FROM telemetry_ordered
+  TO critical_alerts WHERE telemetry_ordered.status = "fault" OR telemetry_ordered.value >= telemetry_ordered.critical_high
+  TO thermal_alerts WHERE telemetry_ordered.sensor = "temperature" AND telemetry_ordered.value >= 80.0
+  TO maintenance_alerts WHERE telemetry_ordered.value >= telemetry_ordered.warn_high
+  DEFAULT TO normal_telemetry
+  PARAMETERIZED BY device_branch
+  FLUSH EACH 250ms MAX BATCH SIZE 10kb
+  ON MESSAGE ERROR LOG;
+
+CREATE REINGESTOR site_alert_repartition
+  FROM critical_alerts
+  TO site_critical_alerts
+  PARAMETERIZED BY site_branch VALUES { site = site_critical_alerts.site } TTL 5m
+  FLUSH EACH 250ms MAX BATCH SIZE 10kb
+  ON MESSAGE ERROR LOG;
+
+CREATE EMITTER redis_site_critical_alerts
+  FROM site_critical_alerts
+  ENCODE USING iot_telemetry_codec
+  TO REDIS PUBSUB redis_alerts CHANNEL iot_site_critical_alerts
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+CREATE EMITTER redis_battery_alerts
+  FROM battery_alerts
+  ENCODE USING iot_telemetry_codec
+  TO REDIS PUBSUB redis_alerts CHANNEL iot_battery_alerts
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+CREATE EMITTER redis_thermal_alerts
+  FROM thermal_alerts
+  ENCODE USING iot_telemetry_codec
+  TO REDIS PUBSUB redis_alerts CHANNEL iot_thermal_alerts
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+CREATE EMITTER redis_maintenance_alerts
+  FROM maintenance_alerts
+  ENCODE USING iot_telemetry_codec
+  TO REDIS PUBSUB redis_alerts CHANNEL iot_maintenance_alerts
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+START;

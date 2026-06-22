@@ -1,0 +1,33 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-vm"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+arrow-arith = { workspace = true }
+arrow-array = { workspace = true }
+arrow-cast = { workspace = true }
+arrow-ord = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
+arrow-string = { workspace = true }
+chrono = { workspace = true }
+md5 = { workspace = true }
+nervix-models = { workspace = true }
+nervix-nspl = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+uuid = { workspace = true, features = ["v4", "v7"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+harness = false
+name = "vm"

@@ -1,0 +1,14 @@
+/target
+mutants.out
+.nervix-db
+.nervix-deps
+.nervix_client_history
+.nervix_history
+.wrangler
+docs/book
+__pycache__
+/tls/
+.nervix-deps
+.playwright-mcp/
+crates/web-console/dist/
+/examples/datalake/geo-wasm-guest/dbip-city-lite-*.mmdb.gz

@@ -1,0 +1,433 @@
+[package]
+build = "build.rs"
+edition.workspace = true
+name = "nervix"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Test-only feature used by the standard test recipes to lower intentionally
+# expensive password hashing parameters.
+testing = []
+
+[dependencies]
+ahash = { workspace = true }
+anyhow = { workspace = true }
+apache-avro = { workspace = true }
+arc-swap = { workspace = true }
+argon2 = { workspace = true }
+arrow-arith = { workspace = true }
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-ord = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
+async-broadcast = { workspace = true }
+async-nats = { workspace = true }
+async-tar = { workspace = true, features = ["runtime-tokio"] }
+async-trait = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-sdk-kinesis = { workspace = true }
+aws-sdk-sqs = { workspace = true }
+aws-smithy-http-client = { workspace = true, features = ["rustls-ring"] }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+chitchat = { workspace = true }
+chrono = { workspace = true }
+ciborium = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+clap_complete = { workspace = true }
+clickhouse = { workspace = true, features = ["inserter", "chrono"] }
+dashmap = { workspace = true }
+ed25519-dalek = { workspace = true }
+error-stack = { workspace = true }
+fastrand = { workspace = true }
+fjall = { workspace = true }
+futures-util = { workspace = true }
+governor = { workspace = true }
+hdrhistogram = { workspace = true }
+http-body-util = { workspace = true }
+humantime = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-rustls = { workspace = true, features = ["http1"] }
+hyper-util = { workspace = true, features = [
+  "server",
+  "client-legacy",
+  "tokio",
+  "http1",
+] }
+iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true }
+iceberg-storage-opendal = { workspace = true }
+indexmap = { workspace = true }
+jaq-core = { workspace = true }
+jaq-fmts = { workspace = true }
+jaq-json = { workspace = true, features = ["serde"] }
+jaq-std = { workspace = true }
+lapin = { workspace = true }
+mongodb = { workspace = true }
+multer = { workspace = true }
+mysql_async = { workspace = true, features = ["default-rustls-ring"] }
+nervix-client-core = { workspace = true }
+nervix-consensus = { workspace = true }
+nervix-dataflow-graph = { workspace = true }
+nervix-interconnect = { workspace = true }
+nervix-models = { workspace = true }
+nervix-nspl = { workspace = true }
+nervix-proto = { workspace = true, features = ["client", "server"] }
+nervix-vm = { workspace = true }
+nervix-wasm = { workspace = true }
+opendal = { workspace = true }
+openssl = { workspace = true, features = ["vendored"] }
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true, default-features = false, features = [
+  "grpc-tonic",
+  "trace",
+] }
+opentelemetry_sdk = { workspace = true, features = ["trace"] }
+ordered-float = { workspace = true }
+ort = { workspace = true, features = [
+  "api-23",
+  "cuda",
+  "load-dynamic",
+  "ndarray",
+  "rocm",
+  "std",
+  "tracing",
+  "webgpu",
+] }
+parking_lot = { workspace = true }
+parquet = { workspace = true }
+postgres-types = { workspace = true }
+prometheus = { workspace = true }
+prost = { workspace = true }
+prost-reflect = { workspace = true, features = ["serde"] }
+prost-types = { workspace = true }
+protox = { workspace = true }
+pulsar = { workspace = true }
+rdkafka = { workspace = true, features = [
+  "tokio",
+  "curl-static",
+  "libz-static",
+  "cmake_build",
+  "static-linking",
+  "ssl",
+] }
+redis = { workspace = true }
+registry = { workspace = true }
+reqwest = { workspace = true, features = [
+  "json",
+  "rustls",
+  "gzip",
+  "brotli",
+  "deflate",
+  "json",
+  "hickory-dns",
+] }
+rkyv = { workspace = true }
+rumqttc = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+rustls-pki-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simd-json = { workspace = true }
+sorted_vec = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true }
+tikv-jemallocator = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
+tokio-postgres-rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+typed-builder = { workspace = true }
+ubyte = { workspace = true }
+upon = { workspace = true }
+url = { workspace = true }
+webpki-roots = { workspace = true }
+zeromq = { workspace = true }
+
+[dev-dependencies]
+cucumber = { workspace = true, features = ["libtest"] }
+loom = { workspace = true }
+nervix-client-core = { workspace = true }
+playwright-rs = { workspace = true }
+rcgen = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
+
+[[test]]
+harness = false
+name = "scenarios"
+
+[workspace]
+members = [
+  ".",
+  "crates/client-core",
+  "crates/consensus",
+  "crates/dataflow-graph",
+  "crates/interconnect",
+  "crates/nervix-wasm",
+  "crates/web-console",
+  "crates/nervix-vm",
+  "crates/nspl",
+  "crates/models",
+  "crates/proto",
+  "crates/registry",
+  "crates/nervix-cli",
+]
+
+[workspace.package]
+edition = "2024"
+license-file = "LICENSE.md"
+version = "0.1.0-dev"
+
+[workspace.lints.clippy]
+disallowed-types = "deny"
+
+[workspace.dependencies]
+ahash = "0.8"
+anyhow = "1"
+apache-avro = "0.21.0"
+arc-swap = "1.9.1"
+argon2 = "0.5"
+ariadne = "0.5"
+arrow-arith = "57.1"
+arrow-array = "57.1"
+arrow-cast = "57.1"
+arrow-ipc = "57.1"
+arrow-ord = "57.1"
+arrow-schema = "57.1"
+arrow-select = "57.1"
+arrow-string = "57.1"
+ascii-dag = "0.9"
+async-broadcast = "0.7.2"
+async-nats = "0.42"
+async-tar = { version = "0.6", default-features = false }
+async-trait = "0.1"
+aws-config = "1.8"
+aws-credential-types = "1.2"
+aws-sdk-kinesis = "1.77"
+aws-sdk-sqs = "1.76"
+aws-smithy-http-client = "1.1.12"
+base64 = "0.22"
+blake3 = "1"
+bolero = "0.13"
+byte-unit = "5.2"
+bytes = "1.11"
+charming = { version = "0.6.0", default-features = false }
+chitchat = "0.10.1"
+chrono = "0.4.44"
+chumsky = "0.12.0"
+ciborium = "0.2"
+clap = "4.6.0"
+clap_complete = "4.6.0"
+clickhouse = { version = "0.15.0", default-features = true }
+console_error_panic_hook = "0.1"
+criterion = "0.5"
+cucumber = "0.22"
+dashmap = "6"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+error-stack = "0.5"
+fastrand = "2.4.1"
+fjall = "3.0.4"
+futures-channel = "0.3"
+futures-util = "0.3"
+gloo-net = "0.7"
+governor = "0.10.4"
+hdrhistogram = "7.5.4"
+http-body-util = "0.1"
+humantime = "2"
+hyper = "1"
+hyper-rustls = "0.27"
+hyper-util = "0.1"
+iceberg = "0.9.1"
+iceberg-catalog-rest = "0.9.1"
+iceberg-storage-opendal = { version = "0.9.1", features = [
+  "opendal-s3",
+  "opendal-gcs",
+  "opendal-azdls",
+] }
+indexmap = "2"
+jaq-core = "3"
+jaq-fmts = "0.1"
+jaq-json = "2"
+jaq-std = "3"
+js-sys = "0.3"
+lapin = "4.4.0"
+leptos = { version = "0.8.19", features = ["csr"] }
+libc = "0.2"
+loom = "0.7"
+md5 = "0.8"
+mongodb = "3.6.0"
+multer = "3"
+mysql_async = "0.36.2"
+nervix = { path = "" }
+nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
+nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
+nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
+nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
+nervix-models = { package = "nervix-models", path = "crates/models" }
+nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
+  "server",
+] }
+nervix-proto = { package = "nervix-proto", path = "crates/proto" }
+nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
+nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
+opendal = { version = "0.55.0", features = [
+  "services-s3",
+  "services-gcs",
+  "services-azdls",
+] }
+openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
+openssl = "0.10"
+opentelemetry = "0.31"
+opentelemetry-otlp = { version = "0.31", default-features = false }
+opentelemetry_sdk = "0.31"
+ordered-float = "4"
+ort = { version = "2.0.0-rc.12", default-features = false }
+parking_lot = "0.12"
+parquet = { version = "57.1", features = ["async"] }
+petgraph = "0.7.1"
+playwright-rs = "0.12.3"
+postgres-types = "0.2"
+prometheus = "0.14.0"
+prost = "0.13"
+prost-reflect = "0.15.3"
+prost-types = "0.13"
+protox = "0.8.0"
+pulsar = { version = "6.7.2", default-features = false, features = [
+  "compression",
+  "tokio-rustls-runtime",
+] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rcgen = "0.13"
+rdkafka = { version = "0.39.0", default-features = false }
+redis = { version = "1.1.0", default-features = false, features = [
+  "aio",
+  "tokio-comp",
+  "tls-rustls",
+  "tokio-rustls-comp",
+] }
+reedline = "0.36"
+regex = "1"
+registry = { package = "nervix-registry", path = "crates/registry" }
+reqwest = "0.13"
+rkyv = "0.8"
+rpassword = "7"
+rumqttc = "0.25.1"
+rustls = { version = "0.23", default-features = false, features = [
+  "logging",
+  "ring",
+  "std",
+  "tls12",
+] }
+rustls-native-certs = "0.8"
+rustls-pki-types = "1"
+rustyline = "17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.149"
+simd-json = "0.17.0"
+sorted_vec = { package = "sorted-vec", version = "0.8" }
+storekey = "0.5"
+strum = "0.26"
+tempfile = "3"
+thiserror = "2"
+tikv-jemalloc-ctl = { version = "0.6.1", features = ["stats"] }
+tikv-jemallocator = { version = "0.6.1", features = ["stats"] }
+tokio = "1"
+tokio-postgres = "0.7"
+tokio-postgres-rustls = "0.13"
+tokio-rustls = "0.26"
+tokio-stream = "0.1"
+tokio-tungstenite = "0.24"
+tokio-util = { version = "0.7", features = ["rt"] }
+tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
+tonic-build = "0.12"
+tracing = "0.1"
+tracing-opentelemetry = "0.32"
+tracing-subscriber = "0.3"
+triomphe = "0.1"
+typed-builder = "0.20"
+ubyte = "0.10.4"
+upon = { version = "0.10", default-features = false, features = ["serde"] }
+url = "2.5"
+uuid = "1.18"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+wasmtime = { version = "45.0.0", default-features = false, features = [
+  "anyhow",
+  "async",
+  "cranelift",
+  "parallel-compilation",
+  "runtime",
+  "std",
+  "wat",
+] }
+web-sys = "0.3"
+webpki-roots = "1"
+zeromq = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "unwind"
+
+[profile.dev.package."wasmtime"]
+opt-level = 3
+[profile.dev.package."wasmtime-environ"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-component-macro"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-component-util"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-core"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-cranelift"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-fiber"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-jit-debug"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-jit-icache-coherence"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-unwinder"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-versioned-export-macros"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-wit-bindgen"]
+opt-level = 3
+
+[profile.dev.package."arrow-arith"]
+opt-level = 3
+[profile.dev.package."arrow-array"]
+opt-level = 3
+[profile.dev.package."arrow-buffer"]
+opt-level = 3
+[profile.dev.package."arrow-cast"]
+opt-level = 3
+[profile.dev.package."arrow-data"]
+opt-level = 3
+[profile.dev.package."arrow-ipc"]
+opt-level = 3
+[profile.dev.package."arrow-ord"]
+opt-level = 3
+[profile.dev.package."arrow-schema"]
+opt-level = 3
+[profile.dev.package."arrow-select"]
+opt-level = 3
+[profile.dev.package."arrow-string"]
+opt-level = 3

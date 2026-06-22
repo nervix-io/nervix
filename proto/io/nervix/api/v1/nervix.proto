@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package io.nervix.api.v1;
+
+service SessionService {
+  rpc Session(stream SessionRequest) returns (stream SessionResponse);
+  rpc UploadResource(stream UploadResourceRequest) returns (UploadResourceResponse);
+}
+
+message CommandRequest {
+  string query = 1;
+  string domain = 2;
+}
+
+message Diagnostic {
+  string message = 1;
+  uint32 span_start = 2;
+  uint32 span_end = 3;
+}
+
+enum CommandResultKind {
+  COMMAND_RESULT_KIND_UNSPECIFIED = 0;
+  COMMAND_RESULT_KIND_OK = 1;
+  COMMAND_RESULT_KIND_ERROR = 2;
+  COMMAND_RESULT_KIND_NOT_LEADER = 3;
+}
+
+message CommandResult {
+  bool success = 1;
+  string message = 2;
+  repeated Diagnostic diagnostics = 3;
+  CommandResultKind kind = 4;
+  string leader = 5;
+  string leader_grpc_uri = 6;
+  bool already_existed = 7;
+  string leader_web_console_uri = 8;
+  repeated CommandResult results = 9;
+}
+
+message SubscriptionEvent {
+  string subscription = 1;
+  string relay = 2;
+  string payload = 3;
+}
+
+enum ServerEventLevel {
+  SERVER_EVENT_LEVEL_UNSPECIFIED = 0;
+  SERVER_EVENT_LEVEL_INFO = 1;
+  SERVER_EVENT_LEVEL_WARN = 2;
+  SERVER_EVENT_LEVEL_ERROR = 3;
+}
+
+message ServerEvent {
+  ServerEventLevel level = 1;
+  string message = 2;
+}
+
+enum SuggestionKind {
+  SUGGESTION_KIND_UNSPECIFIED = 0;
+  SUGGESTION_KIND_TEXT = 1;
+  SUGGESTION_KIND_LOCAL_DIRECTORY_LOOKUP = 2;
+}
+
+message Suggestion {
+  string value = 1;
+  SuggestionKind kind = 2;
+}
+
+message SuggestRequest {
+  string input = 1;
+  uint32 cursor = 2;
+  string domain = 3;
+}
+
+message SuggestResponse {
+  repeated Suggestion suggestions = 1;
+}
+
+message DomainEntitySnapshot {
+  string kind = 1;
+  string identifier = 2;
+  string detail = 3;
+}
+
+message DomainSnapshot {
+  string domain = 1;
+  bytes dataflow_graph = 2;
+  repeated DomainEntitySnapshot entities = 3;
+}
+
+message ListDomainsRequest {}
+
+message SetActiveDomainRequest {
+  string domain = 1;
+}
+
+message DomainInfo {
+  string id = 1;
+  string pace = 2;
+  string status = 3;
+}
+
+message DomainList {
+  repeated DomainInfo domains = 1;
+  bool response_to_request = 2;
+}
+
+message UploadResourceStart {
+  string name = 1;
+  uint64 total_bytes = 2;
+}
+
+message UploadResourceRequest {
+  oneof event {
+    UploadResourceStart start = 1;
+    bytes chunk = 2;
+  }
+}
+
+message UploadResourceResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 version = 3;
+  repeated Diagnostic diagnostics = 4;
+  CommandResultKind kind = 5;
+  string leader = 6;
+  string leader_grpc_uri = 7;
+}
+
+message SessionRequest {
+  oneof request {
+    CommandRequest command = 1;
+    SuggestRequest suggest = 2;
+    ListDomainsRequest list_domains = 3;
+    SetActiveDomainRequest set_active_domain = 4;
+  }
+}
+
+message SessionResponse {
+  oneof event {
+    CommandResult result = 1;
+    SubscriptionEvent subscription = 2;
+    SuggestResponse suggest = 3;
+    ServerEvent server = 4;
+    DomainSnapshot snapshot = 5;
+    DomainList domains = 6;
+  }
+}

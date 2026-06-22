@@ -1,0 +1,14 @@
+image:
+  repository: softwaremill/elasticmq-native
+  tag: 1.6.12
+  pullPolicy: IfNotPresent
+
+service:
+  port: 9324
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi

@@ -1,0 +1,4 @@
+[build]
+dist = "dist"
+filehash = false
+public_url = "/console/"

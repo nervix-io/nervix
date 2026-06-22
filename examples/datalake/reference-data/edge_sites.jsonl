@@ -1,0 +1,4 @@
+{"edge_id":"edge-sfo-1","edge_name":"edge-sfo-1","region":"us-west","site_tier":"metro","edge_lat":37.7749,"edge_lon":-122.4194}
+{"edge_id":"edge-ord-1","edge_name":"edge-ord-1","region":"us-central","site_tier":"core","edge_lat":41.8781,"edge_lon":-87.6298}
+{"edge_id":"edge-zrh-1","edge_name":"edge-zrh-1","region":"eu-central","site_tier":"metro","edge_lat":47.3769,"edge_lon":8.5417}
+{"edge_id":"edge-syd-1","edge_name":"edge-syd-1","region":"ap-southeast","site_tier":"metro","edge_lat":-33.8688,"edge_lon":151.2093}

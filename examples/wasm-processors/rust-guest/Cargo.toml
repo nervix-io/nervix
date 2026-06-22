@@ -1,0 +1,24 @@
+[package]
+edition = "2024"
+name = "nervix-wasm-processor-rust-guest"
+publish = false
+version = "0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+arrow-array = "54"
+arrow-ipc = "54"
+arrow-schema = "54"
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+[workspace]

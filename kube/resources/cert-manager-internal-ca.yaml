@@ -1,0 +1,211 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: nervix-bootstrap-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-internal-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: nervix-internal-ca
+  secretName: nervix-internal-ca-key-pair
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: nervix-bootstrap-selfsigned
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: nervix-internal-ca
+spec:
+  ca:
+    secretName: nervix-internal-ca-key-pair
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-kafka-wildcard
+  namespace: nervix-kafka
+spec:
+  secretName: nervix-kafka-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-kafka.svc"
+    - "*.nervix-kafka.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-rabbitmq-wildcard
+  namespace: nervix-rabbitmq
+spec:
+  secretName: nervix-rabbitmq-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-rabbitmq.svc"
+    - "*.nervix-rabbitmq.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-redis-wildcard
+  namespace: nervix-redis
+spec:
+  secretName: nervix-redis-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-redis.svc"
+    - "*.nervix-redis.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-emqx-wildcard
+  namespace: nervix-emqx
+spec:
+  secretName: nervix-emqx-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-emqx.svc"
+    - "*.nervix-emqx.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-nats-wildcard
+  namespace: nervix-nats
+spec:
+  secretName: nervix-nats-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-nats.svc"
+    - "*.nervix-nats.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-prometheus-wildcard
+  namespace: nervix-prometheus
+spec:
+  secretName: nervix-prometheus-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-prometheus.svc"
+    - "*.nervix-prometheus.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-pulsar-wildcard
+  namespace: nervix-pulsar
+spec:
+  secretName: nervix-pulsar-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-pulsar.svc"
+    - "*.nervix-pulsar.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-elasticmq-wildcard
+  namespace: nervix-elasticmq
+spec:
+  secretName: nervix-elasticmq-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-elasticmq.svc"
+    - "*.nervix-elasticmq.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nervix-mock-server-wildcard
+  namespace: nervix-mock-server
+spec:
+  secretName: nervix-mock-server-wildcard-tls
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "*.nervix-mock-server.svc"
+    - "*.nervix-mock-server.svc.cluster.local"
+  issuerRef:
+    name: nervix-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

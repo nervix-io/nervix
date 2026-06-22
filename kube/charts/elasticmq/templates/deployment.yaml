@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "elasticmq.fullname" . }}
+  labels:
+    {{- include "elasticmq.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "elasticmq.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "elasticmq.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: elasticmq
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          readinessProbe:
+            httpGet:
+              path: /?Action=ListQueues
+              port: http
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /?Action=ListQueues
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

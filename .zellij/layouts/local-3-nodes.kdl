@@ -1,0 +1,33 @@
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="client" {
+        pane split_direction="vertical" {
+            pane command="bash" name="client" {
+                args "-lc" "while ! nc -z localhost 47390; do sleep 1; done; exec nervix-cli --server https://127.0.0.1:47390 --tls required --tls-ca-cert \"${PWD}/tls/dev/ca.pem\""
+            }
+            pane name="exec"
+        }
+    }
+
+    tab name="cluster" {
+        pane split_direction="vertical" {
+            pane command="bash" name="node 1" {
+                args "-lc" "exec nervix --addr 127.0.0.1:47391 --grpc-mode https --grpc-advertise-addr 127.0.0.1:47391 --grpc-https-listen-addr 127.0.0.1:47390 --grpc-https-advertise-addr 127.0.0.1:47390 --http-listen-addr 127.0.0.1:47400 --https-listen-addr 127.0.0.1:47401 --observability-listen-addr 127.0.0.1:47402 --web-console-listen-addr 127.0.0.1:47420 --web-console-advertise-addr 127.0.0.1:47420 --web-console-https-listen-addr 127.0.0.1:47421 --web-console-tls-cert \"${PWD}/tls/dev/node.pem\" --web-console-tls-key \"${PWD}/tls/dev/node-key.pem\" --node-id node-1 --cluster-listen-addr 127.0.0.1:47392 --cluster-advertise-addr 127.0.0.1:47392 --cluster-api-mode https --cluster-api-listen-addr 127.0.0.1:47393 --cluster-api-advertise-addr 127.0.0.1:47393 --cluster-api-https-listen-addr 127.0.0.1:47394 --cluster-api-https-advertise-addr 127.0.0.1:47394 --interconnect-mode https --interconnect-listen-addr 127.0.0.1:47395 --interconnect-advertise-addr 127.0.0.1:47395 --interconnect-https-listen-addr 127.0.0.1:47396 --interconnect-https-advertise-addr 127.0.0.1:47396 --allow-bootstrap --db-path \"${PWD}/.nervix-db/node1\""
+            }
+            pane command="bash" name="node 2" {
+                args "-lc" "exec nervix --addr 127.0.0.1:48391 --grpc-mode https --grpc-advertise-addr 127.0.0.1:48391 --grpc-https-listen-addr 127.0.0.1:48390 --grpc-https-advertise-addr 127.0.0.1:48390 --http-listen-addr 127.0.0.1:48400 --https-listen-addr 127.0.0.1:48401 --observability-listen-addr 127.0.0.1:48402 --web-console-listen-addr 127.0.0.1:48420 --web-console-advertise-addr 127.0.0.1:48420 --web-console-https-listen-addr 127.0.0.1:48421 --web-console-tls-cert \"${PWD}/tls/dev/node.pem\" --web-console-tls-key \"${PWD}/tls/dev/node-key.pem\" --node-id node-2 --cluster-listen-addr 127.0.0.1:48392 --cluster-advertise-addr 127.0.0.1:48392 --cluster-api-mode https --cluster-api-listen-addr 127.0.0.1:48393 --cluster-api-advertise-addr 127.0.0.1:48393 --cluster-api-https-listen-addr 127.0.0.1:48394 --cluster-api-https-advertise-addr 127.0.0.1:48394 --interconnect-mode https --interconnect-listen-addr 127.0.0.1:48395 --interconnect-advertise-addr 127.0.0.1:48395 --interconnect-https-listen-addr 127.0.0.1:48396 --interconnect-https-advertise-addr 127.0.0.1:48396 --cluster-bootstrap-host 127.0.0.1:47392 --db-path \"${PWD}/.nervix-db/node2\""
+            }
+            pane command="bash" name="node 3" {
+                args "-lc" "exec nervix --addr 127.0.0.1:49391 --grpc-mode https --grpc-advertise-addr 127.0.0.1:49391 --grpc-https-listen-addr 127.0.0.1:49390 --grpc-https-advertise-addr 127.0.0.1:49390 --http-listen-addr 127.0.0.1:49400 --https-listen-addr 127.0.0.1:49401 --observability-listen-addr 127.0.0.1:49402 --web-console-listen-addr 127.0.0.1:49420 --web-console-advertise-addr 127.0.0.1:49420 --web-console-https-listen-addr 127.0.0.1:49421 --web-console-tls-cert \"${PWD}/tls/dev/node.pem\" --web-console-tls-key \"${PWD}/tls/dev/node-key.pem\" --node-id node-3 --cluster-listen-addr 127.0.0.1:49392 --cluster-advertise-addr 127.0.0.1:49392 --cluster-api-mode https --cluster-api-listen-addr 127.0.0.1:49393 --cluster-api-advertise-addr 127.0.0.1:49393 --cluster-api-https-listen-addr 127.0.0.1:49394 --cluster-api-https-advertise-addr 127.0.0.1:49394 --interconnect-mode https --interconnect-listen-addr 127.0.0.1:49395 --interconnect-advertise-addr 127.0.0.1:49395 --interconnect-https-listen-addr 127.0.0.1:49396 --interconnect-https-advertise-addr 127.0.0.1:49396 --cluster-bootstrap-host 127.0.0.1:47392 --db-path \"${PWD}/.nervix-db/node3\""
+            }
+        }
+    }
+}

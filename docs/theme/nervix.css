@@ -1,0 +1,429 @@
+/* Nervix mdBook theme. Inspired by the public site treatment: dark grid,
+   cyan/violet accents, restrained technical chrome. */
+
+:root {
+    --content-max-width: 920px;
+    --menu-bar-height: 64px;
+    --page-padding: 28px;
+    --mono-font: "Source Code Pro", "JetBrains Mono", Consolas, Menlo, monospace;
+    --nervix-bg: #050913;
+    --nervix-bg-soft: #09111f;
+    --nervix-panel: rgba(8, 13, 31, 0.88);
+    --nervix-panel-strong: rgba(9, 14, 34, 0.96);
+    --nervix-line: rgba(34, 110, 190, 0.23);
+    --nervix-line-soft: rgba(95, 113, 247, 0.18);
+    --nervix-text: #f7f8ff;
+    --nervix-muted: #96a6ce;
+    --nervix-cyan: #17c9ef;
+    --nervix-blue: #2aa8e8;
+    --nervix-violet: #7d5cff;
+    --nervix-warning: #a78bfa;
+    --nervix-shadow: 0 22px 80px rgba(0, 0, 0, 0.42);
+}
+
+.light,
+.rust,
+.coal,
+.navy,
+.ayu,
+html:not(.js) {
+    --bg: var(--nervix-bg);
+    --fg: var(--nervix-text);
+    --sidebar-bg: rgba(6, 11, 24, 0.94);
+    --sidebar-fg: #b9c4e4;
+    --sidebar-non-existant: #52607f;
+    --sidebar-active: var(--nervix-cyan);
+    --sidebar-spacer: rgba(45, 72, 135, 0.35);
+    --scrollbar: #516184;
+    --icons: #92a1c9;
+    --icons-hover: #ffffff;
+    --links: #49d6ff;
+    --inline-code-color: #b38cff;
+    --theme-popup-bg: #090f22;
+    --theme-popup-border: rgba(75, 98, 185, 0.6);
+    --theme-hover: rgba(31, 54, 116, 0.38);
+    --quote-bg: rgba(11, 21, 46, 0.76);
+    --quote-border: rgba(23, 201, 239, 0.48);
+    --warning-border: var(--nervix-warning);
+    --table-border-color: rgba(76, 112, 190, 0.28);
+    --table-header-bg: rgba(17, 31, 69, 0.95);
+    --table-alternate-bg: rgba(14, 25, 54, 0.48);
+    --searchbar-border-color: rgba(54, 208, 255, 0.46);
+    --searchbar-bg: rgba(5, 9, 19, 0.96);
+    --searchbar-fg: var(--nervix-text);
+    --searchbar-shadow-color: rgba(23, 201, 239, 0.22);
+    --searchresults-header-fg: var(--nervix-muted);
+    --searchresults-border-color: rgba(75, 98, 185, 0.55);
+    --searchresults-li-bg: rgba(11, 20, 47, 0.96);
+    --search-mark-bg: rgba(125, 92, 255, 0.55);
+    --color-scheme: dark;
+}
+
+html {
+    background: var(--nervix-bg);
+}
+
+body {
+    color: var(--nervix-text);
+    background:
+        radial-gradient(circle at 86% 18%, rgba(125, 92, 255, 0.17), transparent 34rem),
+        radial-gradient(circle at 67% 36%, rgba(23, 201, 239, 0.11), transparent 30rem),
+        linear-gradient(180deg, #050913 0%, #050913 58%, #070d19 100%);
+}
+
+body::before {
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    pointer-events: none;
+    content: "";
+    background-image:
+        linear-gradient(rgba(34, 110, 190, 0.11) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(34, 110, 190, 0.11) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.94), rgba(0, 0, 0, 0.68));
+}
+
+#body-container {
+    position: relative;
+    padding-block-start: 36px;
+}
+
+#body-container::before {
+    position: fixed;
+    inset-block-start: 0;
+    inset-inline: 0;
+    z-index: 120;
+    height: 35px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-block-start: 1px solid rgba(160, 139, 255, 0.38);
+    border-block-end: 1px solid rgba(100, 82, 182, 0.32);
+    color: #b7acd9;
+    background: rgba(32, 27, 58, 0.95);
+    box-shadow: 0 0 28px rgba(125, 92, 255, 0.14);
+    content: "•  Nervix is in early development - APIs and syntax are subject to change.";
+    font-size: 1.28rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.page-wrapper {
+    background: transparent;
+}
+
+.page {
+    padding-inline: var(--page-padding);
+}
+
+#menu-bar-hover-placeholder,
+#menu-bar {
+    margin-inline: calc(0px - var(--page-padding));
+}
+
+#menu-bar {
+    min-height: var(--menu-bar-height);
+    padding-inline: clamp(1rem, 5vw, 7rem);
+    border-block-end: 1px solid rgba(40, 78, 142, 0.36);
+    background: rgba(5, 9, 19, 0.78);
+    backdrop-filter: blur(18px);
+}
+
+#menu-bar.sticky,
+#menu-bar-hover-placeholder:hover + #menu-bar,
+#menu-bar:hover,
+html.sidebar-visible #menu-bar {
+    top: 36px !important;
+}
+
+#menu-bar.bordered {
+    border-block-end-color: rgba(52, 104, 190, 0.42);
+}
+
+.menu-title {
+    color: #ffffff;
+    font-size: 1.8rem;
+    font-weight: 800;
+    letter-spacing: 0;
+    text-shadow: 0 0 24px rgba(23, 201, 239, 0.17);
+}
+
+.menu-title::before {
+    display: inline-block;
+    width: 3.2rem;
+    height: 3.2rem;
+    margin-inline-end: 1.1rem;
+    vertical-align: -0.82rem;
+    background: url("nervix-mark.svg") center / contain no-repeat;
+    filter: drop-shadow(0 0 14px rgba(23, 201, 239, 0.28));
+    content: "";
+}
+
+#menu-bar i,
+#menu-bar .icon-button {
+    color: #94a3cf;
+}
+
+#menu-bar i:hover,
+#menu-bar .icon-button:hover {
+    color: #ffffff;
+}
+
+.right-buttons a:last-child i,
+#search-toggle,
+#theme-toggle {
+    color: var(--nervix-cyan);
+}
+
+#sidebar {
+    top: 36px;
+    border-inline-end: 1px solid rgba(48, 78, 156, 0.38);
+    background:
+        linear-gradient(180deg, rgba(8, 14, 33, 0.98), rgba(5, 9, 19, 0.98)),
+        var(--sidebar-bg);
+    box-shadow: 18px 0 60px rgba(0, 0, 0, 0.28);
+}
+
+.sidebar .sidebar-resize-handle {
+    top: 0;
+}
+
+.sidebar-scrollbox {
+    padding-block-start: 1.25rem;
+}
+
+.chapter {
+    color: var(--sidebar-fg);
+}
+
+.chapter li {
+    margin-block: 0.1rem;
+}
+
+.chapter li a {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 0.2rem 0.72rem;
+    border-radius: 6px;
+    color: #aebbe1;
+    font-weight: 500;
+    line-height: 1.45;
+}
+
+.chapter li a strong {
+    color: #8fa0c8;
+    font-weight: inherit;
+}
+
+.chapter li a:hover {
+    color: #ffffff;
+    background: rgba(23, 201, 239, 0.08);
+    text-decoration: none;
+}
+
+.chapter li a.active {
+    color: var(--nervix-cyan);
+    background: linear-gradient(90deg, rgba(23, 201, 239, 0.16), rgba(23, 201, 239, 0.04));
+    box-shadow: inset 2px 0 0 var(--nervix-cyan);
+    font-weight: 650;
+}
+
+.chapter li a.active strong {
+    color: var(--nervix-cyan);
+}
+
+.content {
+    padding-block-end: 8rem;
+}
+
+.content main {
+    max-width: var(--content-max-width);
+    padding-block: clamp(3rem, 6vw, 6rem);
+}
+
+.content main::before {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.8rem;
+    margin-block-end: 2.4rem;
+    padding: 0.52rem 1.2rem;
+    border: 1px solid rgba(23, 201, 239, 0.36);
+    border-radius: 999px;
+    color: var(--nervix-cyan);
+    background: rgba(8, 48, 68, 0.48);
+    content: "NSPL RUNTIME ENGINE";
+    font-family: var(--mono-font);
+    font-size: 1.18rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+}
+
+.content h1,
+.content h2,
+.content h3 {
+    color: #ffffff;
+    letter-spacing: 0;
+}
+
+.content h1 {
+    max-width: 14ch;
+    margin-block: 0 2.2rem;
+    font-size: clamp(4.4rem, 8vw, 8.6rem);
+    line-height: 0.96;
+    font-weight: 800;
+}
+
+.content h1 .header {
+    color: #ffffff;
+}
+
+.content h2 {
+    border-block-start: 1px solid rgba(52, 104, 190, 0.26);
+    padding-block-start: 2.5rem;
+    font-size: 3.2rem;
+}
+
+.content h3 {
+    font-size: 2.35rem;
+}
+
+.content p,
+.content li {
+    color: var(--nervix-muted);
+    font-size: 1.72rem;
+    line-height: 1.72;
+}
+
+.content strong,
+.content li::marker {
+    color: #ffffff;
+}
+
+.content a:link,
+.content a:visited,
+#searchresults a {
+    color: var(--nervix-cyan);
+    font-weight: 700;
+}
+
+.content a:hover {
+    color: #8feaff;
+}
+
+pre,
+.hljs {
+    border-radius: 8px;
+}
+
+pre {
+    border: 1px solid rgba(36, 79, 177, 0.55);
+    background: var(--nervix-panel-strong) !important;
+    box-shadow: var(--nervix-shadow);
+}
+
+:not(pre) > .hljs {
+    border: 1px solid rgba(125, 92, 255, 0.26);
+    border-radius: 5px;
+    color: #c7adff;
+    background: rgba(12, 19, 43, 0.92);
+}
+
+blockquote,
+.warning {
+    border-radius: 8px;
+    box-shadow: inset 0 0 0 1px rgba(70, 111, 190, 0.2);
+}
+
+table {
+    width: 100%;
+    border: 1px solid var(--table-border-color);
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(6, 12, 28, 0.68);
+    box-shadow: var(--nervix-shadow);
+}
+
+table th,
+table td {
+    padding: 0.9rem 1.2rem;
+}
+
+#search-wrapper {
+    border-block-end: 1px solid rgba(52, 104, 190, 0.28);
+    background: rgba(5, 9, 19, 0.85);
+    backdrop-filter: blur(16px);
+}
+
+#searchbar {
+    border-radius: 8px;
+}
+
+.nav-chapters {
+    color: rgba(73, 214, 255, 0.72);
+}
+
+.nav-chapters:hover,
+.mobile-nav-chapters:hover {
+    background: rgba(23, 201, 239, 0.08);
+}
+
+@media only screen and (max-width: 700px) {
+    :root {
+        --page-padding: 18px;
+        --menu-bar-height: 58px;
+    }
+
+    #body-container::before {
+        padding-inline: 1rem;
+        font-size: 1.08rem;
+        text-align: center;
+    }
+
+    #menu-bar {
+        padding-inline: 0.75rem;
+    }
+
+    .menu-title {
+        font-size: 1.35rem;
+    }
+
+    .menu-title::before {
+        width: 2.6rem;
+        height: 2.6rem;
+        margin-inline-end: 0.65rem;
+        vertical-align: -0.72rem;
+    }
+
+    .content main {
+        padding-block-start: 3.2rem;
+    }
+
+    .content h1 {
+        max-width: 100%;
+        font-size: 4.2rem;
+    }
+
+    .content p,
+    .content li {
+        font-size: 1.58rem;
+    }
+}
+
+@media print {
+    #body-container {
+        padding-block-start: 0;
+    }
+
+    #body-container::before,
+    body::before,
+    .content main::before,
+    .menu-title::before {
+        display: none;
+    }
+
+    body,
+    .page-wrapper {
+        background: #ffffff;
+    }
+}

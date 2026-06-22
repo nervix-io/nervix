@@ -1,0 +1,233 @@
+// NATS smart-factory window analytics demo.
+//
+// The graph ingests machine signal telemetry from NATS, routes invalid and
+// battery records by site, repartitions clean records into concrete
+// site/line/asset/sensor branches, preserves that branch through reorder,
+// alert routing, and window processing, then emits branch-local aggregate
+// summaries and site-level alerts back to NATS.
+
+CREATE UNPACED DOMAIN nats_factory_windows_demo;
+
+USE nats_factory_windows_demo;
+
+CREATE SCHEMA machine_signal (
+  site STRING,
+  line STRING,
+  asset_id STRING,
+  sensor STRING,
+  value F64,
+  unit STRING,
+  target_min F64,
+  target_max F64,
+  critical_high F64,
+  battery_pct F64,
+  status STRING,
+  ts DATETIME,
+  seq U64
+);
+
+CREATE JSON WIRE SCHEMA machine_signal_wire (
+  site string,
+  line string,
+  asset_id string,
+  sensor string,
+  value number,
+  unit string,
+  target_min number,
+  target_max number,
+  critical_high number,
+  battery_pct number,
+  status string,
+  ts string,
+  seq integer
+);
+
+CREATE CODEC machine_signal_codec
+  FROM WIRE JSON SCHEMA machine_signal_wire
+  TO SCHEMA machine_signal
+  ENCODE ts AS RFC3339;
+
+CREATE SCHEMA signal_window (
+  site STRING,
+  line STRING,
+  asset_id STRING,
+  sensor STRING,
+  sample_count I64,
+  first_ts DATETIME,
+  last_ts DATETIME,
+  first_value F64,
+  last_value F64,
+  min_value F64,
+  max_value F64,
+  total_value F64,
+  value_p50 F64,
+  value_p90 F64,
+  value_p99 F64,
+  value_percentiles ARRAY<F64, 3>
+);
+
+CREATE JSON WIRE SCHEMA signal_window_wire (
+  site string,
+  line string,
+  asset_id string,
+  sensor string,
+  sample_count integer,
+  first_ts string,
+  last_ts string,
+  first_value number,
+  last_value number,
+  min_value number,
+  max_value number,
+  total_value number,
+  value_p50 number,
+  value_p90 number,
+  value_p99 number,
+  value_percentiles array
+);
+
+CREATE CODEC signal_window_codec
+  FROM WIRE JSON SCHEMA signal_window_wire
+  TO SCHEMA signal_window
+  ENCODE first_ts AS RFC3339, last_ts AS RFC3339;
+
+CREATE IF NOT EXISTS SCHEMA site_branch (
+  site STRING
+);
+
+CREATE IF NOT EXISTS SCHEMA asset_signal_branch (
+  site STRING,
+  line STRING,
+  asset_id STRING,
+  sensor STRING
+);
+
+CREATE RELAY signals_by_site SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 256;
+CREATE RELAY rejected_signals SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 64;
+CREATE RELAY battery_alerts SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 64;
+CREATE RELAY clean_signals SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 256;
+CREATE RELAY signals_by_asset SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 256;
+CREATE RELAY signals_ordered SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 256;
+CREATE RELAY critical_signals SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 64;
+CREATE RELAY drift_signals SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 64;
+CREATE RELAY normal_signals SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 128;
+CREATE RELAY signal_windows SCHEMA signal_window PARAMETERIZED BY asset_signal_branch CAPACITY 64;
+CREATE RELAY site_critical_signals SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 64;
+
+CREATE CLIENT nats_edge
+  TYPE NATS
+  CONFIG {
+    'addr' = 'nats://127.0.0.1:4222'
+  };
+
+CREATE INGESTOR nats_machine_signals
+  TO signals_by_site
+  DECODE USING machine_signal_codec
+  PARAMETERIZED BY site_branch VALUES { site = signals_by_site.site } TTL 5m
+  FLUSH EACH 250ms MAX BATCH SIZE 32kb
+  TIMESTAMP AT ts
+  FROM NATS nats_edge
+  SUBJECT factory_signals
+  QUEUE GROUP factory_signal_workers
+  INSTANCES 4
+  MODE NO_ACK SEQUENTIAL
+  SET signals_by_site.status = lower(trim(message.status)),
+      signals_by_site.sensor = lower(trim(message.sensor)),
+      signals_by_site.unit = lower(trim(message.unit))
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+CREATE ROUTER intake_quality_gate
+  FROM signals_by_site
+  TO rejected_signals WHERE signals_by_site.asset_id = "" OR signals_by_site.sensor = "" OR signals_by_site.status = "offline"
+  TO battery_alerts WHERE signals_by_site.battery_pct < 15.0
+  DEFAULT TO clean_signals
+  PARAMETERIZED BY site_branch
+  FLUSH EACH 250ms MAX BATCH SIZE 32kb
+  ON MESSAGE ERROR LOG;
+
+CREATE REINGESTOR asset_signal_repartition
+  FROM clean_signals
+  TO signals_by_asset
+  PARAMETERIZED BY asset_signal_branch VALUES {
+    site = signals_by_asset.site,
+    line = signals_by_asset.line,
+    asset_id = signals_by_asset.asset_id,
+    sensor = signals_by_asset.sensor
+  } TTL 5m
+  FLUSH EACH 250ms MAX BATCH SIZE 32kb
+  ON MESSAGE ERROR LOG;
+
+CREATE REORDERER asset_signal_reorderer
+  FROM signals_by_asset
+  TO signals_ordered
+  PARAMETERIZED BY asset_signal_branch
+  BY signals_by_asset.ts, signals_by_asset.seq
+  MAX TIME 5s
+  FLUSH EACH 500ms MAX BATCH SIZE 32kb
+  ON MESSAGE ERROR LOG;
+
+CREATE ROUTER process_alert_router
+  FROM signals_ordered
+  TO critical_signals WHERE signals_ordered.status = "fault" OR signals_ordered.value >= signals_ordered.critical_high
+  TO drift_signals WHERE signals_ordered.value < signals_ordered.target_min OR signals_ordered.value > signals_ordered.target_max
+  DEFAULT TO normal_signals
+  PARAMETERIZED BY asset_signal_branch
+  FLUSH EACH 250ms MAX BATCH SIZE 32kb
+  ON MESSAGE ERROR LOG;
+
+CREATE WINDOW PROCESSOR asset_signal_window
+  FROM signals_ordered
+  TO signal_windows
+  PARAMETERIZED BY asset_signal_branch
+  WIDTH 20 MESSAGES 30s DURATION
+  STEP 10 MESSAGES 10s DURATION
+  AGGREGATE
+    signal_windows.site = FIRST(signals_ordered.site),
+    signal_windows.line = FIRST(signals_ordered.line),
+    signal_windows.asset_id = FIRST(signals_ordered.asset_id),
+    signal_windows.sensor = FIRST(signals_ordered.sensor),
+    signal_windows.sample_count = COUNT(signals_ordered.value),
+    signal_windows.first_ts = FIRST(signals_ordered.ts),
+    signal_windows.last_ts = LAST(signals_ordered.ts),
+    signal_windows.first_value = FIRST(signals_ordered.value),
+    signal_windows.last_value = LAST(signals_ordered.value),
+    signal_windows.min_value = MIN(signals_ordered.value),
+    signal_windows.max_value = MAX(signals_ordered.value),
+    signal_windows.total_value = SUM(signals_ordered.value),
+    signal_windows.value_p50 = PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 50, 512, 0, 200, '2s'),
+    signal_windows.value_p90 = PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 90, 512, 0, 200, '2s'),
+    signal_windows.value_p99 = PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 99, 512, 0, 200, '2s'),
+    signal_windows.value_percentiles = [
+      PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 50, 512, 0, 200, '2s'),
+      PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 90, 512, 0, 200, '2s'),
+      PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 99, 512, 0, 200, '2s')
+    ] ON MESSAGE ERROR LOG;
+
+CREATE REINGESTOR site_critical_repartition
+  FROM critical_signals
+  TO site_critical_signals
+  PARAMETERIZED BY site_branch VALUES { site = site_critical_signals.site } TTL 5m
+  FLUSH EACH 250ms MAX BATCH SIZE 32kb
+  ON MESSAGE ERROR LOG;
+
+CREATE EMITTER nats_signal_windows
+  FROM signal_windows
+  ENCODE USING signal_window_codec
+  TO NATS nats_edge SUBJECT factory_signal_windows
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+CREATE EMITTER nats_site_critical_signals
+  FROM site_critical_signals
+  ENCODE USING machine_signal_codec
+  TO NATS nats_edge SUBJECT factory_site_critical_signals
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+CREATE EMITTER nats_battery_alerts
+  FROM battery_alerts
+  ENCODE USING machine_signal_codec
+  TO NATS nats_edge SUBJECT factory_battery_alerts
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+
+START;
