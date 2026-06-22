@@ -20,7 +20,7 @@ nervix-vm = { workspace = true }
 petgraph = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
-sorted_vec = { workspace = true }
+sorted-vec = { workspace = true }
 storekey = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }

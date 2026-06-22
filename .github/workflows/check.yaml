@@ -52,7 +52,22 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just,cargo-autoinherit,toml-cli,trunk
+          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just,cargo-autoinherit,toml-cli,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-22"
+          linker = "clang-22"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
 
       - name: Setup Go environment
         uses: actions/setup-go@v5
@@ -126,7 +141,22 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,cargo-mutants,just,toml-cli,cargo-llvm-cov,trunk,cargo-crap
+          tool: cargo-hack,cargo-mutants,just,toml-cli,cargo-llvm-cov,trunk,cargo-crap,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-22"
+          linker = "clang-22"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
 
       - name: Setup Go environment
         uses: actions/setup-go@v5

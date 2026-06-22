@@ -12,7 +12,7 @@ chrono = { workspace = true }
 error-stack = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
-sorted_vec = { workspace = true, features = ["serde"] }
+sorted-vec = { workspace = true, features = ["serde"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
