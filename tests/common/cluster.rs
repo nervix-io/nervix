@@ -79,8 +79,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(40);
 const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+const NODE_START_RETRY_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-const NODE_START_ATTEMPTS: usize = 8;
 const KAFKA_ADDR: &str = "127.0.0.1:9092";
 const PULSAR_ADDR: &str = "pulsar://127.0.0.1:6650";
 const PULSAR_TLS_ADDR: &str = "pulsar+ssl://127.0.0.1:6651";
@@ -384,29 +384,34 @@ impl Cluster {
             .nodes
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        let mut last_error = None;
-        for attempt in 1..=NODE_START_ATTEMPTS {
+        let retry_deadline = Instant::now() + NODE_START_RETRY_TIMEOUT;
+        let mut attempt = 0;
+        let last_error = loop {
+            tokio::task::consume_budget().await;
+            attempt += 1;
             handle.start()?;
             match handle.wait_until_ready().await {
                 Ok(()) => {
-                    last_error = None;
-                    break;
+                    break None;
                 }
                 Err(error) => {
                     let message = error.to_string();
                     handle.stop().await?;
-                    last_error = Some(error);
-                    if attempt == NODE_START_ATTEMPTS {
-                        break;
+                    if Instant::now() >= retry_deadline {
+                        break Some(error);
                     }
                     handle.spec.reallocate_ports()?;
                     eprintln!(
                         "retrying node '{node_id}' startup after attempt {attempt} failed: \
                          {message}"
                     );
+                    let wait = retry_deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(POLL_INTERVAL);
+                    sleep(wait).await;
                 }
             }
-        }
+        };
         if let Some(error) = last_error {
             return Err(error);
         }
