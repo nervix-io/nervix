@@ -14,6 +14,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::Client as SqsClient;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use fjall::Database;
 use futures_util::SinkExt;
 use lapin::{
     BasicProperties, Connection, ConnectionProperties,
@@ -79,8 +80,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(40);
 const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
-const NODE_START_RETRY_TIMEOUT: Duration = Duration::from_secs(20);
+const FJALL_UNLOCK_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const NODE_START_ATTEMPTS: usize = 8;
 const KAFKA_ADDR: &str = "127.0.0.1:9092";
 const PULSAR_ADDR: &str = "pulsar://127.0.0.1:6650";
 const PULSAR_TLS_ADDR: &str = "pulsar+ssl://127.0.0.1:6651";
@@ -161,6 +163,16 @@ fn next_ports(count: usize) -> io::Result<Vec<u16>> {
 
 fn parse_addr(input: &str) -> io::Result<std::net::SocketAddr> {
     input.parse().map_err(io::Error::other)
+}
+
+async fn database_opens(path: PathBuf) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let database = Database::builder(path).open().map_err(io::Error::other)?;
+        drop(database);
+        Ok(())
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 fn observability_metric_has_value(
@@ -384,34 +396,29 @@ impl Cluster {
             .nodes
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        let retry_deadline = Instant::now() + NODE_START_RETRY_TIMEOUT;
-        let mut attempt = 0;
-        let last_error = loop {
-            tokio::task::consume_budget().await;
-            attempt += 1;
+        let mut last_error = None;
+        for attempt in 1..=NODE_START_ATTEMPTS {
             handle.start()?;
             match handle.wait_until_ready().await {
                 Ok(()) => {
-                    break None;
+                    last_error = None;
+                    break;
                 }
                 Err(error) => {
                     let message = error.to_string();
                     handle.stop().await?;
-                    if Instant::now() >= retry_deadline {
-                        break Some(error);
+                    last_error = Some(error);
+                    if attempt == NODE_START_ATTEMPTS {
+                        break;
                     }
                     handle.spec.reallocate_ports()?;
                     eprintln!(
                         "retrying node '{node_id}' startup after attempt {attempt} failed: \
                          {message}"
                     );
-                    let wait = retry_deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(POLL_INTERVAL);
-                    sleep(wait).await;
                 }
             }
-        };
+        }
         if let Some(error) = last_error {
             return Err(error);
         }
@@ -1548,7 +1555,7 @@ impl NodeHandle {
         let Some(mut task) = self.task.take() else {
             return Ok(());
         };
-        match timeout(SHUTDOWN_TIMEOUT, &mut task).await {
+        let task_result = match timeout(SHUTDOWN_TIMEOUT, &mut task).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) if err.is_cancelled() => Ok(()),
             Ok(Err(err)) => Err(io::Error::other(err)),
@@ -1556,6 +1563,32 @@ impl NodeHandle {
                 task.abort();
                 let _ = task.await;
                 Err(io::Error::other("timed out waiting for node shutdown"))
+            }
+        };
+        if task_result.is_ok() {
+            self.wait_database_unlocked().await?;
+        }
+        task_result
+    }
+
+    async fn wait_database_unlocked(&self) -> io::Result<()> {
+        let db_path = self.spec.db_path()?;
+        let deadline = Instant::now() + FJALL_UNLOCK_TIMEOUT;
+
+        loop {
+            tokio::task::consume_budget().await;
+            match database_opens(db_path.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(io::Error::other(format!(
+                            "timed out waiting for node '{}' database lock to release: {error}",
+                            self.spec.node_id
+                        )));
+                    }
+                    sleep(deadline.saturating_duration_since(now).min(POLL_INTERVAL)).await;
+                }
             }
         }
     }
