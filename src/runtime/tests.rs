@@ -31,7 +31,7 @@ use nervix_wasm::{
     WasmRowAckSet,
 };
 use ordered_float::OrderedFloat;
-use sortedvec::SortedVec;
+use sorted_vec::SortedVec;
 use tempfile::tempdir;
 use tokio::{
     sync::{Mutex, mpsc, watch},
