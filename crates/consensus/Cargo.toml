@@ -13,7 +13,7 @@ openraft = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
-sorted_vec = { workspace = true }
+sorted-vec = { workspace = true }
 storekey = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

@@ -17,7 +17,7 @@ arrow-schema = { workspace = true }
 chumsky = { workspace = true }
 humantime = { workspace = true }
 nervix-models = { workspace = true }
-sorted_vec = { workspace = true }
+sorted-vec = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 ubyte = { workspace = true }
 

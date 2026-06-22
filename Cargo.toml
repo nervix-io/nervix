@@ -137,7 +137,7 @@ rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 simd-json = { workspace = true }
-sorted_vec = { workspace = true }
+sorted-vec = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
@@ -341,7 +341,7 @@ rustyline = "17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.149"
 simd-json = "0.17.0"
-sorted_vec = { package = "sorted-vec", version = "0.8" }
+sorted-vec = "0.8"
 storekey = "0.5"
 strum = "0.26"
 tempfile = "3"
