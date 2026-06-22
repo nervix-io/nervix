@@ -1,14 +1,7 @@
 const ALIAS_PREFIXES = new Set(["snapshot", "latest", "stable", "develop"]);
-const BASIC_AUTH_USERNAME = "nervix";
-const BASIC_AUTH_PASSWORD = "album-decimeter-data";
-const BASIC_AUTH_REALM = "Nervix Docs";
 
 export default {
   async fetch(request, env) {
-    if (!hasValidBasicAuth(request)) {
-      return unauthorizedResponse();
-    }
-
     const url = new URL(request.url);
     const pathname = url.pathname.replace(/^\/+/, "");
     const redirectTarget = await resolveAliasRedirect(pathname, env);
@@ -47,34 +40,6 @@ export default {
   },
 };
 
-function hasValidBasicAuth(request) {
-  const authorization = request.headers.get("authorization");
-  if (authorization === null || !authorization.startsWith("Basic ")) {
-    return false;
-  }
-
-  const encoded = authorization.slice("Basic ".length).trim();
-  let decoded;
-  try {
-    decoded = atob(encoded);
-  } catch {
-    return false;
-  }
-
-  return decoded === `${BASIC_AUTH_USERNAME}:${BASIC_AUTH_PASSWORD}`;
-}
-
-function unauthorizedResponse() {
-  return new Response("Unauthorized", {
-    status: 401,
-    headers: {
-      "content-type": "text/plain; charset=utf-8",
-      "www-authenticate": `Basic realm="${BASIC_AUTH_REALM}", charset="UTF-8"`,
-      "cache-control": "no-store",
-    },
-  });
-}
-
 function normalizeStorageKey(pathname) {
   if (pathname === "") {
     return "index.html";
@@ -101,7 +66,9 @@ async function resolveAliasRedirect(pathname, env) {
     return null;
   }
 
-  const targetPrefix = (await aliasObject.text()).trim().replace(/^\/+|\/+$/g, "");
+  const targetPrefix = (await aliasObject.text())
+    .trim()
+    .replace(/^\/+|\/+$/g, "");
   if (targetPrefix === "") {
     return null;
   }
