@@ -93,30 +93,6 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         },
                     });
             }
-            Model::Forwarder(forwarder) => {
-                processors_by_input
-                    .entry(forwarder.from_relay.clone())
-                    .or_default()
-                    .push(ParameterizedProcessorSpec {
-                        kind,
-                        processor: identifier,
-                        input_relay: forwarder.from_relay.clone(),
-                        input_relays: vec![forwarder.from_relay.clone()],
-                        mode: forwarder.mode,
-                        error_policies: message_only_error_policies(
-                            &forwarder.message_error_policy,
-                        ),
-                        operation: ParameterizedProcessorOperationSpec::Router {
-                            filter_map: forwarder.filter_map.clone(),
-                            match_policy: Default::default(),
-                            routes: Vec::new(),
-                            default_output: ParameterizedProcessorOutputSpec {
-                                relay: forwarder.into_relay.clone(),
-                                children: Vec::new(),
-                            },
-                        },
-                    });
-            }
             Model::Reorderer(reorderer) => {
                 processors_by_input
                     .entry(reorderer.from_relay.clone())

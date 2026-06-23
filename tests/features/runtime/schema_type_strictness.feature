@@ -74,31 +74,31 @@ Feature: Schema type strictness
       """
     When these NSPL commands fail with "source field 'inbound_events.legacy' is not declared in the output schema and must be listed in UNSET"
       """
-      CREATE FORWARDER missing_unset_projection
+      CREATE ROUTER missing_unset_projection
         FROM inbound_events
-        TO missing_unset_events UNPARAMETERIZED
-        FLUSH IMMEDIATE
         SET inbound_events.id = inbound_events.id
+        DEFAULT TO missing_unset_events UNPARAMETERIZED
+        FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
     When these NSPL commands fail with "SET field 'extra' is not declared in the output schema"
       """
-      CREATE FORWARDER unknown_set_projection
+      CREATE ROUTER unknown_set_projection
         FROM inbound_events
-        TO unknown_set_events UNPARAMETERIZED
-        FLUSH IMMEDIATE
         SET inbound_events.extra = "x"
         UNSET inbound_events.legacy
+        DEFAULT TO unknown_set_events UNPARAMETERIZED
+        FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
     When these NSPL commands are executed
       """
-      CREATE FORWARDER valid_projection
+      CREATE ROUTER valid_projection
         FROM inbound_events
-        TO valid_projected_events UNPARAMETERIZED
-        FLUSH IMMEDIATE
         SET inbound_events.id = inbound_events.id
         UNSET inbound_events.legacy
+        DEFAULT TO valid_projected_events UNPARAMETERIZED
+        FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
 
@@ -130,22 +130,22 @@ Feature: Schema type strictness
       """
     When these NSPL commands fail with "SET field 'memo' may be null but the output field is required"
       """
-      CREATE FORWARDER null_required_projection
+      CREATE ROUTER null_required_projection
         FROM nullable_inbound_events
-        TO required_projected_events UNPARAMETERIZED
-        FLUSH IMMEDIATE
         SET nullable_inbound_events.memo = NULL
         UNSET nullable_inbound_events.legacy
+        DEFAULT TO required_projected_events UNPARAMETERIZED
+        FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
     When these NSPL commands are executed
       """
-      CREATE FORWARDER null_optional_projection
+      CREATE ROUTER null_optional_projection
         FROM nullable_inbound_events
-        TO nullable_projected_events UNPARAMETERIZED
-        FLUSH IMMEDIATE
         SET nullable_inbound_events.memo = NULL
         UNSET nullable_inbound_events.legacy
+        DEFAULT TO nullable_projected_events UNPARAMETERIZED
+        FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
 

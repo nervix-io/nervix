@@ -21,7 +21,6 @@ Branch behavior by node type:
 
 - `INGESTOR` starts a branch
 - `ROUTER` preserves that branch while fanning records out to multiple downstream relays
-- `FORWARDER` preserves that branch while forwarding rows into one downstream relay
 - `DEDUPLICATOR`, `REORDERER`, `CORRELATOR`, and `UNIFIER` run inside that branch under one concrete parameter group
 - `WASM PROCESSOR` runs inside that branch under one concrete parameter group
 - `WINDOW PROCESSOR` keeps window state inside that branch under one concrete parameter group
@@ -50,7 +49,6 @@ This surface is available on:
 - `DEDUPLICATOR`
 - `REINGESTOR`
 - `ROUTER`
-- `FORWARDER`
 - `REORDERER`
 
 The clause is a row-level filter-map over the processor output:
@@ -86,8 +84,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] ROUTER <name>
   [SET <relay>.<field> = <expr>, ...]
   [UNSET <relay>.<field>, ...]
   [WHERE <expr>]
-  TO <output> WHERE <expr>
-  TO <output> WHERE <expr>
+  [TO <output> WHERE <expr> ...]
   [MATCH FIRST|ALL]
   DEFAULT TO <output>
   PARAMETERIZED BY <schema>
@@ -95,31 +92,13 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] ROUTER <name>
   ON MESSAGE ERROR <policy>;
 ```
 
-A router evaluates rows from one input relay and forwards each surviving row into one of several downstream relays.
+A router evaluates rows from one input relay and forwards each surviving row into downstream relays.
 
-The optional filter-map clause runs before route selection. After that, each `TO ... WHERE ...` branch is tested in order and `DEFAULT TO ...` handles the remaining rows. `MATCH ALL` forwards a row to every matching route and is the default for existing router syntax. `MATCH FIRST` forwards a row only to the first matching route.
+The optional filter-map clause runs before route selection. After that, each `TO ... WHERE ...` branch is tested in order and `DEFAULT TO ...` handles the remaining rows. `MATCH ALL` forwards a row to every matching route and is the default when conditional routes are present. `MATCH FIRST` forwards a row only to the first matching route. A router with only `DEFAULT TO` is the single-output pass-through/projection form.
 
 Router outputs keep the upstream branch group exactly as received.
 
 `DESCRIBE ROUTER <name>` reports the scheduled owner and replicas, input relay, default output relay, match policy, route conditions, flush policy, filter-map presence, branch-local execution marker, and runtime metrics when available.
-
-## Forwarder
-
-```nspl
-CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] FORWARDER <name>
-  FROM <input>
-  TO <output>
-  PARAMETERIZED BY <schema>
-  FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  [SET <relay>.<field> = <expr>, ...]
-  [UNSET <relay>.<field>, ...]
-  [WHERE <expr>]
-  ON MESSAGE ERROR <policy>;
-```
-
-A forwarder is the trivial single-output processor. It reads one input relay, optionally applies a filter-map program, and forwards every surviving row into one output relay.
-
-A forwarder preserves the upstream branch group exactly as received and sends surviving rows to one output relay.
 
 Typical use cases:
 
@@ -136,14 +115,14 @@ CREATE SCHEMA user_branch (
   user_id U32
 );
 
-CREATE [IF NOT EXISTS] FORWARDER project_notifications
+CREATE [IF NOT EXISTS] ROUTER project_notifications
   FROM notifications
-  TO projected_notifications
-  PARAMETERIZED BY user_branch
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   SET notifications.normalized = lower(trim(notifications.raw)), notifications.amount = notifications.amount + 1
   UNSET notifications.raw, notifications.active
-  WHERE notifications.active;
+  WHERE notifications.active
+  DEFAULT TO projected_notifications
+  PARAMETERIZED BY user_branch
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
 ```
 
 That example keeps the existing branch grouping, drops inactive rows, rewrites `normalized` and `amount`, removes `raw` and `active`, and forwards the surviving rows into `projected_notifications`.

@@ -161,11 +161,11 @@ fn main() -> ExitCode {
          FIRST|ALL] DEFAULT TO <s> [ ON MESSAGE ERROR LOG;]"
     );
     println!(
-        "  CREATE FORWARDER <name> FROM <s> TO <s> [SET|UNSET|WHERE ...] [ ON MESSAGE ERROR LOG;]"
+        "  CREATE ROUTER <name> FROM <s> [SET|UNSET|WHERE ...] DEFAULT TO <s> [ ON MESSAGE ERROR \
+         LOG;]"
     );
     println!(
-        "  SHOW CREATE SCHEMA|CODEC|CLIENT|VHOST|ENDPOINT|INGESTOR|ROUTER|FORWARDER|RELAY|EMITTER \
-         <name> [;]"
+        "  SHOW CREATE SCHEMA|CODEC|CLIENT|VHOST|ENDPOINT|INGESTOR|ROUTER|RELAY|EMITTER <name> [;]"
     );
     println!("  SHOW CLUSTER STATUS [;]");
     println!("History: Up/Down. Completion: Tab. Type 'exit' to quit.");

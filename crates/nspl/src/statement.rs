@@ -45,9 +45,6 @@ pub fn statement_parser<'src>()
             }),
             crate::router::create_router_parser()
                 .map(|create| Statement::Create(create.map_body(Model::Router).map_body(Box::new))),
-            crate::forwarder::create_forwarder_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Forwarder).map_body(Box::new))
-            }),
             crate::codec::create_codec_parser()
                 .map(|create| Statement::Create(create.map_body(Model::Codec).map_body(Box::new))),
             crate::unifier::create_unifier_parser().map(|create| {
@@ -1564,26 +1561,27 @@ mod tests {
     }
 
     #[test]
-    fn parses_forwarder_statement_with_filter_map() {
+    fn parses_default_only_router_statement_with_filter_map() {
         let parsed = parse_statement(
-            "CREATE FORWARDER fw1 FROM ss1 TO ss3 PARAMETERIZED BY tenant FLUSH EACH 100ms MAX \
-             BATCH SIZE 1MiB SET ss1.normalized = lower(ss1.raw) UNSET ss1.raw WHERE ss1.active \
-             ON MESSAGE ERROR LOG;",
+            "CREATE ROUTER fw1 FROM ss1 SET ss1.normalized = lower(ss1.raw) UNSET ss1.raw WHERE \
+             ss1.active DEFAULT TO ss3 PARAMETERIZED BY tenant FLUSH EACH 100ms MAX BATCH SIZE \
+             1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
         let Statement::Create(parsed) = parsed else {
-            panic!("expected forwarder statement");
+            panic!("expected router statement");
         };
-        let Model::Forwarder(forwarder) = parsed.body.as_ref() else {
-            panic!("expected forwarder statement");
+        let Model::Router(router) = parsed.body.as_ref() else {
+            panic!("expected router statement");
         };
-        assert_eq!(forwarder.mode, AckMode::Attached);
-        assert_eq!(forwarder.from_relay.as_str(), "ss1");
-        assert_eq!(forwarder.into_relay.as_str(), "ss3");
-        assert_eq!(forwarder.flush_each, "100ms");
+        assert_eq!(router.mode, AckMode::Attached);
+        assert_eq!(router.from_relay.as_str(), "ss1");
+        assert!(router.routes.is_empty());
+        assert_eq!(router.default_into_relay.as_str(), "ss3");
+        assert_eq!(router.flush_each, "100ms");
         assert_eq!(
-            forwarder.filter_map.as_deref(),
+            router.filter_map.as_deref(),
             Some("SET ss1.normalized = lower ( ss1.raw ) UNSET ss1.raw WHERE ss1.active")
         );
     }
@@ -1656,11 +1654,6 @@ mod tests {
                 r#"CREATE ROUTER log_router FROM incoming_logs TO errors_ss WHERE incoming_logs.level = "error" DEFAULT TO info_ss PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB"#,
             ),
             (
-                "forwarder",
-                "CREATE FORWARDER pass_through FROM notifications TO forwarded_notifications \
-                 PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB",
-            ),
-            (
                 "unifier",
                 "CREATE UNIFIER join_streams FROM notifications_a, notifications_b TO \
                  notifications_all PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE \
@@ -1715,7 +1708,7 @@ mod tests {
     #[test]
     fn message_error_policy_accepts_dlq_but_general_policy_does_not() {
         parse_statement(
-            "CREATE FORWARDER pass_through FROM notifications TO forwarded_notifications \
+            "CREATE ROUTER pass_through FROM notifications DEFAULT TO forwarded_notifications \
              PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
              DLQ error_stream SET error_message = message_error.message;",
         )
@@ -1736,8 +1729,8 @@ mod tests {
     fn branch_preserving_processors_accept_unparameterized() {
         for statement in [
             "CREATE RELAY raw SCHEMA metric UNPARAMETERIZED;",
-            "CREATE FORWARDER pass_through FROM raw TO projected UNPARAMETERIZED FLUSH EACH 100ms \
-             MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE ROUTER pass_through FROM raw DEFAULT TO projected UNPARAMETERIZED FLUSH EACH \
+             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE DEDUPLICATOR dedup FROM raw TO projected UNPARAMETERIZED DEDUPLICATE ON \
              raw.value MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE REORDERER reorder FROM raw TO projected UNPARAMETERIZED BY raw.value MAX TIME \

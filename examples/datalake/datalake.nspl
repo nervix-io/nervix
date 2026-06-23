@@ -572,16 +572,16 @@ CREATE INGESTOR auth_server_activity
       auth_activity_landing.edge_id = lower(trim(message.edge_id))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-CREATE FORWARDER edge_location_lookup
+CREATE ROUTER edge_location_lookup
   FROM edge_activity_landing
-  TO edge_activity_enriched_landing
-  PARAMETERIZED BY device_branch
-  FLUSH EACH 250ms MAX BATCH SIZE 512kb
   SET edge_activity_landing.edge_region = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "region"),
       edge_activity_landing.edge_site_tier = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "site_tier"),
       edge_activity_landing.edge_lat = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lat"),
       edge_activity_landing.edge_lon = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lon")
   WHERE NOT is_null(LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lat"))
+  DEFAULT TO edge_activity_enriched_landing
+  PARAMETERIZED BY device_branch
+  FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
 CREATE ROUTER device_activity_router
@@ -623,11 +623,8 @@ CREATE WASM PROCESSOR geoip_device_location_resolver
   PARAMETERIZED BY device_branch
   ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
-CREATE FORWARDER device_location_distance
+CREATE ROUTER device_location_distance
   FROM device_location_geo_events
-  TO device_location_checked_events
-  PARAMETERIZED BY device_branch
-  FLUSH EACH 250ms MAX BATCH SIZE 512kb
   SET device_location_geo_events.edge_name = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_name"),
       device_location_geo_events.edge_region = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "region"),
       device_location_geo_events.edge_site_tier = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "site_tier"),
@@ -635,6 +632,9 @@ CREATE FORWARDER device_location_distance
       device_location_geo_events.edge_lon = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lon"),
       device_location_geo_events.distance_to_edge_km = 111.32 * sqrt(pow(LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat") - device_location_geo_events.device_lat, 2.0) + pow((LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lon") - device_location_geo_events.device_lon) * cos(device_location_geo_events.device_lat * 0.017453292519943295), 2.0))
   WHERE NOT is_null(LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat"))
+  DEFAULT TO device_location_checked_events
+  PARAMETERIZED BY device_branch
+  FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
 CREATE CORRELATOR device_edge_connect_correlator
@@ -671,12 +671,12 @@ CREATE CORRELATOR device_edge_connect_correlator
   ON CORRELATION TIMEOUT DROP, DROP
   ON MESSAGE ERROR LOG;
 
-CREATE FORWARDER connect_distance_score
+CREATE ROUTER connect_distance_score
   FROM device_edge_connect_events
-  TO device_edge_connect_scored_events
+  SET device_edge_connect_events.distance_to_edge_km = 111.32 * sqrt(pow(device_edge_connect_events.edge_lat - device_edge_connect_events.device_lat, 2.0) + pow((device_edge_connect_events.edge_lon - device_edge_connect_events.device_lon) * cos(device_edge_connect_events.device_lat * 0.017453292519943295), 2.0))
+  DEFAULT TO device_edge_connect_scored_events
   PARAMETERIZED BY device_branch
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
-  SET device_edge_connect_events.distance_to_edge_km = 111.32 * sqrt(pow(device_edge_connect_events.edge_lat - device_edge_connect_events.device_lat, 2.0) + pow((device_edge_connect_events.edge_lon - device_edge_connect_events.device_lon) * cos(device_edge_connect_events.device_lat * 0.017453292519943295), 2.0))
   ON MESSAGE ERROR LOG;
 
 CREATE CORRELATOR connected_session_correlator
@@ -751,11 +751,8 @@ CREATE CORRELATOR disconnect_correlator
   ON CORRELATION TIMEOUT SEND TO device_disconnect_unmatched, SEND TO edge_disconnect_unmatched
   ON MESSAGE ERROR LOG;
 
-CREATE FORWARDER device_disconnect_only_projector
+CREATE ROUTER device_disconnect_only_projector
   FROM device_disconnect_unmatched
-  TO disconnect_events_device_only
-  PARAMETERIZED BY device_branch
-  FLUSH EACH 250ms MAX BATCH SIZE 256kb
   SET device_disconnect_unmatched.event_id = concat("device-only-", device_disconnect_unmatched.event_id),
       device_disconnect_unmatched.disconnect_kind = "device_only",
       device_disconnect_unmatched.device_event_id = device_disconnect_unmatched.event_id,
@@ -772,13 +769,13 @@ CREATE FORWARDER device_disconnect_only_projector
         device_disconnect_unmatched.event_type,
         device_disconnect_unmatched.ts,
         device_disconnect_unmatched.seq
-  ON MESSAGE ERROR LOG;
-
-CREATE FORWARDER edge_disconnect_only_projector
-  FROM edge_disconnect_unmatched
-  TO disconnect_events_edge_only
+  DEFAULT TO disconnect_events_device_only
   PARAMETERIZED BY device_branch
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
+  ON MESSAGE ERROR LOG;
+
+CREATE ROUTER edge_disconnect_only_projector
+  FROM edge_disconnect_unmatched
   SET edge_disconnect_unmatched.event_id = concat("edge-only-", edge_disconnect_unmatched.event_id),
       edge_disconnect_unmatched.disconnect_kind = "edge_only",
       edge_disconnect_unmatched.device_event_id = NULL,
@@ -794,13 +791,13 @@ CREATE FORWARDER edge_disconnect_only_projector
         edge_disconnect_unmatched.event_type,
         edge_disconnect_unmatched.ts,
         edge_disconnect_unmatched.seq
-  ON MESSAGE ERROR LOG;
-
-CREATE FORWARDER denied_auth_security_mapper
-  FROM auth_denied_events
-  TO security_auth_denied_events
+  DEFAULT TO disconnect_events_edge_only
   PARAMETERIZED BY device_branch
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
+  ON MESSAGE ERROR LOG;
+
+CREATE ROUTER denied_auth_security_mapper
+  FROM auth_denied_events
   SET auth_denied_events.event_id = concat("security-", auth_denied_events.event_id),
       auth_denied_events.security_reason = "auth_denied",
       auth_denied_events.observed_at = auth_denied_events.ts,
@@ -810,13 +807,13 @@ CREATE FORWARDER denied_auth_security_mapper
         auth_denied_events.reason,
         auth_denied_events.ts,
         auth_denied_events.seq
-  ON MESSAGE ERROR LOG;
-
-CREATE FORWARDER uncorrelated_auth_security_mapper
-  FROM uncorrelated_auth_events
-  TO security_uncorrelated_auth_events
+  DEFAULT TO security_auth_denied_events
   PARAMETERIZED BY device_branch
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
+  ON MESSAGE ERROR LOG;
+
+CREATE ROUTER uncorrelated_auth_security_mapper
+  FROM uncorrelated_auth_events
   SET uncorrelated_auth_events.event_id = concat("security-", uncorrelated_auth_events.event_id),
       uncorrelated_auth_events.security_reason = "authorized_without_device_edge_connect",
       uncorrelated_auth_events.observed_at = uncorrelated_auth_events.ts,
@@ -826,13 +823,13 @@ CREATE FORWARDER uncorrelated_auth_security_mapper
         uncorrelated_auth_events.reason,
         uncorrelated_auth_events.ts,
         uncorrelated_auth_events.seq
-  ON MESSAGE ERROR LOG;
-
-CREATE FORWARDER connect_without_auth_security_mapper
-  FROM connect_without_auth_events
-  TO security_connect_without_auth_events
+  DEFAULT TO security_uncorrelated_auth_events
   PARAMETERIZED BY device_branch
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
+  ON MESSAGE ERROR LOG;
+
+CREATE ROUTER connect_without_auth_security_mapper
+  FROM connect_without_auth_events
   SET connect_without_auth_events.event_id = concat("security-", connect_without_auth_events.event_id),
       connect_without_auth_events.security_reason = "device_edge_connect_without_auth",
       connect_without_auth_events.observed_at = connect_without_auth_events.edge_connected_at,
@@ -856,6 +853,9 @@ CREATE FORWARDER connect_without_auth_security_mapper
         connect_without_auth_events.edge_lat,
         connect_without_auth_events.edge_lon,
         connect_without_auth_events.distance_to_edge_km
+  DEFAULT TO security_connect_without_auth_events
+  PARAMETERIZED BY device_branch
+  FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
 CREATE UNIFIER security_event_unifier
@@ -865,11 +865,8 @@ CREATE UNIFIER security_event_unifier
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
-CREATE FORWARDER location_distance_alert_mapper
+CREATE ROUTER location_distance_alert_mapper
   FROM device_location_checked_events
-  TO location_distance_alerts
-  PARAMETERIZED BY device_branch
-  FLUSH EACH 250ms MAX BATCH SIZE 256kb
   SET device_location_checked_events.alert_id = concat("distance-", device_location_checked_events.event_id),
       device_location_checked_events.alert_type = "device_location_too_far_from_edge",
       device_location_checked_events.edge_label = coalesce(device_location_checked_events.edge_name, device_location_checked_events.edge_id),
@@ -898,13 +895,13 @@ CREATE FORWARDER location_distance_alert_mapper
         device_location_checked_events.edge_region,
         device_location_checked_events.edge_site_tier
   WHERE device_location_checked_events.distance_to_edge_km > 500.0
-  ON MESSAGE ERROR LOG;
-
-CREATE FORWARDER connection_distance_alert_mapper
-  FROM connected_sessions
-  TO connection_distance_alerts
+  DEFAULT TO location_distance_alerts
   PARAMETERIZED BY device_branch
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
+  ON MESSAGE ERROR LOG;
+
+CREATE ROUTER connection_distance_alert_mapper
+  FROM connected_sessions
   SET connected_sessions.alert_id = concat("distance-", connected_sessions.event_id),
       connected_sessions.alert_type = "connected_session_too_far_from_edge",
       connected_sessions.edge_label = LOOKUP_HASH_MAP("edge_sites_by_id", connected_sessions.edge_id, "edge_name"),
@@ -928,6 +925,9 @@ CREATE FORWARDER connection_distance_alert_mapper
         connected_sessions.edge_site_tier,
         connected_sessions.risk_score
   WHERE connected_sessions.distance_to_edge_km > 500.0
+  DEFAULT TO connection_distance_alerts
+  PARAMETERIZED BY device_branch
+  FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
 CREATE UNIFIER distance_alert_unifier

@@ -5,11 +5,10 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, client_ref, codec_ref, correlator_ref,
-        current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, forwarder_ref,
-        generator_ref, inferencer_ref, ingestor_ref, into_parse_error, kw, kw_phrase2, lex_input,
-        lookup_ref, reingestor_ref, relay_ref, reorderer_ref, router_ref, schema_ref,
-        suggestions_from_errors, tok, unifier_ref, vhost_ref, window_processor_ref,
-        wire_schema_ref,
+        current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref,
+        inferencer_ref, ingestor_ref, into_parse_error, kw, kw_phrase2, lex_input, lookup_ref,
+        reingestor_ref, relay_ref, reorderer_ref, router_ref, schema_ref, suggestions_from_errors,
+        tok, unifier_ref, vhost_ref, window_processor_ref, wire_schema_ref,
     },
 };
 
@@ -75,12 +74,6 @@ pub fn show_create_parser<'src>()
             .ignore_then(router_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Router,
-                name,
-            }),
-        kw(Identifier::Forwarder)
-            .ignore_then(forwarder_ref())
-            .map(|name| ShowCreate {
-                kind: ModelKind::Forwarder,
                 name,
             }),
         kw(Identifier::Reorderer)
@@ -225,14 +218,6 @@ mod tests {
         let parsed = parse_show_create_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.kind, ModelKind::Router);
         assert_eq!(parsed.name.as_str(), "route_logs");
-    }
-
-    #[test]
-    fn parses_show_create_forwarder() {
-        let tokens = to_tokens("SHOW CREATE FORWARDER fw1;");
-        let parsed = parse_show_create_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.kind, ModelKind::Forwarder);
-        assert_eq!(parsed.name.as_str(), "fw1");
     }
 
     #[test]

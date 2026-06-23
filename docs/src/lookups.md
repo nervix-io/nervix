@@ -64,14 +64,14 @@ The function evaluates `<key_expr>`, looks up that key in the named hash map, an
 Example enrichment:
 
 ```nspl
-CREATE FORWARDER enrich_zip
+CREATE ROUTER enrich_zip
   FROM inbound
-  TO enriched
-  PARAMETERIZED BY zip_branch
-  FLUSH IMMEDIATE
   SET inbound.city = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"),
       inbound.region = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "region")
   WHERE NOT is_null(LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"))
+  DEFAULT TO enriched
+  PARAMETERIZED BY zip_branch
+  FLUSH IMMEDIATE
   ON MESSAGE ERROR LOG;
 ```
 

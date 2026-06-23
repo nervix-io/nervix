@@ -112,12 +112,11 @@ Feature: Sensitive data
         FLUSH IMMEDIATE
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE FORWARDER reveal_notifications
+      CREATE ROUTER reveal_notifications
         FROM notifications
-        TO public_notifications UNPARAMETERIZED
-        FLUSH IMMEDIATE
         SET notifications.secret = leak_sensitive(notifications.secret)
-        ON MESSAGE ERROR LOG;
+        DEFAULT TO public_notifications UNPARAMETERIZED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO public_notifications;
       START;
@@ -160,11 +159,10 @@ Feature: Sensitive data
       CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;
       CREATE RELAY public_notifications SCHEMA public_notification UNPARAMETERIZED;
 
-      CREATE FORWARDER leak_notifications
+      CREATE ROUTER leak_notifications
         FROM notifications
-        TO public_notifications UNPARAMETERIZED
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG;
+        DEFAULT TO public_notifications UNPARAMETERIZED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
 
     Examples:

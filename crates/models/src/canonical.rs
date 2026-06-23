@@ -9,22 +9,21 @@ use crate::{
     CreateClientNats, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateForwarder, CreateGenerator, CreateInferencer,
-    CreateIngestor, CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateRouter, CreateSchema, CreateSignalingProtocol, CreateUnifier,
-    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
-    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
-    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry, KinesisIngestMode,
-    MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
-    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
-    NatsConfigEntry, NatsIngestMode, ParameterValueMapping, ParseAsType, PostgresConfigEntry,
-    PostgresConflictAction, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayParameterization, RelayParameters, RetryPolicy, S3ConfigEntry, SchemaField,
-    SqsConfigEntry, SqsIngestMode, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
+    CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateRouter, CreateSchema,
+    CreateSignalingProtocol, CreateUnifier, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
+    EndpointType, ErrorPolicies, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
+    IcebergCatalog, Identifier, InferencerTensorMapping, IngestSource, IngestTimestampSource,
+    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry,
+    KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry,
+    MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
+    MySqlConflictAction, NatsConfigEntry, NatsIngestMode, ParameterValueMapping, ParseAsType,
+    PostgresConfigEntry, PostgresConflictAction, PrometheusConfigEntry, PulsarConfigEntry,
+    PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
+    RedisPubSubIngestMode, RelayParameterization, RelayParameters, RetryPolicy, S3ConfigEntry,
+    SchemaField, SqsConfigEntry, SqsIngestMode, WebsocketsConfigEntry, WebsocketsIngestMode,
+    WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 fn parameter_values_to_nspl(values: &[ParameterValueMapping]) -> String {
@@ -141,7 +140,6 @@ impl Model {
             Self::Ingestor(ingestor) => ingestor.to_canonical_nspl(),
             Self::Reingestor(reingestor) => reingestor.to_canonical_nspl(),
             Self::Router(router) => router.to_canonical_nspl(),
-            Self::Forwarder(forwarder) => forwarder.to_canonical_nspl(),
             Self::Relay(relay) => relay.to_canonical_nspl(),
             Self::Materializer(materializer) => materializer.to_canonical_nspl(),
             Self::Lookup(lookup) => lookup.to_canonical_nspl(),
@@ -1048,33 +1046,22 @@ impl CreateRouter {
                 )
             })
             .collect::<String>();
+        let match_policy = if self.routes.is_empty() {
+            String::new()
+        } else {
+            format!(" MATCH {}", self.match_policy.as_ref())
+        };
         Ok(format!(
-            "CREATE {} ROUTER {} FROM {}{}{} MATCH {} DEFAULT TO {} {} {} {};",
+            "CREATE {} ROUTER {} FROM {}{}{}{} DEFAULT TO {} {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
             filter_map_suffix(&self.filter_map),
             routes,
-            self.match_policy.as_ref(),
+            match_policy,
             self.default_into_relay.as_str(),
             processor_parameterization_to_nspl(&self.parameterized_by),
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
-            message_error_policy_to_nspl(&self.message_error_policy)
-        ))
-    }
-}
-
-impl CreateForwarder {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        Ok(format!(
-            "CREATE {} FORWARDER {} FROM {} TO {} {} {}{} {};",
-            self.mode.as_ref(),
-            self.name.as_str(),
-            self.from_relay.as_str(),
-            self.into_relay.as_str(),
-            processor_parameterization_to_nspl(&self.parameterized_by),
-            flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
-            filter_map_suffix(&self.filter_map),
             message_error_policy_to_nspl(&self.message_error_policy)
         ))
     }
@@ -1890,17 +1877,17 @@ mod tests {
         CreateClientHttp, CreateClientKafka, CreateClientKinesis, CreateClientMqtt,
         CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
         CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateForwarder, CreateIngestor,
-        CreateReingestor, CreateRelay, CreateRouter, CreateSchema, CreateSignalingProtocol,
-        CreateUnifier, CreateVhost, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt,
-        EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies, HttpConfigEntry, Identifier,
-        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-        KinesisIngestMode, MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping,
-        MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
-        NatsIngestMode, ParameterValueMapping, ParseAsType, PostgresConflictAction,
-        PostgresValueMapping, PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode,
-        RelayParameterization, RelayParameters, RetryPolicy, RouterRoute, SchemaField,
-        SqsIngestMode, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
+        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateReingestor,
+        CreateRelay, CreateRouter, CreateSchema, CreateSignalingProtocol, CreateUnifier,
+        CreateVhost, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
+        EndpointIngestMode, EndpointType, ErrorPolicies, HttpConfigEntry, Identifier, IngestSource,
+        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode,
+        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode,
+        ParameterValueMapping, ParseAsType, PostgresConflictAction, PostgresValueMapping,
+        PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization,
+        RelayParameters, RetryPolicy, RouterRoute, SchemaField, SqsIngestMode,
+        WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2520,10 +2507,12 @@ mod tests {
             )
         );
 
-        let forwarder = CreateForwarder {
+        let default_only_router = CreateRouter {
             name: identifier("orders_forwarder"),
             from_relay: identifier("orders_in"),
-            into_relay: identifier("orders_out"),
+            routes: Vec::new(),
+            match_policy: Default::default(),
+            default_into_relay: identifier("orders_out"),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
@@ -2534,11 +2523,13 @@ mod tests {
             ),
         };
         assert_eq!(
-            forwarder.to_canonical_nspl().expect("must render"),
+            default_only_router
+                .to_canonical_nspl()
+                .expect("must render"),
             with_message_error_policy(
-                "CREATE ATTACHED FORWARDER orders_forwarder FROM orders_in TO orders_out \
-                 PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET \
-                 normalized = lower(raw) UNSET raw, legacy WHERE active;"
+                "CREATE ATTACHED ROUTER orders_forwarder FROM orders_in SET normalized = \
+                 lower(raw) UNSET raw, legacy WHERE active DEFAULT TO orders_out PARAMETERIZED BY \
+                 tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"
             )
         );
     }

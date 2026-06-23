@@ -402,11 +402,6 @@ pub fn router_ref<'src>()
     parse_identifier("ref:router")
 }
 
-pub fn forwarder_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:forwarder")
-}
-
 pub fn lookup_ref<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
     parse_identifier("ref:lookup")
@@ -425,11 +420,6 @@ pub fn reingestor_name<'src>()
 pub fn router_name<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
     parse_identifier("router_name")
-}
-
-pub fn forwarder_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("forwarder_name")
 }
 
 pub fn reorderer_name<'src>()

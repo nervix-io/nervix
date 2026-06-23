@@ -267,14 +267,14 @@ CREATE SCHEMA user_branch (
 CREATE RELAY notifications SCHEMA notification_in PARAMETERIZED BY user_branch;
 CREATE RELAY projected_notifications SCHEMA notification_out PARAMETERIZED BY user_branch;
 
-CREATE FORWARDER project_notifications
+CREATE ROUTER project_notifications
   FROM notifications
-  TO projected_notifications
-  PARAMETERIZED BY user_branch
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   SET notifications.normalized = lower(trim(notifications.raw)), notifications.amount = notifications.amount + 1
   UNSET notifications.raw, notifications.active
-  WHERE trim(notifications.raw) != '' ON MESSAGE ERROR LOG;
+  WHERE trim(notifications.raw) != ''
+  DEFAULT TO projected_notifications
+  PARAMETERIZED BY user_branch
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 ```
 
 This keeps the existing branch grouping, rewrites the record shape, drops rows with empty raw text, and forwards the surviving rows into a second relay without changing native grouping.

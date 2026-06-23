@@ -98,7 +98,6 @@ pub enum Identifier {
     Reingestor,
     Reorderer,
     Router,
-    Forwarder,
     On,
     Connect,
     Message,

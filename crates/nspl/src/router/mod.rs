@@ -41,6 +41,17 @@ fn match_policy_parser<'src>()
         .map(|policy| policy.unwrap_or_default())
 }
 
+fn route_set_parser<'src>()
+-> impl Parser<'src, &'src [Token], (Vec<RouterRoute>, RouterMatchPolicy), extra::Err<ParseError<'src>>>
++ Clone {
+    conditional_route_parser()
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .then(match_policy_parser())
+        .or(empty().to((Vec::new(), RouterMatchPolicy::default())))
+}
+
 pub fn create_router_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateRouter>, extra::Err<ParseError<'src>>> + Clone
 {
@@ -55,13 +66,7 @@ pub fn create_router_parser<'src>()
             filter_map_program_until_router_clause().map(Some),
             empty().to(None),
         )))
-        .then(
-            conditional_route_parser()
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .then(match_policy_parser())
+        .then(route_set_parser())
         .then(default_route_parser())
         .then(branch_parameterization())
         .then(flush_each())
@@ -73,8 +78,8 @@ pub fn create_router_parser<'src>()
                     (
                         (
                             (
-                                (((((if_not_exists, mode), name), from_relay), filter_map), routes),
-                                match_policy,
+                                ((((if_not_exists, mode), name), from_relay), filter_map),
+                                (routes, match_policy),
                             ),
                             default_into_relay,
                         ),
@@ -215,6 +220,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_router_with_only_default_route() {
+        let tokens = to_tokens(
+            r#"CREATE ROUTER project_notifications FROM notifications SET notifications.normalized = lower(notifications.raw) UNSET notifications.raw WHERE notifications.active DEFAULT TO projected_notifications PARAMETERIZED BY tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
+        );
+        let parsed = parse_create_router_tokens(&tokens).expect("parse should succeed");
+        assert_eq!(parsed.name.as_str(), "project_notifications");
+        assert_eq!(parsed.from_relay.as_str(), "notifications");
+        assert!(parsed.routes.is_empty());
+        assert_eq!(parsed.match_policy, RouterMatchPolicy::All);
+        assert_eq!(
+            parsed.default_into_relay.as_str(),
+            "projected_notifications"
+        );
+        assert_eq!(parsed.flush_each, "IMMEDIATE");
+        assert_eq!(
+            parsed.filter_map.as_deref(),
+            Some(
+                "SET notifications.normalized = lower ( notifications.raw ) UNSET \
+                 notifications.raw WHERE notifications.active"
+            )
+        );
+    }
+
+    #[test]
     fn rejects_router_match_without_policy() {
         let tokens = to_tokens(
             r#"CREATE ROUTER log_router FROM incoming_logs TO errors_ss WHERE incoming_logs.level = "error" MATCH DEFAULT TO info_ss PARAMETERIZED BY tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
@@ -239,6 +268,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_default_only_router_with_match_policy() {
+        let tokens = to_tokens(
+            r#"CREATE ROUTER log_router FROM incoming_logs MATCH FIRST DEFAULT TO info_ss PARAMETERIZED BY tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
+        );
+        assert!(parse_create_router_tokens(&tokens).is_err());
+    }
+
+    #[test]
     fn suggests_mode_after_create() {
         let input = "CREATE ";
         let suggestions = suggest_create_router(input, input.len());
@@ -251,6 +288,7 @@ mod tests {
         let input = "CREATE ROUTER log_router FROM incoming_logs ";
         let suggestions = suggest_create_router(input, input.len());
         assert!(suggestions.contains(&"TO".to_string()));
+        assert!(suggestions.contains(&"DEFAULT".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }

@@ -53,14 +53,14 @@ Feature: Branch namespace
         TOPIC branch_namespace_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE FORWARDER project_notifications
+      CREATE ROUTER project_notifications
         FROM notifications
-        TO projected_notifications PARAMETERIZED BY tenant_branch
-        FLUSH IMMEDIATE
         SET notifications.branch_tenant = branch.tenant,
             notifications.amount = notifications.amount + 1
         UNSET notifications.active
-        WHERE branch.tenant = notifications.tenant ON MESSAGE ERROR LOG;
+        WHERE branch.tenant = notifications.tenant
+        DEFAULT TO projected_notifications PARAMETERIZED BY tenant_branch
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO projected_notifications WHERE projected_notifications.tenant = 'acme';
       START;
