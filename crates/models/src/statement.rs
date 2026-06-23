@@ -140,8 +140,6 @@ pub enum ModelKind {
     Reingestor,
     #[strum(props(completion_label = "ref:router"))]
     Router,
-    #[strum(props(completion_label = "ref:forwarder"))]
-    Forwarder,
     #[strum(props(completion_label = "ref:relay"))]
     Relay,
     #[strum(props(completion_label = "ref:materializer"))]
@@ -467,7 +465,6 @@ pub enum Model {
     Ingestor(CreateIngestor),
     Reingestor(CreateReingestor),
     Router(CreateRouter),
-    Forwarder(CreateForwarder),
     Relay(CreateRelay),
     Materializer(CreateMaterializer),
     Lookup(CreateLookup),
@@ -514,7 +511,6 @@ impl Model {
             Self::Ingestor(_) => ModelKind::Ingestor,
             Self::Reingestor(_) => ModelKind::Reingestor,
             Self::Router(_) => ModelKind::Router,
-            Self::Forwarder(_) => ModelKind::Forwarder,
             Self::Relay(_) => ModelKind::Relay,
             Self::Materializer(_) => ModelKind::Materializer,
             Self::Lookup(_) => ModelKind::Lookup,
@@ -564,7 +560,6 @@ impl Model {
             Self::Ingestor(v) => &v.name,
             Self::Reingestor(v) => &v.name,
             Self::Router(v) => &v.name,
-            Self::Forwarder(v) => &v.name,
             Self::Relay(v) => &v.name,
             Self::Materializer(v) => &v.relay,
             Self::Lookup(v) => &v.name,
@@ -1260,22 +1255,6 @@ pub struct CreateRouter {
     #[serde(default)]
     pub match_policy: RouterMatchPolicy,
     pub default_into_relay: Identifier,
-    pub parameterized_by: BranchParameterization,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
-    pub message_error_policy: MessageErrorPolicy,
-    #[serde(default)]
-    pub mode: AckMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateForwarder {
-    pub name: Identifier,
-    pub from_relay: Identifier,
-    pub into_relay: Identifier,
     pub parameterized_by: BranchParameterization,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2090,7 +2069,6 @@ mod tests {
             (ModelKind::Ingestor, "ref:ingestor", "ingestor"),
             (ModelKind::Reingestor, "ref:reingestor", "reingestor"),
             (ModelKind::Router, "ref:router", "router"),
-            (ModelKind::Forwarder, "ref:forwarder", "forwarder"),
             (ModelKind::Relay, "ref:relay", "relay"),
             (ModelKind::Unifier, "ref:unifier", "unifier"),
             (ModelKind::Deduplicator, "ref:deduplicator", "deduplicator"),

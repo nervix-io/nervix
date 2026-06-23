@@ -613,8 +613,8 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR raw_metrics_source TO raw_metrics DECODE USING metric_codec UNPARAMETERIZED FLUSH IMMEDIATE FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE FORWARDER rust_filter FROM raw_metrics TO rust_filtered_metrics UNPARAMETERIZED FLUSH IMMEDIATE WHERE raw_metrics.rust_keep ON MESSAGE ERROR LOG;
-      CREATE FORWARDER go_filter FROM rust_filtered_metrics TO go_filtered_metrics UNPARAMETERIZED FLUSH IMMEDIATE WHERE rust_filtered_metrics.go_keep ON MESSAGE ERROR LOG;
+      CREATE ROUTER rust_filter FROM raw_metrics WHERE raw_metrics.rust_keep DEFAULT TO rust_filtered_metrics UNPARAMETERIZED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE ROUTER go_filter FROM rust_filtered_metrics WHERE rust_filtered_metrics.go_keep DEFAULT TO go_filtered_metrics UNPARAMETERIZED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -878,28 +878,24 @@ Feature: Web console NSPL REPL
         INSTANCES 4
         MODE NO_ACK PARALLEL MAX 1024
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE FORWARDER connect_without_authorization
+      CREATE ROUTER connect_without_authorization
         FROM auth_activity_landing
-        TO security_events
-        PARAMETERIZED BY device_branch
+        DEFAULT TO security_events PARAMETERIZED BY device_branch
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE FORWARDER connection_distance_alert_mapper
+      CREATE ROUTER connection_distance_alert_mapper
         FROM device_activity_landing
-        TO connected_sessions
-        PARAMETERIZED BY device_branch
+        DEFAULT TO connected_sessions PARAMETERIZED BY device_branch
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE FORWARDER location_distance_alert_mapper
+      CREATE ROUTER location_distance_alert_mapper
         FROM device_activity_landing
-        TO location_distance_alerts
-        PARAMETERIZED BY device_branch
+        DEFAULT TO location_distance_alerts PARAMETERIZED BY device_branch
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE FORWARDER edge_location_lookup
+      CREATE ROUTER edge_location_lookup
         FROM edge_activity_landing
-        TO edge_activity_enriched_landing
-        PARAMETERIZED BY device_branch
+        DEFAULT TO edge_activity_enriched_landing PARAMETERIZED BY device_branch
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
       CREATE ROUTER edge_activity_router
@@ -1110,9 +1106,9 @@ Feature: Web console NSPL REPL
         PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE FORWARDER notification_forwarder
+      CREATE ROUTER notification_forwarder
         FROM notifications
-        TO validated_notifications PARAMETERIZED BY tenant_user_id_branch
+        DEFAULT TO validated_notifications PARAMETERIZED BY tenant_user_id_branch
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE REINGESTOR reingestor_metrics_node
@@ -1247,10 +1243,9 @@ Feature: Web console NSPL REPL
         PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE FORWARDER relay_buffer_forwarder
+      CREATE ROUTER relay_buffer_forwarder
         FROM notifications
-        TO forwarded_notifications
-        PARAMETERIZED BY user_id_branch
+        DEFAULT TO forwarded_notifications PARAMETERIZED BY user_id_branch
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       SUBSCRIBE SESSION TO notifications WHERE notifications.user_id = 42;
       START;
@@ -1320,7 +1315,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY rr1 SCHEMA txn PARAMETERIZED BY value_branch;
       CREATE ENDPOINT state_txns_endpoint ON edge PATH '/state' TYPE HTTP;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING ); CREATE INGESTOR state_txns_ingestor TO state_txns DECODE USING txn_codec PARAMETERIZED BY value_branch VALUES { value = state_txns.value } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT state_txns_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE FORWARDER fwd FROM ss2 TO rr1 PARAMETERIZED BY value_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE ROUTER fwd FROM ss2 DEFAULT TO rr1 PARAMETERIZED BY value_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "state_txns_ingestor"
     And selector ".graph-hit-layer" contains "state_txns"

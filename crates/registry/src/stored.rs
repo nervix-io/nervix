@@ -8,20 +8,19 @@ use nervix_models::{
     CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateForwarder,
-    CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateRouter, CreateSchema, CreateSignalingProtocol, CreateUnifier,
-    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
-    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorFieldMapping,
-    ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, Identifier,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
-    MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, NameError, NatsIngestMode, ParameterValueMapping, ParseAsType,
-    PostgresConflictAction, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode,
-    RelayParameterization, RelayParameters, RouterMatchPolicy, RouterRoute, SchemaField,
-    SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode, WindowBound,
-    WireSchemaField, ZeroMqIngestMode,
+    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateReorderer,
+    CreateRouter, CreateSchema, CreateSignalingProtocol, CreateUnifier, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
+    EndpointIngestMode, EndpointType, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy,
+    IcebergCatalog, IcebergStorageBackend, Identifier, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+    KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
+    ParameterValueMapping, ParseAsType, PostgresConflictAction, PulsarIngestMode,
+    RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization, RelayParameters,
+    RouterMatchPolicy, RouterRoute, SchemaField, SignalingProtocolOnConnect, SqsIngestMode,
+    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -59,7 +58,6 @@ pub enum StoredModelVersioned {
     Ingestor(StoredCreateIngestor),
     Reingestor(StoredCreateReingestor),
     Router(StoredCreateRouter),
-    Forwarder(StoredCreateForwarder),
     Relay(StoredCreateRelay),
     Lookup(StoredCreateLookup),
     Deduplicator(StoredCreateDeduplicator),
@@ -508,19 +506,6 @@ pub struct StoredCreateRouter {
     pub routes: Vec<StoredRouterRoute>,
     pub match_policy: RouterMatchPolicy,
     pub default_into_relay: String,
-    pub parameterized_by: StoredBranchParameterization,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
-    pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
-    pub filter_map: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredCreateForwarder {
-    pub name: String,
-    pub from_relay: String,
-    pub into_relay: String,
     pub parameterized_by: StoredBranchParameterization,
     pub flush_each: String,
     pub max_batch_size: Option<String>,
@@ -1088,7 +1073,6 @@ impl From<Model> for StoredModelVersioned {
             Model::Ingestor(v) => Self::Ingestor(v.into()),
             Model::Reingestor(v) => Self::Reingestor(v.into()),
             Model::Router(v) => Self::Router(v.into()),
-            Model::Forwarder(v) => Self::Forwarder(v.into()),
             Model::Relay(v) => Self::Relay(v.into()),
             Model::Lookup(v) => Self::Lookup(v.into()),
             Model::Deduplicator(v) => Self::Deduplicator(v.into()),
@@ -1153,7 +1137,6 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Ingestor(v) => Ok(Model::Ingestor(v.try_into()?)),
             StoredModelVersioned::Reingestor(v) => Ok(Model::Reingestor(v.try_into()?)),
             StoredModelVersioned::Router(v) => Ok(Model::Router(v.try_into()?)),
-            StoredModelVersioned::Forwarder(v) => Ok(Model::Forwarder(v.try_into()?)),
             StoredModelVersioned::Relay(v) => Ok(Model::Relay(v.try_into()?)),
             StoredModelVersioned::Lookup(v) => Ok(Model::Lookup(v.try_into()?)),
             StoredModelVersioned::Deduplicator(v) => Ok(Model::Deduplicator(v.try_into()?)),
@@ -2631,40 +2614,6 @@ impl TryFrom<StoredCreateRouter> for CreateRouter {
                 .collect::<Result<Vec<_>, _>>()?,
             match_policy: value.match_policy,
             default_into_relay: Identifier::parse(&value.default_into_relay)?,
-            parameterized_by: value.parameterized_by.try_into()?,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
-            mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
-            filter_map: value.filter_map,
-        })
-    }
-}
-
-impl From<CreateForwarder> for StoredCreateForwarder {
-    fn from(value: CreateForwarder) -> Self {
-        Self {
-            name: value.name.to_string(),
-            from_relay: value.from_relay.to_string(),
-            into_relay: value.into_relay.to_string(),
-            parameterized_by: value.parameterized_by.into(),
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
-            mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
-            filter_map: value.filter_map,
-        }
-    }
-}
-
-impl TryFrom<StoredCreateForwarder> for CreateForwarder {
-    type Error = Report<NameError>;
-
-    fn try_from(value: StoredCreateForwarder) -> Result<Self, Self::Error> {
-        Ok(Self {
-            name: Identifier::parse(&value.name)?,
-            from_relay: Identifier::parse(&value.from_relay)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
             parameterized_by: value.parameterized_by.try_into()?,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
@@ -4335,10 +4284,12 @@ mod tests {
 
                 filter_map: Some("SET severity = lower(level)".to_string()),
             }),
-            Model::Forwarder(CreateForwarder {
+            Model::Router(CreateRouter {
                 name: identifier("events_forwarder"),
                 from_relay: identifier("events_stream"),
-                into_relay: identifier("events_projected"),
+                routes: Vec::new(),
+                match_policy: Default::default(),
+                default_into_relay: identifier("events_projected"),
                 parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),

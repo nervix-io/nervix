@@ -3766,18 +3766,6 @@ impl Runtime {
                         ),
                     });
                 }
-                Model::Forwarder(forwarder) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "forwarder '{}' is not attached to a branch root",
-                            forwarder.name.as_str()
-                        ),
-                    });
-                }
                 Model::Reorderer(reorderer) => {
                     if handled_processors.contains(&node.identifier) {
                         continue;
@@ -5434,18 +5422,6 @@ impl Runtime {
                         reason: format!(
                             "router '{}' is not attached to a branch root",
                             router.name.as_str()
-                        ),
-                    });
-                }
-                Model::Forwarder(forwarder) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "forwarder '{}' is not attached to a branch root",
-                            forwarder.name.as_str()
                         ),
                     });
                 }

@@ -61,11 +61,11 @@ Feature: Materialized relay state
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE FORWARDER enrich_notifications
+      CREATE ROUTER enrich_notifications
         FROM incoming_notifications
-        TO enriched_notifications PARAMETERIZED BY tenant_branch
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        SET incoming_notifications.source = tenant_state.source ON MESSAGE ERROR LOG;
+        SET incoming_notifications.source = tenant_state.source
+        DEFAULT TO enriched_notifications PARAMETERIZED BY tenant_branch
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO enriched_notifications;
       START;

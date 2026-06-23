@@ -1329,65 +1329,6 @@ impl DomainState {
                         &router.message_error_policy,
                     )?;
                 }
-                Model::Forwarder(forwarder) => {
-                    let input = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &forwarder.from_relay,
-                        ModelKind::Relay,
-                    )?;
-                    graph.add_edge(input, source, EdgeKind::RequiredBy);
-                    graph.add_edge(input, source, EdgeKind::SendsTo);
-
-                    let output = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &forwarder.into_relay,
-                        ModelKind::Relay,
-                    )?;
-                    graph.add_edge(output, source, EdgeKind::RequiredBy);
-                    graph.add_edge(source, output, EdgeKind::SendsTo);
-
-                    let producer_schema =
-                        schema_for_ack_model(domain, identifier, models, &forwarder.from_relay)?;
-                    let consumer_schema =
-                        schema_for_ack_model(domain, identifier, models, &forwarder.into_relay)?;
-                    let effective_schema = effective_filter_map_schema(
-                        domain,
-                        identifier,
-                        models,
-                        std::slice::from_ref(&forwarder.from_relay),
-                        producer_schema,
-                        consumer_schema,
-                        relay_declared_branch_schema(
-                            domain,
-                            identifier,
-                            models,
-                            &forwarder.from_relay,
-                        )?,
-                        forwarder.filter_map.as_deref(),
-                    )?;
-                    ensure_internal_schema_compatibility(
-                        domain,
-                        identifier,
-                        &effective_schema,
-                        consumer_schema,
-                        "forwarder flow",
-                    )?;
-                    add_message_error_policy_edges(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &mut graph,
-                        source,
-                        &forwarder.message_error_policy,
-                    )?;
-                }
                 Model::Endpoint(endpoint) => {
                     let vhost = expect_kind(
                         domain,
@@ -2353,7 +2294,6 @@ impl ActiveNode {
                 | ModelKind::Reingestor
                 | ModelKind::Correlator
                 | ModelKind::Router
-                | ModelKind::Forwarder
                 | ModelKind::Unifier
                 | ModelKind::Deduplicator
                 | ModelKind::Reorderer
@@ -2507,7 +2447,6 @@ fn is_schedulable_model(model: &Model) -> bool {
             | Model::Ingestor(_)
             | Model::Reingestor(_)
             | Model::Router(_)
-            | Model::Forwarder(_)
             | Model::Materializer(_)
             | Model::Lookup(_)
             | Model::Deduplicator(_)
@@ -2824,7 +2763,6 @@ impl AssignmentPlanner<'_> {
             | Model::Ingestor(_)
             | Model::Reingestor(_)
             | Model::Router(_)
-            | Model::Forwarder(_)
             | Model::Materializer(_)
             | Model::Lookup(_)
             | Model::Deduplicator(_)
@@ -5558,7 +5496,6 @@ fn infer_stream_parameterizations(
                         | Model::Ingestor(_)
                         | Model::Reingestor(_)
                         | Model::Router(_)
-                        | Model::Forwarder(_)
                         | Model::Deduplicator(_)
                         | Model::Correlator(_)
                         | Model::Unifier(_)
@@ -5597,9 +5534,6 @@ fn infer_stream_parameterizations(
                     ))
                 })
                 .or_else(|| models.get(&RegistryKey::new(ModelKind::Router, producer_id.clone())))
-                .or_else(|| {
-                    models.get(&RegistryKey::new(ModelKind::Forwarder, producer_id.clone()))
-                })
                 .or_else(|| {
                     models.get(&RegistryKey::new(
                         ModelKind::Deduplicator,
@@ -5677,15 +5611,6 @@ fn infer_stream_parameterizations(
                             .collect::<Vec<_>>(),
                     )
                 }
-                Model::Forwarder(forwarder) => Some(vec![(
-                    forwarder.into_relay.clone(),
-                    resolved_branch_parameterization(
-                        domain,
-                        producer_id,
-                        models,
-                        &forwarder.parameterized_by,
-                    )?,
-                )]),
                 Model::Deduplicator(deduplicator) => Some(vec![(
                     deduplicator.into_relay.clone(),
                     resolved_branch_parameterization(
@@ -5830,15 +5755,6 @@ fn validate_processing_branch_parameterizations(
                 graph,
             }
             .matches_relay(&router.parameterized_by, &router.from_relay)?,
-            Model::Forwarder(forwarder) => ProcessorParameterizationCheck {
-                domain,
-                identifier: &key.identifier,
-                model_kind: "forwarder",
-                models,
-                indices,
-                graph,
-            }
-            .matches_relay(&forwarder.parameterized_by, &forwarder.from_relay)?,
             Model::WindowProcessor(window_processor) => ProcessorParameterizationCheck {
                 domain,
                 identifier: &key.identifier,
@@ -6611,8 +6527,8 @@ mod tests {
         CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
         CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
         CorrelatorMatchPolicy, CreateClientKafka, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateForwarder, CreateIngestor, CreateReingestor,
-        CreateRelay, CreateRouter, CreateSchema, CreateUnifier, CreateVhost, CreateWasmProcessor,
+        CreateDeduplicator, CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay,
+        CreateRouter, CreateSchema, CreateUnifier, CreateVhost, CreateWasmProcessor,
         CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule,
         DropModel, EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource,
         IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
@@ -8915,10 +8831,12 @@ mod tests {
                     }),
                     explicitly_unparameterized_relay("sensitive_events", "sensitive_event"),
                     explicitly_unparameterized_relay("public_events", "public_event"),
-                    Model::Forwarder(CreateForwarder {
+                    Model::Router(CreateRouter {
                         name: identifier("leak_events"),
                         from_relay: identifier("sensitive_events"),
-                        into_relay: identifier("public_events"),
+                        routes: Vec::new(),
+                        match_policy: Default::default(),
+                        default_into_relay: identifier("public_events"),
                         parameterized_by: BranchParameterization::unparameterized(),
                         flush_each: "IMMEDIATE".to_string(),
                         max_batch_size: None,

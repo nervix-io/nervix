@@ -15,9 +15,9 @@ use nervix_interconnect::{RelayPayload, RelayPayloadKind};
 use nervix_models::{
     AckMode, BranchParameterization, ClientConfigEntry, ClusterSchedule, CodecWireFormat,
     CreateClientHttp, CreateClientMqtt, CreateClientPrometheus, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateForwarder,
-    CreateGenerator, CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateLookup,
-    CreateReingestor, CreateRelay, CreateRouter, CreateSchema, CreateUnifier, CreateWasmProcessor,
+    CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateLookup, CreateReingestor,
+    CreateRelay, CreateRouter, CreateSchema, CreateUnifier, CreateWasmProcessor,
     CreateWindowProcessor, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState,
     DomainStatus, DomainTick, EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier,
     InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType, MessageErrorPolicy,
@@ -1505,22 +1505,6 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 filter_map: None,
             }),
             "router 'orders_router' is not attached to a branch root",
-        ),
-        (
-            ModelKind::Forwarder,
-            identifier("orders_forwarder"),
-            nervix_models::Model::Forwarder(CreateForwarder {
-                name: identifier("orders_forwarder"),
-                from_relay: identifier("orders"),
-                into_relay: identifier("projected_orders"),
-                parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
-                mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
-                filter_map: None,
-            }),
-            "forwarder 'orders_forwarder' is not attached to a branch root",
         ),
         (
             ModelKind::Unifier,
@@ -4528,7 +4512,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_forwarder_as_default_only_router_tree() {
+fn parameterized_ingestor_specs_capture_default_only_router_tree() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
             (
@@ -4553,12 +4537,14 @@ fn parameterized_ingestor_specs_capture_forwarder_as_default_only_router_tree() 
                 Some(vec![identifier("tenant")]),
             ),
             (
-                ModelKind::Forwarder,
-                identifier("orders_forwarder"),
-                nervix_models::Model::Forwarder(CreateForwarder {
-                    name: identifier("orders_forwarder"),
+                ModelKind::Router,
+                identifier("orders_router"),
+                nervix_models::Model::Router(CreateRouter {
+                    name: identifier("orders_router"),
                     from_relay: identifier("orders"),
-                    into_relay: identifier("projected_orders"),
+                    routes: Vec::new(),
+                    match_policy: Default::default(),
+                    default_into_relay: identifier("projected_orders"),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
@@ -4595,7 +4581,7 @@ fn parameterized_ingestor_specs_capture_forwarder_as_default_only_router_tree() 
     assert_eq!(specs.len(), 1);
     let spec = &specs[0];
     assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("orders_forwarder"));
+    assert_eq!(spec.roots[0].processor, identifier("orders_router"));
     let ParameterizedProcessorOperationSpec::Router {
         filter_map,
         match_policy: _,
@@ -4603,7 +4589,7 @@ fn parameterized_ingestor_specs_capture_forwarder_as_default_only_router_tree() 
         default_output,
     } = &spec.roots[0].operation
     else {
-        panic!("expected forwarder to lower to router-style output");
+        panic!("expected default-only router output");
     };
     assert_eq!(filter_map.as_deref(), Some("WHERE active"));
     assert!(routes.is_empty());
@@ -5689,7 +5675,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
     .expect("batch should build");
 
     let plan = super::plan_filter_map_messages(
-        "forwarder",
+        "router",
         &identifier("project_titles"),
         &program,
         batch,
@@ -5760,7 +5746,7 @@ async fn filter_map_can_read_branch_namespace() {
     .expect("batch should build");
 
     let plan = super::plan_filter_map_messages(
-        "forwarder",
+        "router",
         &identifier("project_notifications"),
         &program,
         batch,

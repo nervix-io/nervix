@@ -311,8 +311,8 @@ mod tests {
     #[test]
     fn rejects_branch_as_relay_reference() {
         let error = crate::statement::parse_statement(
-            "CREATE FORWARDER fw FROM branch TO projected PARAMETERIZED BY tenant_branch FLUSH \
-             IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE ROUTER fw FROM branch DEFAULT TO projected PARAMETERIZED BY tenant_branch \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
         )
         .expect_err("reserved branch namespace must not be accepted as relay reference");
 

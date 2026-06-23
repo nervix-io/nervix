@@ -5,10 +5,10 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, client_ref, codec_ref, correlator_ref,
-        current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, forwarder_ref,
-        inferencer_ref, ingestor_ref, into_parse_error, kw, lex_input, node_id, reingestor_ref,
-        relay_ref, reorderer_ref, router_ref, schema_ref, suggestions_from_errors, tok,
-        unifier_ref, vhost_ref, wire_schema_ref,
+        current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref,
+        ingestor_ref, into_parse_error, kw, lex_input, node_id, reingestor_ref, relay_ref,
+        reorderer_ref, router_ref, schema_ref, suggestions_from_errors, tok, unifier_ref,
+        vhost_ref, wire_schema_ref,
     },
 };
 
@@ -68,12 +68,6 @@ pub fn drop_parser<'src>()
             .ignore_then(router_ref())
             .map(|name| DropModel {
                 kind: ModelKind::Router,
-                name,
-            }),
-        kw(Identifier::Forwarder)
-            .ignore_then(forwarder_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Forwarder,
                 name,
             }),
         kw(Identifier::Reorderer)
@@ -212,14 +206,6 @@ mod tests {
         let parsed = parse_drop_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.kind, ModelKind::Router);
         assert_eq!(parsed.name.as_str(), "log_router");
-    }
-
-    #[test]
-    fn parses_drop_forwarder() {
-        let tokens = to_tokens("DROP FORWARDER fw1;");
-        let parsed = parse_drop_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.kind, ModelKind::Forwarder);
-        assert_eq!(parsed.name.as_str(), "fw1");
     }
 
     #[test]

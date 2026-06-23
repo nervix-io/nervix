@@ -4437,7 +4437,6 @@ impl GraphViewNode {
             NodeKind::Processor => match self.subtype.to_ascii_lowercase().as_str() {
                 "deduplicator" => "DEDUPLICATOR",
                 "correlator" => "CORRELATOR",
-                "forwarder" => "FORWARDER",
                 "generator" => "GENERATOR",
                 "inferencer" => "INFERENCER",
                 "reingestor" => "REINGESTOR",
@@ -7178,7 +7177,7 @@ mod tests {
                         "processor:edge_location_lookup",
                         "edge_location_lookup",
                         DataflowNodeKind::Processor,
-                        "forwarder",
+                        "router",
                         "device_branch",
                         0,
                         0,
