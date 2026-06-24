@@ -8,9 +8,10 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, correlator_name,
-        current_word_prefix, duration_lit, flush_each, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, kw_phrase3, lex_input, message_error_policy, relay_ref,
-        render_vm_program_tokens, suggestions_from_errors, tok, vm_program_error_message,
+        current_word_prefix, duration_lit, filter_where_clause, flush_each, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, message_error_policy,
+        processor_outputs, relay_ref, render_vm_program_tokens, suggestions_from_errors, tok,
+        vm_program_error_message,
     },
 };
 
@@ -155,8 +156,8 @@ pub fn create_correlator_parser<'src>()
         .then_ignore(tok(Token::Comma))
         .then(key_group())
         .then(match_policy())
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(processor_outputs())
         .then(branch_parameterization())
         .then(flush_each())
         .then(output_assignments())
@@ -174,20 +175,8 @@ pub fn create_correlator_parser<'src>()
                             (
                                 (
                                     (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        (((if_not_exists, mode), name), left_relay),
-                                                        right_relay,
-                                                    ),
-                                                    left_on,
-                                                ),
-                                                right_on,
-                                            ),
-                                            match_policy,
-                                        ),
-                                        into_relay,
+                                        ((((base, left_on), right_on), match_policy), filter_where),
+                                        output_routes,
                                     ),
                                     parameterized_by,
                                 ),
@@ -201,6 +190,7 @@ pub fn create_correlator_parser<'src>()
                 ),
                 message_error_policy,
             ) = value;
+            let ((((if_not_exists, mode), name), left_relay), right_relay) = base;
             if left_on.len() != right_on.len() {
                 return Err(Rich::custom(
                     span,
@@ -217,7 +207,7 @@ pub fn create_correlator_parser<'src>()
                     name,
                     left_relay,
                     right_relay,
-                    into_relay,
+                    output_routes,
                     parameterized_by,
                     left_on,
                     right_on,
@@ -229,6 +219,7 @@ pub fn create_correlator_parser<'src>()
                     timeout_policy,
                     message_error_policy,
                     mode: mode.unwrap_or(AckMode::Attached),
+                    filter_where,
                 },
                 if_not_exists,
             ))
@@ -260,16 +251,19 @@ pub fn suggest_create_correlator(input: &str, cursor: usize) -> Vec<String> {
     let safe_cursor = cursor.min(input.len());
     let prefix_src = &input[..safe_cursor];
     let prefix = current_word_prefix(prefix_src);
+
     let (_, _, tokens) = match lex_input(prefix_src) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
+
     let out = create_correlator_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
     if !out.has_errors() {
         return Vec::new();
     }
+
     suggestions_from_errors(out.into_errors(), &prefix)
 }
 
@@ -299,7 +293,16 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "correlate");
         assert_eq!(parsed.left_relay.as_str(), "relay1");
         assert_eq!(parsed.right_relay.as_str(), "relay2");
-        assert_eq!(parsed.into_relay.as_str(), "relay3");
+        assert_eq!(
+            parsed
+                .output_routes
+                .routes
+                .first()
+                .expect("output route should parse")
+                .relay
+                .as_str(),
+            "relay3"
+        );
         assert_eq!(parsed.left_on, vec!["lower ( relay1.name )"]);
         assert_eq!(parsed.right_on, vec!["lower ( relay2.first_name )"]);
         assert_eq!(parsed.match_policy, CorrelatorMatchPolicy::Earliest);

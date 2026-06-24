@@ -1,12 +1,16 @@
 use chumsky::prelude::*;
-use nervix_models::{AckMode, CreateStatement, CreateWasmProcessor, GeneralErrorPolicy};
+use nervix_models::{
+    AckMode, CreateStatement, CreateWasmProcessor, GeneralErrorPolicy, ProcessorOutput,
+    ProcessorOutputs,
+};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        if_not_exists_clause, into_parse_error, kw, lex_input, message_error_policy, relay_ref,
-        resource_ref, string_lit, suggestions_from_errors, tok, wasm_processor_name,
+        filter_where_clause, if_not_exists_clause, into_parse_error, kw, lex_input,
+        message_error_policy, output_filter_map_program, relay_ref, resource_ref, string_lit,
+        suggestions_from_errors, tok, wasm_processor_name,
     },
 };
 
@@ -33,6 +37,39 @@ fn global_error_policy<'src>()
         )))
 }
 
+fn wasm_output_filter_map_program<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    output_filter_map_program().try_map(|source, span| {
+        let parsed = crate::vm_program::parse_program(&source).map_err(|error| {
+            Rich::custom(span, crate::parser_support::vm_program_error_message(error))
+        })?;
+        if !parsed.inner.unset.is_empty() {
+            return Err(Rich::custom(
+                span,
+                "WASM processor TO clauses may use SET and WHERE, but not UNSET",
+            ));
+        }
+        Ok(source)
+    })
+}
+
+fn wasm_processor_output_route<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(wasm_output_filter_map_program().or_not())
+        .map(|(relay, filter_map)| ProcessorOutput { relay, filter_map })
+}
+
+fn wasm_processor_outputs<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
+    wasm_processor_output_route()
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(ProcessorOutputs::new)
+}
+
 pub fn create_wasm_processor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateWasmProcessor>, extra::Err<ParseError<'src>>>
 + Clone {
@@ -50,8 +87,8 @@ pub fn create_wasm_processor_parser<'src>()
         .then(string_lit())
         .then_ignore(kw(Identifier::From))
         .then(relay_ref())
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(wasm_processor_outputs())
         .then(branch_parameterization())
         .then(message_error_policy())
         .then(global_error_policy())
@@ -63,12 +100,18 @@ pub fn create_wasm_processor_parser<'src>()
                         (
                             (
                                 (
-                                    ((((if_not_exists, mode), name), resource), resource_version),
-                                    file,
+                                    (
+                                        (
+                                            (((if_not_exists, mode), name), resource),
+                                            resource_version,
+                                        ),
+                                        file,
+                                    ),
+                                    from_relay,
                                 ),
-                                from_relay,
+                                filter_where,
                             ),
-                            into_relay,
+                            outputs,
                         ),
                         parameterized_by,
                     ),
@@ -80,7 +123,7 @@ pub fn create_wasm_processor_parser<'src>()
                     CreateWasmProcessor {
                         name,
                         from_relay,
-                        into_relay,
+                        output_routes: outputs,
                         parameterized_by,
                         resource,
                         resource_version,
@@ -88,6 +131,7 @@ pub fn create_wasm_processor_parser<'src>()
                         message_error_policy,
                         global_error_policy,
                         mode: mode.unwrap_or(AckMode::Attached),
+                        filter_where,
                     },
                     if_not_exists,
                 )
@@ -167,7 +211,16 @@ mod tests {
         assert_eq!(parsed.resource_version, Some(2));
         assert_eq!(parsed.file, "processors/filter_even.wasm");
         assert_eq!(parsed.from_relay.as_str(), "raw_orders");
-        assert_eq!(parsed.into_relay.as_str(), "filtered_orders");
+        assert_eq!(
+            parsed
+                .output_routes
+                .routes
+                .first()
+                .expect("output route should parse")
+                .relay
+                .as_str(),
+            "filtered_orders"
+        );
         assert_eq!(parsed.mode, AckMode::Detached);
         assert_eq!(
             parsed.message_error_policy,
@@ -196,6 +249,65 @@ mod tests {
     fn rejects_flush_policy() {
         let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b \
                      UNPARAMETERIZED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+        assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
+    }
+
+    #[test]
+    fn parses_conditional_and_unconditional_output_routes() {
+        let input = r#"
+            CREATE WASM PROCESSOR filter_even
+            USING RESOURCE wasm_filters FILE 'processors/filter_even.wasm'
+            FROM raw_orders FILTER WHERE raw_orders.value >= 0
+            TO even_orders WHERE even_orders.value = even_orders.value
+            TO other_orders SET other_orders.bucket = "fallback"
+            UNPARAMETERIZED
+            ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+        "#;
+
+        let parsed = parse_create_wasm_processor_tokens(&to_tokens(input)).expect("parse works");
+        assert_eq!(parsed.output_routes.routes[0].relay.as_str(), "even_orders");
+        assert_eq!(
+            parsed
+                .output_routes
+                .routes
+                .get(1)
+                .expect("second output route should parse")
+                .relay
+                .as_str(),
+            "other_orders"
+        );
+    }
+
+    #[test]
+    fn parses_unconditional_output_route() {
+        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b \
+                     UNPARAMETERIZED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+        let tokens = to_tokens(input);
+        let parsed =
+            parse_create_wasm_processor_tokens(&tokens).expect("unconditional TO should parse");
+        assert_eq!(parsed.output_routes.routes.len(), 1);
+        assert_eq!(parsed.output_routes.routes[0].relay.as_str(), "b");
+        assert_eq!(parsed.output_routes.routes[0].filter_map, None);
+    }
+
+    #[test]
+    fn parses_output_route_with_set_but_no_where() {
+        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM input TO out1 \
+                     SET out1.name = lower(out1.name), out1.surname = input.surname \
+                     UNPARAMETERIZED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+        let tokens = to_tokens(input);
+        let parsed = parse_create_wasm_processor_tokens(&tokens)
+            .expect("TO with SET and no WHERE should parse");
+        assert_eq!(
+            parsed.output_routes.routes[0].filter_map.as_deref(),
+            Some("SET out1.name = lower ( out1.name ) , out1.surname = input.surname")
+        );
+    }
+
+    #[test]
+    fn rejects_output_route_with_unset() {
+        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM input TO out1 \
+                     UNSET out1.legacy UNPARAMETERIZED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 }

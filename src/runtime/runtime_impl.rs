@@ -356,7 +356,7 @@ impl Runtime {
             ingestor_faults: hooks.ingestor_faults,
             resource_store: Arc::new(RwLock::new(None)),
             resource_versions: Arc::new(RwLock::new(ResourceVersionStatus::default())),
-            cluster_router: Arc::new(RwLock::new(None)),
+            remote_dispatcher: Arc::new(RwLock::new(None)),
             local_node_id: Arc::new(RwLock::new(None)),
             next_remote_ack_id: Arc::new(AtomicU64::new(1)),
             pending_remote_acks: Arc::new(DashMap::default()),
@@ -647,14 +647,14 @@ impl Runtime {
         }
     }
 
-    pub fn attach_cluster_router(
+    pub fn attach_remote_dispatcher(
         &self,
         local_node_id: String,
         cluster: Arc<cluster::ClusterHandle>,
         interconnect: Arc<Transport>,
     ) {
         *self.local_node_id.write() = Some(local_node_id);
-        *self.cluster_router.write() = Some(Arc::new(RemoteDispatcher {
+        *self.remote_dispatcher.write() = Some(Arc::new(RemoteDispatcher {
             cluster,
             interconnect,
             local_node_id: self.local_node_id.clone(),
@@ -920,7 +920,7 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         after_lsm: u64,
     ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
-        let Some(dispatcher) = self.cluster_router.read().clone() else {
+        let Some(dispatcher) = self.remote_dispatcher.read().clone() else {
             return Err("remote dispatcher unavailable".to_string());
         };
         let correlation_id = self
@@ -1661,7 +1661,7 @@ impl Runtime {
                             warn!(error = %error, "failed to apply replicated kafka offset snapshot");
                             continue;
                         }
-                        let dispatcher = runtime.cluster_router.read().clone();
+                        let dispatcher = runtime.remote_dispatcher.read().clone();
                         if let Some(dispatcher) = dispatcher {
                             let local_node_id = runtime.local_node_id.read().clone();
                             let Some(local_node_id) = local_node_id else {
@@ -1731,7 +1731,7 @@ impl Runtime {
                             warn!(error = %error, "failed to apply replicated branch-aggregated state snapshot");
                             continue;
                         }
-                        let dispatcher = runtime.cluster_router.read().clone();
+                        let dispatcher = runtime.remote_dispatcher.read().clone();
                         if let Some(dispatcher) = dispatcher {
                             let local_node_id = runtime.local_node_id.read().clone();
                             let Some(local_node_id) = local_node_id else {
@@ -2300,7 +2300,7 @@ impl Runtime {
         let Some(ack) = ack else {
             return;
         };
-        let Some(dispatcher) = self.cluster_router.read().clone() else {
+        let Some(dispatcher) = self.remote_dispatcher.read().clone() else {
             return;
         };
         tokio::spawn(async move {
@@ -2566,26 +2566,6 @@ impl Runtime {
                 error.reason,
             )
             .await;
-        }
-    }
-
-    pub(in crate::runtime) fn handle_planned_internal_processor_errors(
-        &self,
-        domain: &Domain,
-        node_kind: &str,
-        node: &Identifier,
-        policies: &ErrorPolicies,
-        errors: Vec<PlannedGeneralError>,
-    ) {
-        for error in errors {
-            self.handle_internal_processor_error_for_acks(
-                domain,
-                node_kind,
-                node,
-                policies,
-                error.acks.iter(),
-                error.reason,
-            );
         }
     }
 
@@ -3405,7 +3385,7 @@ impl Runtime {
         let mut reingestor_specs = Vec::new();
         let mut ingestor_specs = Vec::new();
         let mut tasks = Vec::new();
-        let remote_dispatcher = self.cluster_router.read().clone();
+        let remote_dispatcher = self.remote_dispatcher.read().clone();
         let model_index = schedule
             .nodes
             .iter()
@@ -3751,18 +3731,6 @@ impl Runtime {
                         reason: format!(
                             "unifier '{}' is not attached to a branch root",
                             unifier.name.as_str()
-                        ),
-                    });
-                }
-                Model::Router(router) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "router '{}' is not attached to a branch root",
-                            router.name.as_str()
                         ),
                     });
                 }
@@ -5413,18 +5381,6 @@ impl Runtime {
                         ),
                     });
                 }
-                Model::Router(router) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "router '{}' is not attached to a branch root",
-                            router.name.as_str()
-                        ),
-                    });
-                }
                 Model::Reorderer(reorderer) => {
                     if handled_processors.contains(&node.identifier) {
                         continue;
@@ -6160,6 +6116,579 @@ impl Runtime {
         }))
     }
 
+    async fn evaluate_reingestor_output_events(
+        &self,
+        domain: &Domain,
+        reingestor: &Identifier,
+        from_relay: &Identifier,
+        output: &mut RelayProcessorOutputNode,
+        output_index: usize,
+        batch: &RelayRecordBatch,
+    ) -> Result<
+        (
+            Vec<PendingProcessorOutputMessage>,
+            Vec<PendingProcessorOutputBatch>,
+            Vec<PendingProcessorOutputMessageError>,
+        ),
+        PlannedGeneralError,
+    > {
+        if output.compiled_program.is_none() && output.filter_map.is_some() {
+            let (
+                input_schema,
+                output_schema,
+                materialized_stream_specs,
+                available_lookups,
+                current_parameterization,
+                current_branch_schema,
+            ) = {
+                let Some(execution) = self.executions.get(domain) else {
+                    return Err(PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason: format!("domain '{}' is not instantiated", domain.as_str()),
+                    });
+                };
+                let input_schema = execution
+                    .relay_schemas
+                    .get(from_relay)
+                    .cloned()
+                    .ok_or_else(|| PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason: format!(
+                            "stream '{}' schema is not instantiated in domain '{}'",
+                            from_relay.as_str(),
+                            domain.as_str()
+                        ),
+                    })?;
+                let output_schema = execution
+                    .relay_schemas
+                    .get(&output.relay)
+                    .cloned()
+                    .ok_or_else(|| PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason: format!(
+                            "stream '{}' schema is not instantiated in domain '{}'",
+                            output.relay.as_str(),
+                            domain.as_str()
+                        ),
+                    })?;
+                (
+                    input_schema,
+                    output_schema,
+                    execution.materialized_stream_specs.clone(),
+                    execution.lookups.clone(),
+                    execution
+                        .relay_parameterizations
+                        .get(from_relay)
+                        .cloned()
+                        .unwrap_or_default(),
+                    execution
+                        .relay_parameterization_schemas
+                        .get(from_relay)
+                        .cloned()
+                        .flatten(),
+                )
+            };
+            match compile_processor_output_filter_map_program(
+                domain,
+                reingestor,
+                std::slice::from_ref(from_relay),
+                &output.relay,
+                output.filter_map.as_deref(),
+                batch.arrow_schema(),
+                input_schema.vm_sensitivity(),
+                output_schema.arrow_schema(),
+                output_schema.vm_sensitivity(),
+                RuntimeVmCompileContext {
+                    available_materialized_streams: &materialized_stream_specs,
+                    available_lookups: &available_lookups,
+                    current_parameterization: &current_parameterization,
+                    current_branch_schema: current_branch_schema.as_ref(),
+                    current_branch_sensitivity: None,
+                },
+            ) {
+                Ok(program) => output.compiled_program = program,
+                Err(error) => {
+                    return Err(PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        let Some(program) = output.compiled_program.as_ref() else {
+            let can_forward_batch = self
+                .executions
+                .get(domain)
+                .and_then(|execution| execution.relay_schemas.get(&output.relay).cloned())
+                .map(|schema| schema.arrow_schema().as_ref() == batch.arrow_schema().as_ref())
+                .unwrap_or(true);
+            if can_forward_batch {
+                return Ok((
+                    Vec::new(),
+                    vec![pending_passthrough_output_batch(output_index, batch)],
+                    Vec::new(),
+                ));
+            }
+            let messages = batch
+                .records
+                .iter()
+                .enumerate()
+                .map(|(row, record)| PendingProcessorOutputMessage {
+                    row,
+                    output_index,
+                    key: batch.keys[row].clone(),
+                    record: record.clone(),
+                })
+                .collect();
+            return Ok((messages, Vec::new(), Vec::new()));
+        };
+
+        let (output_schema, owner_nodes) = {
+            let Some(execution) = self.executions.get(domain) else {
+                return Err(PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!("domain '{}' is not instantiated", domain.as_str()),
+                });
+            };
+            let output_schema = execution
+                .relay_schemas
+                .get(&output.relay)
+                .cloned()
+                .ok_or_else(|| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!(
+                        "stream '{}' schema is not instantiated in domain '{}'",
+                        output.relay.as_str(),
+                        domain.as_str()
+                    ),
+                })?;
+            (
+                output_schema,
+                execution.materialized_stream_owner_nodes.clone(),
+            )
+        };
+        let side_inputs = self
+            .load_materialized_side_inputs(
+                domain,
+                &batch.key,
+                &program.materialized_interest,
+                &owner_nodes,
+            )
+            .await
+            .map_err(|error| PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason: format!(
+                    "reingestor '{}' failed to load materialized side inputs: {}",
+                    reingestor.as_str(),
+                    error
+                ),
+            })?;
+        let execution_now = self
+            .current_stream_expiration_time(domain)
+            .ok()
+            .flatten()
+            .unwrap_or_else(current_timestamp);
+        let input_records = prepare_filter_map_input_records(
+            "reingestor",
+            reingestor,
+            program,
+            batch.records.clone(),
+            execution_now,
+            &side_inputs,
+            &batch.keys,
+            &batch.acks,
+        )
+        .await?;
+        let executed = execute_filter_map_program(
+            "reingestor",
+            reingestor,
+            program,
+            &input_records,
+            execution_now,
+            batch.acks.clone(),
+        )
+        .await?;
+        let output_batch = vm_typed_batch_to_runtime_batch(&executed.batch).map_err(|error| {
+            PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason: format!(
+                    "reingestor '{}' failed to materialize FILTER-MAP output batch: {}",
+                    reingestor.as_str(),
+                    error
+                ),
+            }
+        })?;
+        let mut success_output_rows = Vec::new();
+        let mut success_input_rows = Vec::new();
+        let mut errors = Vec::new();
+        for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
+            if let Some(side_error) = executed.batch.errors()[output_row].first() {
+                errors.push(PendingProcessorOutputMessageError {
+                    row: input_row,
+                    key: batch.keys[input_row].clone(),
+                    record: batch.records[input_row].clone(),
+                    reason: format!(
+                        "reingestor '{}' FILTER-MAP side error {}: {} at {}",
+                        reingestor.as_str(),
+                        side_error.code.as_str(),
+                        side_error.message,
+                        side_error.span
+                    ),
+                });
+                continue;
+            }
+            success_output_rows.push(output_row);
+            success_input_rows.push(input_row);
+        }
+        let output_batches = if success_output_rows.is_empty() {
+            Vec::new()
+        } else {
+            let output_batch = if success_output_rows.len() == executed.batch.row_count() {
+                output_batch
+            } else {
+                let success_output_rows =
+                    success_output_rows.iter().copied().collect::<HashSet<_>>();
+                let keep = BooleanArray::from_iter(
+                    (0..executed.batch.row_count())
+                        .map(|row| Some(success_output_rows.contains(&row))),
+                );
+                output_batch
+                    .filter(&keep)
+                    .map_err(|error| PlannedGeneralError {
+                        acks: batch.acks.clone(),
+                        reason: format!(
+                            "reingestor '{}' failed to filter FILTER-MAP output batch: {}",
+                            reingestor.as_str(),
+                            error
+                        ),
+                    })?
+            };
+            let records = output_schema
+                .decoded_records_from_arrow_batch(&output_batch)
+                .map_err(|error| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!(
+                        "reingestor '{}' failed to decode FILTER-MAP output sidecar records: {}",
+                        reingestor.as_str(),
+                        error
+                    ),
+                })?
+                .into_iter()
+                .zip(success_input_rows.iter())
+                .map(|(record, input_row)| {
+                    record.into_runtime_record(batch.metadata[*input_row].clone())
+                })
+                .collect::<Vec<_>>();
+            let metadata = success_input_rows
+                .iter()
+                .map(|input_row| batch.metadata[*input_row].clone())
+                .collect::<Vec<_>>();
+            vec![PendingProcessorOutputBatch {
+                output_index,
+                input_rows: success_input_rows,
+                key: batch.key.clone(),
+                batch: output_batch,
+                records,
+                metadata,
+            }]
+        };
+
+        Ok((Vec::new(), output_batches, errors))
+    }
+
+    async fn dispatch_reingestor_outputs(
+        &self,
+        domain: &Domain,
+        reingestor: &Identifier,
+        from_relay: &Identifier,
+        mode: AckMode,
+        error_policies: &ErrorPolicies,
+        output_routes: &mut RelayProcessorOutputsNode,
+        parameterized_senders: &HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+        batch: RelayRecordBatch,
+    ) {
+        if batch.message_count() == 0 {
+            return;
+        }
+
+        let output_relays = output_routes
+            .routes
+            .iter()
+            .map(|output| output.relay.clone())
+            .collect::<Vec<_>>();
+
+        let mut pending_messages = Vec::new();
+        let mut pending_batches = Vec::new();
+        let mut pending_errors = Vec::new();
+        for (output_index, output) in output_routes.routes.iter_mut().enumerate() {
+            let (messages, batches, errors) = match self
+                .evaluate_reingestor_output_events(
+                    domain,
+                    reingestor,
+                    from_relay,
+                    output,
+                    output_index,
+                    &batch,
+                )
+                .await
+            {
+                Ok(events) => events,
+                Err(error) => {
+                    self.handle_internal_processor_error_for_acks(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        error.acks.iter(),
+                        error.reason,
+                    );
+                    return;
+                }
+            };
+            pending_messages.extend(messages);
+            pending_batches.extend(batches);
+            pending_errors.extend(errors);
+        }
+
+        let mut delivery_counts = vec![0usize; batch.acks.len()];
+        for message in &pending_messages {
+            delivery_counts[message.row] += 1;
+        }
+        for pending_batch in &pending_batches {
+            for row in &pending_batch.input_rows {
+                delivery_counts[*row] += 1;
+            }
+        }
+        for error in &pending_errors {
+            delivery_counts[error.row] += 1;
+        }
+
+        let RelayRecordBatch { acks, .. } = batch;
+        let mut ack_queues = Vec::with_capacity(delivery_counts.len());
+        for (row, ack) in acks.into_iter().enumerate() {
+            let delivery_count = delivery_counts[row];
+            if delivery_count == 0 {
+                ack.ack_success();
+                ack_queues.push(VecDeque::new());
+                continue;
+            }
+            let mut queue = VecDeque::with_capacity(delivery_count);
+            for _ in 1..delivery_count {
+                queue.push_back(ack.attached());
+            }
+            queue.push_front(ack);
+            ack_queues.push(queue);
+        }
+
+        let mut messages_by_output = vec![Vec::new(); output_relays.len()];
+        let mut batches_by_output = vec![Vec::new(); output_relays.len()];
+        for message in pending_messages {
+            let Some(acks) = ack_queues[message.row].pop_front() else {
+                continue;
+            };
+            messages_by_output[message.output_index].push(RelayMessage {
+                key: message.key,
+                record: message.record,
+                acks,
+            });
+        }
+        for pending_batch in pending_batches {
+            let mut batch_acks = Vec::with_capacity(pending_batch.input_rows.len());
+            for row in &pending_batch.input_rows {
+                let Some(acks) = ack_queues[*row].pop_front() else {
+                    continue;
+                };
+                batch_acks.push(acks);
+            }
+            if batch_acks.len() != pending_batch.input_rows.len() {
+                self.handle_internal_processor_error_for_acks(
+                    domain,
+                    "reingestor",
+                    reingestor,
+                    error_policies,
+                    batch_acks.iter(),
+                    "reingestor output batch ack count does not match selected row count"
+                        .to_string(),
+                );
+                return;
+            }
+            let output_index = pending_batch.output_index;
+            let error_acks = batch_acks.clone();
+            match pending_batch.into_relay_batch(batch_acks) {
+                Ok(batch) => batches_by_output[output_index].push(batch),
+                Err(error) => {
+                    self.handle_internal_processor_error_for_acks(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        error_acks.iter(),
+                        error,
+                    );
+                    return;
+                }
+            }
+        }
+
+        let mut planned_errors = Vec::new();
+        for error in pending_errors {
+            let Some(acks) = ack_queues[error.row].pop_front() else {
+                continue;
+            };
+            planned_errors.push(PlannedMessageError {
+                message: RelayMessage {
+                    key: error.key,
+                    record: error.record,
+                    acks,
+                },
+                reason: error.reason,
+            });
+        }
+        self.handle_planned_message_errors(
+            domain,
+            "reingestor",
+            reingestor,
+            error_policies,
+            planned_errors,
+        )
+        .await;
+
+        for ((relay, messages), mut batches) in output_relays
+            .into_iter()
+            .zip(messages_by_output)
+            .zip(batches_by_output)
+        {
+            let Some(parameterized_sender) = parameterized_senders.get(&relay) else {
+                for message in messages {
+                    self.handle_message_error(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        message,
+                        format!(
+                            "missing reingestor parameterized entrypoint for relay '{}'",
+                            relay.as_str()
+                        ),
+                    )
+                    .await;
+                }
+                for batch in batches {
+                    self.handle_internal_processor_error_for_acks(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        batch.acks.iter(),
+                        format!(
+                            "missing reingestor parameterized entrypoint for relay '{}'",
+                            relay.as_str()
+                        ),
+                    );
+                }
+                continue;
+            };
+            if !messages.is_empty() {
+                let output_schema = match relay_schema_for_runtime(self, domain, &relay) {
+                    Ok(schema) => schema,
+                    Err(error) => {
+                        for message in messages {
+                            self.handle_message_error(
+                                domain,
+                                "reingestor",
+                                reingestor,
+                                error_policies,
+                                message,
+                                error.to_string(),
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
+                };
+                match build_stream_record_batch_preserving_acks(output_schema, messages) {
+                    Ok(batch) => batches.push(batch),
+                    Err((error, acks)) => {
+                        self.handle_internal_processor_error_for_acks(
+                            domain,
+                            "reingestor",
+                            reingestor,
+                            error_policies,
+                            acks.iter(),
+                            format!(
+                                "reingestor '{}' failed to build output batch for relay '{}': {}",
+                                reingestor.as_str(),
+                                relay.as_str(),
+                                error
+                            ),
+                        );
+                        continue;
+                    }
+                }
+            };
+            if batches.is_empty() {
+                continue;
+            }
+            let concat_acks = batches
+                .iter()
+                .flat_map(|batch| batch.acks.iter().cloned())
+                .collect::<Vec<_>>();
+            let forwarded = match RelayRecordBatch::concat(batches) {
+                Ok(batch) => batch,
+                Err(error) => {
+                    self.handle_internal_processor_error_for_acks(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        concat_acks.iter(),
+                        format!(
+                            "reingestor '{}' failed to concat output batches for relay '{}': {}",
+                            reingestor.as_str(),
+                            relay.as_str(),
+                            error
+                        ),
+                    );
+                    continue;
+                }
+            };
+            match parameterized_sender
+                .send(ParameterizedEntrypointInput::PendingParameterizationBatch(
+                    forwarded,
+                ))
+                .await
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    let ParameterizedEntrypointInput::PendingParameterizationBatch(batch) = error.0
+                    else {
+                        continue;
+                    };
+                    if mode == AckMode::Detached {
+                        for ack in batch.acks {
+                            ack.ack_success();
+                        }
+                        continue;
+                    }
+                    self.handle_internal_processor_error_for_acks(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        batch.acks.iter(),
+                        format!(
+                            "reingestor '{}' failed to forward batch to parametrization \
+                             entrypoint for relay '{}'",
+                            reingestor.as_str(),
+                            relay.as_str()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     pub(in crate::runtime) fn spawn_reingestor_task(
         &self,
         domain: &Domain,
@@ -6171,18 +6700,31 @@ impl Runtime {
         reingestor: CreateReingestor,
         receiver: RelayRuntimeFanIn,
     ) -> Result<JoinHandle<()>, RuntimeError> {
-        let Some(parameterized_sender) = parameterized_entrypoint_senders
-            .get(&reingestor.into_relay)
-            .cloned()
-        else {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "missing reingestor parameterized entrypoint for relay '{}'",
-                    reingestor.into_relay.as_str()
-                ),
-            });
+        let mut task_output_routes = RelayProcessorOutputsNode {
+            routes: reingestor
+                .output_routes
+                .routes
+                .iter()
+                .map(|output| RelayProcessorOutputNode {
+                    relay: output.relay.clone(),
+                    filter_map: output.filter_map.clone(),
+                    compiled_program: None,
+                })
+                .collect(),
         };
+        let mut task_parameterized_senders = HashMap::default();
+        for output in reingestor.output_routes.outputs() {
+            let Some(sender) = parameterized_entrypoint_senders.get(&output.relay).cloned() else {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "missing reingestor parameterized entrypoint for relay '{}'",
+                        output.relay.as_str()
+                    ),
+                });
+            };
+            task_parameterized_senders.insert(output.relay.clone(), sender);
+        }
         let task_domain = domain.clone();
         let task_reingestor = reingestor.name.clone();
         let task_from_relay = reingestor.from_relay.clone();
@@ -6242,40 +6784,18 @@ impl Runtime {
                                 &task_reingestor,
                             );
                         }
-                        match parameterized_sender
-                            .send(ParameterizedEntrypointInput::PendingParameterizationBatch(
+                        runtime
+                            .dispatch_reingestor_outputs(
+                                &task_domain,
+                                &task_reingestor,
+                                &task_from_relay,
+                                task_mode,
+                                &task_error_policies,
+                                &mut task_output_routes,
+                                &task_parameterized_senders,
                                 batch,
-                            ))
-                            .await
-                        {
-                            Ok(()) => {}
-                            Err(error) => {
-                                let ParameterizedEntrypointInput::PendingParameterizationBatch(
-                                    batch,
-                                ) = error.0
-                                else {
-                                    continue;
-                                };
-                                if task_mode == AckMode::Detached {
-                                    for ack in batch.acks {
-                                        ack.ack_success();
-                                    }
-                                    continue;
-                                }
-                                runtime.handle_internal_processor_error_for_acks(
-                                    &task_domain,
-                                    "reingestor",
-                                    &task_reingestor,
-                                    &task_error_policies,
-                                    batch.acks.iter(),
-                                    format!(
-                                        "reingestor '{}' failed to forward batch to \
-                                         parametrization entrypoint",
-                                        task_reingestor.as_str()
-                                    ),
-                                );
-                            }
-                        }
+                            )
+                            .await;
                     }
                 }
             }

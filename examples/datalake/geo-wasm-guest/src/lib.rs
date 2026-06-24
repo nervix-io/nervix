@@ -49,8 +49,9 @@ unsafe extern "C" {
 struct GuestState {
     buffer: Vec<u8>,
     init_metadata: Vec<u8>,
-    pending_emit: Vec<u8>,
+    pending_emit: Vec<Vec<u8>>,
     global_error: Vec<u8>,
+    output_relays: Vec<String>,
     geoip_reader: Option<Reader<&'static [u8]>>,
     initialized: bool,
     processed_batches: u64,
@@ -71,8 +72,20 @@ struct GuestSnapshot {
 
 #[derive(Clone)]
 struct BatchEnvelope {
+    output_relay: Option<String>,
     arrow_ipc_batch: Vec<u8>,
     acks: AckSidecar,
+}
+
+#[derive(Clone, Deserialize)]
+struct BranchInitMetadata {
+    #[serde(default)]
+    output_schemas: Vec<ProcessorSchema>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ProcessorSchema {
+    name: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -153,6 +166,7 @@ impl GuestState {
             init_metadata: Vec::new(),
             pending_emit: Vec::new(),
             global_error: Vec::new(),
+            output_relays: Vec::new(),
             geoip_reader: None,
             initialized: false,
             processed_batches: 0,
@@ -210,6 +224,8 @@ impl GuestState {
         };
 
         self.init_metadata = snapshot.init_metadata;
+        self.output_relays = output_relays_from_init_metadata(&self.init_metadata)
+            .unwrap_or_default();
         self.processed_batches = snapshot.processed_batches;
         self.processed_rows = snapshot.processed_rows;
         self.last_domain_time_nanos = snapshot.last_domain_time_nanos;
@@ -226,6 +242,7 @@ impl GuestState {
         self.init_metadata.clear();
         self.pending_emit.clear();
         self.global_error.clear();
+        self.output_relays.clear();
         self.geoip_reader = None;
         self.initialized = false;
         self.processed_batches = 0;
@@ -244,11 +261,17 @@ impl GuestState {
 
 impl BatchEnvelope {
     fn encode(&self) -> Result<Vec<u8>, i32> {
+        let output_relay = self.output_relay.as_deref().unwrap_or_default().as_bytes();
+        let output_len = u32::try_from(output_relay.len()).map_err(|_| ERR_ENVELOPE)?;
         let arrow_len = u32::try_from(self.arrow_ipc_batch.len()).map_err(|_| ERR_ENVELOPE)?;
         let mut ack_bytes = Vec::new();
         ciborium::into_writer(&self.acks, &mut ack_bytes).map_err(|_| ERR_ENVELOPE)?;
         let ack_len = u32::try_from(ack_bytes.len()).map_err(|_| ERR_ENVELOPE)?;
-        let mut encoded = Vec::with_capacity(8 + self.arrow_ipc_batch.len() + ack_bytes.len());
+        let mut encoded = Vec::with_capacity(
+            12 + output_relay.len() + self.arrow_ipc_batch.len() + ack_bytes.len(),
+        );
+        encoded.extend_from_slice(&output_len.to_le_bytes());
+        encoded.extend_from_slice(output_relay);
         encoded.extend_from_slice(&arrow_len.to_le_bytes());
         encoded.extend_from_slice(&self.arrow_ipc_batch);
         encoded.extend_from_slice(&ack_len.to_le_bytes());
@@ -257,11 +280,26 @@ impl BatchEnvelope {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, i32> {
-        if bytes.len() < 8 {
+        if bytes.len() < 12 {
             return Err(ERR_ENVELOPE);
         }
-        let arrow_len = read_u32_len(bytes, 0)?;
-        let arrow_start = 4_usize;
+        let output_len = read_u32_len(bytes, 0)?;
+        let output_start = 4_usize;
+        let output_end = output_start.checked_add(output_len).ok_or(ERR_ENVELOPE)?;
+        if output_end.checked_add(8).ok_or(ERR_ENVELOPE)? > bytes.len() {
+            return Err(ERR_ENVELOPE);
+        }
+        let output_relay = if output_len == 0 {
+            None
+        } else {
+            Some(
+                std::str::from_utf8(&bytes[output_start..output_end])
+                    .map_err(|_| ERR_ENVELOPE)?
+                    .to_string(),
+            )
+        };
+        let arrow_len = read_u32_len(bytes, output_end)?;
+        let arrow_start = output_end + 4;
         let arrow_end = arrow_start.checked_add(arrow_len).ok_or(ERR_ENVELOPE)?;
         if arrow_end.checked_add(4).ok_or(ERR_ENVELOPE)? > bytes.len() {
             return Err(ERR_ENVELOPE);
@@ -274,6 +312,7 @@ impl BatchEnvelope {
         }
         let acks = ciborium::from_reader(&bytes[ack_start..ack_end]).map_err(|_| ERR_ENVELOPE)?;
         Ok(Self {
+            output_relay,
             arrow_ipc_batch: bytes[arrow_start..arrow_end].to_vec(),
             acks,
         })
@@ -388,7 +427,12 @@ pub extern "C" fn nervix_init(ptr: i32, size: i32) -> i32 {
             let Ok(reader) = geoip_reader() else {
                 return ERR_INVALID_SIZE;
             };
+            let output_relays = match output_relays_from_init_metadata(&metadata) {
+                Ok(output_relays) => output_relays,
+                Err(error) => return error,
+            };
             state.init_metadata = metadata;
+            state.output_relays = output_relays;
             state.geoip_reader = Some(reader);
             state.initialized = true;
             SUCCESS
@@ -439,13 +483,24 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
             Ok(envelope) => envelope,
             Err(error) => return error,
         };
-        match enriched.encode() {
-            Ok(encoded) => {
-                state.pending_emit = encoded;
-                SUCCESS
-            }
-            Err(error) => error,
+        if state.output_relays.is_empty() {
+            return ERR_NOT_INITIALIZED;
         }
+        state.pending_emit.clear();
+        for (index, relay) in state.output_relays.iter().enumerate() {
+            let mut output = enriched.clone();
+            output.output_relay = Some(relay.clone());
+            if index > 0 {
+                output.acks.acked.clear();
+                output.acks.nacked.clear();
+                output.acks.message_errors.clear();
+            }
+            match output.encode() {
+                Ok(encoded) => state.pending_emit.push(encoded),
+                Err(error) => return error,
+            }
+        }
+        SUCCESS
     })
 }
 
@@ -461,8 +516,7 @@ pub extern "C" fn nervix_read_emit() -> i32 {
             return 0;
         }
         state.buffer.clear();
-        state.buffer.extend_from_slice(&state.pending_emit);
-        state.pending_emit.clear();
+        state.buffer.extend_from_slice(&state.pending_emit.remove(0));
         state.buffer.len() as i32
     })
 }
@@ -492,6 +546,18 @@ fn read_u32_len(bytes: &[u8], offset: usize) -> Result<usize, i32> {
     let end = offset.checked_add(4).ok_or(ERR_ENVELOPE)?;
     let raw = bytes.get(offset..end).ok_or(ERR_ENVELOPE)?;
     Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize)
+}
+
+fn output_relays_from_init_metadata(metadata: &[u8]) -> Result<Vec<String>, i32> {
+    ciborium::from_reader::<BranchInitMetadata, _>(Cursor::new(metadata))
+        .map(|metadata| {
+            metadata
+                .output_schemas
+                .into_iter()
+                .map(|schema| schema.name)
+                .collect()
+        })
+        .map_err(|_| ERR_INVALID_SIZE)
 }
 
 fn arrow_ipc_row_count(bytes: &[u8]) -> Result<u64, i32> {
@@ -525,6 +591,7 @@ fn geo_enrich_envelope(
         writer.finish().map_err(|_| ERR_ARROW_IPC)?;
     }
     Ok(BatchEnvelope {
+        output_relay: None,
         arrow_ipc_batch: output,
         acks: envelope.acks,
     })

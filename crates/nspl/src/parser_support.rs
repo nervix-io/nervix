@@ -6,7 +6,8 @@ use chumsky::{
 };
 use nervix_models::{
     AckMode, BranchParameterization, Domain, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy,
-    Identifier as ModelIdentifier, MessageErrorPolicy, ParameterValueMapping,
+    Identifier as ModelIdentifier, MessageErrorPolicy, ParameterValueMapping, ProcessorOutput,
+    ProcessorOutputs,
 };
 use sorted_vec::SortedSet;
 
@@ -397,11 +398,6 @@ pub fn reingestor_ref<'src>()
     parse_identifier("ref:reingestor")
 }
 
-pub fn router_ref<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:router")
-}
-
 pub fn lookup_ref<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
     parse_identifier("ref:lookup")
@@ -415,11 +411,6 @@ pub fn lookup_name<'src>()
 pub fn reingestor_name<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
     parse_identifier("reingestor_name")
-}
-
-pub fn router_name<'src>()
--> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("router_name")
 }
 
 pub fn reorderer_name<'src>()
@@ -603,23 +594,28 @@ fn vm_program_head<'src>()
     }
 }
 
-fn router_boundary_token(token: &Token) -> bool {
+fn processor_output_boundary_token(token: &Token) -> bool {
     matches!(
         token,
         Token::Semicolon
             | Token::Word(Word::KnownWord {
-                iden: Identifier::To | Identifier::Default | Identifier::Match | Identifier::On,
-                ..
-            })
-    )
-}
-
-fn inference_boundary_token(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Semicolon
-            | Token::Word(Word::KnownWord {
-                iden: Identifier::Inputs | Identifier::On,
+                iden: Identifier::To
+                    | Identifier::Parameterized
+                    | Identifier::Parametrized
+                    | Identifier::Unparameterized
+                    | Identifier::Flush
+                    | Identifier::On
+                    | Identifier::Using
+                    | Identifier::Inputs
+                    | Identifier::Outputs
+                    | Identifier::File
+                    | Identifier::Deduplicate
+                    | Identifier::Max
+                    | Identifier::By
+                    | Identifier::Width
+                    | Identifier::Step
+                    | Identifier::Aggregate
+                    | Identifier::Output,
                 ..
             })
     )
@@ -660,6 +656,48 @@ pub fn filter_map_program<'src>()
     })
 }
 
+pub fn output_filter_map_program<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    validated_vm_program_until(processor_output_boundary_token)
+}
+
+pub fn filter_where_clause<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Filter)
+        .ignore_then(kw(Identifier::Where))
+        .ignore_then(
+            any()
+                .filter(|token: &Token| !processor_output_boundary_token(token))
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .try_map(|tokens, span| {
+            let source = render_vm_program_tokens(&tokens);
+            let program = format!("WHERE {source}");
+            crate::vm_program::parse_program(&program)
+                .map(|_| program)
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
+}
+
+fn processor_output_route<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(output_filter_map_program().or_not())
+        .map(|(relay, filter_map)| ProcessorOutput { relay, filter_map })
+}
+
+pub fn processor_outputs<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
+    processor_output_route()
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(ProcessorOutputs::new)
+}
+
 pub fn set_only_program<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     filter_map_program().try_map(
@@ -679,34 +717,6 @@ pub fn set_only_program<'src>()
             Err(error) => Err(Rich::custom(span, vm_program_error_message(error))),
         },
     )
-}
-
-pub fn filter_map_program_until_router_clause<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    validated_vm_program_until(router_boundary_token)
-}
-
-pub fn filter_map_program_until_inference_clause<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    validated_vm_program_until(inference_boundary_token)
-}
-
-pub fn where_expr_until_router_clause<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Where)
-        .ignore_then(
-            any()
-                .filter(|token: &Token| !router_boundary_token(token))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
-            crate::vm_program::parse_program(&format!("WHERE {source}"))
-                .map(|_| source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
-        })
 }
 
 pub fn hostname_lit<'src>()

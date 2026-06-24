@@ -4,7 +4,7 @@ use ahash::{HashMap, HashSet};
 use nervix_models::{
     AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     ErrorPolicies, Identifier, InferencerTensorMapping, ModelKind, ParameterValueMapping,
-    RouterMatchPolicy, Timestamp, WindowBound,
+    Timestamp, WindowBound,
 };
 use nervix_nspl::window_processor::aggregate::WindowAggregateProgram;
 use nervix_vm::CompiledProgram as VmCompiledProgram;
@@ -61,39 +61,32 @@ pub(super) struct ParameterizedProcessorSpec {
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
+    pub(super) filter_where: Option<String>,
     pub(super) operation: ParameterizedProcessorOperationSpec,
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum ParameterizedProcessorOperationSpec {
     Deduplicator {
-        output: ParameterizedProcessorOutputSpec,
+        output_routes: ParameterizedProcessorOutputsSpec,
         deduplicate_on: String,
         max_time: String,
-        filter_map: Option<String>,
-    },
-    Router {
-        filter_map: Option<String>,
-        match_policy: RouterMatchPolicy,
-        routes: Vec<ParameterizedRouterRouteSpec>,
-        default_output: ParameterizedProcessorOutputSpec,
     },
     WindowProcessor {
-        output: ParameterizedProcessorOutputSpec,
+        output_routes: ParameterizedProcessorOutputsSpec,
         width: WindowBound,
         step: WindowBound,
         aggregate: String,
     },
     Reorderer {
-        output: ParameterizedProcessorOutputSpec,
+        output_routes: ParameterizedProcessorOutputsSpec,
         order_by: String,
         max_time: String,
         flush_each: String,
         max_batch_size: Option<String>,
-        filter_map: Option<String>,
     },
     Correlator {
-        output: ParameterizedProcessorOutputSpec,
+        output_routes: ParameterizedProcessorOutputsSpec,
         left_relay: Identifier,
         right_relay: Identifier,
         left_on: Vec<String>,
@@ -106,13 +99,12 @@ pub(super) enum ParameterizedProcessorOperationSpec {
         timeout_policy: CorrelationTimeoutPolicy,
     },
     Unifier {
-        output: ParameterizedProcessorOutputSpec,
+        output_routes: ParameterizedProcessorOutputsSpec,
         flush_each: String,
         max_batch_size: Option<String>,
-        filter_map: Option<String>,
     },
     Inferencer {
-        output: ParameterizedProcessorOutputSpec,
+        output_routes: ParameterizedProcessorOutputsSpec,
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
@@ -120,10 +112,9 @@ pub(super) enum ParameterizedProcessorOperationSpec {
         outputs: Vec<InferencerTensorMapping>,
         flush_each: String,
         max_batch_size: Option<String>,
-        filter_map: Option<String>,
     },
     WasmProcessor {
-        output: ParameterizedProcessorOutputSpec,
+        output_routes: ParameterizedProcessorOutputsSpec,
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
@@ -131,15 +122,27 @@ pub(super) enum ParameterizedProcessorOperationSpec {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParameterizedProcessorOutputSpec {
-    pub(super) relay: Identifier,
-    pub(super) children: Vec<ParameterizedProcessorSpec>,
+pub(super) struct ParameterizedProcessorOutputsSpec {
+    pub(super) routes: Vec<ParameterizedProcessorOutputSpec>,
+}
+
+impl ParameterizedProcessorOutputsSpec {
+    pub(super) fn outputs(&self) -> impl Iterator<Item = &ParameterizedProcessorOutputSpec> {
+        self.routes.iter()
+    }
+
+    pub(super) fn outputs_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut ParameterizedProcessorOutputSpec> {
+        self.routes.iter_mut()
+    }
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParameterizedRouterRouteSpec {
-    pub(super) condition: String,
-    pub(super) output: ParameterizedProcessorOutputSpec,
+pub(super) struct ParameterizedProcessorOutputSpec {
+    pub(super) relay: Identifier,
+    pub(super) filter_map: Option<String>,
+    pub(super) children: Vec<ParameterizedProcessorSpec>,
 }
 
 impl ParameterizedIngestorSpec {
@@ -151,40 +154,36 @@ impl ParameterizedIngestorSpec {
             for node in nodes {
                 relays.extend(node.input_relays.iter().cloned());
                 match &node.operation {
-                    ParameterizedProcessorOperationSpec::Deduplicator { output, .. }
-                    | ParameterizedProcessorOperationSpec::Reorderer { output, .. }
-                    | ParameterizedProcessorOperationSpec::WindowProcessor { output, .. }
-                    | ParameterizedProcessorOperationSpec::Unifier { output, .. }
-                    | ParameterizedProcessorOperationSpec::Inferencer { output, .. }
-                    | ParameterizedProcessorOperationSpec::WasmProcessor { output, .. } => {
-                        relays.insert(output.relay.clone());
-                        collect(&output.children, relays);
+                    ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::WindowProcessor {
+                        output_routes, ..
+                    }
+                    | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::WasmProcessor {
+                        output_routes, ..
+                    } => {
+                        for output in output_routes.outputs() {
+                            relays.insert(output.relay.clone());
+                            collect(&output.children, relays);
+                        }
                     }
                     ParameterizedProcessorOperationSpec::Correlator {
-                        output,
+                        output_routes,
                         timeout_policy,
                         ..
                     } => {
-                        relays.insert(output.relay.clone());
+                        for output in output_routes.outputs() {
+                            relays.insert(output.relay.clone());
+                            collect(&output.children, relays);
+                        }
                         if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.left {
                             relays.insert(relay.clone());
                         }
                         if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.right {
                             relays.insert(relay.clone());
                         }
-                        collect(&output.children, relays);
-                    }
-                    ParameterizedProcessorOperationSpec::Router {
-                        routes,
-                        default_output,
-                        ..
-                    } => {
-                        for route in routes {
-                            relays.insert(route.output.relay.clone());
-                            collect(&route.output.children, relays);
-                        }
-                        relays.insert(default_output.relay.clone());
-                        collect(&default_output.children, relays);
                     }
                 }
             }
@@ -201,36 +200,16 @@ impl ParameterizedIngestorSpec {
 
         fn contains(nodes: &[ParameterizedProcessorSpec], relay: &Identifier) -> bool {
             nodes.iter().any(|node| match &node.operation {
-                ParameterizedProcessorOperationSpec::Deduplicator { output, .. } => {
-                    &output.relay == relay || contains(&output.children, relay)
-                }
-                ParameterizedProcessorOperationSpec::Router {
-                    routes,
-                    default_output,
-                    ..
-                } => {
-                    routes.iter().any(|route| {
-                        &route.output.relay == relay || contains(&route.output.children, relay)
-                    }) || &default_output.relay == relay
-                        || contains(&default_output.children, relay)
-                }
-                ParameterizedProcessorOperationSpec::WindowProcessor { output, .. } => {
-                    &output.relay == relay || contains(&output.children, relay)
-                }
-                ParameterizedProcessorOperationSpec::Reorderer { output, .. } => {
-                    &output.relay == relay || contains(&output.children, relay)
-                }
-                ParameterizedProcessorOperationSpec::Correlator { output, .. } => {
-                    &output.relay == relay || contains(&output.children, relay)
-                }
-                ParameterizedProcessorOperationSpec::Unifier { output, .. } => {
-                    &output.relay == relay || contains(&output.children, relay)
-                }
-                ParameterizedProcessorOperationSpec::Inferencer { output, .. } => {
-                    &output.relay == relay || contains(&output.children, relay)
-                }
-                ParameterizedProcessorOperationSpec::WasmProcessor { output, .. } => {
-                    &output.relay == relay || contains(&output.children, relay)
+                ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
+                    output_routes
+                        .outputs()
+                        .any(|output| &output.relay == relay || contains(&output.children, relay))
                 }
             })
         }
@@ -267,27 +246,22 @@ pub(super) struct RelayProcessorTemplate {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
     pub(super) input_relay: Identifier,
+    pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
+    pub(super) filter_where: Option<String>,
     pub(super) operation: RelayProcessorOperationTemplate,
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum RelayProcessorOperationTemplate {
     Deduplicator {
-        output: RelayProcessorOutputTemplate,
+        output_routes: RelayProcessorOutputsTemplate,
         deduplicate_on: String,
         max_time: Duration,
-        filter_map: Option<String>,
-    },
-    Router {
-        filter_map: Option<String>,
-        match_policy: RouterMatchPolicy,
-        routes: Vec<StreamProcessorRouterRouteTemplate>,
-        default_output: RelayProcessorOutputTemplate,
     },
     WindowProcessor {
-        output: RelayProcessorOutputTemplate,
+        output_routes: RelayProcessorOutputsTemplate,
         width_messages: Option<usize>,
         step_messages: Option<usize>,
         width_duration: Option<Duration>,
@@ -295,14 +269,13 @@ pub(super) enum RelayProcessorOperationTemplate {
         aggregate: WindowAggregateProgram,
     },
     Reorderer {
-        output: RelayProcessorOutputTemplate,
+        output_routes: RelayProcessorOutputsTemplate,
         order_by: String,
         max_time: Duration,
         flush_each: RuntimeFlushPolicy,
-        filter_map: Option<String>,
     },
     Correlator {
-        output: RelayProcessorOutputTemplate,
+        output_routes: RelayProcessorOutputsTemplate,
         left_relay: Identifier,
         right_relay: Identifier,
         left_on: Vec<String>,
@@ -314,22 +287,20 @@ pub(super) enum RelayProcessorOperationTemplate {
         timeout_policy: CorrelationTimeoutPolicy,
     },
     Unifier {
-        output: RelayProcessorOutputTemplate,
+        output_routes: RelayProcessorOutputsTemplate,
         flush_each: RuntimeFlushPolicy,
-        filter_map: Option<String>,
     },
     Inferencer {
-        output: RelayProcessorOutputTemplate,
+        output_routes: RelayProcessorOutputsTemplate,
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         outputs: Vec<InferencerTensorMapping>,
         flush_each: RuntimeFlushPolicy,
-        filter_map: Option<String>,
     },
     WasmProcessor {
-        output: RelayProcessorOutputTemplate,
+        output_routes: RelayProcessorOutputsTemplate,
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
@@ -337,8 +308,14 @@ pub(super) enum RelayProcessorOperationTemplate {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct RelayProcessorOutputsTemplate {
+    pub(super) routes: Vec<RelayProcessorOutputTemplate>,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct RelayProcessorOutputTemplate {
     pub(super) output_relay: Identifier,
+    pub(super) filter_map: Option<String>,
 }
 
 #[derive(Debug)]
@@ -346,8 +323,11 @@ pub(super) struct RelayProcessorNode {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
     pub(super) input_relay: Identifier,
+    pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
+    pub(super) filter_where: Option<String>,
+    pub(super) compiled_filter_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
     pub(super) last_graph: Option<Arc<ActiveGraph>>,
     pub(super) generation: u64,
@@ -356,23 +336,14 @@ pub(super) struct RelayProcessorNode {
 #[derive(Debug)]
 pub(super) enum RelayProcessorOperationNode {
     Deduplicator {
-        output: RelayProcessorOutputNode,
+        output_routes: RelayProcessorOutputsNode,
         deduplicate_on: String,
         max_time: Duration,
-        filter_map: Option<String>,
         compiled_key_program: Option<Box<CompiledDeduplicatorKeyProgram>>,
-        compiled_program: Option<CompiledProgramWithMaterializedInterest>,
         state: Arc<ReplicatedDeduplicatorState>,
     },
-    Router {
-        filter_map: Option<String>,
-        match_policy: RouterMatchPolicy,
-        routes: Vec<RelayProcessorRouterRouteNode>,
-        default_output: RelayProcessorOutputNode,
-        compiled_program: Option<CompiledProgramWithMaterializedInterest>,
-    },
     WindowProcessor {
-        output: RelayProcessorOutputNode,
+        output_routes: RelayProcessorOutputsNode,
         width_messages: Option<usize>,
         step_messages: Option<usize>,
         width_duration: Option<Duration>,
@@ -382,19 +353,17 @@ pub(super) enum RelayProcessorOperationNode {
         replicated_state: Arc<ReplicatedWindowProcessorState>,
     },
     Reorderer {
-        output: RelayProcessorOutputNode,
+        output_routes: RelayProcessorOutputsNode,
         order_by: String,
         max_time: Duration,
         flush_each: RuntimeFlushPolicy,
-        filter_map: Option<String>,
         compiled_program: Option<Box<CompiledReordererProgram>>,
-        compiled_filter_map: Option<CompiledProgramWithMaterializedInterest>,
         pending: Vec<ReordererPendingMessage>,
         arrival_sequence: u64,
         next_flush: Option<Timestamp>,
     },
     Correlator {
-        output: RelayProcessorOutputNode,
+        output_routes: RelayProcessorOutputsNode,
         left_relay: Identifier,
         right_relay: Identifier,
         left_on: Vec<String>,
@@ -410,28 +379,24 @@ pub(super) enum RelayProcessorOperationNode {
         state: SharedCorrelatorBranchState,
     },
     Unifier {
-        output: RelayProcessorOutputNode,
+        output_routes: RelayProcessorOutputsNode,
         flush_each: RuntimeFlushPolicy,
-        filter_map: Option<String>,
-        compiled_program: Option<CompiledProgramWithMaterializedInterest>,
         pending: Vec<RelayRecordBatch>,
         next_flush: Option<Timestamp>,
     },
     Inferencer {
-        output: RelayProcessorOutputNode,
+        output_routes: RelayProcessorOutputsNode,
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         outputs: Vec<InferencerTensorMapping>,
         flush_each: RuntimeFlushPolicy,
-        filter_map: Option<String>,
-        compiled_program: Option<CompiledProgramWithMaterializedInterest>,
         pending: Vec<RelayRecordBatch>,
         next_flush: Option<Timestamp>,
     },
     WasmProcessor {
-        output: RelayProcessorOutputNode,
+        output_routes: RelayProcessorOutputsNode,
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
@@ -445,8 +410,21 @@ pub(super) enum RelayProcessorOperationNode {
 }
 
 #[derive(Debug)]
+pub(super) struct RelayProcessorOutputsNode {
+    pub(super) routes: Vec<RelayProcessorOutputNode>,
+}
+
+impl RelayProcessorOutputsNode {
+    pub(super) fn base_relay(&self) -> Option<Identifier> {
+        self.routes.first().map(|output| output.relay.clone())
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct RelayProcessorOutputNode {
     pub(super) relay: Identifier,
+    pub(super) filter_map: Option<String>,
+    pub(super) compiled_program: Option<CompiledProgramWithMaterializedInterest>,
 }
 
 #[derive(Debug, Clone)]
@@ -514,18 +492,6 @@ pub(super) struct CorrelatorPendingMessage {
     pub(super) message: RelayMessage,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct StreamProcessorRouterRouteTemplate {
-    pub(super) condition: String,
-    pub(super) output: RelayProcessorOutputTemplate,
-}
-
-#[derive(Debug)]
-pub(super) struct RelayProcessorRouterRouteNode {
-    pub(super) condition: String,
-    pub(super) output: RelayProcessorOutputNode,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(super) struct WindowBounds {
     pub(super) width_messages: Option<usize>,
@@ -540,8 +506,7 @@ pub(super) struct WindowFlushContext<'a> {
     pub(super) processor: &'a Identifier,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) branch: &'a mut BranchRuntime,
-    pub(super) output: &'a RelayProcessorOutputNode,
-    pub(super) output_schema: &'a Arc<CompiledSchema>,
+    pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
 }
 
 pub(super) struct UnifierFlushContext<'a> {
@@ -550,18 +515,16 @@ pub(super) struct UnifierFlushContext<'a> {
     pub(super) node_kind: &'a str,
     pub(super) processor: &'a Identifier,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) input_relay: &'a Identifier,
-    pub(super) output: &'a RelayProcessorOutputNode,
+    pub(super) input_relays: &'a [Identifier],
+    pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
 }
 
 pub(super) struct InferencerFlushContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: &'a str,
     pub(super) processor: &'a Identifier,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) input_relay: &'a Identifier,
-    pub(super) output: &'a RelayProcessorOutputNode,
+    pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     pub(super) resource: &'a Identifier,
     pub(super) resource_version: Option<u64>,
     pub(super) file: &'a str,
@@ -576,7 +539,7 @@ pub(super) struct WasmFlushContext<'a> {
     pub(super) processor: &'a Identifier,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) input_relay: &'a Identifier,
-    pub(super) output: &'a RelayProcessorOutputNode,
+    pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     pub(super) resource: &'a Identifier,
     pub(super) resource_version: Option<u64>,
     pub(super) file: &'a str,
@@ -594,14 +557,6 @@ impl std::fmt::Debug for WasmCompiledBranchProcessor {
             .field("version", &self.version)
             .finish_non_exhaustive()
     }
-}
-
-pub(super) struct ParameterizedRouterBatchContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
-    pub(super) branch: &'a mut BranchRuntime,
-    pub(super) processor: &'a Identifier,
-    pub(super) node_kind: &'a str,
-    pub(super) error_policies: &'a ErrorPolicies,
 }
 
 pub(super) struct PlannedMessageError {
@@ -624,13 +579,6 @@ impl std::fmt::Debug for PlannedGeneralError {
 }
 
 pub(super) struct FilterMapPlan {
-    pub(super) messages: Vec<RelayMessage>,
+    pub(super) batch: Option<RelayRecordBatch>,
     pub(super) message_errors: Vec<PlannedMessageError>,
-}
-
-pub(super) struct RouterPlan {
-    pub(super) route_messages: Vec<Vec<RelayMessage>>,
-    pub(super) default_messages: Vec<RelayMessage>,
-    pub(super) message_errors: Vec<PlannedMessageError>,
-    pub(super) general_errors: Vec<PlannedGeneralError>,
 }

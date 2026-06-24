@@ -40,7 +40,7 @@ Runtime branch rules:
 
 - an `INGESTOR` starts a branch for one concrete parameter group
 - normal downstream processors keep the same branch group
-- routers and forwarders send records to downstream relay names inside the same branch
+- output routes and forwarders send records to downstream relay names inside the same branch
 - stateful processors keep branch-local state for that group
 - a `REINGESTOR` consumes records across the whole input relay and starts new downstream branches with a new parameter grouping
 - an `EMITTER` consumes records across the whole input relay and terminates the branch at an external sink

@@ -15,7 +15,6 @@ pub mod describe_lookup;
 pub mod describe_reingestor;
 pub mod describe_reorderer;
 pub mod describe_resource;
-pub mod describe_router;
 pub mod describe_stream;
 pub mod describe_wasm_processor;
 pub mod describe_window_processor;
@@ -34,7 +33,6 @@ mod parser_support;
 pub mod reingestor;
 pub mod relay;
 pub mod reorderer;
-pub mod router;
 pub mod schema;
 #[cfg(feature = "server")]
 pub mod server_statement;

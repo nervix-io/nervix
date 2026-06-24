@@ -16,7 +16,8 @@ Redis alert emission, and event-type Iceberg tables.
 The default Docker Compose graph initializes the RustFS bucket and the datalake
 REST catalog namespace and tables explicitly before the graph appends data.
 For WASM processor guest testing, see `examples/wasm-processors/wasm-dual.nspl`,
-which uploads both the Rust and Go guest modules and wires them into one graph.
+which uploads both the Rust and Go guest modules and wires them into one graph
+with multiple output routes on both WASM processors.
 `examples/binance-websocket/binance_websocket.nspl` connects to the real Binance
 spot WebSocket API with an explicit `SIGNALING PROTOCOL` subscription handshake
 and normalizes the received stream events with a JAQ-native codec. Binance may
@@ -267,13 +268,16 @@ CREATE SCHEMA user_branch (
 CREATE RELAY notifications SCHEMA notification_in PARAMETERIZED BY user_branch;
 CREATE RELAY projected_notifications SCHEMA notification_out PARAMETERIZED BY user_branch;
 
-CREATE ROUTER project_notifications
+CREATE DEDUPLICATOR project_notifications
   FROM notifications
-  SET notifications.normalized = lower(trim(notifications.raw)), notifications.amount = notifications.amount + 1
-  UNSET notifications.raw, notifications.active
-  WHERE trim(notifications.raw) != ''
-  DEFAULT TO projected_notifications
+  TO projected_notifications
+    SET projected_notifications.normalized = lower(trim(notifications.raw)),
+        projected_notifications.amount = notifications.amount + 1
+    UNSET notifications.raw, notifications.active
+    WHERE trim(notifications.raw) != ''
   PARAMETERIZED BY user_branch
+  DEDUPLICATE ON notifications.tenant, notifications.user_id
+  MAX TIME 10m
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 ```
 

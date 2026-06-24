@@ -167,7 +167,7 @@ Feature: Cluster scheduling
       DESCRIBE RELAY notifications WHERE (user_id = 42);
       """
 
-  Scenario: Describe router on the leader reports scheduled owner metrics
+  Scenario: Describe deduplicator on the leader reports scheduled owner metrics
     Given a 2 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -212,26 +212,29 @@ Feature: Cluster scheduling
         PARAMETERIZED BY id_branch VALUES { id = incoming_logs.id } TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
-        TOPIC router_describe_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_router_describe_{{test_id}}
+        TOPIC deduplicator_describe_{{test_id}}
+        OFFSET BY CONSUMER GROUP nervix_cucumber_deduplicator_describe_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE ROUTER remote_router
+      CREATE DEDUPLICATOR remote_deduplicator
         FROM incoming_logs
         TO routed_logs WHERE incoming_logs.level = "error"
-        DEFAULT TO routed_logs PARAMETERIZED BY id_branch
+        TO routed_logs
+        PARAMETERIZED BY id_branch
+        DEDUPLICATE ON incoming_logs.id
+        MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       START;
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "router" "remote_router" is saved as placeholder "router_owner"
-    And within "5s" node "{{leader}}" eventually reports scheduled "router" "remote_router" owner different from placeholder "leader"
+    Then the last cluster status owner for scheduled "deduplicator" "remote_deduplicator" is saved as placeholder "deduplicator_owner"
+    And within "5s" node "{{leader}}" eventually reports scheduled "deduplicator" "remote_deduplicator" owner different from placeholder "leader"
     When these NSPL commands are executed on node "node-2"
       """
       SUBSCRIBE SESSION TO routed_logs;
       """
-    And Kafka message is published to topic "router_describe_{{test_id}}"
+    And Kafka message is published to topic "deduplicator_describe_{{test_id}}"
       """
       {"id":42,"level":"error"}
       """
@@ -241,15 +244,15 @@ Feature: Cluster scheduling
       """
     When these NSPL commands are executed on the leader node
       """
-      DESCRIBE ROUTER remote_router;
+      DESCRIBE DEDUPLICATOR remote_deduplicator;
       """
     Then the last command output contains
       """
-      owner: {{router_owner}}
+      owner: {{deduplicator_owner}}
       """
     And the last command output contains
       """
-      messages_total received relay=incoming_logs physical_node={{router_owner}} total=1
+      messages_total received relay=incoming_logs physical_node={{deduplicator_owner}} total=1
       """
 
   Scenario: All nodes report describe relay for a parameterized HTTP relay

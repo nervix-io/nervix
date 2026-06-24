@@ -10,7 +10,7 @@ use crate::{
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
-    CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateRouter, CreateSchema,
+    CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
     CreateSignalingProtocol, CreateUnifier, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
     EndpointType, ErrorPolicies, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
@@ -19,8 +19,8 @@ use crate::{
     KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry,
     MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
     MySqlConflictAction, NatsConfigEntry, NatsIngestMode, ParameterValueMapping, ParseAsType,
-    PostgresConfigEntry, PostgresConflictAction, PrometheusConfigEntry, PulsarConfigEntry,
-    PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
+    PostgresConfigEntry, PostgresConflictAction, ProcessorOutputs, PrometheusConfigEntry,
+    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
     RedisPubSubIngestMode, RelayParameterization, RelayParameters, RetryPolicy, S3ConfigEntry,
     SchemaField, SqsConfigEntry, SqsIngestMode, WebsocketsConfigEntry, WebsocketsIngestMode,
     WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
@@ -139,7 +139,6 @@ impl Model {
             Self::WasmProcessor(processor) => processor.to_canonical_nspl(),
             Self::Ingestor(ingestor) => ingestor.to_canonical_nspl(),
             Self::Reingestor(reingestor) => reingestor.to_canonical_nspl(),
-            Self::Router(router) => router.to_canonical_nspl(),
             Self::Relay(relay) => relay.to_canonical_nspl(),
             Self::Materializer(materializer) => materializer.to_canonical_nspl(),
             Self::Lookup(lookup) => lookup.to_canonical_nspl(),
@@ -875,7 +874,7 @@ fn general_error_policy_to_nspl(policy: &GeneralErrorPolicy) -> &'static str {
 impl CreateUnifier {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} UNIFIER {} FROM {} TO {} {} {}{} {};",
+            "CREATE {} UNIFIER {} FROM {}{}{} {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relays
@@ -883,10 +882,10 @@ impl CreateUnifier {
                 .map(Identifier::as_str)
                 .collect::<Vec<_>>()
                 .join(", "),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
-            filter_map_suffix(&self.filter_map),
             message_error_policy_to_nspl(&self.message_error_policy)
         ))
     }
@@ -895,16 +894,16 @@ impl CreateUnifier {
 impl CreateDeduplicator {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} DEDUPLICATOR {} FROM {} TO {} {} DEDUPLICATE ON {} MAX TIME {} {}{} {};",
+            "CREATE {} DEDUPLICATOR {} FROM {}{}{} {} DEDUPLICATE ON {} MAX TIME {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
             self.deduplicate_on,
             self.max_time,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
-            filter_map_suffix(&self.filter_map),
             message_error_policy_to_nspl(&self.message_error_policy)
         ))
     }
@@ -913,7 +912,7 @@ impl CreateDeduplicator {
 impl CreateCorrelator {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} CORRELATOR {} FROM {}, {} ON ({}), ({}) MATCH {} TO {} {} {} OUTPUT {} MAX \
+            "CREATE {} CORRELATOR {} FROM {}, {} ON ({}), ({}) MATCH {}{}{} {} {} OUTPUT {} MAX \
              TIME {} ON CORRELATION TIMEOUT {}, {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
@@ -922,7 +921,8 @@ impl CreateCorrelator {
             self.left_on.join(", "),
             self.right_on.join(", "),
             self.match_policy.as_ref(),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             self.output,
@@ -944,16 +944,16 @@ fn correlation_timeout_action_to_nspl(action: &CorrelationTimeoutAction) -> Stri
 impl CreateReorderer {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} REORDERER {} FROM {} TO {} {} BY {} MAX TIME {} {}{} {};",
+            "CREATE {} REORDERER {} FROM {}{}{} {} BY {} MAX TIME {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
             self.order_by,
             self.max_time,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
-            filter_map_suffix(&self.filter_map),
             message_error_policy_to_nspl(&self.message_error_policy)
         ))
     }
@@ -962,11 +962,12 @@ impl CreateReorderer {
 impl CreateWindowProcessor {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} WINDOW PROCESSOR {} FROM {} TO {} {} WIDTH {} STEP {} AGGREGATE {} {};",
+            "CREATE {} WINDOW PROCESSOR {} FROM {}{}{} {} WIDTH {} STEP {} AGGREGATE {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
             window_bound_to_nspl(&self.width),
             window_bound_to_nspl(&self.step),
@@ -1020,47 +1021,13 @@ fn window_bound_to_nspl(bound: &WindowBound) -> String {
 impl CreateReingestor {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} REINGESTOR {} FROM {} TO {} {} {}{} {};",
+            "CREATE {} REINGESTOR {} FROM {}{}{} {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             parameterization_to_nspl(&self.parameterized_by),
-            flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
-            filter_map_suffix(&self.filter_map),
-            message_error_policy_to_nspl(&self.message_error_policy)
-        ))
-    }
-}
-
-impl CreateRouter {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let routes = self
-            .routes
-            .iter()
-            .map(|route| {
-                format!(
-                    " TO {} WHERE {}",
-                    route.into_relay.as_str(),
-                    route.condition
-                )
-            })
-            .collect::<String>();
-        let match_policy = if self.routes.is_empty() {
-            String::new()
-        } else {
-            format!(" MATCH {}", self.match_policy.as_ref())
-        };
-        Ok(format!(
-            "CREATE {} ROUTER {} FROM {}{}{}{} DEFAULT TO {} {} {} {};",
-            self.mode.as_ref(),
-            self.name.as_str(),
-            self.from_relay.as_str(),
-            filter_map_suffix(&self.filter_map),
-            routes,
-            match_policy,
-            self.default_into_relay.as_str(),
-            processor_parameterization_to_nspl(&self.parameterized_by),
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             message_error_policy_to_nspl(&self.message_error_policy)
         ))
@@ -1074,17 +1041,17 @@ impl CreateInferencer {
             .map(|version| format!(" VERSION {version}"))
             .unwrap_or_default();
         Ok(format!(
-            "CREATE {} INFERENCER {} FROM {} TO {} {} USING RESOURCE {}{} FILE {}{} INPUTS {{ {} \
-             }} OUTPUTS {{ {} }} {} {};",
+            "CREATE {} INFERENCER {} FROM {}{}{} {} USING RESOURCE {}{} FILE {} INPUTS {{ {} }} \
+             OUTPUTS {{ {} }} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
-            filter_map_suffix(&self.filter_map),
             inference_mappings_to_nspl(&self.inputs)?,
             inference_mappings_to_nspl(&self.outputs)?,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
@@ -1100,14 +1067,15 @@ impl CreateWasmProcessor {
             .map(|version| format!(" VERSION {version}"))
             .unwrap_or_default();
         Ok(format!(
-            "CREATE {} WASM PROCESSOR {} USING RESOURCE {}{} FILE {} FROM {} TO {} {} {} {};",
+            "CREATE {} WASM PROCESSOR {} USING RESOURCE {}{} FILE {} FROM {}{}{} {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
             self.from_relay.as_str(),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
             message_error_policy_to_nspl(&self.message_error_policy),
             general_error_policy_to_nspl(&self.global_error_policy).replace("GENERAL", "GLOBAL")
@@ -1137,6 +1105,32 @@ fn filter_map_suffix(filter_map: &Option<String>) -> String {
         .as_deref()
         .map(|filter_map| format!(" {filter_map}"))
         .unwrap_or_default()
+}
+
+fn filter_where_suffix(filter_where: &Option<String>) -> String {
+    filter_where
+        .as_deref()
+        .map(|where_program| {
+            let condition = where_program
+                .strip_prefix("WHERE ")
+                .unwrap_or(where_program);
+            format!(" FILTER WHERE {condition}")
+        })
+        .unwrap_or_default()
+}
+
+fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> String {
+    outputs
+        .routes
+        .iter()
+        .map(|output| {
+            format!(
+                " TO {}{}",
+                output.relay.as_str(),
+                filter_map_suffix(&output.filter_map)
+            )
+        })
+        .collect::<String>()
 }
 
 fn schema_field_to_nspl(field: &SchemaField) -> Result<String, CanonicalNsplError> {
@@ -1878,16 +1872,16 @@ mod tests {
         CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
         CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
         CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateReingestor,
-        CreateRelay, CreateRouter, CreateSchema, CreateSignalingProtocol, CreateUnifier,
-        CreateVhost, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUnifier, CreateVhost,
+        CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
         EndpointIngestMode, EndpointType, ErrorPolicies, HttpConfigEntry, Identifier, IngestSource,
         JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode,
         MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
         MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode,
         ParameterValueMapping, ParseAsType, PostgresConflictAction, PostgresValueMapping,
-        PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization,
-        RelayParameters, RetryPolicy, RouterRoute, SchemaField, SqsIngestMode,
-        WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
+        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RelayParameterization, RelayParameters, RetryPolicy, SchemaField,
+        SqsIngestMode, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2387,14 +2381,13 @@ mod tests {
         let unifier = CreateUnifier {
             name: identifier("orders_unifier"),
             from_relays: vec![identifier("orders_a"), identifier("orders_b")],
-            into_relay: identifier("orders_all"),
+            output_routes: ProcessorOutputs::single(identifier("orders_all")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
             message_error_policy: MessageErrorPolicy::Log,
-
-            filter_map: None,
+            filter_where: None,
         };
         assert_eq!(
             unifier.to_canonical_nspl().expect("must render"),
@@ -2407,7 +2400,7 @@ mod tests {
         let deduplicator = CreateDeduplicator {
             name: identifier("orders_dedup"),
             from_relay: identifier("orders_in"),
-            into_relay: identifier("orders_out"),
+            output_routes: ProcessorOutputs::single(identifier("orders_out")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             deduplicate_on: "ss1.transaction_id".to_string(),
             max_time: "10m".to_string(),
@@ -2415,8 +2408,7 @@ mod tests {
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Detached,
             message_error_policy: MessageErrorPolicy::Log,
-
-            filter_map: None,
+            filter_where: None,
         };
         assert_eq!(
             deduplicator.to_canonical_nspl().expect("must render"),
@@ -2430,7 +2422,7 @@ mod tests {
         let window_processor = CreateWindowProcessor {
             name: identifier("latency_window"),
             from_relay: identifier("orders_in"),
-            into_relay: identifier("orders_p99"),
+            output_routes: ProcessorOutputs::single(identifier("orders_p99")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             width: WindowBound {
                 messages: Some(100),
@@ -2445,6 +2437,7 @@ mod tests {
                 .to_string(),
             mode: AckMode::Attached,
             message_error_policy: MessageErrorPolicy::Log,
+            filter_where: None,
         };
         assert_eq!(
             window_processor.to_canonical_nspl().expect("must render"),
@@ -2459,14 +2452,13 @@ mod tests {
         let reingestor = CreateReingestor {
             name: identifier("orders_repartition"),
             from_relay: identifier("orders_in"),
-            into_relay: identifier("orders_out"),
+            output_routes: ProcessorOutputs::single(identifier("orders_out")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
             message_error_policy: MessageErrorPolicy::Log,
-
-            filter_map: None,
+            filter_where: None,
         };
         assert_eq!(
             reingestor.to_canonical_nspl().expect("must render"),
@@ -2477,59 +2469,36 @@ mod tests {
             )
         );
 
-        let router = CreateRouter {
-            name: identifier("orders_router"),
+        let route_reingestor = CreateReingestor {
+            name: identifier("orders_splitter"),
             from_relay: identifier("orders_in"),
-            routes: vec![
-                RouterRoute {
-                    into_relay: identifier("orders_errors"),
-                    condition: r#"level = "error""#.to_string(),
+            output_routes: ProcessorOutputs::new(vec![
+                ProcessorOutput {
+                    relay: identifier("orders_errors"),
+                    filter_map: Some(r#"WHERE level = "error""#.to_string()),
                 },
-                RouterRoute {
-                    into_relay: identifier("orders_warn"),
-                    condition: r#"level = "warn""#.to_string(),
+                ProcessorOutput {
+                    relay: identifier("orders_warn"),
+                    filter_map: Some(
+                        r#"SET severity = "warning" WHERE level = "warn""#.to_string(),
+                    ),
                 },
-            ],
-            match_policy: Default::default(),
-            default_into_relay: identifier("orders_info"),
+                ProcessorOutput {
+                    relay: identifier("orders_info"),
+                    filter_map: None,
+                },
+            ]),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Detached,
             message_error_policy: MessageErrorPolicy::Log,
-
-            filter_map: Some("SET severity = lower(level)".to_string()),
+            filter_where: Some("WHERE active".to_string()),
         };
         assert_eq!(
-            router.to_canonical_nspl().expect("must render"),
+            route_reingestor.to_canonical_nspl().expect("must render"),
             with_message_error_policy(
-                r#"CREATE DETACHED ROUTER orders_router FROM orders_in SET severity = lower(level) TO orders_errors WHERE level = "error" TO orders_warn WHERE level = "warn" MATCH ALL DEFAULT TO orders_info PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"#
-            )
-        );
-
-        let default_only_router = CreateRouter {
-            name: identifier("orders_forwarder"),
-            from_relay: identifier("orders_in"),
-            routes: Vec::new(),
-            match_policy: Default::default(),
-            default_into_relay: identifier("orders_out"),
-            parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
-            mode: AckMode::Attached,
-            message_error_policy: MessageErrorPolicy::Log,
-            filter_map: Some(
-                "SET normalized = lower(raw) UNSET raw, legacy WHERE active".to_string(),
-            ),
-        };
-        assert_eq!(
-            default_only_router
-                .to_canonical_nspl()
-                .expect("must render"),
-            with_message_error_policy(
-                "CREATE ATTACHED ROUTER orders_forwarder FROM orders_in SET normalized = \
-                 lower(raw) UNSET raw, legacy WHERE active DEFAULT TO orders_out PARAMETERIZED BY \
-                 tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"
+                r#"CREATE DETACHED REINGESTOR orders_splitter FROM orders_in FILTER WHERE active TO orders_errors WHERE level = "error" TO orders_warn SET severity = "warning" WHERE level = "warn" TO orders_info PARAMETERIZED BY tenant_branch VALUES {tenant = orders.tenant} TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"#
             )
         );
     }

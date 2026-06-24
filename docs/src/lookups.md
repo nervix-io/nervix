@@ -64,13 +64,15 @@ The function evaluates `<key_expr>`, looks up that key in the named hash map, an
 Example enrichment:
 
 ```nspl
-CREATE ROUTER enrich_zip
+CREATE DEDUPLICATOR enrich_zip
   FROM inbound
-  SET inbound.city = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"),
-      inbound.region = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "region")
-  WHERE NOT is_null(LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"))
-  DEFAULT TO enriched
+  TO enriched
+    SET enriched.city = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"),
+        enriched.region = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "region")
+    WHERE NOT is_null(LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"))
   PARAMETERIZED BY zip_branch
+  DEDUPLICATE ON inbound.zip
+  MAX TIME 10m
   FLUSH IMMEDIATE
   ON MESSAGE ERROR LOG;
 ```

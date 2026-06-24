@@ -2940,7 +2940,6 @@ fn GraphPanel(
                             let click_node = node.clone();
                             let subtype = node.subtype.clone();
                             let label = node.label.clone();
-                            let is_router = node.subtype.eq_ignore_ascii_case("router");
                             let branch_summary = node.branch_summary();
                             let node_search_class = node.clone();
                             let node_search_data = node.clone();
@@ -2974,12 +2973,6 @@ fn GraphPanel(
                                     <span class="node-status"></span>
                                     <ReconnectTimer wait_millis=node.reconnect_wait_millis />
                                     <span class="node-hit-name">{label}</span>
-                                    <Show when=move || is_router fallback=|| ()>
-                                        <span class="router-ports">
-                                            <i></i>
-                                            <i></i>
-                                        </span>
-                                    </Show>
                                 </button>
                             }
                             }} />
@@ -4350,7 +4343,7 @@ impl GraphActionTarget {
 
 fn describe_command(kind: &str, name: &str) -> Option<String> {
     match kind {
-        "INGESTOR" | "DEDUPLICATOR" | "REINGESTOR" | "ROUTER" | "REORDERER" | "WASM PROCESSOR"
+        "INGESTOR" | "DEDUPLICATOR" | "REINGESTOR" | "REORDERER" | "WASM PROCESSOR"
         | "CORRELATOR" | "EMITTER" => Some(format!("DESCRIBE {kind} {name};")),
         "WINDOW PROCESSOR" => Some(format!("DESCRIBE WINDOW PROCESSOR {name};")),
         _ => None,
@@ -4441,7 +4434,6 @@ impl GraphViewNode {
                 "inferencer" => "INFERENCER",
                 "reingestor" => "REINGESTOR",
                 "reorderer" => "REORDERER",
-                "router" => "ROUTER",
                 "unifier" => "UNIFIER",
                 "wasm_processor" | "wasm processor" => "WASM PROCESSOR",
                 "window_processor" | "window processor" => "WINDOW PROCESSOR",
@@ -6102,10 +6094,10 @@ mod tests {
                     100,
                 ),
                 unparameterized_node(
-                    "processor:anomaly_router",
-                    "anomaly_router",
+                    "processor:anomaly_splitter",
+                    "anomaly_splitter",
                     DataflowNodeKind::Processor,
-                    "router",
+                    "deduplicator",
                     520,
                     100,
                 ),
@@ -6148,9 +6140,9 @@ mod tests {
             ],
             edges: vec![
                 edge("processor:device_repartition", "relay:telemetry_ordered"),
-                edge("relay:telemetry_ordered", "processor:anomaly_router"),
-                edge("processor:anomaly_router", "relay:thermal_alerts"),
-                edge("processor:anomaly_router", "relay:maintenance_alerts"),
+                edge("relay:telemetry_ordered", "processor:anomaly_splitter"),
+                edge("processor:anomaly_splitter", "relay:thermal_alerts"),
+                edge("processor:anomaly_splitter", "relay:maintenance_alerts"),
                 edge("relay:thermal_alerts", "emitter:redis_thermal_alerts"),
                 edge(
                     "relay:maintenance_alerts",
@@ -7077,7 +7069,7 @@ mod tests {
     }
 
     #[test]
-    fn datalake_router_input_edge_stays_near_its_endpoints() {
+    fn datalake_splitter_input_edge_stays_near_its_endpoints() {
         let graph = GraphView::from_dataflow_graph(
             DataflowGraph {
                 domain: "datalake_demo".to_string(),
@@ -7165,10 +7157,10 @@ mod tests {
                         0,
                     ),
                     node(
-                        "processor:device_activity_router",
-                        "device_activity_router",
+                        "processor:device_activity_splitter",
+                        "device_activity_splitter",
                         DataflowNodeKind::Processor,
-                        "router",
+                        "deduplicator",
                         "device_branch",
                         0,
                         0,
@@ -7177,16 +7169,16 @@ mod tests {
                         "processor:edge_location_lookup",
                         "edge_location_lookup",
                         DataflowNodeKind::Processor,
-                        "router",
+                        "deduplicator",
                         "device_branch",
                         0,
                         0,
                     ),
                     node(
-                        "processor:auth_activity_router",
-                        "auth_activity_router",
+                        "processor:auth_activity_splitter",
+                        "auth_activity_splitter",
                         DataflowNodeKind::Processor,
-                        "router",
+                        "deduplicator",
                         "device_branch",
                         0,
                         0,
@@ -7246,10 +7238,10 @@ mod tests {
                         0,
                     ),
                     node(
-                        "processor:edge_activity_router",
-                        "edge_activity_router",
+                        "processor:edge_activity_splitter",
+                        "edge_activity_splitter",
                         DataflowNodeKind::Processor,
-                        "router",
+                        "deduplicator",
                         "device_branch",
                         0,
                         0,
@@ -7291,7 +7283,7 @@ mod tests {
                     ),
                     edge(
                         "relay:device_activity_landing",
-                        "processor:device_activity_router",
+                        "processor:device_activity_splitter",
                     ),
                     edge(
                         "relay:edge_activity_landing",
@@ -7299,18 +7291,18 @@ mod tests {
                     ),
                     edge(
                         "relay:auth_activity_landing",
-                        "processor:auth_activity_router",
+                        "processor:auth_activity_splitter",
                     ),
                     edge(
-                        "processor:device_activity_router",
+                        "processor:device_activity_splitter",
                         "relay:device_connect_events",
                     ),
                     edge(
-                        "processor:device_activity_router",
+                        "processor:device_activity_splitter",
                         "relay:device_location_events",
                     ),
                     edge(
-                        "processor:device_activity_router",
+                        "processor:device_activity_splitter",
                         "relay:device_disconnect_events",
                     ),
                     edge(
@@ -7319,19 +7311,22 @@ mod tests {
                     ),
                     edge(
                         "relay:edge_activity_enriched_landing",
-                        "processor:edge_activity_router",
+                        "processor:edge_activity_splitter",
                     ),
                     edge(
-                        "processor:auth_activity_router",
+                        "processor:auth_activity_splitter",
                         "relay:auth_authorized_events",
                     ),
-                    edge("processor:auth_activity_router", "relay:auth_denied_events"),
                     edge(
-                        "processor:edge_activity_router",
+                        "processor:auth_activity_splitter",
+                        "relay:auth_denied_events",
+                    ),
+                    edge(
+                        "processor:edge_activity_splitter",
                         "relay:edge_connect_events",
                     ),
                     edge(
-                        "processor:edge_activity_router",
+                        "processor:edge_activity_splitter",
                         "relay:edge_disconnect_events",
                     ),
                 ],
@@ -7343,9 +7338,9 @@ mod tests {
             .iter()
             .find(|edge| {
                 edge.source == "relay:edge_activity_enriched_landing"
-                    && edge.target == "processor:edge_activity_router"
+                    && edge.target == "processor:edge_activity_splitter"
             })
-            .expect("edge_activity_router input edge must exist");
+            .expect("edge_activity_splitter input edge must exist");
 
         let route = edge.route_points(&graph);
         let path = edge.path(&graph);
@@ -7365,12 +7360,12 @@ mod tests {
         assert!(
             min_y >= endpoint_min_y - GRAPH_EDGE_LANE_SPACING
                 && max_y <= endpoint_max_y + GRAPH_EDGE_LANE_SPACING,
-            "router input edge should not make a tall vertical detour: {route:?}"
+            "deduplicator input edge should not make a tall vertical detour: {route:?}"
         );
         assert!(
             path.contains(" C"),
-            "short clear router input edge should use a direct curve instead of an orthogonal \
-             dogleg: {path}"
+            "short clear deduplicator input edge should use a direct curve instead of an \
+             orthogonal dogleg: {path}"
         );
     }
 
@@ -7387,7 +7382,7 @@ mod tests {
             edges: vec![
                 graph_view_edge(
                     "relay:edge_activity_enriched_landing",
-                    "processor:edge_activity_router",
+                    "processor:edge_activity_splitter",
                     1518,
                     428,
                     1624,
@@ -7395,7 +7390,7 @@ mod tests {
                 ),
                 graph_view_edge(
                     "relay:auth_activity_landing",
-                    "processor:edge_activity_router",
+                    "processor:edge_activity_splitter",
                     1518,
                     428,
                     1624,

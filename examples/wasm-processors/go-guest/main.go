@@ -33,9 +33,10 @@ var fixedBuffer [maxGuestBufferBytes]byte
 var buffer []byte
 var initMetadata []byte
 var pendingBatch []byte
-var pendingEmit []byte
+var pendingEmit [][]byte
 var globalError []byte
 var savedState []byte
+var outputRelays []string
 var pendingStartRow uint64
 var initialized bool
 var processedBatches uint64
@@ -57,8 +58,17 @@ type guestSnapshot struct {
 }
 
 type batchEnvelope struct {
+	OutputRelay   string
 	ArrowIPCBatch []byte
 	Acks          ackSidecar
+}
+
+type branchInitMetadata struct {
+	OutputSchemas []processorSchema `cbor:"output_schemas"`
+}
+
+type processorSchema struct {
+	Name string `cbor:"name"`
 }
 
 type ackSidecar struct {
@@ -140,7 +150,12 @@ func nervixInit(ptr int32, size int32) int32 {
 		if code != success {
 			return code
 		}
+		relays, code := outputRelaysFromInitMetadata(data)
+		if code != success {
+			return code
+		}
 		initMetadata = append(initMetadata[:0], data...)
+		outputRelays = append(outputRelays[:0], relays...)
 		initialized = true
 		return success
 	})
@@ -188,11 +203,15 @@ func nervixProcessBatch(size int32) int32 {
 			if code != success {
 				return code
 			}
+			if len(outputRelays) > 0 {
+				errorEnvelope.OutputRelay = outputRelays[0]
+			}
 			encoded, code := encodeBatchEnvelope(errorEnvelope)
 			if code != success {
 				return code
 			}
-			pendingEmit = append(pendingEmit[:0], encoded...)
+			pendingEmit = pendingEmit[:0]
+			pendingEmit = append(pendingEmit, encoded)
 			return success
 		}
 		rowCount, code := arrowIPCRowCount(envelope.ArrowIPCBatch)
@@ -226,8 +245,8 @@ func nervixReadEmit() int32 {
 		if len(pendingEmit) == 0 {
 			return 0
 		}
-		buffer = append(buffer[:0], pendingEmit...)
-		pendingEmit = pendingEmit[:0]
+		buffer = append(buffer[:0], pendingEmit[0]...)
+		pendingEmit = pendingEmit[1:]
 		return int32(len(buffer))
 	})
 }
@@ -273,6 +292,7 @@ func nervixResetState() int32 {
 	pendingEmit = pendingEmit[:0]
 	clearGlobalError()
 	savedState = savedState[:0]
+	outputRelays = outputRelays[:0]
 	pendingStartRow = 0
 	initialized = false
 	processedBatches = 0
@@ -317,11 +337,24 @@ func flushPending() int32 {
 	if code != success {
 		return code
 	}
-	encoded, code := encodeBatchEnvelope(filtered)
-	if code != success {
-		return code
+	if len(outputRelays) == 0 {
+		return errNotInitialized
 	}
-	pendingEmit = append(pendingEmit[:0], encoded...)
+	pendingEmit = pendingEmit[:0]
+	for i := 0; i < len(outputRelays); i++ {
+		output := filtered
+		output.OutputRelay = outputRelays[i]
+		if i > 0 {
+			output.Acks.Acked = make([]rowAckSet, 0)
+			output.Acks.Nacked = make([]nackSet, 0)
+			output.Acks.MessageErrors = make([]messageErrorSet, 0)
+		}
+		encoded, code := encodeBatchEnvelope(output)
+		if code != success {
+			return code
+		}
+		pendingEmit = append(pendingEmit, encoded)
+	}
 	pendingBatch = pendingBatch[:0]
 	pendingStartRow = processedRows
 	return success
@@ -330,11 +363,14 @@ func flushPending() int32 {
 func encodeBatchEnvelope(envelope batchEnvelope) ([]byte, int32) {
 	envelope.Acks.normalize()
 	ackBytes := encodeAckSidecar(envelope.Acks)
-	if uint64(len(envelope.ArrowIPCBatch)) > uint64(^uint32(0)) ||
+	if uint64(len(envelope.OutputRelay)) > uint64(^uint32(0)) ||
+		uint64(len(envelope.ArrowIPCBatch)) > uint64(^uint32(0)) ||
 		uint64(len(ackBytes)) > uint64(^uint32(0)) {
 		return nil, errEnvelope
 	}
-	output := make([]byte, 0, 8+len(envelope.ArrowIPCBatch)+len(ackBytes))
+	output := make([]byte, 0, 12+len(envelope.OutputRelay)+len(envelope.ArrowIPCBatch)+len(ackBytes))
+	output = appendUint32(output, uint32(len(envelope.OutputRelay)))
+	output = append(output, envelope.OutputRelay...)
 	output = appendUint32(output, uint32(len(envelope.ArrowIPCBatch)))
 	output = append(output, envelope.ArrowIPCBatch...)
 	output = appendUint32(output, uint32(len(ackBytes)))
@@ -380,15 +416,25 @@ func (acks *rowAckSet) normalize() {
 }
 
 func decodeBatchEnvelope(data []byte) (batchEnvelope, int32) {
-	if len(data) < 8 {
+	if len(data) < 12 {
 		return batchEnvelope{}, errEnvelope
 	}
-	arrowLen64 := uint64(readUint32(data))
+	outputLen64 := uint64(readUint32(data))
+	if outputLen64 > uint64(maxInt) {
+		return batchEnvelope{}, errEnvelope
+	}
+	outputLen := int(outputLen64)
+	outputStart := 4
+	outputEnd := outputStart + outputLen
+	if outputEnd < outputStart || outputEnd > len(data) || len(data)-outputEnd < 8 {
+		return batchEnvelope{}, errEnvelope
+	}
+	arrowLen64 := uint64(readUint32(data[outputEnd:]))
 	if arrowLen64 > uint64(maxInt) {
 		return batchEnvelope{}, errEnvelope
 	}
 	arrowLen := int(arrowLen64)
-	arrowStart := 4
+	arrowStart := outputEnd + 4
 	arrowEnd := arrowStart + arrowLen
 	if arrowEnd < arrowStart || arrowEnd > len(data) || len(data)-arrowEnd < 4 {
 		return batchEnvelope{}, errEnvelope
@@ -411,6 +457,7 @@ func decodeBatchEnvelope(data []byte) (batchEnvelope, int32) {
 		return batchEnvelope{}, errEnvelope
 	}
 	return batchEnvelope{
+		OutputRelay:   string(data[outputStart:outputEnd]),
 		ArrowIPCBatch: append([]byte(nil), data[arrowStart:arrowEnd]...),
 		Acks:          acks,
 	}, success
@@ -795,6 +842,18 @@ func readBufferRange(ptr int32, size int32) ([]byte, int32) {
 	return buffer[start:end], success
 }
 
+func outputRelaysFromInitMetadata(data []byte) ([]string, int32) {
+	var metadata branchInitMetadata
+	if err := cbor.Unmarshal(data, &metadata); err != nil {
+		return nil, errInvalidSize
+	}
+	relays := make([]string, 0, len(metadata.OutputSchemas))
+	for i := 0; i < len(metadata.OutputSchemas); i++ {
+		relays = append(relays, metadata.OutputSchemas[i].Name)
+	}
+	return relays, success
+}
+
 func loadStateBytes(data []byte) int32 {
 	var snapshot guestSnapshot
 	if err := cbor.Unmarshal(data, &snapshot); err != nil {
@@ -808,6 +867,11 @@ func loadStateBytes(data []byte) int32 {
 	lastTimeoutHandle = snapshot.LastTimeoutHandle
 	pendingBatch = append(pendingBatch[:0], snapshot.PendingBatch...)
 	initMetadata = append(initMetadata[:0], snapshot.InitMetadata...)
+	relays, code := outputRelaysFromInitMetadata(initMetadata)
+	if code != success {
+		return code
+	}
+	outputRelays = append(outputRelays[:0], relays...)
 	savedState = append(savedState[:0], snapshot.SavedState...)
 	errorState = snapshot.ErrorState
 	initialized = true

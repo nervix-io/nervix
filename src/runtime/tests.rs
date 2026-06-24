@@ -17,14 +17,14 @@ use nervix_models::{
     CreateClientHttp, CreateClientMqtt, CreateClientPrometheus, CreateClientWebsockets,
     CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator,
     CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateLookup, CreateReingestor,
-    CreateRelay, CreateRouter, CreateSchema, CreateUnifier, CreateWasmProcessor,
-    CreateWindowProcessor, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState,
-    DomainStatus, DomainTick, EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType, MessageErrorPolicy,
-    ModelKind, MqttIngestMode, MqttQos, MqttSession, ParameterValueMapping, ParseAsType,
+    CreateRelay, CreateSchema, CreateUnifier, CreateWasmProcessor, CreateWindowProcessor, Domain,
+    DomainConfig, DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink,
+    ErrorPolicies, GeneralErrorPolicy, Identifier, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, JsonType, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos,
+    MqttSession, ParameterValueMapping, ParseAsType, ProcessorOutput, ProcessorOutputs,
     RelayParameterization, RemoteAckOutcome, RemoteAckResolution, ResourceId, ResourceVersion,
-    ResourceVersionStatus, RetryPolicy, RouterMatchPolicy, RouterRoute, ScheduledNode, SchemaField,
-    Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, Timestamp, WindowBound,
+    WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmBatchEnvelope, WasmMessageErrorSet, WasmNackSet,
@@ -972,6 +972,7 @@ fn wasm_output_rejects_ack_sidecar_row_count_mismatch() {
         identifier("branch"),
         RuntimeValue::String("test".to_string()),
     )]));
+    let mut token_use_counts = HashMap::default();
 
     let error = super::relay_batch_from_wasm_envelope(
         &branch,
@@ -986,8 +987,10 @@ fn wasm_output_rejects_ack_sidecar_row_count_mismatch() {
             },
         ),
         &mut ack_map,
+        &mut token_use_counts,
     )
-    .expect_err("row count mismatch should reject guest output");
+    .err()
+    .expect("row count mismatch should reject guest output");
 
     assert_eq!(
         error,
@@ -1003,6 +1006,7 @@ fn wasm_output_rejects_malformed_arrow_ipc_before_relay_dispatch() {
         identifier("branch"),
         RuntimeValue::String("test".to_string()),
     )]));
+    let mut token_use_counts = HashMap::default();
 
     let error = super::relay_batch_from_wasm_envelope(
         &branch,
@@ -1017,8 +1021,10 @@ fn wasm_output_rejects_malformed_arrow_ipc_before_relay_dispatch() {
             },
         ),
         &mut ack_map,
+        &mut token_use_counts,
     )
-    .expect_err("malformed guest Arrow IPC should reject guest output");
+    .err()
+    .expect("malformed guest Arrow IPC should reject guest output");
 
     assert_eq!(
         error,
@@ -1034,6 +1040,7 @@ fn wasm_output_rejects_unknown_carried_ack_token() {
         identifier("branch"),
         RuntimeValue::String("test".to_string()),
     )]));
+    let mut token_use_counts = HashMap::default();
 
     let error = super::relay_batch_from_wasm_envelope(
         &branch,
@@ -1050,8 +1057,10 @@ fn wasm_output_rejects_unknown_carried_ack_token() {
             },
         ),
         &mut ack_map,
+        &mut token_use_counts,
     )
-    .expect_err("unknown carried ack token should reject guest output");
+    .err()
+    .expect("unknown carried ack token should reject guest output");
 
     assert_eq!(error, "wasm output referenced unknown ack token 99");
 }
@@ -1473,7 +1482,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             nervix_models::Model::Deduplicator(CreateDeduplicator {
                 name: identifier("dedup_orders"),
                 from_relay: identifier("orders"),
-                into_relay: identifier("projected_orders"),
+                output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 deduplicate_on: "orders.order_id".to_string(),
                 max_time: "10m".to_string(),
@@ -1481,30 +1490,9 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
-                filter_map: None,
+                filter_where: None,
             }),
             "deduplicator 'dedup_orders' is not attached to a branch root",
-        ),
-        (
-            ModelKind::Router,
-            identifier("orders_router"),
-            nervix_models::Model::Router(CreateRouter {
-                name: identifier("orders_router"),
-                from_relay: identifier("orders"),
-                routes: vec![RouterRoute {
-                    into_relay: identifier("urgent_orders"),
-                    condition: "orders.urgent".to_string(),
-                }],
-                match_policy: Default::default(),
-                default_into_relay: identifier("default_orders"),
-                parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
-                mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
-                filter_map: None,
-            }),
-            "router 'orders_router' is not attached to a branch root",
         ),
         (
             ModelKind::Unifier,
@@ -1512,13 +1500,13 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             nervix_models::Model::Unifier(CreateUnifier {
                 name: identifier("join_orders"),
                 from_relays: vec![identifier("left_orders"), identifier("right_orders")],
-                into_relay: identifier("joined_orders"),
+                output_routes: ProcessorOutputs::single(identifier("joined_orders")),
                 parameterized_by: parameterized_by("tenant", "left_orders", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
-                filter_map: None,
+                filter_where: None,
             }),
             "unifier 'join_orders' is not attached to a branch root",
         ),
@@ -1528,7 +1516,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             nervix_models::Model::WindowProcessor(CreateWindowProcessor {
                 name: identifier("orders_window"),
                 from_relay: identifier("orders"),
-                into_relay: identifier("order_summaries"),
+                output_routes: ProcessorOutputs::single(identifier("order_summaries")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 width: WindowBound {
                     messages: Some(10),
@@ -1541,6 +1529,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 mode: AckMode::Attached,
                 aggregate: "order_summaries.count = COUNT(orders.amount)".to_string(),
                 message_error_policy: MessageErrorPolicy::Log,
+                filter_where: None,
             }),
             "window processor 'orders_window' is not attached to a branch root",
         ),
@@ -1550,7 +1539,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             nervix_models::Model::Inferencer(CreateInferencer {
                 name: identifier("score_orders"),
                 from_relay: identifier("orders"),
-                into_relay: identifier("scores"),
+                output_routes: ProcessorOutputs::single(identifier("scores")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 resource: identifier("score_model"),
                 resource_version: None,
@@ -1569,7 +1558,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 max_batch_size: None,
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
-                filter_map: None,
+                filter_where: None,
             }),
             "inferencer 'score_orders' is not attached to a branch root",
         ),
@@ -3963,7 +3952,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
                     from_relay: identifier("orders"),
-                    into_relay: identifier("projected_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "projected_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
@@ -3971,7 +3960,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -3981,7 +3970,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_projected_orders"),
                     from_relay: identifier("projected_orders"),
-                    into_relay: identifier("aggregated_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("aggregated_orders")),
                     parameterized_by: parameterized_by("tenant", "projected_orders", &["tenant"]),
                     deduplicate_on: "tenant_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
@@ -3989,7 +3978,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4021,10 +4010,15 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
     assert_eq!(spec.root_relay, identifier("orders"));
     assert_eq!(spec.roots.len(), 1);
     assert_eq!(spec.roots[0].processor, identifier("dedup_orders"));
-    let ParameterizedProcessorOperationSpec::Deduplicator { output, .. } = &spec.roots[0].operation
+    let ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+        &spec.roots[0].operation
     else {
         panic!("expected deduplicator output");
     };
+    let output = output_routes
+        .routes
+        .first()
+        .expect("deduplicator should have output route");
     assert_eq!(output.children.len(), 1);
     assert_eq!(
         output.children[0].processor,
@@ -4062,7 +4056,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                 nervix_models::Model::WindowProcessor(CreateWindowProcessor {
                     name: identifier("metric_window"),
                     from_relay: identifier("metrics"),
-                    into_relay: identifier("metric_summary"),
+                    output_routes: ProcessorOutputs::single(identifier("metric_summary")),
                     parameterized_by: parameterized_by("host", "metrics", &["host"]),
                     width: WindowBound {
                         messages: Some(100),
@@ -4075,6 +4069,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                     mode: AckMode::Attached,
                     aggregate: "metric_summary.count = COUNT(metrics.latency)".to_string(),
                     message_error_policy: MessageErrorPolicy::Log,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("host")]),
             ),
@@ -4084,7 +4079,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_summary"),
                     from_relay: identifier("metric_summary"),
-                    into_relay: identifier("projected_summary"),
+                    output_routes: ProcessorOutputs::single(identifier("projected_summary")),
                     parameterized_by: parameterized_by("host", "metric_summary", &["host"]),
                     deduplicate_on: "metric_summary.count".to_string(),
                     max_time: "10m".to_string(),
@@ -4092,7 +4087,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("host")]),
             ),
@@ -4106,7 +4101,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
     assert_eq!(spec.roots.len(), 1);
     assert_eq!(spec.roots[0].processor, identifier("metric_window"));
     let ParameterizedProcessorOperationSpec::WindowProcessor {
-        output,
+        output_routes,
         width,
         step,
         aggregate,
@@ -4114,6 +4109,10 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
     else {
         panic!("expected window processor branch node");
     };
+    let output = output_routes
+        .routes
+        .first()
+        .expect("window processor should have output route");
     assert_eq!(output.relay, identifier("metric_summary"));
     assert_eq!(output.children.len(), 1);
     assert_eq!(output.children[0].processor, identifier("dedup_summary"));
@@ -4152,7 +4151,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                 nervix_models::Model::Inferencer(CreateInferencer {
                     name: identifier("score_model"),
                     from_relay: identifier("features"),
-                    into_relay: identifier("scores"),
+                    output_routes: ProcessorOutputs::single(identifier("scores")),
                     parameterized_by: parameterized_by("tenant", "features", &["tenant"]),
                     resource: identifier("fraud_model"),
                     resource_version: Some(3),
@@ -4171,7 +4170,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                     max_batch_size: None,
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-                    filter_map: Some("WHERE active".to_string()),
+                    filter_where: Some("WHERE active".to_string()),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4181,7 +4180,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_scores"),
                     from_relay: identifier("scores"),
-                    into_relay: identifier("projected_scores"),
+                    output_routes: ProcessorOutputs::single(identifier("projected_scores")),
                     parameterized_by: parameterized_by("tenant", "scores", &["tenant"]),
                     deduplicate_on: "scores.score".to_string(),
                     max_time: "10m".to_string(),
@@ -4189,7 +4188,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4203,19 +4202,22 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
     assert_eq!(spec.roots.len(), 1);
     assert_eq!(spec.roots[0].processor, identifier("score_model"));
     let ParameterizedProcessorOperationSpec::Inferencer {
-        output,
+        output_routes,
         resource,
         resource_version,
         file,
         inputs,
         outputs,
         flush_each,
-        filter_map,
         ..
     } = &spec.roots[0].operation
     else {
         panic!("expected inferencer branch node");
     };
+    let output = output_routes
+        .routes
+        .first()
+        .expect("inferencer should have output route");
     assert_eq!(output.relay, identifier("scores"));
     assert_eq!(output.children.len(), 1);
     assert_eq!(output.children[0].processor, identifier("dedup_scores"));
@@ -4225,7 +4227,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
     assert_eq!(inputs.len(), 1);
     assert_eq!(outputs.len(), 1);
     assert_eq!(flush_each, "IMMEDIATE");
-    assert_eq!(filter_map.as_deref(), Some("WHERE active"));
+    assert_eq!(spec.roots[0].filter_where.as_deref(), Some("WHERE active"));
 }
 
 #[test]
@@ -4238,13 +4240,13 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
                 nervix_models::Model::Reingestor(CreateReingestor {
                     name: identifier("tenant_partition"),
                     from_relay: identifier("orders"),
-                    into_relay: identifier("tenant_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4254,7 +4256,7 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
                     from_relay: identifier("tenant_orders"),
-                    into_relay: identifier("projected_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: parameterized_by("tenant", "tenant_orders", &["tenant"]),
                     deduplicate_on: "urgent_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
@@ -4262,7 +4264,7 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4280,7 +4282,7 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_router_outputs_and_default_tree() {
+fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
             (
@@ -4304,24 +4306,29 @@ fn parameterized_ingestor_specs_capture_router_outputs_and_default_tree() {
                 Some(vec![identifier("tenant")]),
             ),
             (
-                ModelKind::Router,
-                identifier("orders_router"),
-                nervix_models::Model::Router(CreateRouter {
-                    name: identifier("orders_router"),
+                ModelKind::Deduplicator,
+                identifier("orders_splitter"),
+                nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    name: identifier("orders_splitter"),
                     from_relay: identifier("orders"),
-                    routes: vec![RouterRoute {
-                        into_relay: identifier("urgent_orders"),
-                        condition: "urgent".to_string(),
-                    }],
-                    match_policy: Default::default(),
-                    default_into_relay: identifier("default_orders"),
+                    output_routes: ProcessorOutputs::new(vec![
+                        ProcessorOutput {
+                            relay: identifier("urgent_orders"),
+                            filter_map: Some("WHERE urgent".to_string()),
+                        },
+                        ProcessorOutput {
+                            relay: identifier("default_orders"),
+                            filter_map: None,
+                        },
+                    ]),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    deduplicate_on: "orders.order_id".to_string(),
+                    max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: Some("WHERE active".to_string()),
+                    filter_where: Some("WHERE active".to_string()),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4331,7 +4338,7 @@ fn parameterized_ingestor_specs_capture_router_outputs_and_default_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_urgent"),
                     from_relay: identifier("urgent_orders"),
-                    into_relay: identifier("urgent_projected"),
+                    output_routes: ProcessorOutputs::single(identifier("urgent_projected")),
                     parameterized_by: parameterized_by("tenant", "urgent_orders", &["tenant"]),
                     deduplicate_on: "default_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
@@ -4339,8 +4346,7 @@ fn parameterized_ingestor_specs_capture_router_outputs_and_default_tree() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4350,7 +4356,7 @@ fn parameterized_ingestor_specs_capture_router_outputs_and_default_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_default"),
                     from_relay: identifier("default_orders"),
-                    into_relay: identifier("default_projected"),
+                    output_routes: ProcessorOutputs::single(identifier("default_projected")),
                     parameterized_by: parameterized_by("tenant", "default_orders", &["tenant"]),
                     deduplicate_on: "projected_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
@@ -4358,8 +4364,7 @@ fn parameterized_ingestor_specs_capture_router_outputs_and_default_tree() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4370,27 +4375,28 @@ fn parameterized_ingestor_specs_capture_router_outputs_and_default_tree() {
     assert_eq!(specs.len(), 1);
     let spec = &specs[0];
     assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("orders_router"));
-    let ParameterizedProcessorOperationSpec::Router {
-        filter_map,
-        match_policy: _,
-        routes,
-        default_output,
-    } = &spec.roots[0].operation
+    assert_eq!(spec.roots[0].processor, identifier("orders_splitter"));
+    let ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+        &spec.roots[0].operation
     else {
-        panic!("expected router output");
+        panic!("expected deduplicator output routes");
     };
-    assert_eq!(filter_map.as_deref(), Some("WHERE active"));
-    assert_eq!(routes.len(), 1);
-    assert_eq!(routes[0].condition, "urgent");
-    assert_eq!(routes[0].output.children.len(), 1);
+    assert_eq!(spec.roots[0].filter_where.as_deref(), Some("WHERE active"));
+    assert_eq!(output_routes.routes.len(), 2);
     assert_eq!(
-        routes[0].output.children[0].processor,
+        output_routes.routes[0].filter_map.as_deref(),
+        Some("WHERE urgent")
+    );
+    assert_eq!(output_routes.routes[0].children.len(), 1);
+    assert_eq!(
+        output_routes.routes[0].children[0].processor,
         identifier("dedup_urgent")
     );
-    assert_eq!(default_output.children.len(), 1);
+    assert_eq!(output_routes.routes.len(), 2);
+    assert_eq!(output_routes.routes[1].relay, identifier("default_orders"));
+    assert_eq!(output_routes.routes[1].children.len(), 1);
     assert_eq!(
-        default_output.children[0].processor,
+        output_routes.routes[1].children[0].processor,
         identifier("dedup_default")
     );
 }
@@ -4447,14 +4453,13 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                 nervix_models::Model::Unifier(CreateUnifier {
                     name: identifier("join_streams"),
                     from_relays: vec![identifier("left_stream"), identifier("right_stream")],
-                    into_relay: identifier("joined_stream"),
+                    output_routes: ProcessorOutputs::single(identifier("joined_stream")),
                     parameterized_by: parameterized_by("tenant", "left_stream", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4464,7 +4469,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_joined"),
                     from_relay: identifier("joined_stream"),
-                    into_relay: identifier("projected_joined"),
+                    output_routes: ProcessorOutputs::single(identifier("projected_joined")),
                     parameterized_by: parameterized_by("tenant", "joined_stream", &["tenant"]),
                     deduplicate_on: "joined_stream.tenant".to_string(),
                     max_time: "10m".to_string(),
@@ -4472,8 +4477,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4499,9 +4503,14 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
             unifier.input_relays,
             vec![identifier("left_stream"), identifier("right_stream")]
         );
-        let ParameterizedProcessorOperationSpec::Unifier { output, .. } = &unifier.operation else {
+        let ParameterizedProcessorOperationSpec::Unifier { output_routes, .. } = &unifier.operation
+        else {
             panic!("expected unifier processor");
         };
+        let output = output_routes
+            .routes
+            .first()
+            .expect("unifier should have output route");
         assert_eq!(output.relay, identifier("joined_stream"));
         assert!(
             spec.processors
@@ -4512,7 +4521,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_default_only_router_tree() {
+fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
             (
@@ -4537,21 +4546,20 @@ fn parameterized_ingestor_specs_capture_default_only_router_tree() {
                 Some(vec![identifier("tenant")]),
             ),
             (
-                ModelKind::Router,
-                identifier("orders_router"),
-                nervix_models::Model::Router(CreateRouter {
-                    name: identifier("orders_router"),
+                ModelKind::Deduplicator,
+                identifier("orders_filter"),
+                nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    name: identifier("orders_filter"),
                     from_relay: identifier("orders"),
-                    routes: Vec::new(),
-                    match_policy: Default::default(),
-                    default_into_relay: identifier("projected_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    deduplicate_on: "orders.order_id".to_string(),
+                    max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: Some("WHERE active".to_string()),
+                    filter_where: Some("WHERE active".to_string()),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4561,7 +4569,7 @@ fn parameterized_ingestor_specs_capture_default_only_router_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_projected"),
                     from_relay: identifier("projected_orders"),
-                    into_relay: identifier("aggregated_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("aggregated_orders")),
                     parameterized_by: parameterized_by("tenant", "projected_orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
@@ -4569,8 +4577,7 @@ fn parameterized_ingestor_specs_capture_default_only_router_tree() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4581,22 +4588,21 @@ fn parameterized_ingestor_specs_capture_default_only_router_tree() {
     assert_eq!(specs.len(), 1);
     let spec = &specs[0];
     assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("orders_router"));
-    let ParameterizedProcessorOperationSpec::Router {
-        filter_map,
-        match_policy: _,
-        routes,
-        default_output,
-    } = &spec.roots[0].operation
+    assert_eq!(spec.roots[0].processor, identifier("orders_filter"));
+    let ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+        &spec.roots[0].operation
     else {
-        panic!("expected default-only router output");
+        panic!("expected processor output routes");
     };
-    assert_eq!(filter_map.as_deref(), Some("WHERE active"));
-    assert!(routes.is_empty());
-    assert_eq!(default_output.relay, identifier("projected_orders"));
-    assert_eq!(default_output.children.len(), 1);
+    assert_eq!(spec.roots[0].filter_where.as_deref(), Some("WHERE active"));
+    assert_eq!(output_routes.routes.len(), 1);
     assert_eq!(
-        default_output.children[0].processor,
+        output_routes.routes[0].relay,
+        identifier("projected_orders")
+    );
+    assert_eq!(output_routes.routes[0].children.len(), 1);
+    assert_eq!(
+        output_routes.routes[0].children[0].processor,
         identifier("dedup_projected")
     );
 }
@@ -4632,7 +4638,7 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
                     from_relay: identifier("orders"),
-                    into_relay: identifier("projected_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: parameterized_by("root", "orders", &[]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
@@ -4640,8 +4646,7 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(Vec::new()),
             ),
@@ -4678,7 +4683,7 @@ fn parameterized_ingestor_specs_use_explicit_unparameterized_relay_as_root() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
                     from_relay: identifier("orders"),
-                    into_relay: identifier("projected_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: BranchParameterization::unparameterized(),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
@@ -4686,7 +4691,7 @@ fn parameterized_ingestor_specs_use_explicit_unparameterized_relay_as_root() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     message_error_policy: MessageErrorPolicy::Log,
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(Vec::new()),
             ),
@@ -4724,7 +4729,7 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
                 nervix_models::Model::WasmProcessor(CreateWasmProcessor {
                     name: identifier("filter_orders"),
                     from_relay: identifier("orders"),
-                    into_relay: identifier("filtered_orders"),
+                    output_routes: ProcessorOutputs::single(identifier("filtered_orders")),
                     parameterized_by: BranchParameterization::unparameterized(),
                     resource: identifier("filter_resource"),
                     resource_version: None,
@@ -4732,6 +4737,7 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
                     message_error_policy: MessageErrorPolicy::Log,
                     global_error_policy: GeneralErrorPolicy::Ignore,
                     mode: AckMode::Attached,
+                    filter_where: None,
                 }),
                 Some(Vec::new()),
             ),
@@ -4760,14 +4766,13 @@ fn parameterized_ingestor_specs_include_reingestor_with_declared_parameterizatio
             nervix_models::Model::Reingestor(CreateReingestor {
                 name: identifier("tenant_partition"),
                 from_relay: identifier("notifications"),
-                into_relay: identifier("tenant_notifications"),
+                output_routes: ProcessorOutputs::single(identifier("tenant_notifications")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
-
-                filter_map: None,
+                filter_where: None,
             }),
             None,
         )]
@@ -5101,14 +5106,13 @@ async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
             CreateReingestor {
                 name: identifier("tenant_partition"),
                 from_relay: identifier("orders"),
-                into_relay: identifier("tenant_orders"),
+                output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
-
-                filter_map: None,
+                filter_where: None,
             },
             fan_in,
         )
@@ -5304,262 +5308,6 @@ async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() 
 }
 
 #[tokio::test]
-async fn router_planning_fans_out_matches_and_uses_default() {
-    let schema = test_schema(&[
-        ("id", ParseAsType::String),
-        ("active", ParseAsType::Bool),
-        ("level", ParseAsType::String),
-        ("urgent", ParseAsType::Bool),
-    ]);
-    let program = super::compile_router_program_from_parts(
-        &identifier("orders_router"),
-        &identifier("orders"),
-        Some("WHERE orders.active"),
-        ["orders.level = \"error\"", "orders.urgent"].into_iter(),
-        schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
-        schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
-        super::RuntimeVmCompileContext {
-            available_materialized_streams: &HashMap::default(),
-            available_lookups: &HashMap::default(),
-            current_parameterization: &[],
-            current_branch_schema: None,
-            current_branch_sensitivity: None,
-        },
-    )
-    .expect("router program should compile");
-
-    let (error_acks, error_completion) = AckSet::root();
-    let (default_acks, default_completion) = AckSet::root();
-    let (filtered_acks, filtered_completion) = AckSet::root();
-    let batch = super::RelayRecordBatch::from_messages(
-        schema.clone(),
-        vec![
-            RelayMessage {
-                key: string_branch_key("tenant", "acme"),
-                record: RuntimeRecord::from_fields([
-                    ("id".to_string(), RuntimeValue::String("err-1".to_string())),
-                    ("active".to_string(), RuntimeValue::Bool(true)),
-                    (
-                        "level".to_string(),
-                        RuntimeValue::String("error".to_string()),
-                    ),
-                    ("urgent".to_string(), RuntimeValue::Bool(true)),
-                ]),
-                acks: error_acks,
-            },
-            RelayMessage {
-                key: string_branch_key("tenant", "acme"),
-                record: RuntimeRecord::from_fields([
-                    ("id".to_string(), RuntimeValue::String("info-1".to_string())),
-                    ("active".to_string(), RuntimeValue::Bool(true)),
-                    (
-                        "level".to_string(),
-                        RuntimeValue::String("info".to_string()),
-                    ),
-                    ("urgent".to_string(), RuntimeValue::Bool(false)),
-                ]),
-                acks: default_acks,
-            },
-            RelayMessage {
-                key: string_branch_key("tenant", "acme"),
-                record: RuntimeRecord::from_fields([
-                    (
-                        "id".to_string(),
-                        RuntimeValue::String("ignored".to_string()),
-                    ),
-                    ("active".to_string(), RuntimeValue::Bool(false)),
-                    (
-                        "level".to_string(),
-                        RuntimeValue::String("error".to_string()),
-                    ),
-                    ("urgent".to_string(), RuntimeValue::Bool(true)),
-                ]),
-                acks: filtered_acks,
-            },
-        ],
-    )
-    .expect("batch should build");
-
-    let router_plan = super::plan_router_messages(
-        &identifier("orders_router"),
-        &program,
-        batch,
-        RouterMatchPolicy::All,
-        2,
-        Timestamp::from_unix_nanos(1),
-        &HashMap::default(),
-    )
-    .await
-    .expect("router planning should succeed");
-    let route_messages = router_plan.route_messages;
-    let default_messages = router_plan.default_messages;
-
-    assert_eq!(route_messages.len(), 2);
-    assert_eq!(route_messages[0].len(), 1);
-    assert_eq!(route_messages[1].len(), 1);
-    assert_eq!(default_messages.len(), 1);
-    let error_wait = error_completion.wait();
-    tokio::pin!(error_wait);
-    assert!(
-        timeout(Duration::from_millis(10), &mut error_wait)
-            .await
-            .is_err(),
-        "attached multi-route ack should stay pending until both branches resolve"
-    );
-
-    for messages in &route_messages {
-        for message in messages {
-            message.acks.ack_success();
-        }
-    }
-    for message in &default_messages {
-        message.acks.ack_success();
-    }
-
-    assert_eq!(
-        timeout(Duration::from_secs(1), error_wait)
-            .await
-            .expect("error completion should resolve"),
-        AckOutcome::Ack
-    );
-    assert_eq!(
-        timeout(Duration::from_secs(1), default_completion.wait())
-            .await
-            .expect("default completion should resolve"),
-        AckOutcome::Ack
-    );
-    assert_eq!(
-        timeout(Duration::from_secs(1), filtered_completion.wait())
-            .await
-            .expect("filtered completion should resolve"),
-        AckOutcome::Ack
-    );
-}
-
-#[tokio::test]
-async fn router_planning_routes_on_transformed_fields_without_default_fallback() {
-    let input_schema = test_schema(&[
-        ("id", ParseAsType::String),
-        ("active", ParseAsType::Bool),
-        ("level", ParseAsType::String),
-        ("legacy", ParseAsType::String),
-    ]);
-    let program = super::compile_router_program_from_parts(
-        &identifier("rewrite_router"),
-        &identifier("orders"),
-        Some(
-            "SET orders.severity = lower(orders.level) UNSET orders.level, orders.legacy WHERE \
-             orders.active",
-        ),
-        ["orders.severity = \"error\""].into_iter(),
-        input_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
-        test_schema(&[
-            ("id", ParseAsType::String),
-            ("active", ParseAsType::Bool),
-            ("severity", ParseAsType::String),
-        ])
-        .arrow_schema(),
-        super::VmSchemaSensitivity::default(),
-        super::RuntimeVmCompileContext {
-            available_materialized_streams: &HashMap::default(),
-            available_lookups: &HashMap::default(),
-            current_parameterization: &[],
-            current_branch_schema: None,
-            current_branch_sensitivity: None,
-        },
-    )
-    .expect("router program should compile");
-
-    let (matched_acks, matched_completion) = AckSet::root();
-    let (default_acks, default_completion) = AckSet::root();
-    let batch = super::RelayRecordBatch::from_messages(
-        input_schema.clone(),
-        vec![
-            RelayMessage {
-                key: string_branch_key("tenant", "acme"),
-                record: RuntimeRecord::from_fields([
-                    ("id".to_string(), RuntimeValue::String("err-2".to_string())),
-                    ("active".to_string(), RuntimeValue::Bool(true)),
-                    (
-                        "level".to_string(),
-                        RuntimeValue::String("ERROR".to_string()),
-                    ),
-                    (
-                        "legacy".to_string(),
-                        RuntimeValue::String("old".to_string()),
-                    ),
-                ]),
-                acks: matched_acks,
-            },
-            RelayMessage {
-                key: string_branch_key("tenant", "acme"),
-                record: RuntimeRecord::from_fields([
-                    ("id".to_string(), RuntimeValue::String("info-2".to_string())),
-                    ("active".to_string(), RuntimeValue::Bool(true)),
-                    (
-                        "level".to_string(),
-                        RuntimeValue::String("INFO".to_string()),
-                    ),
-                    (
-                        "legacy".to_string(),
-                        RuntimeValue::String("old".to_string()),
-                    ),
-                ]),
-                acks: default_acks,
-            },
-        ],
-    )
-    .expect("batch should build");
-
-    let router_plan = super::plan_router_messages(
-        &identifier("rewrite_router"),
-        &program,
-        batch,
-        RouterMatchPolicy::All,
-        1,
-        Timestamp::from_unix_nanos(1),
-        &HashMap::default(),
-    )
-    .await
-    .expect("router planning should succeed");
-    let route_messages = router_plan.route_messages;
-    let default_messages = router_plan.default_messages;
-
-    assert_eq!(route_messages.len(), 1);
-    assert_eq!(route_messages[0].len(), 1);
-    assert_eq!(default_messages.len(), 1);
-
-    let matched_payload = route_messages[0][0].record.to_json_string();
-    assert!(matched_payload.contains("\"severity\":\"error\""));
-    assert!(!matched_payload.contains("\"level\""));
-    assert!(!matched_payload.contains("\"legacy\""));
-
-    let default_payload = default_messages[0].record.to_json_string();
-    assert!(default_payload.contains("\"severity\":\"info\""));
-    assert!(!default_payload.contains("\"level\""));
-    assert!(!default_payload.contains("\"legacy\""));
-
-    route_messages[0][0].acks.ack_success();
-    default_messages[0].acks.ack_success();
-
-    assert_eq!(
-        timeout(Duration::from_secs(1), matched_completion.wait())
-            .await
-            .expect("matched completion should resolve"),
-        AckOutcome::Ack
-    );
-    assert_eq!(
-        timeout(Duration::from_secs(1), default_completion.wait())
-            .await
-            .expect("default completion should resolve"),
-        AckOutcome::Ack
-    );
-}
-
-#[tokio::test]
 async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
     let input_schema = test_schema(&[
         ("id", ParseAsType::String),
@@ -5675,7 +5423,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
     .expect("batch should build");
 
     let plan = super::plan_filter_map_messages(
-        "router",
+        "deduplicator",
         &identifier("project_titles"),
         &program,
         batch,
@@ -5684,7 +5432,11 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
     )
     .await
     .expect("filter-map planning should succeed");
-    let messages = plan.messages;
+    let messages = plan
+        .batch
+        .expect("filter-map should produce a batch")
+        .try_into_messages()
+        .expect("filter-map batch should convert to messages");
 
     assert_eq!(messages.len(), 1);
     assert_eq!(
@@ -5746,7 +5498,7 @@ async fn filter_map_can_read_branch_namespace() {
     .expect("batch should build");
 
     let plan = super::plan_filter_map_messages(
-        "router",
+        "deduplicator",
         &identifier("project_notifications"),
         &program,
         batch,
@@ -5756,19 +5508,25 @@ async fn filter_map_can_read_branch_namespace() {
     .await
     .expect("filter-map planning should succeed");
 
-    assert_eq!(plan.messages.len(), 1);
+    let messages = plan
+        .batch
+        .expect("filter-map should produce a batch")
+        .try_into_messages()
+        .expect("filter-map batch should convert to messages");
+
+    assert_eq!(messages.len(), 1);
     assert_eq!(
-        plan.messages[0].record.value("branch_tenant"),
+        messages[0].record.value("branch_tenant"),
         Some(&RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(
-        plan.messages[0].record.value("amount"),
+        messages[0].record.value("amount"),
         Some(&RuntimeValue::I64(8))
     );
 }
 
 #[tokio::test]
-async fn default_router_filter_map_can_read_branch_namespace() {
+async fn filter_map_with_unset_can_read_branch_namespace() {
     let input_schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("active", ParseAsType::Bool),
@@ -5780,15 +5538,15 @@ async fn default_router_filter_map_can_read_branch_namespace() {
         ("branch_tenant", ParseAsType::String),
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
-    let program = super::compile_router_program_from_parts(
+    let program = super::compile_filter_map_program(
+        &domain("default"),
         &identifier("project_notifications"),
-        &identifier("notifications"),
+        &[identifier("notifications")],
         Some(
             "SET notifications.branch_tenant = branch.tenant, notifications.amount = \
              notifications.amount + 1 UNSET notifications.active WHERE branch.tenant = \
              notifications.tenant",
         ),
-        std::iter::empty::<&str>(),
         input_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
         output_schema.arrow_schema(),
@@ -5801,7 +5559,8 @@ async fn default_router_filter_map_can_read_branch_namespace() {
             current_branch_sensitivity: None,
         },
     )
-    .expect("default router should compile");
+    .expect("filter-map should compile")
+    .expect("program should exist");
 
     let (acks, _completion) = AckSet::root();
     let batch = super::RelayRecordBatch::from_messages(
@@ -5821,30 +5580,34 @@ async fn default_router_filter_map_can_read_branch_namespace() {
     )
     .expect("batch should build");
 
-    let plan = super::plan_router_messages(
+    let plan = super::plan_filter_map_messages(
+        "processor",
         &identifier("project_notifications"),
         &program,
         batch,
-        RouterMatchPolicy::First,
-        0,
         super::current_timestamp(),
         &HashMap::default(),
     )
     .await
-    .expect("router planning should succeed");
+    .expect("filter-map planning should succeed");
 
-    assert!(plan.route_messages.is_empty());
-    assert_eq!(plan.default_messages.len(), 1);
+    let messages = plan
+        .batch
+        .expect("filter-map should produce a batch")
+        .try_into_messages()
+        .expect("filter-map batch should convert to messages");
+
+    assert_eq!(messages.len(), 1);
     assert_eq!(
-        plan.default_messages[0].record.value("branch_tenant"),
+        messages[0].record.value("branch_tenant"),
         Some(&RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(
-        plan.default_messages[0].record.value("amount"),
+        messages[0].record.value("amount"),
         Some(&RuntimeValue::I64(8))
     );
     assert_eq!(
-        plan.default_messages[0].key.as_ref(),
+        messages[0].key.as_ref(),
         string_branch_key("tenant", "acme").as_ref()
     );
 }

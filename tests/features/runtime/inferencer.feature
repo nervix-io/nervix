@@ -52,7 +52,8 @@ Feature: Inferencer resources
 
       CREATE INFERENCER score_model
         FROM features
-        TO scored PARAMETERIZED BY tenant_branch
+        TO scored SET scored.tenant = features.tenant
+        PARAMETERIZED BY tenant_branch
         USING RESOURCE fraud_model VERSION 1
         FILE 'models/simple_score.onnx'
         INPUTS { "features" = features.vector }
@@ -122,7 +123,8 @@ Feature: Inferencer resources
 
       CREATE INFERENCER score_model
         FROM features
-        TO scored PARAMETERIZED BY tenant_branch
+        TO scored SET scored.tenant = features.tenant
+        PARAMETERIZED BY tenant_branch
         USING RESOURCE fraud_model VERSION 1
         FILE 'models/simple_score.onnx'
         INPUTS { "<input_tensor>" = features.vector }

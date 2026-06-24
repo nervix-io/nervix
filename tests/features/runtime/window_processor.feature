@@ -898,7 +898,7 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Parameterized window chains preserve concrete branch keys through routers
+  Scenario Outline: Parameterized window chains preserve concrete branch keys through output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -955,19 +955,14 @@ Feature: Window processor runtime behavior
 
       CREATE WINDOW PROCESSOR first_window
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO high_summaries WHERE high_summaries.total_latency >= 100
+        TO low_summaries PARAMETERIZED BY tenant_branch
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
-          metric_summaries.tenant = FIRST(metrics.tenant),
-          metric_summaries.sample_count = COUNT(metrics.latency),
-          metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-
-      CREATE ROUTER summary_router
-        FROM metric_summaries
-        TO high_summaries WHERE metric_summaries.total_latency >= 100
-        DEFAULT TO low_summaries PARAMETERIZED BY tenant_branch
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+          high_summaries.tenant = FIRST(metrics.tenant),
+          high_summaries.sample_count = COUNT(metrics.latency),
+          high_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
 
       CREATE WINDOW PROCESSOR second_window
         FROM high_summaries
@@ -978,8 +973,8 @@ Feature: Window processor runtime behavior
           chain_summaries.tenant = FIRST(high_summaries.tenant),
           chain_summaries.high_window_count = COUNT(high_summaries.total_latency) ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO chain_summaries WHERE chain_summaries.tenant = 'acme';
       START;
+      SUBSCRIBE SESSION TO chain_summaries WHERE chain_summaries.tenant = 'acme';
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """

@@ -7,8 +7,9 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        duration_lit, if_not_exists_clause, into_parse_error, kw, lex_input, message_error_policy,
-        relay_ref, suggestions_from_errors, tok, window_processor_name,
+        duration_lit, filter_where_clause, if_not_exists_clause, into_parse_error, kw, lex_input,
+        message_error_policy, processor_outputs, relay_ref, suggestions_from_errors, tok,
+        window_processor_name,
     },
 };
 
@@ -206,8 +207,8 @@ pub fn create_window_processor_parser<'src>()
         .then(window_processor_name())
         .then_ignore(kw(Identifier::From))
         .then(relay_ref())
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(processor_outputs())
         .then(branch_parameterization())
         .then_ignore(kw(Identifier::Width))
         .then(window_bound())
@@ -222,7 +223,10 @@ pub fn create_window_processor_parser<'src>()
                     (
                         (
                             (
-                                ((((if_not_exists, mode), name), from_relay), into_relay),
+                                (
+                                    ((((if_not_exists, mode), name), from_relay), filter_where),
+                                    outputs,
+                                ),
                                 parameterized_by,
                             ),
                             width,
@@ -239,13 +243,14 @@ pub fn create_window_processor_parser<'src>()
                     CreateWindowProcessor {
                         name,
                         from_relay,
-                        into_relay,
+                        output_routes: outputs,
                         parameterized_by,
                         width,
                         step,
                         aggregate,
                         message_error_policy,
                         mode: mode.unwrap_or(AckMode::Attached),
+                        filter_where,
                     },
                     if_not_exists,
                 ))
@@ -329,7 +334,16 @@ mod tests {
             parse_create_window_processor_tokens(&to_tokens(input)).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "latency_window");
         assert_eq!(parsed.from_relay.as_str(), "s1");
-        assert_eq!(parsed.into_relay.as_str(), "s2");
+        assert_eq!(
+            parsed
+                .output_routes
+                .routes
+                .first()
+                .expect("output route should parse")
+                .relay
+                .as_str(),
+            "s2"
+        );
         assert_eq!(parsed.width.messages, Some(100));
         assert_eq!(parsed.width.duration.as_deref(), Some("10s"));
         assert_eq!(parsed.step.messages, Some(10));

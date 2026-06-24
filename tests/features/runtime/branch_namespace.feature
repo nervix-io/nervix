@@ -53,13 +53,16 @@ Feature: Branch namespace
         TOPIC branch_namespace_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE ROUTER project_notifications
+      CREATE DEDUPLICATOR project_notifications
         FROM notifications
-        SET notifications.branch_tenant = branch.tenant,
-            notifications.amount = notifications.amount + 1
-        UNSET notifications.active
-        WHERE branch.tenant = notifications.tenant
-        DEFAULT TO projected_notifications PARAMETERIZED BY tenant_branch
+        TO projected_notifications
+          SET projected_notifications.branch_tenant = branch.tenant,
+              projected_notifications.amount = notifications.amount + 1
+          UNSET notifications.active
+          WHERE branch.tenant = notifications.tenant
+        PARAMETERIZED BY tenant_branch
+        DEDUPLICATE ON notifications.user_id
+        MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO projected_notifications WHERE projected_notifications.tenant = 'acme';

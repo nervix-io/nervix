@@ -375,11 +375,10 @@ Feature: Relay deduplication
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        FROM ss1 TO ss2 SET ss2.source = state_txns.source PARAMETERIZED BY transaction_id_branch
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        SET ss1.source = state_txns.source ON MESSAGE ERROR LOG;
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO ss2;
 

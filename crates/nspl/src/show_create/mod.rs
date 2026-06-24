@@ -7,8 +7,8 @@ use crate::{
         ParseError, ParseFromSourceError, client_ref, codec_ref, correlator_ref,
         current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref,
         inferencer_ref, ingestor_ref, into_parse_error, kw, kw_phrase2, lex_input, lookup_ref,
-        reingestor_ref, relay_ref, reorderer_ref, router_ref, schema_ref, suggestions_from_errors,
-        tok, unifier_ref, vhost_ref, window_processor_ref, wire_schema_ref,
+        reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggestions_from_errors, tok,
+        unifier_ref, vhost_ref, window_processor_ref, wire_schema_ref,
     },
 };
 
@@ -68,12 +68,6 @@ pub fn show_create_parser<'src>()
             .ignore_then(reingestor_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Reingestor,
-                name,
-            }),
-        kw(Identifier::Router)
-            .ignore_then(router_ref())
-            .map(|name| ShowCreate {
-                kind: ModelKind::Router,
                 name,
             }),
         kw(Identifier::Reorderer)
@@ -213,14 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_show_create_router() {
-        let tokens = to_tokens("SHOW CREATE ROUTER route_logs;");
-        let parsed = parse_show_create_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.kind, ModelKind::Router);
-        assert_eq!(parsed.name.as_str(), "route_logs");
-    }
-
-    #[test]
     fn parses_show_create_deduplicator() {
         let tokens = to_tokens("SHOW CREATE DEDUPLICATOR dedup;");
         let parsed = parse_show_create_tokens(&tokens).expect("parse should succeed");
@@ -286,7 +272,6 @@ mod tests {
         assert!(suggestions.contains(&"ENDPOINT".to_string()));
         assert!(suggestions.contains(&"GENERATOR".to_string()));
         assert!(suggestions.contains(&"INGESTOR".to_string()));
-        assert!(suggestions.contains(&"ROUTER".to_string()));
         assert!(suggestions.contains(&"RELAY".to_string()));
         assert!(suggestions.contains(&"HASH MAP".to_string()));
         assert!(suggestions.contains(&"UNIFIER".to_string()));

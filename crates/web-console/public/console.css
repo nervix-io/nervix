@@ -1766,24 +1766,6 @@ button {
   font-style: normal;
 }
 
-.router-ports {
-  position: absolute;
-  right: -6px;
-  top: 50%;
-  display: grid;
-  gap: 4px;
-  transform: translateY(-50%);
-}
-
-.router-ports i {
-  width: 11px;
-  height: 11px;
-  border: 1px solid rgba(136, 92, 246, 0.6);
-  border-radius: 999px;
-  background: rgba(136, 92, 246, 0.14);
-  box-shadow: inset 0 0 0 3px rgba(7, 11, 24, 0.9);
-}
-
 .relay-hit {
   display: flex;
   align-items: center;

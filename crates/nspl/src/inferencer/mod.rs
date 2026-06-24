@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        filter_map_program_until_inference_clause, flush_each, if_not_exists_clause,
-        inferencer_name, into_parse_error, kw, lex_input, message_error_policy, relay_ref,
-        resource_ref, string_lit, suggestions_from_errors, tok, word_raw,
+        filter_where_clause, flush_each, if_not_exists_clause, inferencer_name, into_parse_error,
+        kw, lex_input, message_error_policy, processor_outputs, relay_ref, resource_ref,
+        string_lit, suggestions_from_errors, tok, word_raw,
     },
 };
 
@@ -59,8 +59,8 @@ pub fn create_inferencer_parser<'src>()
         .then(inferencer_name())
         .then_ignore(kw(Identifier::From))
         .then(relay_ref())
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(processor_outputs())
         .then(branch_parameterization())
         .then_ignore(kw(Identifier::Using))
         .then_ignore(kw(Identifier::Resource))
@@ -68,66 +68,44 @@ pub fn create_inferencer_parser<'src>()
         .then(kw(Identifier::Version).ignore_then(u64_value()).or_not())
         .then_ignore(kw(Identifier::File))
         .then(string_lit())
-        .then(filter_map_program_until_inference_clause().or_not())
         .then(field_mappings(Identifier::Inputs))
         .then(field_mappings(Identifier::Outputs))
         .then(flush_each())
         .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(
+        .map(|value| {
+            let (
                 (
-                    (
-                        (
-                            (
-                                (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (((if_not_exists, mode), name), from_relay),
-                                                    into_relay,
-                                                ),
-                                                parameterized_by,
-                                            ),
-                                            resource,
-                                        ),
-                                        resource_version,
-                                    ),
-                                    file,
-                                ),
-                                filter_map,
-                            ),
-                            inputs,
-                        ),
-                        outputs,
-                    ),
+                    (((((base, resource), resource_version), file), inputs), tensor_outputs),
                     flush_each,
                 ),
                 message_error_policy,
-            )| {
-                let (flush_each, max_batch_size) = flush_each;
-                CreateStatement::new(
-                    CreateInferencer {
-                        name,
-                        from_relay,
-                        into_relay,
-                        parameterized_by,
-                        resource,
-                        resource_version,
-                        file,
-                        inputs,
-                        outputs,
-                        flush_each,
-                        max_batch_size,
-                        message_error_policy,
-                        mode: mode.unwrap_or(AckMode::Attached),
-                        filter_map,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
+            ) = value;
+            let (
+                (((((if_not_exists, mode), name), from_relay), filter_where), processor_outputs),
+                parameterized_by,
+            ) = base;
+            let (flush_each, max_batch_size) = flush_each;
+            CreateStatement::new(
+                CreateInferencer {
+                    name,
+                    from_relay,
+                    output_routes: processor_outputs,
+                    parameterized_by,
+                    resource,
+                    resource_version,
+                    file,
+                    inputs,
+                    outputs: tensor_outputs,
+                    flush_each,
+                    max_batch_size,
+                    message_error_policy,
+                    mode: mode.unwrap_or(AckMode::Attached),
+                    filter_where,
+                },
+                if_not_exists,
+            )
+        })
 }
 
 pub fn parse_create_inferencer_tokens(
@@ -188,12 +166,11 @@ mod tests {
     fn parses_create_inferencer() {
         let input = r#"
             CREATE DETACHED INFERENCER score_model
-            FROM features TO scored
+            FROM features FILTER WHERE features.present
+            TO scored SET scored.ready = true
             PARAMETERIZED BY tenant
             USING RESOURCE fraud_model VERSION 3
             FILE 'models/fraud.onnx'
-            SET scored.ready = true
-            WHERE features.present
             INPUTS { "features" = features.vector }
             OUTPUTS { "score" = scored.score }
             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -203,7 +180,16 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "score_model");
         assert_eq!(parsed.from_relay.as_str(), "features");
-        assert_eq!(parsed.into_relay.as_str(), "scored");
+        assert_eq!(
+            parsed
+                .output_routes
+                .routes
+                .first()
+                .expect("output route should parse")
+                .relay
+                .as_str(),
+            "scored"
+        );
         assert_eq!(parsed.resource.as_str(), "fraud_model");
         assert_eq!(parsed.resource_version, Some(3));
         assert_eq!(parsed.file, "models/fraud.onnx");

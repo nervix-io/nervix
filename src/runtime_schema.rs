@@ -817,6 +817,19 @@ impl RuntimeRecordValues for DecodedRecord {
 }
 
 impl RuntimeRecordBatch {
+    pub(crate) fn from_record_batch(
+        expected_schema: Arc<ArrowSchema>,
+        batch: RecordBatch,
+    ) -> Result<Self, String> {
+        if batch.schema().as_ref() != expected_schema.as_ref() {
+            return Err("arrow batch schema does not match expected schema".to_string());
+        }
+        Ok(Self {
+            schema: expected_schema,
+            batch,
+        })
+    }
+
     pub fn schema(&self) -> Arc<ArrowSchema> {
         self.schema.clone()
     }

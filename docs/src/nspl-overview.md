@@ -70,7 +70,6 @@ The rest of the graph is built with:
 - `CREATE INGESTOR`
 - `CREATE GENERATOR`
 - `CREATE INFERENCER`
-- `CREATE ROUTER`
 - `CREATE UNIFIER`
 - `CREATE DEDUPLICATOR`
 - `CREATE REINGESTOR`
@@ -79,24 +78,29 @@ The rest of the graph is built with:
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
-Runtime nodes may also carry an optional filter-map clause after their main definition:
+Ingestors and emitters may carry filter-map clauses on their source or sink boundary. Relay-consuming processors instead use an optional node-level arrival filter and per-output filter-map clauses:
 
 ```nspl
-[SET <relay>.<field> = <expr>, ...]
-[UNSET <relay>.<field>, ...]
-[WHERE <expr>]
+[FILTER WHERE <expr>]
+TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]
+[TO <relay> ...]
 ```
 
-When more than one filter-map block is present, the grammar order is always `SET`, then `UNSET`, then `WHERE`. The order keeps the surface regular FLUSH EACH 100ms MAX BATCH SIZE 1MiB; expression binding is still validated against the node's input scope.
+`FILTER WHERE` runs before the processor accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the processor.
+
+Passthrough inheritance only applies to processors that naturally map one input row to one output row. Generated-output processors such as windows, inferencers, and WASM processors do not inherit input fields; their output routes operate on the aggregate record, ONNX output record, or WASM guest output record.
+
+WASM output routes are generated-output routes with one additional input binding: `SET` may read guest output fields through the destination relay namespace and original source fields through `input.<field>`. WASM output routes support `SET` and `WHERE`; they do not support `UNSET`.
 
 This surface is available on:
 
 - `CREATE INGESTOR`
 - `CREATE INFERENCER`
-- `CREATE ROUTER`
 - `CREATE UNIFIER`
 - `CREATE DEDUPLICATOR`
 - `CREATE REINGESTOR`
+- `CREATE WASM PROCESSOR`
+- `CREATE WINDOW PROCESSOR`
 - `CREATE EMITTER`
 
 The clause acts as a row-level filter-map program:
@@ -104,7 +108,7 @@ The clause acts as a row-level filter-map program:
 Flush-based runtime nodes require an explicit `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` clause. Emitters also declare a flush policy: they collect an in-memory Arrow batch before publishing to the external system. Window processors use `WIDTH` and `STEP` instead.
 
 - `SET` overwrites existing fields or appends new fields
-- `UNSET` removes fields from the downstream row shape
+- `UNSET` removes fields from the downstream row shape when passthrough inheritance is active
 - `WHERE` keeps only rows where the predicate is true
 
 Supported expression surface:
@@ -286,7 +290,6 @@ UNSUBSCRIBE SESSION FROM <relay> [BLOCKING|DROPPING] [BATCH SAMPLE RATE <rate>] 
 DESCRIBE RELAY <relay> WHERE (...);
 DESCRIBE INGESTOR <ingestor>;
 DESCRIBE DEDUPLICATOR <deduplicator>;
-DESCRIBE ROUTER <router>;
 DESCRIBE REORDERER <reorderer>;
 DESCRIBE WINDOW PROCESSOR <window_processor>;
 DESCRIBE HASH MAP <hash_map>;

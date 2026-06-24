@@ -5,8 +5,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        filter_map_program, flush_each, if_not_exists_clause, into_parse_error, kw, lex_input,
-        message_error_policy, relay_ref, suggestions_from_errors, tok, unifier_name,
+        filter_where_clause, flush_each, if_not_exists_clause, into_parse_error, kw, lex_input,
+        message_error_policy, processor_outputs, relay_ref, suggestions_from_errors, tok,
+        unifier_name,
     },
 };
 
@@ -25,24 +26,20 @@ pub fn create_unifier_parser<'src>()
                 .at_least(2)
                 .collect::<Vec<_>>(),
         )
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(processor_outputs())
         .then(branch_parameterization())
         .then(flush_each())
-        .then(filter_map_program().or_not())
         .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |(
                 (
                     (
-                        (
-                            ((((if_not_exists, mode), name), from_relays), into_relay),
-                            parameterized_by,
-                        ),
-                        flush_each,
+                        (((((if_not_exists, mode), name), from_relays), filter_where), outputs),
+                        parameterized_by,
                     ),
-                    filter_map,
+                    flush_each,
                 ),
                 message_error_policy,
             )| {
@@ -51,13 +48,13 @@ pub fn create_unifier_parser<'src>()
                     CreateUnifier {
                         name,
                         from_relays,
-                        into_relay,
+                        output_routes: outputs,
                         parameterized_by,
                         flush_each,
                         max_batch_size,
                         message_error_policy,
                         mode: mode.unwrap_or(AckMode::Attached),
-                        filter_map,
+                        filter_where,
                     },
                     if_not_exists,
                 )
@@ -140,7 +137,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ss1", "ss2", "ss3"]
         );
-        assert_eq!(parsed.into_relay.as_str(), "ss10");
+        assert_eq!(
+            parsed
+                .output_routes
+                .routes
+                .first()
+                .expect("output route should parse")
+                .relay
+                .as_str(),
+            "ss10"
+        );
         assert_eq!(parsed.mode, AckMode::Attached);
     }
 

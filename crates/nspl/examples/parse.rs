@@ -156,17 +156,7 @@ fn main() -> ExitCode {
          KAFKA|PULSAR|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS ... [ ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;]"
     );
-    println!(
-        "  CREATE ROUTER <name> FROM <s> [SET|UNSET|WHERE ...] TO <s> WHERE <expr> ... [MATCH \
-         FIRST|ALL] DEFAULT TO <s> [ ON MESSAGE ERROR LOG;]"
-    );
-    println!(
-        "  CREATE ROUTER <name> FROM <s> [SET|UNSET|WHERE ...] DEFAULT TO <s> [ ON MESSAGE ERROR \
-         LOG;]"
-    );
-    println!(
-        "  SHOW CREATE SCHEMA|CODEC|CLIENT|VHOST|ENDPOINT|INGESTOR|ROUTER|RELAY|EMITTER <name> [;]"
-    );
+    println!("  SHOW CREATE SCHEMA|CODEC|CLIENT|VHOST|ENDPOINT|INGESTOR|RELAY|EMITTER <name> [;]");
     println!("  SHOW CLUSTER STATUS [;]");
     println!("History: Up/Down. Completion: Tab. Type 'exit' to quit.");
 

@@ -29,7 +29,7 @@ The guest imports these functions from the `env` module:
 | `nervix_current_domain_time_nanos` | `() -> i64` | Returns the current domain-clock time by calling the host import. |
 | `nervix_process_batch` | `(size: i32) -> i32` | Processes `size` bytes of batch envelope from the guest buffer. Prototype behavior filters the input batch before emitting a new batch envelope. |
 | `nervix_on_timeout` | `(handle: i64) -> i32` | Host callback when a previously requested timeout fires. |
-| `nervix_read_emit` | `() -> i32` | If the guest has a pending outgoing batch envelope, writes it into the reusable buffer, clears the pending emit slot, and returns the byte size. Returns `0` when nothing is pending. |
+| `nervix_read_emit` | `() -> i32` | If the guest has a pending outgoing batch envelope, writes the next envelope into the reusable buffer, removes it from the pending emit queue, and returns the byte size. Returns `0` when nothing is pending. |
 | `nervix_dump_state` | `() -> i32` | Serializes guest state into the reusable buffer and returns the byte size. |
 | `nervix_load_state` | `(ptr: i32, size: i32) -> i32` | Loads previously dumped guest state bytes. Returns a negative value on rejection. |
 | `nervix_reset_state` | `() -> i32` | Clears guest-owned state while keeping the reusable buffer. |
@@ -49,11 +49,18 @@ Return code `0` means success. Negative return codes are guest errors:
 Input and output batches use a small binary envelope:
 
 ```text
+u32 little-endian output relay name byte size
+UTF-8 output relay name bytes, empty on host-to-guest input
 u32 little-endian Arrow IPC byte size
 Arrow IPC stream bytes
 u32 little-endian ack sidecar byte size
 CBOR ack sidecar bytes
 ```
+
+Host-to-guest input envelopes use an empty output relay name. Guest-to-host
+output envelopes must name one of the processor's declared `TO` relays, and the
+Arrow IPC batch in that envelope must match that relay's schema before route
+`SET` and `WHERE` clauses are applied.
 
 The ack sidecar is CBOR encoded:
 
@@ -130,7 +137,7 @@ The intended shape is:
   "domain_type": text,
   "branch_key": bytes,
   "input_schema": WasmProcessorSchema,
-  "output_schema": WasmProcessorSchema
+  "output_schemas": [WasmProcessorSchema, ...]
 }
 ```
 
@@ -138,7 +145,8 @@ The intended shape is:
 instance. A singleton root branch is still represented by a concrete, serialized
 branch key.
 
-`input_schema` and `output_schema` use the `nervix-wasm` ABI schema contract:
+`input_schema` and every entry in `output_schemas` use the `nervix-wasm` ABI
+schema contract:
 
 ```text
 WasmProcessorSchema {

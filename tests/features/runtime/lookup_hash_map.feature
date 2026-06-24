@@ -88,14 +88,18 @@ Feature: LOOKUP_HASH_MAP filter-map function
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE ROUTER enrich_titles
+      CREATE DEDUPLICATOR enrich_titles
         FROM incoming_logs
-        SET incoming_logs.title_key = lower(incoming_logs.title),
-            incoming_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name"),
-            incoming_logs.region = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "region_name")
-        UNSET incoming_logs.title, incoming_logs.legacy
-        WHERE incoming_logs.active AND NOT is_null(LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name"))
-        DEFAULT TO enriched_logs UNPARAMETERIZED
+        FILTER WHERE incoming_logs.active
+        TO enriched_logs
+          SET enriched_logs.title_key = lower(incoming_logs.title),
+              enriched_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name"),
+              enriched_logs.region = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "region_name")
+          UNSET incoming_logs.title, incoming_logs.legacy
+          WHERE NOT is_null(LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name"))
+        UNPARAMETERIZED
+        DEDUPLICATE ON incoming_logs.id
+        MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO enriched_logs;
@@ -211,12 +215,15 @@ Feature: LOOKUP_HASH_MAP filter-map function
       """
     When these NSPL commands fail with "LOOKUP_HASH_MAP field 'missing_city' is missing from hash map 'titles_by_normalized' schema"
       """
-      CREATE ROUTER enrich_titles
+      CREATE DEDUPLICATOR enrich_titles
         FROM incoming_logs
-        SET incoming_logs.title_key = lower(incoming_logs.title),
-            incoming_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "missing_city")
-        UNSET incoming_logs.title
-        DEFAULT TO enriched_logs UNPARAMETERIZED
+        TO enriched_logs
+          SET enriched_logs.title_key = lower(incoming_logs.title),
+              enriched_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "missing_city")
+          UNSET incoming_logs.title
+        UNPARAMETERIZED
+        DEDUPLICATE ON incoming_logs.id
+        MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
 

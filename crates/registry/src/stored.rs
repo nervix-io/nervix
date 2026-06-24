@@ -10,17 +10,17 @@ use nervix_models::{
     CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
     CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
     CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateRouter, CreateSchema, CreateSignalingProtocol, CreateUnifier, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
-    EndpointIngestMode, EndpointType, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy,
-    IcebergCatalog, IcebergStorageBackend, Identifier, InferencerTensorMapping, IngestSource,
+    CreateSchema, CreateSignalingProtocol, CreateUnifier, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
+    EndpointType, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, IcebergCatalog,
+    IcebergStorageBackend, Identifier, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
     KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
     MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
-    ParameterValueMapping, ParseAsType, PostgresConflictAction, PulsarIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization, RelayParameters,
-    RouterMatchPolicy, RouterRoute, SchemaField, SignalingProtocolOnConnect, SqsIngestMode,
-    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    ParameterValueMapping, ParseAsType, PostgresConflictAction, ProcessorOutput, ProcessorOutputs,
+    PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization,
+    RelayParameters, SchemaField, SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource,
+    WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -57,7 +57,6 @@ pub enum StoredModelVersioned {
     WasmProcessor(StoredCreateWasmProcessor),
     Ingestor(StoredCreateIngestor),
     Reingestor(StoredCreateReingestor),
-    Router(StoredCreateRouter),
     Relay(StoredCreateRelay),
     Lookup(StoredCreateLookup),
     Deduplicator(StoredCreateDeduplicator),
@@ -490,35 +489,20 @@ pub enum StoredIngestTimestampSource {
 pub struct StoredCreateReingestor {
     pub name: String,
     pub from_relay: String,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub flush_each: String,
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
     pub message_error_policy: StoredMessageErrorPolicy,
-    pub filter_map: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredCreateRouter {
-    pub name: String,
-    pub from_relay: String,
-    pub routes: Vec<StoredRouterRoute>,
-    pub match_policy: RouterMatchPolicy,
-    pub default_into_relay: String,
-    pub parameterized_by: StoredBranchParameterization,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
-    pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateInferencer {
     pub name: String,
     pub from_relay: String,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub resource: String,
     pub resource_version: Option<u64>,
@@ -529,14 +513,14 @@ pub struct StoredCreateInferencer {
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
     pub message_error_policy: StoredMessageErrorPolicy,
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateWasmProcessor {
     pub name: String,
     pub from_relay: String,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub resource: String,
     pub resource_version: Option<u64>,
@@ -544,6 +528,7 @@ pub struct StoredCreateWasmProcessor {
     pub mode: AckMode,
     pub message_error_policy: StoredMessageErrorPolicy,
     pub global_error_policy: StoredGeneralErrorPolicy,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -551,12 +536,6 @@ pub struct StoredInferencerTensorMapping {
     pub tensor: String,
     pub relay: String,
     pub field: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredRouterRoute {
-    pub into_relay: String,
-    pub condition: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -787,6 +766,17 @@ pub enum StoredBranchParameterization {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredProcessorOutput {
+    pub relay: String,
+    pub filter_map: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredProcessorOutputs {
+    pub routes: Vec<StoredProcessorOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredMaterializedRelayState {
     LastByTimestamp,
 }
@@ -804,20 +794,20 @@ pub struct StoredCreateLookup {
 pub struct StoredCreateUnifier {
     pub name: String,
     pub from_relays: Vec<String>,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub flush_each: String,
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
     pub message_error_policy: StoredMessageErrorPolicy,
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateDeduplicator {
     pub name: String,
     pub from_relay: String,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub deduplicate_on: String,
     pub max_time: String,
@@ -825,7 +815,7 @@ pub struct StoredCreateDeduplicator {
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
     pub message_error_policy: StoredMessageErrorPolicy,
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -833,7 +823,7 @@ pub struct StoredCreateCorrelator {
     pub name: String,
     pub left_relay: String,
     pub right_relay: String,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub left_on: Vec<String>,
     pub right_on: Vec<String>,
@@ -845,6 +835,7 @@ pub struct StoredCreateCorrelator {
     pub timeout_policy: StoredCorrelationTimeoutPolicy,
     pub mode: AckMode,
     pub message_error_policy: StoredMessageErrorPolicy,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -869,7 +860,7 @@ pub enum StoredCorrelationTimeoutAction {
 pub struct StoredCreateReorderer {
     pub name: String,
     pub from_relay: String,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub order_by: String,
     pub max_time: String,
@@ -877,20 +868,21 @@ pub struct StoredCreateReorderer {
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
     pub message_error_policy: StoredMessageErrorPolicy,
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateWindowProcessor {
     pub name: String,
     pub from_relay: String,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub width: StoredWindowBound,
     pub step: StoredWindowBound,
     pub aggregate: String,
     pub mode: AckMode,
     pub message_error_policy: StoredMessageErrorPolicy,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1072,7 +1064,6 @@ impl From<Model> for StoredModelVersioned {
             Model::WasmProcessor(v) => Self::WasmProcessor(v.into()),
             Model::Ingestor(v) => Self::Ingestor(v.into()),
             Model::Reingestor(v) => Self::Reingestor(v.into()),
-            Model::Router(v) => Self::Router(v.into()),
             Model::Relay(v) => Self::Relay(v.into()),
             Model::Lookup(v) => Self::Lookup(v.into()),
             Model::Deduplicator(v) => Self::Deduplicator(v.into()),
@@ -1136,7 +1127,6 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::WasmProcessor(v) => Ok(Model::WasmProcessor(v.try_into()?)),
             StoredModelVersioned::Ingestor(v) => Ok(Model::Ingestor(v.try_into()?)),
             StoredModelVersioned::Reingestor(v) => Ok(Model::Reingestor(v.try_into()?)),
-            StoredModelVersioned::Router(v) => Ok(Model::Router(v.try_into()?)),
             StoredModelVersioned::Relay(v) => Ok(Model::Relay(v.try_into()?)),
             StoredModelVersioned::Lookup(v) => Ok(Model::Lookup(v.try_into()?)),
             StoredModelVersioned::Deduplicator(v) => Ok(Model::Deduplicator(v.try_into()?)),
@@ -2509,6 +2499,48 @@ impl TryFrom<StoredBranchParameterization> for BranchParameterization {
     }
 }
 
+impl From<ProcessorOutput> for StoredProcessorOutput {
+    fn from(value: ProcessorOutput) -> Self {
+        Self {
+            relay: value.relay.to_string(),
+            filter_map: value.filter_map,
+        }
+    }
+}
+
+impl TryFrom<StoredProcessorOutput> for ProcessorOutput {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredProcessorOutput) -> Result<Self, Self::Error> {
+        Ok(Self {
+            relay: Identifier::parse(&value.relay)?,
+            filter_map: value.filter_map,
+        })
+    }
+}
+
+impl From<ProcessorOutputs> for StoredProcessorOutputs {
+    fn from(value: ProcessorOutputs) -> Self {
+        Self {
+            routes: value.routes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<StoredProcessorOutputs> for ProcessorOutputs {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredProcessorOutputs) -> Result<Self, Self::Error> {
+        Ok(Self {
+            routes: value
+                .routes
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
 impl TryFrom<StoredCreateIngestor> for CreateIngestor {
     type Error = Report<NameError>;
 
@@ -2553,13 +2585,13 @@ impl From<CreateReingestor> for StoredCreateReingestor {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.into(),
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         }
     }
 }
@@ -2571,55 +2603,13 @@ impl TryFrom<StoredCreateReingestor> for CreateReingestor {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.try_into()?,
-            filter_map: value.filter_map,
-        })
-    }
-}
-
-impl From<CreateRouter> for StoredCreateRouter {
-    fn from(value: CreateRouter) -> Self {
-        Self {
-            name: value.name.to_string(),
-            from_relay: value.from_relay.to_string(),
-            routes: value.routes.into_iter().map(Into::into).collect(),
-            match_policy: value.match_policy,
-            default_into_relay: value.default_into_relay.to_string(),
-            parameterized_by: value.parameterized_by.into(),
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
-            mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
-            filter_map: value.filter_map,
-        }
-    }
-}
-
-impl TryFrom<StoredCreateRouter> for CreateRouter {
-    type Error = Report<NameError>;
-
-    fn try_from(value: StoredCreateRouter) -> Result<Self, Self::Error> {
-        Ok(Self {
-            name: Identifier::parse(&value.name)?,
-            from_relay: Identifier::parse(&value.from_relay)?,
-            routes: value
-                .routes
-                .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
-            match_policy: value.match_policy,
-            default_into_relay: Identifier::parse(&value.default_into_relay)?,
-            parameterized_by: value.parameterized_by.try_into()?,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
-            mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         })
     }
 }
@@ -2629,7 +2619,7 @@ impl From<CreateInferencer> for StoredCreateInferencer {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             resource: value.resource.to_string(),
             resource_version: value.resource_version,
@@ -2640,7 +2630,7 @@ impl From<CreateInferencer> for StoredCreateInferencer {
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.into(),
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         }
     }
 }
@@ -2652,7 +2642,7 @@ impl TryFrom<StoredCreateInferencer> for CreateInferencer {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             resource: Identifier::parse(&value.resource)?,
             resource_version: value.resource_version,
@@ -2671,7 +2661,7 @@ impl TryFrom<StoredCreateInferencer> for CreateInferencer {
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.try_into()?,
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         })
     }
 }
@@ -2681,7 +2671,7 @@ impl From<CreateWasmProcessor> for StoredCreateWasmProcessor {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             resource: value.resource.to_string(),
             resource_version: value.resource_version,
@@ -2689,6 +2679,7 @@ impl From<CreateWasmProcessor> for StoredCreateWasmProcessor {
             mode: value.mode,
             message_error_policy: value.message_error_policy.into(),
             global_error_policy: value.global_error_policy.into(),
+            filter_where: value.filter_where,
         }
     }
 }
@@ -2700,7 +2691,7 @@ impl TryFrom<StoredCreateWasmProcessor> for CreateWasmProcessor {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             resource: Identifier::parse(&value.resource)?,
             resource_version: value.resource_version,
@@ -2708,6 +2699,7 @@ impl TryFrom<StoredCreateWasmProcessor> for CreateWasmProcessor {
             mode: value.mode,
             message_error_policy: value.message_error_policy.try_into()?,
             global_error_policy: value.global_error_policy.into(),
+            filter_where: value.filter_where,
         })
     }
 }
@@ -2730,26 +2722,6 @@ impl TryFrom<StoredInferencerTensorMapping> for InferencerTensorMapping {
             tensor: value.tensor,
             relay: Identifier::parse(&value.relay)?,
             field: Identifier::parse(&value.field)?,
-        })
-    }
-}
-
-impl From<RouterRoute> for StoredRouterRoute {
-    fn from(value: RouterRoute) -> Self {
-        Self {
-            into_relay: value.into_relay.to_string(),
-            condition: value.condition,
-        }
-    }
-}
-
-impl TryFrom<StoredRouterRoute> for RouterRoute {
-    type Error = Report<NameError>;
-
-    fn try_from(value: StoredRouterRoute) -> Result<Self, Self::Error> {
-        Ok(Self {
-            into_relay: Identifier::parse(&value.into_relay)?,
-            condition: value.condition,
         })
     }
 }
@@ -3498,7 +3470,7 @@ impl From<CreateDeduplicator> for StoredCreateDeduplicator {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             deduplicate_on: value.deduplicate_on,
             max_time: value.max_time,
@@ -3506,7 +3478,7 @@ impl From<CreateDeduplicator> for StoredCreateDeduplicator {
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.into(),
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         }
     }
 }
@@ -3518,7 +3490,7 @@ impl TryFrom<StoredCreateDeduplicator> for CreateDeduplicator {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             deduplicate_on: value.deduplicate_on,
             max_time: value.max_time,
@@ -3526,7 +3498,7 @@ impl TryFrom<StoredCreateDeduplicator> for CreateDeduplicator {
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.try_into()?,
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         })
     }
 }
@@ -3537,7 +3509,7 @@ impl From<CreateCorrelator> for StoredCreateCorrelator {
             name: value.name.to_string(),
             left_relay: value.left_relay.to_string(),
             right_relay: value.right_relay.to_string(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             left_on: value.left_on,
             right_on: value.right_on,
@@ -3549,6 +3521,7 @@ impl From<CreateCorrelator> for StoredCreateCorrelator {
             timeout_policy: value.timeout_policy.into(),
             mode: value.mode,
             message_error_policy: value.message_error_policy.into(),
+            filter_where: value.filter_where,
         }
     }
 }
@@ -3561,7 +3534,7 @@ impl TryFrom<StoredCreateCorrelator> for CreateCorrelator {
             name: Identifier::parse(&value.name)?,
             left_relay: Identifier::parse(&value.left_relay)?,
             right_relay: Identifier::parse(&value.right_relay)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             left_on: value.left_on,
             right_on: value.right_on,
@@ -3573,6 +3546,7 @@ impl TryFrom<StoredCreateCorrelator> for CreateCorrelator {
             timeout_policy: value.timeout_policy.try_into()?,
             mode: value.mode,
             message_error_policy: value.message_error_policy.try_into()?,
+            filter_where: value.filter_where,
         })
     }
 }
@@ -3644,7 +3618,7 @@ impl From<CreateReorderer> for StoredCreateReorderer {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             order_by: value.order_by,
             max_time: value.max_time,
@@ -3652,7 +3626,7 @@ impl From<CreateReorderer> for StoredCreateReorderer {
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.into(),
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         }
     }
 }
@@ -3664,7 +3638,7 @@ impl TryFrom<StoredCreateReorderer> for CreateReorderer {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             order_by: value.order_by,
             max_time: value.max_time,
@@ -3672,7 +3646,7 @@ impl TryFrom<StoredCreateReorderer> for CreateReorderer {
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.try_into()?,
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         })
     }
 }
@@ -3682,13 +3656,14 @@ impl From<CreateWindowProcessor> for StoredCreateWindowProcessor {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             width: value.width.into(),
             step: value.step.into(),
             aggregate: value.aggregate,
             mode: value.mode,
             message_error_policy: value.message_error_policy.into(),
+            filter_where: value.filter_where,
         }
     }
 }
@@ -3700,13 +3675,14 @@ impl TryFrom<StoredCreateWindowProcessor> for CreateWindowProcessor {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             width: value.width.into(),
             step: value.step.into(),
             aggregate: value.aggregate,
             mode: value.mode,
             message_error_policy: value.message_error_policy.try_into()?,
+            filter_where: value.filter_where,
         })
     }
 }
@@ -3738,13 +3714,13 @@ impl From<CreateUnifier> for StoredCreateUnifier {
                 .into_iter()
                 .map(|relay| relay.to_string())
                 .collect(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.into(),
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         }
     }
 }
@@ -3760,13 +3736,13 @@ impl TryFrom<StoredCreateUnifier> for CreateUnifier {
                 .into_iter()
                 .map(|stream| Identifier::parse(&stream))
                 .collect::<Result<Vec<_>, _>>()?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             message_error_policy: value.message_error_policy.try_into()?,
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         })
     }
 }
@@ -4258,50 +4234,53 @@ mod tests {
             Model::Unifier(CreateUnifier {
                 name: identifier("events_unifier"),
                 from_relays: vec![identifier("events_a"), identifier("events_b")],
-                into_relay: identifier("events_stream"),
+                output_routes: ProcessorOutputs::single(identifier("events_stream")),
                 parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
-
-                filter_map: None,
+                filter_where: None,
             }),
-            Model::Router(CreateRouter {
-                name: identifier("events_router"),
+            Model::Reingestor(CreateReingestor {
+                name: identifier("events_splitter"),
                 from_relay: identifier("events_stream"),
-                routes: vec![RouterRoute {
-                    into_relay: identifier("events_errors"),
-                    condition: r#"level = "error""#.to_string(),
-                }],
-                match_policy: Default::default(),
-                default_into_relay: identifier("events_other"),
+                output_routes: ProcessorOutputs::new(vec![
+                    ProcessorOutput {
+                        relay: identifier("events_errors"),
+                        filter_map: Some(
+                            r#"SET severity = lower(level) WHERE level = "error""#.to_string(),
+                        ),
+                    },
+                    ProcessorOutput::new(identifier("events_other")),
+                ]),
                 parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
-
-                filter_map: Some("SET severity = lower(level)".to_string()),
+                filter_where: None,
             }),
-            Model::Router(CreateRouter {
+            Model::Reingestor(CreateReingestor {
                 name: identifier("events_forwarder"),
                 from_relay: identifier("events_stream"),
-                routes: Vec::new(),
-                match_policy: Default::default(),
-                default_into_relay: identifier("events_projected"),
+                output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                    relay: identifier("events_projected"),
+                    filter_map: Some(
+                        "SET normalized = lower(raw) UNSET raw WHERE active".to_string(),
+                    ),
+                }]),
                 parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Detached,
                 message_error_policy: MessageErrorPolicy::Log,
-
-                filter_map: Some("SET normalized = lower(raw) UNSET raw WHERE active".to_string()),
+                filter_where: Some("WHERE tenant = \"acme\"".to_string()),
             }),
             Model::WindowProcessor(CreateWindowProcessor {
                 name: identifier("events_window"),
                 from_relay: identifier("events_stream"),
-                into_relay: identifier("events_summary"),
+                output_routes: ProcessorOutputs::single(identifier("events_summary")),
                 parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
                 width: WindowBound {
                     messages: Some(100),
@@ -4314,6 +4293,7 @@ mod tests {
                 aggregate: "events_summary.count = COUNT(events_stream.id)".to_string(),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
+                filter_where: None,
             }),
             Model::Emitter(CreateEmitter {
                 name: identifier("events_emitter"),

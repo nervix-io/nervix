@@ -84,7 +84,7 @@ Feature: Reingestor metrics
       """
     And the last command output contains
       """
-      into: tenant_notifications
+      output 0: into=tenant_notifications filter-map=none
       """
     And the last command output contains
       """
