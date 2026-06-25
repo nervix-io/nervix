@@ -428,7 +428,7 @@ pub type StoredKafkaConfigEntry = StoredClientConfigEntry;
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateIngestor {
     pub name: String,
-    pub into_relay: String,
+    pub output_routes: StoredProcessorOutputs,
     pub decode_using_codec: String,
     pub parameterized_by: StoredBranchParameterization,
     pub flush_each: String,
@@ -436,7 +436,7 @@ pub struct StoredCreateIngestor {
     pub timestamp_source: Option<StoredIngestTimestampSource>,
     pub source: StoredIngestSource,
     pub error_policies: StoredErrorPolicies,
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -2423,7 +2423,7 @@ impl From<CreateIngestor> for StoredCreateIngestor {
     fn from(value: CreateIngestor) -> Self {
         Self {
             name: value.name.to_string(),
-            into_relay: value.into_relay.to_string(),
+            output_routes: value.output_routes.into(),
             decode_using_codec: value.decode_using_codec.to_string(),
             parameterized_by: value.parameterized_by.into(),
             flush_each: value.flush_each,
@@ -2431,7 +2431,7 @@ impl From<CreateIngestor> for StoredCreateIngestor {
             timestamp_source: value.timestamp_source.map(Into::into),
             source: value.source.into(),
             error_policies: value.error_policies.into(),
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         }
     }
 }
@@ -2547,7 +2547,7 @@ impl TryFrom<StoredCreateIngestor> for CreateIngestor {
     fn try_from(value: StoredCreateIngestor) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            output_routes: value.output_routes.try_into()?,
             decode_using_codec: Identifier::parse(&value.decode_using_codec)?,
             parameterized_by: value.parameterized_by.try_into()?,
             flush_each: value.flush_each,
@@ -2555,7 +2555,7 @@ impl TryFrom<StoredCreateIngestor> for CreateIngestor {
             timestamp_source: value.timestamp_source.map(TryInto::try_into).transpose()?,
             source: value.source.try_into()?,
             error_policies: value.error_policies.try_into()?,
-            filter_map: value.filter_map,
+            filter_where: value.filter_where,
         })
     }
 }
@@ -4217,7 +4217,7 @@ mod tests {
             }),
             Model::Ingestor(CreateIngestor {
                 name: identifier("events_ingestor"),
-                into_relay: identifier("events_stream"),
+                output_routes: ProcessorOutputs::single(identifier("events_stream")),
                 decode_using_codec: identifier("events_codec"),
                 parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
@@ -4229,7 +4229,7 @@ mod tests {
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
 
-                filter_map: None,
+                filter_where: None,
             }),
             Model::Unifier(CreateUnifier {
                 name: identifier("events_unifier"),

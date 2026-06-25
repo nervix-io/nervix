@@ -661,6 +661,22 @@ pub fn output_filter_map_program<'src>()
     validated_vm_program_until(processor_output_boundary_token)
 }
 
+fn ingestor_output_boundary_token(token: &Token) -> bool {
+    processor_output_boundary_token(token)
+        || matches!(
+            token,
+            Token::Word(Word::KnownWord {
+                iden: Identifier::Decode,
+                ..
+            })
+        )
+}
+
+fn ingestor_output_filter_map_program<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    validated_vm_program_until(ingestor_output_boundary_token)
+}
+
 pub fn filter_where_clause<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Filter)
@@ -689,9 +705,26 @@ fn processor_output_route<'src>()
         .map(|(relay, filter_map)| ProcessorOutput { relay, filter_map })
 }
 
+fn ingestor_output_route<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(ingestor_output_filter_map_program().or_not())
+        .map(|(relay, filter_map)| ProcessorOutput { relay, filter_map })
+}
+
 pub fn processor_outputs<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
     processor_output_route()
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(ProcessorOutputs::new)
+}
+
+pub fn ingestor_outputs<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
+    ingestor_output_route()
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()

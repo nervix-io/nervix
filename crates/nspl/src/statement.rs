@@ -519,7 +519,7 @@ mod tests {
                     if g.bool() {
                         Model::Ingestor(CreateIngestor {
                             name: g.ident(),
-                            into_relay: g.ident(),
+                            output_routes: ProcessorOutputs::single(g.ident()),
                             decode_using_codec: g.ident(),
                             parameterized_by: params,
                             flush_each: "100ms".to_string(),
@@ -533,12 +533,12 @@ mod tests {
                                 mode,
                             },
                             error_policies: ErrorPolicies::handled_by_log(),
-                            filter_map: None,
+                            filter_where: None,
                         })
                     } else {
                         Model::Ingestor(CreateIngestor {
                             name: g.ident(),
-                            into_relay: g.ident(),
+                            output_routes: ProcessorOutputs::single(g.ident()),
                             decode_using_codec: g.ident(),
                             parameterized_by: params,
                             flush_each: "100ms".to_string(),
@@ -574,13 +574,13 @@ mod tests {
                                 },
                             },
                             error_policies: ErrorPolicies::handled_by_log(),
-                            filter_map: None,
+                            filter_where: None,
                         })
                     }
                 } else {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        into_relay: g.ident(),
+                        output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
                         parameterized_by: params,
                         flush_each: "100ms".to_string(),
@@ -599,7 +599,7 @@ mod tests {
                             },
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
-                        filter_map: None,
+                        filter_where: None,
                     })
                 }
             }
@@ -686,7 +686,7 @@ mod tests {
 
                 Model::Ingestor(CreateIngestor {
                     name: g.ident(),
-                    into_relay: g.ident(),
+                    output_routes: ProcessorOutputs::single(g.ident()),
                     decode_using_codec: g.ident(),
                     parameterized_by: params,
                     flush_each: "100ms".to_string(),
@@ -698,14 +698,14 @@ mod tests {
                         mode: RedisPubSubIngestMode::NoAckSequential,
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
-                    filter_map: None,
+                    filter_where: None,
                 })
             }
             13 => {
                 if g.bool() {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        into_relay: g.ident(),
+                        output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
                         parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                         flush_each: "100ms".to_string(),
@@ -721,12 +721,12 @@ mod tests {
                             },
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
-                        filter_map: None,
+                        filter_where: None,
                     })
                 } else if g.bool() {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        into_relay: g.ident(),
+                        output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
                         parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                         flush_each: "100ms".to_string(),
@@ -739,7 +739,7 @@ mod tests {
                             every: "15s".to_string(),
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
-                        filter_map: None,
+                        filter_where: None,
                     })
                 } else {
                     let sink = match g.next_u8() % 3 {
@@ -834,7 +834,7 @@ mod tests {
             }),
             19 => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                into_relay: g.ident(),
+                output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
                 parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
@@ -845,7 +845,7 @@ mod tests {
                     mode: ZeroMqIngestMode::NoAckSequential,
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
-                filter_map: None,
+                filter_where: None,
             }),
             20 => Model::Emitter(CreateEmitter {
                 name: g.ident(),
@@ -867,7 +867,7 @@ mod tests {
             }),
             21 => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                into_relay: g.ident(),
+                output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
                 parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
@@ -881,7 +881,7 @@ mod tests {
                     mode: NatsIngestMode::NoAckSequential,
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
-                filter_map: None,
+                filter_where: None,
             }),
             22 => {
                 let from_relay = ModelIdentifier::try_from("source").expect("valid identifier");
@@ -979,7 +979,7 @@ mod tests {
             }),
             _ => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                into_relay: g.ident(),
+                output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
                 parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
@@ -1005,7 +1005,7 @@ mod tests {
                     }
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
-                filter_map: None,
+                filter_where: None,
             }),
         }
     }

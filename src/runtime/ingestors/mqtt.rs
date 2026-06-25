@@ -24,12 +24,12 @@ struct MqttTaskContext {
     ingestor: Identifier,
     error_policies: ErrorPolicies,
     timestamp_source: Option<IngestTimestampSource>,
-    sender_relay: Identifier,
-    filter_map: Option<CompiledProgramWithMaterializedInterest>,
+    output_routes: RelayProcessorOutputsNode,
+    filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
     parameterization: Vec<Identifier>,
     parameter_value_mappings: Vec<ParameterValueMapping>,
-    parameterized_sender: Option<mpsc::Sender<ParameterizedEntrypointInput>>,
+    parameterized_senders: HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
     events: broadcast::Sender<RuntimeEvent>,
 }
 
@@ -112,8 +112,7 @@ impl MqttIngestor {
             _ => None,
         };
 
-        let (sender_relay, filter_map, codec, parameterization, parameterized_template) =
-            runtime.ingestor_dependencies(domain, &ingestor).await?;
+        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         runtime
             .resolve_client_config_with_instance(client.mount.as_ref(), &client.config, 0)
             .map_err(|reason| RuntimeError::StartIngestor {
@@ -146,7 +145,7 @@ impl MqttIngestor {
                 key,
                 IngestorRuntime::Background {
                     shutdown: shutdown_tx,
-                    parameterized: None,
+                    parameterized: Vec::new(),
                     tasks: vec![task],
                 },
             );
@@ -155,11 +154,13 @@ impl MqttIngestor {
         let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
             domain,
             &ingestor.name,
-            parameterized_template,
+            dependencies.parameterized_templates,
         );
-        let parameterized_sender = parameterized_runtime
-            .as_ref()
-            .map(|runtime| runtime.sender());
+        let parameterized_senders = parameterized_runtime.senders.clone();
+        let output_routes = dependencies.output_routes;
+        let filter_where = dependencies.filter_where;
+        let codec = dependencies.codec;
+        let parameterization = dependencies.parameterization;
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -177,12 +178,12 @@ impl MqttIngestor {
                 ingestor: ingestor.name.clone(),
                 error_policies: ingestor.error_policies.clone(),
                 timestamp_source: ingestor.timestamp_source.clone(),
-                sender_relay: sender_relay.clone(),
-                filter_map: filter_map.clone(),
+                output_routes: output_routes.clone(),
+                filter_where: filter_where.clone(),
                 codec: codec.clone(),
                 parameterization: parameterization.clone(),
                 parameter_value_mappings: ingestor.parameterized_by.values().to_vec(),
-                parameterized_sender: parameterized_sender.clone(),
+                parameterized_senders: parameterized_senders.clone(),
                 events: runtime.events.clone(),
             };
             let task_topic = topic.clone();
@@ -448,7 +449,7 @@ impl MqttIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime,
+                parameterized: parameterized_runtime.runtimes,
                 tasks,
             },
         );
@@ -609,7 +610,7 @@ impl MqttIngestor {
             let dispatched = Self::dispatch_entry(
                 context,
                 entry.record.clone(),
-                if context.parameterized_sender.is_some() {
+                if !context.parameterized_senders.is_empty() {
                     acks.attached()
                 } else {
                     acks.clone()
@@ -695,7 +696,7 @@ impl MqttIngestor {
                 let dispatched = Self::dispatch_entry(
                     context,
                     entry.record.clone(),
-                    if context.parameterized_sender.is_some() {
+                    if !context.parameterized_senders.is_empty() {
                         acks.attached()
                     } else {
                         acks.clone()
@@ -834,6 +835,7 @@ impl MqttIngestor {
         record: DecodedRecord,
         acks: AckSet,
     ) -> Result<(), String> {
+        let mut output_routes = context.output_routes.clone();
         context
             .runtime
             .dispatch_ingested_record(IngestDispatch {
@@ -842,9 +844,9 @@ impl MqttIngestor {
                 timestamp_source: context.timestamp_source.as_ref(),
                 parameterization: &context.parameterization,
                 parameter_value_mappings: Some(&context.parameter_value_mappings),
-                sender_relay: &context.sender_relay,
-                filter_map: context.filter_map.as_ref(),
-                parameterized_sender: context.parameterized_sender.as_ref(),
+                output_routes: &mut output_routes,
+                filter_where: context.filter_where.as_ref(),
+                parameterized_senders: &context.parameterized_senders,
                 record,
                 filter_map_metadata: None,
                 ingested_at: current_timestamp(),

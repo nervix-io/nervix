@@ -515,6 +515,10 @@ CREATE CLIENT lakehouse_catalog
 
 CREATE INGESTOR iot_device_activity
   TO device_activity_landing
+    SET device_activity_landing.source = "iot_device",
+        device_activity_landing.event_type = lower(trim(message.event_type)),
+        device_activity_landing.edge_id = lower(trim(message.edge_id)),
+        device_activity_landing.firmware = lower(trim(message.firmware))
   DECODE USING device_activity_cbor_codec
   PARAMETERIZED BY device_branch VALUES {
     tenant_id = device_activity_landing.tenant_id,
@@ -526,14 +530,15 @@ CREATE INGESTOR iot_device_activity
   TOPIC 'datalake/device_activity'
   INSTANCES 2
   MODE NO_ACK SEQUENTIAL
-  SET device_activity_landing.source = "iot_device",
-      device_activity_landing.event_type = lower(trim(message.event_type)),
-      device_activity_landing.edge_id = lower(trim(message.edge_id)),
-      device_activity_landing.firmware = lower(trim(message.firmware))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE INGESTOR edge_server_activity
   TO edge_activity_landing
+    SET edge_activity_landing.source = "edge_server",
+        edge_activity_landing.event_type = lower(trim(message.event_type)),
+        edge_activity_landing.edge_id = lower(trim(message.edge_id)),
+        edge_activity_landing.edge_name = lower(trim(message.edge_name)),
+        edge_activity_landing.protocol = lower(trim(message.protocol))
   DECODE USING edge_activity_protobuf_codec
   PARAMETERIZED BY device_branch VALUES {
     tenant_id = edge_activity_landing.tenant_id,
@@ -546,15 +551,14 @@ CREATE INGESTOR edge_server_activity
   QUEUE GROUP datalake_edge_servers
   INSTANCES 2
   MODE NO_ACK SEQUENTIAL
-  SET edge_activity_landing.source = "edge_server",
-      edge_activity_landing.event_type = lower(trim(message.event_type)),
-      edge_activity_landing.edge_id = lower(trim(message.edge_id)),
-      edge_activity_landing.edge_name = lower(trim(message.edge_name)),
-      edge_activity_landing.protocol = lower(trim(message.protocol))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE INGESTOR auth_server_activity
   TO auth_activity_landing
+    SET auth_activity_landing.source = "auth_server",
+        auth_activity_landing.event_type = lower(trim(message.event_type)),
+        auth_activity_landing.auth_result = lower(trim(message.auth_result)),
+        auth_activity_landing.edge_id = lower(trim(message.edge_id))
   DECODE USING auth_activity_json_codec
   PARAMETERIZED BY device_branch VALUES {
     tenant_id = auth_activity_landing.tenant_id,
@@ -567,10 +571,6 @@ CREATE INGESTOR auth_server_activity
   OFFSET BY CONSUMER GROUP datalake_demo_auth
   INSTANCES 4
   MODE NO_ACK PARALLEL MAX 1024
-  SET auth_activity_landing.source = "auth_server",
-      auth_activity_landing.event_type = lower(trim(message.event_type)),
-      auth_activity_landing.auth_result = lower(trim(message.auth_result)),
-      auth_activity_landing.edge_id = lower(trim(message.edge_id))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE DEDUPLICATOR edge_location_lookup

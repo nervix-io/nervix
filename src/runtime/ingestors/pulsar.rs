@@ -69,13 +69,16 @@ impl PulsarIngestor {
             }
             _ => None,
         };
-        let (sender_relay, filter_map, codec, parameterization, parameterized_template) =
-            runtime.ingestor_dependencies(domain, &ingestor).await?;
+        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
             domain,
             &ingestor.name,
-            parameterized_template,
+            dependencies.parameterized_templates,
         );
+        let output_routes = dependencies.output_routes;
+        let filter_where = dependencies.filter_where;
+        let codec = dependencies.codec;
+        let parameterization = dependencies.parameterization;
         let resolved_client = runtime
             .resolve_client_config(client.mount.as_ref(), &client.config)
             .map_err(|reason| RuntimeError::StartIngestor {
@@ -123,14 +126,12 @@ impl PulsarIngestor {
             let task_topic = topic_name.clone();
             let task_subscription = subscription.clone();
             let task_events = runtime.events.clone();
-            let task_sender = sender_relay.clone();
-            let task_filter_map = filter_map.clone();
+            let task_output_routes = output_routes.clone();
+            let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
             let task_parameterization = parameterization.clone();
             let task_parameter_value_mappings = ingestor.parameterized_by.values().to_vec();
-            let task_parameterized_sender = parameterized_runtime
-                .as_ref()
-                .map(|runtime| runtime.sender());
+            let task_parameterized_senders = parameterized_runtime.senders.clone();
             let task_ack_mode = ack_mode.clone();
             let task_ack_timeout = ack_timeout;
             let task_retry_policy = retry_policy.unwrap_or(ParsedRetryPolicy {
@@ -209,6 +210,8 @@ impl PulsarIngestor {
                                                         record,
                                                         filter_map_metadata,
                                                     };
+                                                    let mut output_routes =
+                                                        task_output_routes.clone();
                                                     if let Err(error) = task_runtime
                                                         .dispatch_ingested_record(IngestDispatch {
                                                             domain: &task_domain,
@@ -218,10 +221,10 @@ impl PulsarIngestor {
                                                             parameterization:
                                                                 &task_parameterization,
                                                             parameter_value_mappings: Some(&task_parameter_value_mappings),
-                                                            sender_relay: &task_sender,
-                                                            filter_map: task_filter_map.as_ref(),
-                                                            parameterized_sender:
-                                                                task_parameterized_sender.as_ref(),
+                                                            output_routes: &mut output_routes,
+                                                            filter_where: task_filter_where.as_ref(),
+                                                            parameterized_senders:
+                                                                &task_parameterized_senders,
                                                             record: entry.record,
                                                             filter_map_metadata: Some(
                                                                 entry.filter_map_metadata.clone(),
@@ -324,6 +327,8 @@ impl PulsarIngestor {
                                             loop {
                                                 tokio::task::consume_budget().await;
                                                 let (acks, completion) = AckSet::root();
+                                                let mut output_routes =
+                                                    task_output_routes.clone();
                                                 let dispatched = task_runtime
                                                     .dispatch_ingested_record(IngestDispatch {
                                                         domain: &task_domain,
@@ -333,16 +338,16 @@ impl PulsarIngestor {
                                                         parameterization:
                                                             &task_parameterization,
                                                         parameter_value_mappings: Some(&task_parameter_value_mappings),
-                                                        sender_relay: &task_sender,
-                                                        filter_map: task_filter_map.as_ref(),
-                                                        parameterized_sender:
-                                                            task_parameterized_sender.as_ref(),
+                                                        output_routes: &mut output_routes,
+                                                        filter_where: task_filter_where.as_ref(),
+                                                        parameterized_senders:
+                                                            &task_parameterized_senders,
                                                         record: entry.record.clone(),
                                                         filter_map_metadata: Some(
                                                             entry.filter_map_metadata.clone(),
                                                         ),
                                                         ingested_at: current_timestamp(),
-                                                        acks: if task_parameterized_sender.is_some() {
+                                                        acks: if !task_parameterized_senders.is_empty() {
                                                             acks.attached()
                                                         } else {
                                                             acks.clone()
@@ -532,10 +537,55 @@ impl PulsarIngestor {
                                                 tokio::task::consume_budget().await;
                                                 let mut completions = Vec::with_capacity(batch.len());
                                                 let mut batch_failure = None::<String>;
+                                                let ingested_at = current_timestamp();
+                                                let runtime_records = batch
+                                                    .iter()
+                                                    .map(|entry| {
+                                                        entry.record.clone().into_runtime_record(
+                                                            RuntimeRecordMetadata::from_ingested_at_watermarks(
+                                                                ingested_at,
+                                                                ingested_at,
+                                                            ),
+                                                        )
+                                                    })
+                                                    .collect::<Vec<_>>();
+                                                let filter_map_metadata = batch
+                                                    .iter()
+                                                    .map(|entry| entry.filter_map_metadata.clone())
+                                                    .collect::<Vec<_>>();
+                                                let selected_rows = match task_runtime
+                                                    .select_ingested_batch_rows(IngestBatchSelection {
+                                                        domain: &task_domain,
+                                                        ingestor: &task_ingestor,
+                                                        parameterization: &task_parameterization,
+                                                        parameter_value_mappings: Some(
+                                                            &task_parameter_value_mappings,
+                                                        ),
+                                                        filter_where: task_filter_where.as_ref(),
+                                                        records: &runtime_records,
+                                                        filter_map_metadata: Some(
+                                                            &filter_map_metadata,
+                                                        ),
+                                                    })
+                                                    .await
+                                                {
+                                                    Ok(selected_rows) => selected_rows,
+                                                    Err(error) => {
+                                                        batch_failure = Some(error);
+                                                        HashSet::default()
+                                                    }
+                                                };
 
-                                                for entry in &batch {
+                                                for (row, entry) in batch.iter().enumerate() {
                                                     tokio::task::consume_budget().await;
                                                     let (acks, completion) = AckSet::root();
+                                                    if !selected_rows.contains(&row) {
+                                                        acks.ack_success();
+                                                        completions.push(completion);
+                                                        continue;
+                                                    }
+                                                    let mut output_routes =
+                                                        task_output_routes.clone();
                                                     let dispatched = task_runtime
                                                         .dispatch_ingested_record(IngestDispatch {
                                                             domain: &task_domain,
@@ -545,17 +595,16 @@ impl PulsarIngestor {
                                                             parameterization:
                                                                 &task_parameterization,
                                                             parameter_value_mappings: Some(&task_parameter_value_mappings),
-                                                            sender_relay: &task_sender,
-                                                            filter_map: task_filter_map.as_ref(),
-                                                            parameterized_sender:
-                                                                task_parameterized_sender.as_ref(),
+                                                            output_routes: &mut output_routes,
+                                                            filter_where: None,
+                                                            parameterized_senders:
+                                                                &task_parameterized_senders,
                                                             record: entry.record.clone(),
                                                             filter_map_metadata: Some(
                                                                 entry.filter_map_metadata.clone(),
                                                             ),
-                                                            ingested_at: current_timestamp(),
-                                                            acks: if task_parameterized_sender
-                                                                .is_some()
+                                                            ingested_at,
+                                                            acks: if !task_parameterized_senders.is_empty()
                                                             {
                                                                 acks.attached()
                                                             } else {
@@ -692,7 +741,7 @@ impl PulsarIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime,
+                parameterized: parameterized_runtime.runtimes,
                 tasks,
             },
         );

@@ -147,9 +147,9 @@ fn main() -> ExitCode {
          ICEBERG_REST|WEBSOCKETS CONFIG {{ 'k' = 'v', ... }} [;]"
     );
     println!(
-        "  CREATE INGESTOR <name> FROM \
-         HTTP|KAFKA|PULSAR|PROMETHEUS|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS|ENDPOINT|WEBSOCKETS ... \
-         [ ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;]"
+        "  CREATE INGESTOR <name> [FILTER WHERE <expr>] TO <relay> ... DECODE USING <codec> ... \
+         FROM HTTP|KAFKA|PULSAR|PROMETHEUS|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS|ENDPOINT|WEBSOCKETS \
+         ... [ ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;]"
     );
     println!(
         "  CREATE EMITTER <name> FROM <s> ENCODE USING <codec> TO \

@@ -11,10 +11,10 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, branch_parameterization_with_values, channel_ref,
         client_ref, codec_ref, consumer_group_ref, current_word_prefix, duration_lit, endpoint_ref,
-        error_policies, filter_map_program, flush_each, if_not_exists_clause, ingestor_name,
-        into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
-        queue_ref, relay_ref, string_lit, subscription_ref, suggestions_from_errors, tok,
-        topic_ref, word_raw,
+        error_policies, filter_where_clause, flush_each, if_not_exists_clause, ingestor_name,
+        ingestor_outputs, into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter,
+        nats_queue_group_ref, queue_ref, relay_ref, string_lit, subscription_ref,
+        suggestions_from_errors, tok, topic_ref, word_raw,
     },
 };
 
@@ -642,8 +642,8 @@ pub fn create_ingestor_parser<'src>()
         .ignore_then(if_not_exists_clause())
         .then_ignore(kw(Identifier::Ingestor))
         .then(ingestor_name())
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(ingestor_outputs())
         .then_ignore(kw_phrase2(Identifier::Decode, Identifier::Using))
         .then(codec_ref())
         .then(branch_parameterization_with_values())
@@ -651,7 +651,6 @@ pub fn create_ingestor_parser<'src>()
         .then(timestamp_source().or_not())
         .then_ignore(kw(Identifier::From))
         .then(ingest_source_parser())
-        .then(filter_map_program().or_not())
         .then(error_policies())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
@@ -661,16 +660,16 @@ pub fn create_ingestor_parser<'src>()
                         (
                             (
                                 (
-                                    (((if_not_exists, name), into_relay), decode_using_codec),
-                                    parameterized_by,
+                                    (((if_not_exists, name), filter_where), output_routes),
+                                    decode_using_codec,
                                 ),
-                                flush_each,
+                                parameterized_by,
                             ),
-                            timestamp_source,
+                            flush_each,
                         ),
-                        source,
+                        timestamp_source,
                     ),
-                    filter_map,
+                    source,
                 ),
                 error_policies,
             )| {
@@ -678,7 +677,7 @@ pub fn create_ingestor_parser<'src>()
                 CreateStatement::new(
                     CreateIngestor {
                         name,
-                        into_relay,
+                        output_routes,
                         decode_using_codec,
                         parameterized_by,
                         flush_each,
@@ -686,7 +685,7 @@ pub fn create_ingestor_parser<'src>()
                         timestamp_source,
                         source,
                         error_policies,
-                        filter_map,
+                        filter_where,
                     },
                     if_not_exists,
                 )
@@ -770,7 +769,14 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), "kafka_notifications");
-        assert_eq!(parsed.into_relay.as_str(), "notifications");
+        assert_eq!(
+            parsed
+                .output_routes
+                .outputs()
+                .map(|output| output.relay.as_str())
+                .collect::<Vec<_>>(),
+            vec!["notifications"]
+        );
         assert_eq!(
             parsed.decode_using_codec.as_str(),
             "notification_kafka_message"
@@ -1014,7 +1020,14 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), "rabbit_notifications");
-        assert_eq!(parsed.into_relay.as_str(), "notifications");
+        assert_eq!(
+            parsed
+                .output_routes
+                .outputs()
+                .map(|output| output.relay.as_str())
+                .collect::<Vec<_>>(),
+            vec!["notifications"]
+        );
         assert_eq!(
             parsed.source,
             IngestSource::RabbitMq {
@@ -1845,39 +1858,53 @@ mod tests {
     }
 
     #[test]
-    fn parses_ingestor_with_filter_map_program() {
+    fn parses_ingestor_with_filter_where_and_output_routes() {
         let input = r#"
             CREATE INGESTOR kafka_notifications
+              FILTER WHERE message.active
               TO notifications
+                SET notifications.normalized = lower(message.name), notifications.total = message.amount AS INT64
+                UNSET notifications.raw
+                WHERE message.kind = "audit"
+              TO audit_notifications
               DECODE USING notification_kafka_message
               PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-              FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL MAX 10
-              SET notifications.normalized = lower(notifications.name), notifications.total = notifications.amount AS INT64 UNSET notifications.raw WHERE notifications.active ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+              FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL MAX 10 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_ingestor(input).expect("parse should succeed");
 
+        assert_eq!(parsed.filter_where.as_deref(), Some("WHERE message.active"));
+        assert_eq!(parsed.output_routes.routes.len(), 2);
         assert_eq!(
-            parsed.filter_map.as_deref(),
+            parsed.output_routes.routes[0].relay.as_str(),
+            "notifications"
+        );
+        assert_eq!(
+            parsed.output_routes.routes[0].filter_map.as_deref(),
             Some(
-                "SET notifications.normalized = lower ( notifications.name ) , \
-                 notifications.total = notifications.amount AS INT64 UNSET notifications.raw \
-                 WHERE notifications.active"
+                "SET notifications.normalized = lower ( message.name ) , notifications.total = \
+                 message.amount AS INT64 UNSET notifications.raw WHERE message.kind = \"audit\""
             )
         );
+        assert_eq!(
+            parsed.output_routes.routes[1].relay.as_str(),
+            "audit_notifications"
+        );
+        assert_eq!(parsed.output_routes.routes[1].filter_map, None);
     }
 
     #[test]
-    fn rejects_invalid_ingestor_filter_map_program() {
+    fn rejects_invalid_ingestor_output_route_program() {
         let input = r#"
             CREATE INGESTOR kafka_notifications
               TO notifications
+                SET notifications.normalized =
               DECODE USING notification_kafka_message
               PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-              FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL MAX 10
-              SET notifications.normalized = ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+              FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL MAX 10 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let error = parse_create_ingestor(input).expect_err("parse should fail");

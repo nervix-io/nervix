@@ -78,7 +78,7 @@ The rest of the graph is built with:
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
-Ingestors and emitters may carry filter-map clauses on their source or sink boundary. Relay-consuming processors instead use an optional node-level arrival filter and per-output filter-map clauses:
+Ingestors, relay-consuming processors, and generated-output processors use optional node-level arrival filters and per-output route clauses. Emitters use the same row-level filter-map surface on their sink boundary:
 
 ```nspl
 [FILTER WHERE <expr>]
@@ -86,7 +86,7 @@ TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHE
 [TO <relay> ...]
 ```
 
-`FILTER WHERE` runs before the processor accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the processor.
+`FILTER WHERE` runs before the node accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the node.
 
 Passthrough inheritance only applies to processors that naturally map one input row to one output row. Generated-output processors such as windows, inferencers, and WASM processors do not inherit input fields; their output routes operate on the aggregate record, ONNX output record, or WASM guest output record.
 
@@ -158,14 +158,15 @@ Example:
 
 ```nspl
 CREATE INGESTOR notifications_in
+  FILTER WHERE message.active
   TO notifications
+    SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
+    UNSET notifications.raw
   DECODE USING notification_codec
   PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-  SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
-  UNSET notifications.raw
-  WHERE message.active ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 ```
 
 Another example showing nested conditions and chained calls:

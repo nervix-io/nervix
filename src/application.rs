@@ -9127,7 +9127,15 @@ fn format_ingestor_describe_output(
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
         format!("source: {}", format_ingestor_source(&ingestor.source)),
-        format!("stream: {}", ingestor.into_relay.as_str()),
+        format!(
+            "streams: {}",
+            ingestor
+                .output_routes
+                .relays()
+                .map(Identifier::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         format!("codec: {}", ingestor.decode_using_codec.as_str()),
         format!("owner: {}", ingestor_node.execution_node().unwrap_or("-"),),
         format!(

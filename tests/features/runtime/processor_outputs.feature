@@ -1,4 +1,93 @@
 Feature: Processor output routing
+  Scenario Outline: Ingestor output routes filter input before fan-out
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event_in (
+        id STRING,
+        active BOOL,
+        level STRING,
+        raw STRING
+      );
+
+      CREATE SCHEMA event_projection (
+      id STRING,
+      route STRING,
+      normalized STRING
+      );
+
+      CREATE JSON WIRE SCHEMA event_wire (
+        id string,
+        active boolean,
+        level string,
+        raw string
+      );
+
+      CREATE CODEC event_codec
+        FROM WIRE JSON SCHEMA event_wire
+        TO SCHEMA event_in;
+
+      CREATE RELAY error_events SCHEMA event_projection UNPARAMETERIZED;
+      CREATE RELAY audit_events SCHEMA event_projection UNPARAMETERIZED;
+
+      CREATE VHOST edge http-ingestor-output-{{test_id}}.example.com;
+
+      CREATE ENDPOINT ingress
+        ON edge
+        PATH '/ingestor-output'
+        TYPE HTTP;
+
+      CREATE INGESTOR event_source
+        FILTER WHERE message.active
+        TO error_events
+          SET error_events.route = "error",
+              error_events.normalized = lower(trim(message.raw))
+          UNSET error_events.active, error_events.level, error_events.raw
+          WHERE message.level = "ERROR"
+        TO audit_events
+          SET audit_events.route = "audit",
+              audit_events.normalized = lower(trim(message.raw))
+          UNSET audit_events.active, audit_events.level, audit_events.raw
+        DECODE USING event_codec
+        UNPARAMETERIZED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO error_events;
+      SUBSCRIBE SESSION TO audit_events;
+
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-ingestor-output-{{test_id}}.example.com" path "/ingestor-output"
+      """
+      {"id":"err-1","active":true,"level":"ERROR","raw":"  FAIL  "}
+      """
+    And http payload is posted to node "node-1" with host "http-ingestor-output-{{test_id}}.example.com" path "/ingestor-output"
+      """
+      {"id":"info-1","active":true,"level":"INFO","raw":"  OK  "}
+      """
+    And http payload is posted to node "node-1" with host "http-ingestor-output-{{test_id}}.example.com" path "/ingestor-output"
+      """
+      {"id":"drop-1","active":false,"level":"ERROR","raw":"  DROP  "}
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      "id":"err-1","normalized":"fail","route":"error"
+      "id":"err-1","normalized":"fail","route":"audit"
+      "id":"info-1","normalized":"ok","route":"audit"
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: Processor output routes fan out to conditional and unconditional destinations
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

@@ -51,6 +51,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 const BRANCH_NAMESPACE: &str = "branch";
+const INGEST_MESSAGE_NAMESPACE: &str = "message";
 const WASM_INPUT_NAMESPACE: &str = "input";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -1047,16 +1048,15 @@ impl DomainState {
                 Model::Ingestor(ingestor) => {
                     validate_ingestor_source(domain, identifier, ingestor)?;
 
-                    let relay = expect_kind(
+                    add_processor_output_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
-                        &ingestor.into_relay,
-                        ModelKind::Relay,
+                        &mut graph,
+                        source,
+                        &ingestor.output_routes,
                     )?;
-                    graph.add_edge(relay, source, EdgeKind::RequiredBy);
-                    graph.add_edge(source, relay, EdgeKind::SendsTo);
 
                     let codec = expect_kind(
                         domain,
@@ -1117,29 +1117,49 @@ impl DomainState {
                         models,
                         &ingestor.decode_using_codec,
                     )?;
-                    let consumer_schema =
-                        schema_for_ack_model(domain, identifier, models, &ingestor.into_relay)?;
-                    let effective_schema = effective_ingestor_filter_map_schema(
+                    let message_namespace = Identifier::parse(INGEST_MESSAGE_NAMESPACE)
+                        .expect("static namespace must be a valid identifier");
+                    validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
+                        &[(&message_namespace, producer_schema)],
+                        None,
+                        ingestor.filter_where.as_deref(),
+                    )?;
+                    for output in ingestor.output_routes.outputs() {
+                        let consumer_schema =
+                            schema_for_ack_model(domain, identifier, models, &output.relay)?;
+                        let effective_schema = effective_ingestor_output_filter_map_schema(
+                            domain,
+                            identifier,
+                            models,
+                            ingestor,
+                            producer_schema,
+                            output,
+                            consumer_schema,
+                        )?;
+                        ensure_internal_schema_compatibility(
+                            domain,
+                            identifier,
+                            &effective_schema,
+                            consumer_schema,
+                            "ingestor output",
+                        )?;
+                        ensure_ingestor_output_parameterization_source(
+                            domain,
+                            identifier,
+                            models,
+                            ingestor,
+                            &effective_schema,
+                            &output.relay,
+                        )?;
+                    }
+                    ensure_ingestor_timestamp_source(
+                        domain,
+                        identifier,
                         ingestor,
                         producer_schema,
-                        consumer_schema,
-                    )?;
-                    ensure_internal_schema_compatibility(
-                        domain,
-                        identifier,
-                        &effective_schema,
-                        consumer_schema,
-                        "ingestor output",
-                    )?;
-                    ensure_ingestor_parameterization_source(
-                        domain,
-                        identifier,
-                        models,
-                        ingestor,
-                        &effective_schema,
                     )?;
                     validate_branch_ttl(domain, identifier, &ingestor.parameterized_by)?;
                     add_message_error_policy_edges(
@@ -4643,15 +4663,16 @@ fn effective_generator_schema(
     })
 }
 
-fn effective_ingestor_filter_map_schema(
+fn effective_ingestor_output_filter_map_schema(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
     ingestor: &CreateIngestor,
     input_schema: &CreateSchema,
+    output: &ProcessorOutput,
     output_schema: &CreateSchema,
 ) -> Result<CreateSchema, Report<RegistryError>> {
-    let Some(filter_map) = ingestor.filter_map.as_deref() else {
+    let Some(filter_map) = output.filter_map.as_deref() else {
         return Ok(input_schema.clone());
     };
 
@@ -4674,8 +4695,8 @@ fn effective_ingestor_filter_map_schema(
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
 
     let mut bindings = vec![
-        readonly_binding_for_internal_schema("message", input_schema),
-        writeonly_binding_for_internal_schema(ingestor.into_relay.as_str(), output_schema),
+        readonly_binding_for_internal_schema(INGEST_MESSAGE_NAMESPACE, input_schema),
+        writeonly_binding_for_internal_schema(output.relay.as_str(), output_schema),
     ];
     if let Some(metadata_schema) = ingestor_filter_map_metadata_schema(&ingestor.source) {
         bindings.push(CompileBinding::readonly(
@@ -4689,17 +4710,18 @@ fn effective_ingestor_filter_map_schema(
             arrow_schema_for_internal_schema(&headers_schema),
         ));
     }
+    let local_namespaces = HashSet::from_iter([
+        INGEST_MESSAGE_NAMESPACE.to_string(),
+        "metadata".to_string(),
+        "headers".to_string(),
+        output.relay.as_str().to_string(),
+    ]);
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
         models,
         &original_parsed,
-        &HashSet::from_iter([
-            "message".to_string(),
-            "metadata".to_string(),
-            "headers".to_string(),
-            ingestor.into_relay.as_str().to_string(),
-        ]),
+        &local_namespaces,
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
@@ -5729,12 +5751,13 @@ fn ensure_lookup_key_field_exists(
     }))
 }
 
-fn ensure_ingestor_parameterization_source(
+fn ensure_ingestor_output_parameterization_source(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
     ingestor: &CreateIngestor,
     schema: &CreateSchema,
+    output_relay: &Identifier,
 ) -> Result<(), Report<RegistryError>> {
     if let Some(parameter_schema) = ingestor.parameterized_by.schema() {
         ensure_parameter_values_match_schema(
@@ -5744,11 +5767,11 @@ fn ensure_ingestor_parameterization_source(
             parameter_schema,
             ingestor.parameterized_by.values(),
             schema,
-            &ingestor.into_relay,
+            output_relay,
             None,
         )?;
     }
-    ensure_ingestor_timestamp_source(domain, identifier, ingestor, schema)
+    Ok(())
 }
 
 fn ensure_ingestor_timestamp_source(
@@ -6168,15 +6191,22 @@ fn infer_stream_parameterizations(
                             .collect(),
                     )
                 }
-                Model::Ingestor(ingestor) => Some(vec![(
-                    ingestor.into_relay.clone(),
-                    resolved_branch_parameterization(
+                Model::Ingestor(ingestor) => {
+                    let parameterization = resolved_branch_parameterization(
                         domain,
                         producer_id,
                         models,
                         &ingestor.parameterized_by,
-                    )?,
-                )]),
+                    )?;
+                    Some(
+                        ingestor
+                            .output_routes
+                            .relays()
+                            .cloned()
+                            .map(|target| (target, parameterization.clone()))
+                            .collect(),
+                    )
+                }
                 Model::Reingestor(reingestor) => {
                     let parameterization = resolved_branch_parameterization(
                         domain,
@@ -7426,7 +7456,7 @@ mod tests {
         };
         Model::Ingestor(CreateIngestor {
             name: identifier(name),
-            into_relay: identifier(into),
+            output_routes: ProcessorOutputs::single(identifier(into)),
             decode_using_codec: identifier(codec),
             parameterized_by,
             flush_each: "100ms".to_string(),
@@ -7449,7 +7479,7 @@ mod tests {
             },
             error_policies: ErrorPolicies::handled_by_log(),
 
-            filter_map: None,
+            filter_where: None,
         })
     }
 
@@ -8531,7 +8561,9 @@ mod tests {
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("http_ing").expect("valid identifier"),
-                        into_relay: Identifier::parse("notifications").expect("valid identifier"),
+                        output_routes: ProcessorOutputs::single(
+                            Identifier::parse("notifications").expect("valid identifier"),
+                        ),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
                         parameterized_by: BranchParameterization::unparameterized(),
@@ -8544,7 +8576,7 @@ mod tests {
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
 
-                        filter_map: None,
+                        filter_where: None,
                     }),
                 ],
             )
@@ -8591,7 +8623,9 @@ mod tests {
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("mqtt_ing").expect("valid identifier"),
-                    into_relay: Identifier::parse("notifications").expect("valid identifier"),
+                    output_routes: ProcessorOutputs::single(
+                        Identifier::parse("notifications").expect("valid identifier"),
+                    ),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -8607,7 +8641,7 @@ mod tests {
                         },
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
-                    filter_map: None,
+                    filter_where: None,
                 }),
             ],
         );
@@ -8663,7 +8697,9 @@ mod tests {
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
-                    into_relay: Identifier::parse("notifications").expect("valid identifier"),
+                    output_routes: ProcessorOutputs::single(
+                        Identifier::parse("notifications").expect("valid identifier"),
+                    ),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -8682,7 +8718,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }),
             ],
         );
@@ -8772,7 +8808,14 @@ mod tests {
                     branch_schema("tenant_branch", &["tenant"]),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("ing").expect("valid identifier"),
-                        into_relay: Identifier::parse("notifications").expect("valid identifier"),
+                        output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                            relay: Identifier::parse("notifications").expect("valid identifier"),
+                            filter_map: Some(
+                                "SET notifications.total = message.value, notifications.tenant = \
+                                 message.tenant UNSET notifications.value, notifications.raw"
+                                    .to_string(),
+                            ),
+                        }]),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
                         parameterized_by: parameterized_by(
@@ -8793,11 +8836,7 @@ mod tests {
                             mode: KafkaIngestMode::NoAckParallel { max: 1 },
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
-                        filter_map: Some(
-                            "SET notifications.total = message.value, notifications.tenant = \
-                             message.tenant UNSET notifications.value, notifications.raw"
-                                .to_string(),
-                        ),
+                        filter_where: None,
                     }),
                 ],
             )
@@ -8846,7 +8885,14 @@ mod tests {
                 relay("notifications", "transformed_schema"),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
-                    into_relay: Identifier::parse("notifications").expect("valid identifier"),
+                    output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                        relay: Identifier::parse("notifications").expect("valid identifier"),
+                        filter_map: Some(
+                            "SET notifications.total = message.missing + 1 UNSET \
+                             notifications.value"
+                                .to_string(),
+                        ),
+                    }]),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -8863,10 +8909,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: Some(
-                        "SET notifications.total = message.missing + 1 UNSET notifications.value"
-                            .to_string(),
-                    ),
+                    filter_where: None,
                 }),
             ],
         );
@@ -8927,7 +8970,10 @@ mod tests {
                 branch_schema("tenant_branch", &["tenant"]),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
-                    into_relay: Identifier::parse("notifications").expect("valid identifier"),
+                    output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                        relay: Identifier::parse("notifications").expect("valid identifier"),
+                        filter_map: Some("UNSET notifications.value".to_string()),
+                    }]),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
                     parameterized_by: parameterized_by(
                         "tenant_branch",
@@ -8948,7 +8994,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: Some("UNSET notifications.value".to_string()),
+                    filter_where: None,
                 }),
             ],
         );
@@ -8987,7 +9033,9 @@ mod tests {
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("ws_ing").expect("valid identifier"),
-                        into_relay: Identifier::parse("notifications").expect("valid identifier"),
+                        output_routes: ProcessorOutputs::single(
+                            Identifier::parse("notifications").expect("valid identifier"),
+                        ),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
                         parameterized_by: BranchParameterization::unparameterized(),
@@ -9000,7 +9048,7 @@ mod tests {
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
 
-                        filter_map: None,
+                        filter_where: None,
                     }),
                 ],
             )

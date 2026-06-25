@@ -741,15 +741,15 @@ impl CreateIngestor {
             .unwrap_or_default();
         let source = ingest_source_to_nspl(&self.source);
         Ok(format!(
-            "CREATE INGESTOR {} TO {} DECODE USING {} {} {}{} FROM {}{} {};",
+            "CREATE INGESTOR {}{}{} DECODE USING {} {} {}{} FROM {} {};",
             self.name.as_str(),
-            self.into_relay.as_str(),
+            filter_where_suffix(&self.filter_where),
+            processor_outputs_to_nspl(&self.output_routes),
             self.decode_using_codec.as_str(),
             params,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             timestamp,
             source,
-            filter_map_suffix(&self.filter_map),
             error_policies_to_nspl(&self.error_policies)
         ))
     }
@@ -2731,7 +2731,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("http_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -2743,7 +2743,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2754,7 +2754,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("kinesis_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -2771,7 +2771,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2783,7 +2783,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("kafka_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: parameterized_by(
                         "tenant_region_branch",
@@ -2807,7 +2807,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2820,7 +2820,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("mqtt_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -2837,7 +2837,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2848,7 +2848,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("nats_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -2863,7 +2863,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2874,7 +2874,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("rabbit_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -2891,7 +2891,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2903,7 +2903,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("redis_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -2916,7 +2916,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2927,7 +2927,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("prom_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -2940,7 +2940,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2951,7 +2951,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("zmq_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -2963,7 +2963,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -2973,7 +2973,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("sqs_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -2990,7 +2990,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -3001,7 +3001,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("endpoint_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -3013,7 +3013,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
@@ -3024,7 +3024,7 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("ws_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
@@ -3036,7 +3036,7 @@ mod tests {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }
                 .to_canonical_nspl()
                 .expect("must render"),

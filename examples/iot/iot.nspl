@@ -82,6 +82,9 @@ CREATE CLIENT redis_alerts
 
 CREATE INGESTOR mqtt_telemetry
   TO telemetry_by_site
+    SET telemetry_by_site.status = lower(trim(message.status)),
+        telemetry_by_site.sensor = lower(trim(message.sensor)),
+        telemetry_by_site.unit = lower(trim(message.unit))
   DECODE USING iot_telemetry_codec
   PARAMETERIZED BY site_branch VALUES { site = telemetry_by_site.site } TTL 5m
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
@@ -90,9 +93,6 @@ CREATE INGESTOR mqtt_telemetry
   TOPIC factory_telemetry
   INSTANCES 4
   MODE NO_ACK PARALLEL MAX 1024
-  SET telemetry_by_site.status = lower(trim(message.status)),
-      telemetry_by_site.sensor = lower(trim(message.sensor)),
-      telemetry_by_site.unit = lower(trim(message.unit))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE DEDUPLICATOR quality_gate

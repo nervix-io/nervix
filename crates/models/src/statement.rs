@@ -1202,7 +1202,7 @@ impl BranchParameterization {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateIngestor {
     pub name: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub decode_using_codec: Identifier,
     pub parameterized_by: BranchParameterization,
     pub flush_each: String,
@@ -1212,7 +1212,7 @@ pub struct CreateIngestor {
     pub source: IngestSource,
     pub error_policies: ErrorPolicies,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2223,7 +2223,7 @@ mod tests {
             kind: ModelKind::Ingestor,
             config: Box::new(Model::Ingestor(CreateIngestor {
                 name: identifier("orders_http"),
-                into_relay: identifier("orders_out"),
+                output_routes: ProcessorOutputs::single(identifier("orders_out")),
                 decode_using_codec: identifier("codec"),
                 parameterized_by: BranchParameterization::unparameterized(),
                 flush_each: "100ms".to_string(),
@@ -2235,7 +2235,7 @@ mod tests {
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
 
-                filter_map: None,
+                filter_where: None,
             })),
             effective_parameterization: None,
             kafka_partition_schedule: None,

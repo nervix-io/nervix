@@ -2678,7 +2678,7 @@ impl Runtime {
                 dispatch.ingested_at,
             ),
         );
-        if let Some(filter_map) = dispatch.filter_map {
+        if let Some(filter_where) = dispatch.filter_where {
             let branch_key = if let Some(mappings) = dispatch.parameter_value_mappings {
                 resolve_concrete_branch_from_mappings(&record, None, mappings, dispatch.ingestor)?
             } else {
@@ -2689,7 +2689,7 @@ impl Runtime {
                 .load_materialized_side_inputs(
                     dispatch.domain,
                     &branch_key,
-                    &filter_map.materialized_interest,
+                    &filter_where.materialized_interest,
                     &self
                         .executions
                         .get(dispatch.domain)
@@ -2703,7 +2703,7 @@ impl Runtime {
                 .flatten()
                 .unwrap_or_else(current_timestamp);
             let Some(transformed) = execute_filter_map_on_record(
-                filter_map,
+                filter_where,
                 augment_runtime_record_with_side_inputs(record, &side_inputs),
                 None,
                 dispatch.filter_map_metadata.as_ref(),
@@ -2731,129 +2731,285 @@ impl Runtime {
                 dispatch.domain.as_str()
             ));
         };
-        let Some(schema) = execution.relay_schemas.get(dispatch.sender_relay).cloned() else {
-            return Err(format!(
-                "stream '{}' schema is not instantiated in domain '{}'",
-                dispatch.sender_relay.as_str(),
-                dispatch.domain.as_str()
-            ));
-        };
-        if let Some(sender) = dispatch.parameterized_sender {
-            let bytes = record.estimated_bytes();
-            self.metrics
-                .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
-                    domain: dispatch.domain,
-                    kind: ModelKind::Ingestor,
-                    node: dispatch.ingestor,
-                    physical_node_id: self.local_node_id.read().as_deref(),
-                    messages: 1,
-                    bytes,
-                    domain_timestamp: Some(event_timestamp),
-                });
-            self.mark_branch_aggregated_metrics_updated(
-                dispatch.domain,
-                ModelKind::Ingestor,
-                dispatch.ingestor,
-            );
-            if let Err(error) = sender
-                .send(ParameterizedEntrypointInput::UnresolvedRecord {
-                    record,
-                    acks: dispatch.acks,
-                })
-                .await
-            {
-                let ParameterizedEntrypointInput::UnresolvedRecord { acks, .. } = error.0 else {
-                    return Ok(());
-                };
-                self.handle_general_error_for_acks(
-                    dispatch.domain,
-                    ModelKind::Ingestor.as_str(),
-                    dispatch.ingestor,
-                    &ErrorPolicies::handled_by_log(),
-                    std::iter::once(&acks),
-                    format!(
-                        "ingestor '{}' failed to forward record to parametrization entrypoint",
-                        dispatch.ingestor.as_str()
-                    ),
-                );
-            }
-            return Ok(());
-        }
-        let key = if let Some(mappings) = dispatch.parameter_value_mappings {
-            resolve_concrete_branch_from_mappings(&record, None, mappings, dispatch.ingestor)?
-        } else {
-            resolve_concrete_branch(&record, dispatch.parameterization, dispatch.ingestor)?
-        }
-        .into_relay_key();
-        let batch = RelayRecordBatch::single(schema, key, record, dispatch.acks)?;
+        let relay_schemas = execution.relay_schemas.clone();
+        let relay_registries = execution.relay_registries.clone();
+        let relay_services = execution.relay_services.clone();
+        let relay_parameterizations = execution.relay_parameterizations.clone();
+        let owner_nodes = execution.materialized_stream_owner_nodes.clone();
+        drop(execution);
         self.metrics
             .observe_global_node_without_stream_received(NodeWithoutRelayObservation {
                 domain: dispatch.domain,
                 kind: ModelKind::Ingestor,
                 node: dispatch.ingestor,
                 physical_node_id: self.local_node_id.read().as_deref(),
+                messages: 1,
+                bytes: record.estimated_bytes(),
+                domain_timestamp: Some(event_timestamp),
+            });
+        self.mark_branch_aggregated_metrics_updated(
+            dispatch.domain,
+            ModelKind::Ingestor,
+            dispatch.ingestor,
+        );
+        let mut routed_records = Vec::new();
+        for output in &dispatch.output_routes.routes {
+            let output_record = if let Some(filter_map) = output.compiled_program.as_ref() {
+                let empty_parameterization = Vec::new();
+                let output_parameterization = relay_parameterizations
+                    .get(&output.relay)
+                    .unwrap_or(&empty_parameterization);
+                let branch_key = if output_parameterization.is_empty() {
+                    ConcreteBranch::Root
+                } else if let Some(mappings) = dispatch.parameter_value_mappings {
+                    resolve_concrete_branch_from_mappings(
+                        &record,
+                        None,
+                        mappings,
+                        dispatch.ingestor,
+                    )?
+                } else {
+                    resolve_concrete_branch(&record, output_parameterization, dispatch.ingestor)?
+                }
+                .into_relay_key();
+                let side_inputs = self
+                    .load_materialized_side_inputs(
+                        dispatch.domain,
+                        &branch_key,
+                        &filter_map.materialized_interest,
+                        &owner_nodes,
+                    )
+                    .await?;
+                let execution_now = self
+                    .current_stream_expiration_time(dispatch.domain)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(current_timestamp);
+                execute_filter_map_on_record(
+                    filter_map,
+                    augment_runtime_record_with_side_inputs(record.clone(), &side_inputs),
+                    None,
+                    dispatch.filter_map_metadata.as_ref(),
+                    execution_now,
+                )
+                .await?
+            } else {
+                Some(record.clone())
+            };
+            if let Some(output_record) = output_record {
+                routed_records.push((output.relay.clone(), output_record));
+            }
+        }
+        if routed_records.is_empty() {
+            dispatch.acks.ack_success();
+            return Ok(());
+        }
+        let mut ack_queue = VecDeque::with_capacity(routed_records.len());
+        for _ in 1..routed_records.len() {
+            ack_queue.push_back(dispatch.acks.attached());
+        }
+        ack_queue.push_front(dispatch.acks);
+        for (relay, output_record) in routed_records {
+            let acks = ack_queue
+                .pop_front()
+                .expect("ack queue must match routed output count");
+            if let Some(sender) = dispatch.parameterized_senders.get(&relay) {
+                if let Err(error) = sender
+                    .send(ParameterizedEntrypointInput::UnresolvedRecord {
+                        record: output_record,
+                        acks,
+                    })
+                    .await
+                {
+                    let ParameterizedEntrypointInput::UnresolvedRecord { acks, .. } = error.0
+                    else {
+                        continue;
+                    };
+                    self.handle_general_error_for_acks(
+                        dispatch.domain,
+                        ModelKind::Ingestor.as_str(),
+                        dispatch.ingestor,
+                        &ErrorPolicies::handled_by_log(),
+                        std::iter::once(&acks),
+                        format!(
+                            "ingestor '{}' failed to forward record to parametrization entrypoint \
+                             for relay '{}'",
+                            dispatch.ingestor.as_str(),
+                            relay.as_str()
+                        ),
+                    );
+                }
+                continue;
+            }
+            let empty_parameterization = Vec::new();
+            let output_parameterization = relay_parameterizations
+                .get(&relay)
+                .unwrap_or(&empty_parameterization);
+            let key = if output_parameterization.is_empty() {
+                ConcreteBranch::Root
+            } else if let Some(mappings) = dispatch.parameter_value_mappings {
+                resolve_concrete_branch_from_mappings(
+                    &output_record,
+                    None,
+                    mappings,
+                    dispatch.ingestor,
+                )?
+            } else {
+                resolve_concrete_branch(&output_record, output_parameterization, dispatch.ingestor)?
+            }
+            .into_relay_key();
+            let Some(schema) = relay_schemas.get(&relay).cloned() else {
+                return Err(format!(
+                    "stream '{}' schema is not instantiated in domain '{}'",
+                    relay.as_str(),
+                    dispatch.domain.as_str()
+                ));
+            };
+            let batch = RelayRecordBatch::single(schema, key, output_record, acks)?;
+            if let Some(branch_key) = batch.key.as_ref() {
+                self.metrics.observe_branch_node_without_stream_received(
+                    branch_key.as_str(),
+                    NodeWithoutRelayObservation {
+                        domain: dispatch.domain,
+                        kind: ModelKind::Ingestor,
+                        node: dispatch.ingestor,
+                        physical_node_id: self.local_node_id.read().as_deref(),
+                        messages: batch.message_count(),
+                        bytes: batch.estimated_bytes(),
+                        domain_timestamp: batch.domain_timestamp(),
+                    },
+                );
+            }
+            self.metrics.observe_global_node_sent(NodeBatchObservation {
+                domain: dispatch.domain,
+                kind: ModelKind::Ingestor,
+                node: dispatch.ingestor,
+                relay: &relay,
+                physical_node_id: self.local_node_id.read().as_deref(),
                 messages: batch.message_count(),
                 bytes: batch.estimated_bytes(),
                 domain_timestamp: batch.domain_timestamp(),
             });
-        if let Some(branch_key) = batch.key.as_ref() {
-            self.metrics.observe_branch_node_without_stream_received(
-                branch_key.as_str(),
-                NodeWithoutRelayObservation {
-                    domain: dispatch.domain,
-                    kind: ModelKind::Ingestor,
-                    node: dispatch.ingestor,
-                    physical_node_id: self.local_node_id.read().as_deref(),
-                    messages: batch.message_count(),
-                    bytes: batch.estimated_bytes(),
-                    domain_timestamp: batch.domain_timestamp(),
-                },
-            );
-        }
-        self.mark_branch_aggregated_metrics_updated(
-            dispatch.domain,
-            ModelKind::Ingestor,
-            dispatch.ingestor,
-        );
-        self.metrics.observe_global_node_sent(NodeBatchObservation {
-            domain: dispatch.domain,
-            kind: ModelKind::Ingestor,
-            node: dispatch.ingestor,
-            relay: dispatch.sender_relay,
-            physical_node_id: self.local_node_id.read().as_deref(),
-            messages: batch.message_count(),
-            bytes: batch.estimated_bytes(),
-            domain_timestamp: batch.domain_timestamp(),
-        });
-        self.mark_branch_aggregated_metrics_updated(
-            dispatch.domain,
-            ModelKind::Ingestor,
-            dispatch.ingestor,
-        );
-        let Some(registry) = execution.relay_registries.get(dispatch.sender_relay) else {
-            return Err(format!(
-                "stream '{}' is not instantiated in domain '{}'",
-                dispatch.sender_relay.as_str(),
-                dispatch.domain.as_str()
-            ));
-        };
-        let Some(services) = execution.relay_services.get(dispatch.sender_relay) else {
-            return Err(format!(
-                "stream '{}' services are not instantiated in domain '{}'",
-                dispatch.sender_relay.as_str(),
-                dispatch.domain.as_str()
-            ));
-        };
-        let _ = self
-            .ingest_stream_boundary_message(
+            self.mark_branch_aggregated_metrics_updated(
                 dispatch.domain,
-                dispatch.sender_relay,
-                registry,
-                services,
-                &batch,
-            )
-            .await;
+                ModelKind::Ingestor,
+                dispatch.ingestor,
+            );
+            let Some(registry) = relay_registries.get(&relay) else {
+                return Err(format!(
+                    "stream '{}' is not instantiated in domain '{}'",
+                    relay.as_str(),
+                    dispatch.domain.as_str()
+                ));
+            };
+            let Some(services) = relay_services.get(&relay) else {
+                return Err(format!(
+                    "stream '{}' services are not instantiated in domain '{}'",
+                    relay.as_str(),
+                    dispatch.domain.as_str()
+                ));
+            };
+            let _ = self
+                .ingest_stream_boundary_message(dispatch.domain, &relay, registry, services, &batch)
+                .await;
+        }
         Ok(())
+    }
+
+    pub(in crate::runtime) async fn select_ingested_batch_rows(
+        &self,
+        selection: IngestBatchSelection<'_>,
+    ) -> Result<HashSet<usize>, String> {
+        let Some(filter_where) = selection.filter_where else {
+            return Ok((0..selection.records.len()).collect());
+        };
+        let Some(execution) = self.executions.get(selection.domain) else {
+            return Err(format!(
+                "domain '{}' is not instantiated",
+                selection.domain.as_str()
+            ));
+        };
+        let owner_nodes = execution.materialized_stream_owner_nodes.clone();
+        drop(execution);
+
+        let mut rows_by_branch = HashMap::<Option<BranchKey>, Vec<usize>>::default();
+        for (row, record) in selection.records.iter().enumerate() {
+            let branch_key = if let Some(mappings) = selection.parameter_value_mappings {
+                resolve_concrete_branch_from_mappings(record, None, mappings, selection.ingestor)?
+            } else {
+                resolve_concrete_branch(record, selection.parameterization, selection.ingestor)?
+            }
+            .into_relay_key();
+            rows_by_branch.entry(branch_key).or_default().push(row);
+        }
+
+        let mut selected_rows = HashSet::default();
+        for (branch_key, rows) in rows_by_branch {
+            tokio::task::consume_budget().await;
+            let side_inputs = self
+                .load_materialized_side_inputs(
+                    selection.domain,
+                    &branch_key,
+                    &filter_where.materialized_interest,
+                    &owner_nodes,
+                )
+                .await?;
+            let execution_now = self
+                .current_stream_expiration_time(selection.domain)
+                .ok()
+                .flatten()
+                .unwrap_or_else(current_timestamp);
+            let input_records = rows
+                .iter()
+                .map(|row| selection.records[*row].clone())
+                .collect::<Vec<_>>();
+            let input_records =
+                augment_runtime_records_with_side_inputs(input_records, &side_inputs);
+            let branch_keys = rows.iter().map(|_| branch_key.clone()).collect::<Vec<_>>();
+            let input_records =
+                augment_runtime_records_with_branch_keys(input_records, &branch_keys)?;
+            let input_records = augment_runtime_records_with_lookup_hash_maps(
+                input_records,
+                filter_where,
+                execution_now,
+            )
+            .await?;
+            let filter_map_metadata = selection.filter_map_metadata.map(|metadata| {
+                rows.iter()
+                    .map(|row| metadata[*row].clone())
+                    .collect::<Vec<_>>()
+            });
+            let vm_batch = vm_typed_batch_from_runtime_records_with_metadata(
+                &input_records,
+                filter_map_metadata.as_deref(),
+                &filter_where.compiled.input_schema,
+            )?;
+            let result = execute_program_with_selection_in_context(
+                filter_where.compiled.as_ref(),
+                &vm_batch,
+                &VmExecutionContext { now: execution_now },
+            )
+            .await
+            .map_err(|error| format!("FILTER WHERE execution failed: {error}"))?;
+            for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
+                if let Some(side_error) = result.batch.errors()[output_row].first() {
+                    return Err(format!(
+                        "FILTER WHERE side error {}: {} at {}",
+                        side_error.code.as_str(),
+                        side_error.message,
+                        side_error.span
+                    ));
+                }
+                let Some(original_row) = rows.get(input_row).copied() else {
+                    return Err(format!(
+                        "FILTER WHERE selected row {input_row} outside input batch"
+                    ));
+                };
+                selected_rows.insert(original_row);
+            }
+        }
+
+        Ok(selected_rows)
     }
 
     pub(in crate::runtime) fn resolve_ingested_record_timestamp(
@@ -3117,13 +3273,39 @@ impl Runtime {
         })
     }
 
+    fn parameterized_specs_by_identifier(
+        specs: &[ParameterizedIngestorSpec],
+    ) -> HashMap<Identifier, Vec<ParameterizedIngestorSpec>> {
+        let mut specs_by_identifier = HashMap::default();
+        for spec in specs {
+            specs_by_identifier
+                .entry(spec.identifier.clone())
+                .or_insert_with(Vec::new)
+                .push(spec.clone());
+        }
+        specs_by_identifier
+    }
+
     pub(in crate::runtime) fn start_parameterized_ingestor_runtime(
         &self,
         domain: &Domain,
         ingestor: &Identifier,
-        parameterized: Option<(SharedActiveGraph, ParametrizerTemplate)>,
-    ) -> Option<Arc<ParameterizedIngestorRuntime>> {
-        self.start_parameterized_entrypoint_runtime(domain, ingestor, parameterized)
+        parameterized: HashMap<Identifier, (SharedActiveGraph, ParametrizerTemplate)>,
+    ) -> ParameterizedIngestorRuntimes {
+        let mut roots = parameterized.into_iter().collect::<Vec<_>>();
+        roots.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut runtimes = Vec::with_capacity(roots.len());
+        let mut senders = HashMap::with_capacity(roots.len());
+        for (root_relay, template) in roots {
+            let Some(runtime) =
+                self.start_parameterized_entrypoint_runtime(domain, ingestor, Some(template))
+            else {
+                continue;
+            };
+            senders.insert(root_relay, runtime.sender());
+            runtimes.push(runtime);
+        }
+        ParameterizedIngestorRuntimes { runtimes, senders }
     }
 
     pub async fn apply_cluster_schedule(
@@ -4017,7 +4199,10 @@ impl Runtime {
                 continue;
             };
             parameterized_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            parameterized_entrypoints.insert(spec.identifier.clone(), runtime);
+            parameterized_entrypoints
+                .entry(spec.identifier.clone())
+                .or_insert_with(Vec::new)
+                .push(runtime);
         }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
@@ -4113,10 +4298,9 @@ impl Runtime {
                 relay_parameterization_schemas,
                 materialized_stream_specs,
                 materialized_stream_owner_nodes,
-                parameterized_ingestors: parameterized_specs
-                    .iter()
-                    .map(|spec| (spec.identifier.clone(), spec.clone()))
-                    .collect(),
+                parameterized_ingestors: Self::parameterized_specs_by_identifier(
+                    &parameterized_specs,
+                ),
                 parameterized_entrypoints,
                 codecs,
                 signaling_protocols,
@@ -4202,6 +4386,7 @@ impl Runtime {
         for binding in &bindings {
             match decode_ingested_payload(binding.codec.clone(), payload).await {
                 Ok(record) => {
+                    let mut output_routes = binding.output_routes.clone();
                     if let Err(error) = self
                         .dispatch_ingested_record(IngestDispatch {
                             domain: &binding.domain,
@@ -4209,9 +4394,9 @@ impl Runtime {
                             timestamp_source: binding.timestamp_source.as_ref(),
                             parameterization: &binding.parameterization,
                             parameter_value_mappings: Some(&binding.parameter_value_mappings),
-                            sender_relay: &binding.sender_relay,
-                            filter_map: binding.filter_map.as_ref(),
-                            parameterized_sender: binding.parameterized_sender.as_ref(),
+                            output_routes: &mut output_routes,
+                            filter_where: binding.filter_where.as_ref(),
+                            parameterized_senders: &binding.parameterized_senders,
                             record,
                             filter_map_metadata: Some(IngestFilterMapMetadata::from_headers(
                                 headers.clone(),
@@ -5480,7 +5665,10 @@ impl Runtime {
                 continue;
             };
             parameterized_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            parameterized_entrypoints.insert(spec.identifier.clone(), runtime);
+            parameterized_entrypoints
+                .entry(spec.identifier.clone())
+                .or_insert_with(Vec::new)
+                .push(runtime);
         }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
@@ -5591,10 +5779,9 @@ impl Runtime {
                 relay_parameterization_schemas,
                 materialized_stream_specs,
                 materialized_stream_owner_nodes,
-                parameterized_ingestors: parameterized_specs
-                    .iter()
-                    .map(|spec| (spec.identifier.clone(), spec.clone()))
-                    .collect(),
+                parameterized_ingestors: Self::parameterized_specs_by_identifier(
+                    &parameterized_specs,
+                ),
                 parameterized_entrypoints,
                 codecs,
                 signaling_protocols,
@@ -7024,13 +7211,15 @@ impl Runtime {
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
         }
-        for (identifier, runtime) in execution.parameterized_entrypoints {
-            runtime.shutdown().await;
-            info!(
-                domain = domain.as_str(),
-                entrypoint = identifier.as_str(),
-                "stopped parameterized entrypoint runtime"
-            );
+        for (identifier, runtimes) in execution.parameterized_entrypoints {
+            for runtime in runtimes {
+                runtime.shutdown().await;
+                info!(
+                    domain = domain.as_str(),
+                    entrypoint = identifier.as_str(),
+                    "stopped parameterized entrypoint runtime"
+                );
+            }
         }
         let placements = self
             .replicated_deduplicator_states
@@ -7452,7 +7641,7 @@ impl Runtime {
                 for task in tasks {
                     Self::await_shutdown_task(task, domain, Some(ingestor), "ingestor").await;
                 }
-                if let Some(parameterized) = parameterized {
+                for parameterized in parameterized {
                     parameterized.shutdown().await;
                 }
             }
@@ -7472,7 +7661,7 @@ impl Runtime {
                         self.endpoint_bindings.remove(&route_key);
                     }
                 }
-                if let Some(parameterized) = parameterized {
+                for parameterized in parameterized {
                     parameterized.shutdown().await;
                 }
             }
@@ -7538,69 +7727,104 @@ impl Runtime {
         &self,
         domain: &Domain,
         ingestor: &CreateIngestor,
-    ) -> Result<
-        (
-            Identifier,
-            Option<CompiledProgramWithMaterializedInterest>,
-            Arc<CompiledCodec>,
-            Vec<Identifier>,
-            Option<(SharedActiveGraph, ParametrizerTemplate)>,
-        ),
-        RuntimeError,
-    > {
+    ) -> Result<IngestorDependencies, RuntimeError> {
         let Some(execution) = self.executions.get(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
-                relay: ingestor.into_relay.as_str().to_string(),
+                relay: ingestor
+                    .output_routes
+                    .relays()
+                    .next()
+                    .map(|relay| relay.as_str().to_string())
+                    .unwrap_or_else(|| "<missing>".to_string()),
             });
         };
-        if !execution.relay_services.contains_key(&ingestor.into_relay) {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: ingestor.into_relay.as_str().to_string(),
-            });
-        }
         let Some(codec) = execution.codecs.get(&ingestor.decode_using_codec).cloned() else {
             return Err(RuntimeError::CodecNotInstantiated {
                 domain: domain.as_str().to_string(),
                 codec: ingestor.decode_using_codec.as_str().to_string(),
             });
         };
-        let output_schema = execution
-            .relay_schemas
-            .get(&ingestor.into_relay)
-            .cloned()
-            .ok_or_else(|| RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: ingestor.into_relay.as_str().to_string(),
-            })?;
-        let filter_map = compile_ingestor_filter_map_program(
+        let message_namespace =
+            Identifier::parse(INGEST_MESSAGE_NAMESPACE).expect("static namespace is valid");
+        let empty_parameterization = Vec::new();
+        let filter_where = compile_filter_map_program(
             domain,
             &ingestor.name,
-            &ingestor.into_relay,
-            &ingestor.source,
-            ingestor.filter_map.as_deref(),
-            RuntimeVmSchemaPair {
-                input: codec.schema().arrow_schema(),
-                input_sensitivity: codec.schema().vm_sensitivity(),
-                output: output_schema.arrow_schema(),
-                output_sensitivity: output_schema.vm_sensitivity(),
-            },
+            &[message_namespace],
+            ingestor.filter_where.as_deref(),
+            codec.schema().arrow_schema(),
+            codec.schema().vm_sensitivity(),
+            codec.schema().arrow_schema(),
+            codec.schema().vm_sensitivity(),
             RuntimeVmCompileContext {
                 available_materialized_streams: &execution.materialized_stream_specs,
                 available_lookups: &execution.lookups,
-                current_parameterization: &execution
-                    .relay_parameterizations
-                    .get(&ingestor.into_relay)
-                    .cloned()
-                    .unwrap_or_default(),
+                current_parameterization: &empty_parameterization,
                 current_branch_schema: None,
                 current_branch_sensitivity: None,
             },
         )?;
+        let mut output_routes = RelayProcessorOutputsNode {
+            routes: Vec::with_capacity(ingestor.output_routes.routes.len()),
+        };
+        for output in ingestor.output_routes.outputs() {
+            if !execution.relay_services.contains_key(&output.relay) {
+                return Err(RuntimeError::RelayNotInstantiated {
+                    domain: domain.as_str().to_string(),
+                    relay: output.relay.as_str().to_string(),
+                });
+            }
+            let output_schema = execution
+                .relay_schemas
+                .get(&output.relay)
+                .cloned()
+                .ok_or_else(|| RuntimeError::RelayNotInstantiated {
+                    domain: domain.as_str().to_string(),
+                    relay: output.relay.as_str().to_string(),
+                })?;
+            let compiled_program = compile_ingestor_filter_map_program(
+                domain,
+                &ingestor.name,
+                &output.relay,
+                &ingestor.source,
+                output.filter_map.as_deref(),
+                RuntimeVmSchemaPair {
+                    input: codec.schema().arrow_schema(),
+                    input_sensitivity: codec.schema().vm_sensitivity(),
+                    output: output_schema.arrow_schema(),
+                    output_sensitivity: output_schema.vm_sensitivity(),
+                },
+                RuntimeVmCompileContext {
+                    available_materialized_streams: &execution.materialized_stream_specs,
+                    available_lookups: &execution.lookups,
+                    current_parameterization: &execution
+                        .relay_parameterizations
+                        .get(&output.relay)
+                        .cloned()
+                        .unwrap_or_default(),
+                    current_branch_schema: None,
+                    current_branch_sensitivity: None,
+                },
+            )?;
+            output_routes.routes.push(RelayProcessorOutputNode {
+                relay: output.relay.clone(),
+                filter_map: output.filter_map.clone(),
+                compiled_program,
+            });
+        }
+        let Some(base_output_relay) = output_routes.base_relay() else {
+            return Err(RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "ingestor '{}' must declare at least one output route",
+                    ingestor.name.as_str()
+                ),
+            });
+        };
         let parameterization = execution
             .relay_parameterizations
-            .get(&ingestor.into_relay)
+            .get(&base_output_relay)
             .cloned()
             .unwrap_or_default();
         let model_index = execution
@@ -7609,31 +7833,31 @@ impl Runtime {
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let parameterized_template = execution
-            .parameterized_ingestors
-            .get(&ingestor.name)
-            .map(|spec| {
-                materialize_parametrizer_template(
+        let mut parameterized_templates = HashMap::default();
+        if let Some(specs) = execution.parameterized_ingestors.get(&ingestor.name) {
+            for spec in specs {
+                let template = materialize_parametrizer_template(
                     spec,
                     &model_index,
                     &execution.relay_schemas,
                     &execution.relay_registries,
                     &execution.relay_services,
                 )
-                .map(|template| (execution.graph.clone(), template))
-            })
-            .transpose()
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason,
-            })?;
-        Ok((
-            ingestor.into_relay.clone(),
-            filter_map,
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason,
+                })?;
+                parameterized_templates
+                    .insert(spec.root_relay.clone(), (execution.graph.clone(), template));
+            }
+        }
+        Ok(IngestorDependencies {
+            output_routes,
+            filter_where,
             codec,
             parameterization,
-            parameterized_template,
-        ))
+            parameterized_templates,
+        })
     }
 
     pub(in crate::runtime) async fn load_lookup_runtime(

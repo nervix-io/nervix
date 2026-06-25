@@ -35,26 +35,23 @@ impl EndpointIngestor {
                 })?
         };
 
-        let (sender_relay, filter_map, codec, parameterization, parameterized_template) =
-            runtime.ingestor_dependencies(domain, &ingestor).await?;
+        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
             domain,
             &ingestor.name,
-            parameterized_template,
+            dependencies.parameterized_templates,
         );
         let binding = EndpointIngestBinding {
             runtime_key: key.clone(),
             domain: domain.clone(),
             ingestor: ingestor.name.clone(),
             timestamp_source: ingestor.timestamp_source.clone(),
-            sender_relay,
-            filter_map,
-            codec,
-            parameterization,
+            output_routes: dependencies.output_routes,
+            filter_where: dependencies.filter_where,
+            codec: dependencies.codec,
+            parameterization: dependencies.parameterization,
             parameter_value_mappings: ingestor.parameterized_by.values().to_vec(),
-            parameterized_sender: parameterized_runtime
-                .as_ref()
-                .map(|runtime| runtime.sender()),
+            parameterized_senders: parameterized_runtime.senders.clone(),
         };
 
         let route_keys = route
@@ -78,7 +75,7 @@ impl EndpointIngestor {
             key,
             IngestorRuntime::Endpoint {
                 route_keys,
-                parameterized: parameterized_runtime,
+                parameterized: parameterized_runtime.runtimes,
             },
         );
 

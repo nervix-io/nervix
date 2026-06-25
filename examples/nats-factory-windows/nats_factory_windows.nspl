@@ -121,6 +121,9 @@ CREATE CLIENT nats_edge
 
 CREATE INGESTOR nats_machine_signals
   TO signals_by_site
+    SET signals_by_site.status = lower(trim(message.status)),
+        signals_by_site.sensor = lower(trim(message.sensor)),
+        signals_by_site.unit = lower(trim(message.unit))
   DECODE USING machine_signal_codec
   PARAMETERIZED BY site_branch VALUES { site = signals_by_site.site } TTL 5m
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
@@ -130,9 +133,6 @@ CREATE INGESTOR nats_machine_signals
   QUEUE GROUP factory_signal_workers
   INSTANCES 4
   MODE NO_ACK SEQUENTIAL
-  SET signals_by_site.status = lower(trim(message.status)),
-      signals_by_site.sensor = lower(trim(message.sensor)),
-      signals_by_site.unit = lower(trim(message.unit))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE DEDUPLICATOR intake_quality_gate

@@ -270,12 +270,12 @@ impl RuntimeKey {
 enum IngestorRuntime {
     Background {
         shutdown: watch::Sender<bool>,
-        parameterized: Option<Arc<ParameterizedIngestorRuntime>>,
+        parameterized: Vec<Arc<ParameterizedIngestorRuntime>>,
         tasks: Vec<JoinHandle<()>>,
     },
     Endpoint {
         route_keys: Vec<HttpRouteKey>,
-        parameterized: Option<Arc<ParameterizedIngestorRuntime>>,
+        parameterized: Vec<Arc<ParameterizedIngestorRuntime>>,
     },
 }
 
@@ -417,8 +417,8 @@ struct DomainExecution {
     relay_parameterization_schemas: HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
     materialized_stream_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_stream_owner_nodes: HashMap<Identifier, Option<String>>,
-    parameterized_ingestors: HashMap<Identifier, ParameterizedIngestorSpec>,
-    parameterized_entrypoints: HashMap<Identifier, Arc<ParameterizedIngestorRuntime>>,
+    parameterized_ingestors: HashMap<Identifier, Vec<ParameterizedIngestorSpec>>,
+    parameterized_entrypoints: HashMap<Identifier, Vec<Arc<ParameterizedIngestorRuntime>>>,
     codecs: HashMap<Identifier, Arc<CompiledCodec>>,
     signaling_protocols: HashMap<Identifier, Arc<CreateSignalingProtocol>>,
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
@@ -591,12 +591,20 @@ struct EndpointIngestBinding {
     domain: Domain,
     ingestor: Identifier,
     timestamp_source: Option<IngestTimestampSource>,
-    sender_relay: Identifier,
-    filter_map: Option<CompiledProgramWithMaterializedInterest>,
+    output_routes: RelayProcessorOutputsNode,
+    filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
     parameterization: Vec<Identifier>,
     parameter_value_mappings: Vec<ParameterValueMapping>,
-    parameterized_sender: Option<mpsc::Sender<ParameterizedEntrypointInput>>,
+    parameterized_senders: HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+}
+
+struct IngestorDependencies {
+    output_routes: RelayProcessorOutputsNode,
+    filter_where: Option<CompiledProgramWithMaterializedInterest>,
+    codec: Arc<CompiledCodec>,
+    parameterization: Vec<Identifier>,
+    parameterized_templates: HashMap<Identifier, (SharedActiveGraph, ParametrizerTemplate)>,
 }
 
 struct IngestDispatch<'a> {
@@ -605,13 +613,29 @@ struct IngestDispatch<'a> {
     timestamp_source: Option<&'a IngestTimestampSource>,
     parameterization: &'a [Identifier],
     parameter_value_mappings: Option<&'a [ParameterValueMapping]>,
-    sender_relay: &'a Identifier,
-    filter_map: Option<&'a CompiledProgramWithMaterializedInterest>,
-    parameterized_sender: Option<&'a mpsc::Sender<ParameterizedEntrypointInput>>,
+    output_routes: &'a mut RelayProcessorOutputsNode,
+    filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    parameterized_senders: &'a HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
     record: DecodedRecord,
     filter_map_metadata: Option<IngestFilterMapMetadata>,
     ingested_at: Timestamp,
     acks: AckSet,
+}
+
+#[derive(Clone, Default)]
+struct ParameterizedIngestorRuntimes {
+    runtimes: Vec<Arc<ParameterizedIngestorRuntime>>,
+    senders: HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+}
+
+struct IngestBatchSelection<'a> {
+    domain: &'a Domain,
+    ingestor: &'a Identifier,
+    parameterization: &'a [Identifier],
+    parameter_value_mappings: Option<&'a [ParameterValueMapping]>,
+    filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    records: &'a [RuntimeRecord],
+    filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
 }
 
 enum ParameterizedEntrypointInput {

@@ -409,7 +409,7 @@ pub(super) enum RelayProcessorOperationNode {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct RelayProcessorOutputsNode {
     pub(super) routes: Vec<RelayProcessorOutputNode>,
 }
@@ -420,7 +420,7 @@ impl RelayProcessorOutputsNode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct RelayProcessorOutputNode {
     pub(super) relay: Identifier,
     pub(super) filter_map: Option<String>,

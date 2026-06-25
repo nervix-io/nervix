@@ -137,7 +137,7 @@ async fn memory_pressure_pause_stops_registered_ingestors() {
         key.clone(),
         super::IngestorRuntime::Background {
             shutdown: shutdown_tx,
-            parameterized: None,
+            parameterized: Vec::new(),
             tasks: vec![task],
         },
     );
@@ -1277,7 +1277,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                             ingestor.clone(),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
-                                into_relay: relay.clone(),
+                                output_routes: ProcessorOutputs::single(relay.clone()),
                                 decode_using_codec: codec.clone(),
                                 parameterized_by: BranchParameterization::unparameterized(),
                                 flush_each: "100ms".to_string(),
@@ -1296,7 +1296,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                                     message: MessageErrorPolicy::Log,
                                     general: GeneralErrorPolicy::Log,
                                 },
-                                filter_map: None,
+                                filter_where: None,
                             }),
                         ),
                     ],
@@ -1418,7 +1418,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                             ingestor.clone(),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
-                                into_relay: relay.clone(),
+                                output_routes: ProcessorOutputs::single(relay.clone()),
                                 decode_using_codec: codec.clone(),
                                 parameterized_by: BranchParameterization::unparameterized(),
                                 flush_each: "100ms".to_string(),
@@ -1440,7 +1440,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                                     message: MessageErrorPolicy::Log,
                                     general: GeneralErrorPolicy::Log,
                                 },
-                                filter_map: None,
+                                filter_where: None,
                             }),
                         ),
                     ],
@@ -3931,7 +3931,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                 identifier("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -3942,7 +3942,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4035,7 +4035,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                 identifier("metrics_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("metrics_ingestor"),
-                    into_relay: identifier("metrics"),
+                    output_routes: ProcessorOutputs::single(identifier("metrics")),
                     decode_using_codec: identifier("metrics_codec"),
                     parameterized_by: parameterized_by("host", "metrics", &["host"]),
                     flush_each: "100ms".to_string(),
@@ -4046,7 +4046,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("host")]),
             ),
@@ -4130,7 +4130,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                 identifier("features_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("features_ingestor"),
-                    into_relay: identifier("features"),
+                    output_routes: ProcessorOutputs::single(identifier("features")),
                     decode_using_codec: identifier("features_codec"),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -4141,7 +4141,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4290,7 +4290,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                 identifier("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -4301,7 +4301,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4410,7 +4410,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                 identifier("left_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("left_ingestor"),
-                    into_relay: identifier("left_stream"),
+                    output_routes: ProcessorOutputs::single(identifier("left_stream")),
                     decode_using_codec: identifier("notification_codec"),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -4422,7 +4422,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4431,7 +4431,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                 identifier("right_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("right_ingestor"),
-                    into_relay: identifier("right_stream"),
+                    output_routes: ProcessorOutputs::single(identifier("right_stream")),
                     decode_using_codec: identifier("notification_codec"),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -4443,7 +4443,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4529,7 +4529,7 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
                 identifier("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -4541,7 +4541,7 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4616,7 +4616,7 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
                 identifier("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
-                    into_relay: identifier("orders"),
+                    output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
                     parameterized_by: parameterized_by("root", "orders", &[]),
                     flush_each: "100ms".to_string(),
@@ -4628,7 +4628,7 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
 
-                    filter_map: None,
+                    filter_where: None,
                 }),
                 Some(Vec::new()),
             ),

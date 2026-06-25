@@ -230,17 +230,19 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     });
             }
             Model::Ingestor(ingestor) => {
-                ingestors.push((
-                    kind,
-                    identifier,
-                    ingestor.into_relay.clone(),
-                    ingestor.parameterized_by.ttl().map(str::to_string),
-                    ingestor.parameterized_by.values().to_vec(),
-                    ParametrizerAckBoundary::Preserve,
-                    ingestor.flush_each.clone(),
-                    ingestor.max_batch_size.clone(),
-                    ingestor.error_policies.clone(),
-                ));
+                for output in ingestor.output_routes.outputs() {
+                    ingestors.push((
+                        kind,
+                        identifier.clone(),
+                        output.relay.clone(),
+                        ingestor.parameterized_by.ttl().map(str::to_string),
+                        ingestor.parameterized_by.values().to_vec(),
+                        ParametrizerAckBoundary::Preserve,
+                        ingestor.flush_each.clone(),
+                        ingestor.max_batch_size.clone(),
+                        ingestor.error_policies.clone(),
+                    ));
+                }
             }
             Model::Reingestor(reingestor) => {
                 for output in reingestor.output_routes.outputs() {
