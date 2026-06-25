@@ -13,7 +13,7 @@ Feature: Parameterized session subscriptions
         tenant STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         tenant string
       );
@@ -80,7 +80,7 @@ Feature: Parameterized session subscriptions
         normalized STRING OPTIONAL
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         tenant string,
         active boolean,

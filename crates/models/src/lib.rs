@@ -18,8 +18,9 @@ pub use resource::{
     ResourceVersionKey, ResourceVersionStatus,
 };
 pub use schema::{
-    AvroType, CreateAvroWireSchema, CreateJsonWireSchema, CreateSchema, CreateWireSchema,
-    CreateWireSchemaStmt, JsonType, ParseAsType, SchemaField, WireSchemaField,
+    AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema,
+    CreateSchema, CreateWireSchema, CreateWireSchemaStmt, JsonType, ParseAsType, SchemaField,
+    WireSchemaField, WireSchemaStrictness,
 };
 pub use statement::{
     AckMode, AlterRelay, AlterRelayOperation, AzureBlobConfigEntry, BranchParameterization,

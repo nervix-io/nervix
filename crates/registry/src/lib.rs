@@ -2571,6 +2571,9 @@ fn ensure_wire_schema_has_fields(
         CreateWireSchemaStmt::Json(schema) => {
             ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
         }
+        CreateWireSchemaStmt::Cbor(schema) => {
+            ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
+        }
         CreateWireSchemaStmt::Avro(schema) => {
             ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
         }
@@ -6674,6 +6677,25 @@ fn ensure_codec_schema_compatibility(
                 &rfc3339_fields,
             )
         }
+        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Cbor(cbor))) => {
+            ensure_wire_field_set_matches(
+                domain,
+                identifier,
+                &cbor
+                    .fields
+                    .iter()
+                    .map(|field| WireFieldCompatibility {
+                        name: field.name.as_str(),
+                        optional: field.optional,
+                        wire_type: field.ty.as_ref().to_string(),
+                        compatibility: WireTypeCompatibility::Json(field.ty),
+                    })
+                    .collect::<Vec<_>>(),
+                schema,
+                "cbor",
+                &rfc3339_fields,
+            )
+        }
         (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Avro(avro))) => {
             ensure_wire_field_set_matches(
                 domain,
@@ -6722,6 +6744,30 @@ fn ensure_codec_schema_compatibility(
                     .to_string(),
             }))
         }
+        (CodecWireFormat::Json, Some(CreateWireSchemaStmt::Cbor(_))) => {
+            Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "codec declares JSON wire format but references a cbor wire schema"
+                    .to_string(),
+            }))
+        }
+        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Json(_))) => {
+            Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "codec declares CBOR wire format but references a json wire schema"
+                    .to_string(),
+            }))
+        }
+        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Avro(_))) => {
+            Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "codec declares CBOR wire format but references an avro wire schema"
+                    .to_string(),
+            }))
+        }
         (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Json(_))) => {
             Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
@@ -6730,10 +6776,24 @@ fn ensure_codec_schema_compatibility(
                     .to_string(),
             }))
         }
+        (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Cbor(_))) => {
+            Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "codec declares AVRO wire format but references a cbor wire schema"
+                    .to_string(),
+            }))
+        }
         (CodecWireFormat::Json, None) => Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: "codec declares JSON wire format but does not reference a json wire schema"
+                .to_string(),
+        })),
+        (CodecWireFormat::Cbor, None) => Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "codec declares CBOR wire format but does not reference a cbor wire schema"
                 .to_string(),
         })),
         (CodecWireFormat::Avro, None) => Err(Report::new(RegistryError::InvalidModel {
@@ -7275,6 +7335,7 @@ mod tests {
     fn wire_schema(name: &str) -> Model {
         Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
             name: Identifier::parse(name).expect("valid identifier"),
+            strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: Identifier::parse("value").expect("valid identifier"),
                 ty: JsonType::String,
@@ -7286,6 +7347,7 @@ mod tests {
     fn json_wire_schema_with_type(name: &str, field_type: JsonType) -> Model {
         Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
             name: identifier(name),
+            strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: identifier("value"),
                 ty: field_type,
@@ -7297,6 +7359,7 @@ mod tests {
     fn avro_wire_schema_with_type(name: &str, field_type: nervix_models::AvroType) -> Model {
         Model::WireSchema(CreateWireSchemaStmt::Avro(CreateWireSchema {
             name: identifier(name),
+            strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: identifier("value"),
                 ty: field_type,
@@ -8375,6 +8438,7 @@ mod tests {
             vec![Model::WireSchema(CreateWireSchemaStmt::Json(
                 CreateWireSchema {
                     name: identifier("empty_wire"),
+                    strictness: Default::default(),
                     fields: Vec::<WireSchemaField<JsonType>>::new(),
                 },
             ))],
@@ -8679,6 +8743,7 @@ mod tests {
                 }),
                 Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                     name: Identifier::parse("event_wire").expect("valid identifier"),
+                    strictness: Default::default(),
                     fields: vec![
                         WireSchemaField {
                             name: Identifier::parse("value").expect("valid identifier"),
@@ -8784,6 +8849,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
                                 name: Identifier::parse("value").expect("valid identifier"),
@@ -8874,6 +8940,7 @@ mod tests {
                 }),
                 Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                     name: Identifier::parse("event_wire").expect("valid identifier"),
+                    strictness: Default::default(),
                     fields: vec![WireSchemaField {
                         name: Identifier::parse("value").expect("valid identifier"),
                         ty: JsonType::Integer,
@@ -8951,6 +9018,7 @@ mod tests {
                 }),
                 Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                     name: Identifier::parse("event_wire").expect("valid identifier"),
+                    strictness: Default::default(),
                     fields: vec![
                         WireSchemaField {
                             name: Identifier::parse("value").expect("valid identifier"),
@@ -9641,6 +9709,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![WireSchemaField {
                             name: Identifier::parse("value").expect("valid identifier"),
                             ty: JsonType::String,
@@ -10053,6 +10122,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
                                 name: Identifier::parse("tenant").expect("valid identifier"),
@@ -10176,6 +10246,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
                                 name: Identifier::parse("tenant").expect("valid identifier"),
@@ -10279,6 +10350,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
                                 name: Identifier::parse("tenant").expect("valid identifier"),
@@ -10417,6 +10489,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
                                 name: Identifier::parse("tenant").expect("valid identifier"),
@@ -10542,6 +10615,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
                                 name: Identifier::parse("tenant").expect("valid identifier"),
@@ -10669,6 +10743,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
                                 name: Identifier::parse("tenant").expect("valid identifier"),
@@ -10888,6 +10963,7 @@ mod tests {
                     }),
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
+                        strictness: Default::default(),
                         fields: vec![
                             WireSchemaField {
                                 name: Identifier::parse("tenant").expect("valid identifier"),

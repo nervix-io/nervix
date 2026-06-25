@@ -5,7 +5,7 @@ Feature: Ingestor parameterization
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE JSON WIRE SCHEMA notification_wire ( user_id integer );
+      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification;
       CREATE VHOST edge http-{{test_id}}.example.com;

@@ -14,7 +14,7 @@ Feature: MongoDB emission
         action STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
@@ -103,7 +103,7 @@ Feature: MongoDB emission
         action STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );

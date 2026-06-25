@@ -20,7 +20,7 @@ use nervix_models::{
     ParameterValueMapping, ParseAsType, PostgresConflictAction, ProcessorOutput, ProcessorOutputs,
     PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization,
     RelayParameters, SchemaField, SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource,
-    WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -84,13 +84,21 @@ pub struct StoredSchemaField {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredCreateWireSchemaStmt {
     Json(StoredCreateWireSchema<StoredJsonType>),
+    Cbor(StoredCreateWireSchema<StoredJsonType>),
     Avro(StoredCreateWireSchema<StoredAvroType>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateWireSchema<T> {
     pub name: String,
+    pub strictness: StoredWireSchemaStrictness,
     pub fields: Vec<StoredWireSchemaField<T>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredWireSchemaStrictness {
+    Strict,
+    Loose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -333,6 +341,7 @@ pub struct StoredCreateCodec {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredCodecWireFormat {
     Json,
+    Cbor,
     Avro,
     JaqNative {
         format: StoredCodecJaqFormat,
@@ -1191,6 +1200,7 @@ impl From<CreateWireSchemaStmt> for StoredCreateWireSchemaStmt {
     fn from(value: CreateWireSchemaStmt) -> Self {
         match value {
             CreateWireSchemaStmt::Json(v) => Self::Json(v.into()),
+            CreateWireSchemaStmt::Cbor(v) => Self::Cbor(v.into()),
             CreateWireSchemaStmt::Avro(v) => Self::Avro(v.into()),
         }
     }
@@ -1202,6 +1212,7 @@ impl TryFrom<StoredCreateWireSchemaStmt> for CreateWireSchemaStmt {
     fn try_from(value: StoredCreateWireSchemaStmt) -> Result<Self, Self::Error> {
         match value {
             StoredCreateWireSchemaStmt::Json(v) => Ok(Self::Json(v.try_into()?)),
+            StoredCreateWireSchemaStmt::Cbor(v) => Ok(Self::Cbor(v.try_into()?)),
             StoredCreateWireSchemaStmt::Avro(v) => Ok(Self::Avro(v.try_into()?)),
         }
     }
@@ -1211,6 +1222,7 @@ impl From<CreateWireSchema<JsonType>> for StoredCreateWireSchema<StoredJsonType>
     fn from(value: CreateWireSchema<JsonType>) -> Self {
         Self {
             name: value.name.to_string(),
+            strictness: value.strictness.into(),
             fields: value.fields.into_iter().map(Into::into).collect(),
         }
     }
@@ -1220,6 +1232,7 @@ impl From<CreateWireSchema<AvroType>> for StoredCreateWireSchema<StoredAvroType>
     fn from(value: CreateWireSchema<AvroType>) -> Self {
         Self {
             name: value.name.to_string(),
+            strictness: value.strictness.into(),
             fields: value.fields.into_iter().map(Into::into).collect(),
         }
     }
@@ -1231,6 +1244,7 @@ impl TryFrom<StoredCreateWireSchema<StoredJsonType>> for CreateWireSchema<JsonTy
     fn try_from(value: StoredCreateWireSchema<StoredJsonType>) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
+            strictness: value.strictness.into(),
             fields: value
                 .fields
                 .into_iter()
@@ -1246,12 +1260,31 @@ impl TryFrom<StoredCreateWireSchema<StoredAvroType>> for CreateWireSchema<AvroTy
     fn try_from(value: StoredCreateWireSchema<StoredAvroType>) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
+            strictness: value.strictness.into(),
             fields: value
                 .fields
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<_>, _>>()?,
         })
+    }
+}
+
+impl From<WireSchemaStrictness> for StoredWireSchemaStrictness {
+    fn from(value: WireSchemaStrictness) -> Self {
+        match value {
+            WireSchemaStrictness::Strict => Self::Strict,
+            WireSchemaStrictness::Loose => Self::Loose,
+        }
+    }
+}
+
+impl From<StoredWireSchemaStrictness> for WireSchemaStrictness {
+    fn from(value: StoredWireSchemaStrictness) -> Self {
+        match value {
+            StoredWireSchemaStrictness::Strict => Self::Strict,
+            StoredWireSchemaStrictness::Loose => Self::Loose,
+        }
     }
 }
 
@@ -2283,6 +2316,7 @@ impl From<CodecWireFormat> for StoredCodecWireFormat {
     fn from(value: CodecWireFormat) -> Self {
         match value {
             CodecWireFormat::Json => Self::Json,
+            CodecWireFormat::Cbor => Self::Cbor,
             CodecWireFormat::Avro => Self::Avro,
             CodecWireFormat::JaqNative {
                 format,
@@ -2302,6 +2336,7 @@ impl TryFrom<StoredCodecWireFormat> for CodecWireFormat {
     fn try_from(value: StoredCodecWireFormat) -> Result<Self, Self::Error> {
         Ok(match value {
             StoredCodecWireFormat::Json => Self::Json,
+            StoredCodecWireFormat::Cbor => Self::Cbor,
             StoredCodecWireFormat::Avro => Self::Avro,
             StoredCodecWireFormat::JaqNative {
                 format,
@@ -4183,6 +4218,7 @@ mod tests {
             }),
             Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                 name: identifier("events_json"),
+                strictness: Default::default(),
                 fields: vec![WireSchemaField {
                     name: identifier("user_id"),
                     ty: JsonType::Integer,
@@ -4341,6 +4377,7 @@ mod tests {
             }),
             Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                 name: identifier("events_json"),
+                strictness: Default::default(),
                 fields: vec![
                     WireSchemaField {
                         name: identifier("user_id"),

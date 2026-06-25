@@ -12,7 +12,7 @@ Feature: Websocket endpoint ingestion
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -78,7 +78,7 @@ Feature: Websocket endpoint ingestion
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -139,7 +139,7 @@ Feature: Websocket endpoint ingestion
         seq I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         seq integer
       );
 

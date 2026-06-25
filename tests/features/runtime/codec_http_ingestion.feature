@@ -13,7 +13,7 @@ Feature: HTTP codec ingestion
         user_id I64
       );
 
-      CREATE <wire_format> WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE <wire_format> SCHEMA notification_wire (
         tenant <tenant_wire_type>,
         user_id <user_id_wire_type>
       );
@@ -75,7 +75,7 @@ Feature: HTTP codec ingestion
         labels <labels_type> OPTIONAL
       );
 
-      CREATE <wire_format> WIRE SCHEMA metrics_wire (
+      CREATE STRICT WIRE <wire_format> SCHEMA metrics_wire (
         device STRING,
         cpu_last_64 ARRAY,
         labels ARRAY OPTIONAL
@@ -120,6 +120,93 @@ Feature: HTTP codec ingestion
       | 1            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
       | 3            | JSON        | ARRAY<F32, 3> | VEC<STRING> |
       | 3            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
+
+  Scenario Outline: Schemaful <wire_format> wire schemas enforce strictness for extra fields
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        tenant STRING,
+        user_id I64
+      );
+
+      CREATE STRICT WIRE <wire_format> SCHEMA strict_notification_wire (
+        tenant <tenant_wire_type>,
+        user_id <user_id_wire_type>
+      );
+
+      CREATE LOOSE WIRE <wire_format> SCHEMA loose_notification_wire (
+        tenant <tenant_wire_type>,
+        user_id <user_id_wire_type>
+      );
+
+      CREATE CODEC strict_notification_codec
+        FROM WIRE <wire_format> SCHEMA strict_notification_wire
+        TO SCHEMA notification;
+
+      CREATE CODEC loose_notification_codec
+        FROM WIRE <wire_format> SCHEMA loose_notification_wire
+        TO SCHEMA notification;
+
+      CREATE RELAY strict_notifications SCHEMA notification;
+      CREATE RELAY loose_notifications SCHEMA notification;
+
+      CREATE VHOST edge strict-loose-{{test_id}}.example.com;
+
+      CREATE ENDPOINT strict_ingress
+        ON edge
+        PATH '/strict'
+        TYPE HTTP;
+
+      CREATE ENDPOINT loose_ingress
+        ON edge
+        PATH '/loose'
+        TYPE HTTP;
+
+      CREATE INGESTOR strict_notifications_source
+        TO strict_notifications
+        DECODE USING strict_notification_codec
+        UNPARAMETERIZED
+        FLUSH IMMEDIATE
+        FROM ENDPOINT strict_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      CREATE INGESTOR loose_notifications_source
+        TO loose_notifications
+        DECODE USING loose_notification_codec
+        UNPARAMETERIZED
+        FLUSH IMMEDIATE
+        FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO strict_notifications;
+      SUBSCRIBE SESSION TO loose_notifications;
+      START;
+      """
+    When http payload encoded as "<wire_format>" is posted to host "strict-loose-{{test_id}}.example.com" path "/strict"
+      """
+      {"tenant":"acme","user_id":42,"ignored":"drop-me"}
+      """
+    Then the relay subscription does not receive a payload within "500ms"
+    When http payload encoded as "<wire_format>" is posted to host "strict-loose-{{test_id}}.example.com" path "/loose"
+      """
+      {"tenant":"acme","user_id":42,"ignored":"drop-me"}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"tenant":"acme","user_id":42}
+      """
+    And the last relay subscription payload does not contain "ignored"
+
+    Examples:
+      | cluster_size | wire_format | tenant_wire_type | user_id_wire_type |
+      | 1            | JSON        | string           | integer           |
+      | 3            | JSON        | string           | integer           |
+      | 1            | CBOR        | string           | integer           |
+      | 3            | CBOR        | string           | integer           |
 
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a JAQ-native codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

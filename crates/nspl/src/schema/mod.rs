@@ -1,7 +1,8 @@
 use chumsky::prelude::*;
 use nervix_models::{
-    AvroType, CreateAvroWireSchema, CreateJsonWireSchema, CreateSchema, CreateStatement,
-    CreateWireSchema, CreateWireSchemaStmt, JsonType, ParseAsType, SchemaField, WireSchemaField,
+    AvroType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
+    CreateStatement, CreateWireSchema, CreateWireSchemaStmt, JsonType, ParseAsType, SchemaField,
+    WireSchemaField, WireSchemaStrictness,
 };
 
 pub use crate::parser_support::{Diagnostic, ParseFromSourceError};
@@ -24,6 +25,11 @@ fn json_type<'src>()
         kw(Identifier::Boolean).to(JsonType::Boolean),
         kw(Identifier::Null).to(JsonType::Null),
     ))
+}
+
+fn cbor_type<'src>()
+-> impl Parser<'src, &'src [Token], JsonType, extra::Err<ParseError<'src>>> + Clone {
+    json_type()
 }
 
 fn avro_type<'src>()
@@ -186,16 +192,31 @@ where
         .collect::<Vec<_>>()
         .delimited_by(tok(Token::LParen), tok(Token::RParen));
 
+    let strictness = choice((
+        kw(Identifier::Strict).to(WireSchemaStrictness::Strict),
+        kw(Identifier::Loose).to(WireSchemaStrictness::Loose),
+    ));
+
+    let wire_schema_header = strictness
+        .then_ignore(kw(Identifier::Wire))
+        .then_ignore(kw(format_kw))
+        .then_ignore(kw(Identifier::Schema));
+
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(format_kw))
-        .then_ignore(kw(Identifier::Wire))
-        .then_ignore(kw(Identifier::Schema))
+        .then(wire_schema_header)
         .then(wire_schema_name())
         .then(fields)
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|((if_not_exists, name), fields)| {
-            CreateStatement::new(CreateWireSchema { name, fields }, if_not_exists)
+        .map(|(((if_not_exists, strictness), name), fields)| {
+            CreateStatement::new(
+                CreateWireSchema {
+                    name,
+                    strictness,
+                    fields,
+                },
+                if_not_exists,
+            )
         })
 }
 
@@ -203,6 +224,12 @@ pub fn create_json_wire_schema_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateJsonWireSchema>, extra::Err<ParseError<'src>>>
 + Clone {
     create_wire_schema_parser(Identifier::Json, json_type())
+}
+
+pub fn create_cbor_wire_schema_parser<'src>()
+-> impl Parser<'src, &'src [Token], CreateStatement<CreateCborWireSchema>, extra::Err<ParseError<'src>>>
++ Clone {
+    create_wire_schema_parser(Identifier::Cbor, cbor_type())
 }
 
 pub fn create_avro_wire_schema_parser<'src>()
@@ -216,6 +243,7 @@ pub fn create_wire_schema_parser_any<'src>()
 + Clone {
     choice((
         create_json_wire_schema_parser().map(|create| create.map_body(CreateWireSchemaStmt::Json)),
+        create_cbor_wire_schema_parser().map(|create| create.map_body(CreateWireSchemaStmt::Cbor)),
         create_avro_wire_schema_parser().map(|create| create.map_body(CreateWireSchemaStmt::Avro)),
     ))
 }
@@ -520,7 +548,7 @@ mod tests {
     #[test]
     fn parses_json_wire_schema_definition() {
         let input = r#"
-            CREATE JSON WIRE SCHEMA notification (
+            CREATE STRICT WIRE JSON SCHEMA notification (
                 user_id integer,
                 created_at string,
                 payload object
@@ -533,26 +561,76 @@ mod tests {
             panic!("expected JSON wire schema");
         };
         assert_eq!(schema.name.as_str(), "notification");
+        assert_eq!(schema.strictness, WireSchemaStrictness::Strict);
         assert_eq!(schema.fields[0].ty, JsonType::Integer);
     }
 
     #[test]
+    fn parses_strict_json_wire_schema_definition() {
+        let input = r#"
+            CREATE STRICT WIRE JSON SCHEMA notification (
+                user_id integer,
+                payload object
+            );
+        "#;
+
+        let parsed = parse_create_wire_schema(input).expect("parse should succeed");
+        let CreateWireSchemaStmt::Json(schema) = parsed.body else {
+            panic!("expected JSON wire schema");
+        };
+        assert_eq!(schema.strictness, WireSchemaStrictness::Strict);
+        assert_eq!(schema.fields[1].ty, JsonType::Object);
+    }
+
+    #[test]
+    fn parses_loose_cbor_wire_schema_definition() {
+        let input = r#"
+            CREATE LOOSE WIRE CBOR SCHEMA notification (
+                user_id integer,
+                payload object OPTIONAL
+            );
+        "#;
+
+        let parsed = parse_create_wire_schema(input).expect("parse should succeed");
+        let CreateWireSchemaStmt::Cbor(schema) = parsed.body else {
+            panic!("expected CBOR wire schema");
+        };
+        assert_eq!(schema.strictness, WireSchemaStrictness::Loose);
+        assert_eq!(schema.fields[0].ty, JsonType::Integer);
+        assert!(schema.fields[1].optional);
+    }
+
+    #[test]
     fn rejects_internal_types_in_json_wire_schema_definition() {
-        let input = "CREATE JSON WIRE SCHEMA notification ( user_id U32 );";
+        let input = "CREATE STRICT WIRE JSON SCHEMA notification ( user_id U32 );";
+
+        assert!(parse_create_wire_schema(input).is_err());
+    }
+
+    #[test]
+    fn rejects_strictness_before_legacy_wire_schema_order() {
+        let input = "CREATE STRICT JSON WIRE SCHEMA notification ( user_id integer );";
+
+        assert!(parse_create_wire_schema(input).is_err());
+    }
+
+    #[test]
+    fn rejects_legacy_wire_schema_order_without_strictness() {
+        let input = "CREATE JSON WIRE SCHEMA notification ( user_id integer );";
 
         assert!(parse_create_wire_schema(input).is_err());
     }
 
     #[test]
     fn rejects_empty_wire_schema_definition() {
-        let input = "CREATE JSON WIRE SCHEMA notification ();";
+        let input = "CREATE STRICT WIRE JSON SCHEMA notification ();";
         assert!(parse_create_wire_schema(input).is_err());
     }
 
     #[test]
     fn parses_avro_wire_schema_definition() {
         let input = r#"
-            CREATE AVRO WIRE SCHEMA latency_report (
+            CREATE STRICT WIRE AVRO SCHEMA latency_report (
                 user_id long,
                 created_at string,
                 payload bytes
@@ -570,7 +648,7 @@ mod tests {
     #[test]
     fn parses_optional_wire_schema_fields() {
         let input = r#"
-            CREATE JSON WIRE SCHEMA notification (
+            CREATE STRICT WIRE JSON SCHEMA notification (
                 user_id integer,
                 nickname string OPTIONAL
             );
@@ -620,7 +698,7 @@ mod tests {
 
     #[test]
     fn suggests_types_from_json_wire_schema_grammar() {
-        let input = "CREATE JSON WIRE SCHEMA s (id ";
+        let input = "CREATE STRICT WIRE JSON SCHEMA s (id ";
         let suggestions = suggest_create_wire_schema(input, input.len());
         assert!(suggestions.contains(&"STRING".to_string()));
         assert!(suggestions.contains(&"NUMBER".to_string()));
@@ -629,8 +707,41 @@ mod tests {
     }
 
     #[test]
+    fn suggests_strictness_after_create() {
+        let input = "CREATE ";
+        let suggestions = suggest_create_wire_schema(input, input.len());
+        assert!(suggestions.contains(&"STRICT".to_string()));
+        assert!(suggestions.contains(&"LOOSE".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+        assert!(!suggestions.contains(&"CBOR".to_string()));
+        assert!(!suggestions.contains(&"AVRO".to_string()));
+        assert!(!suggestions.contains(&"U32".to_string()));
+    }
+
+    #[test]
+    fn suggests_wire_formats_after_strict_wire() {
+        let input = "CREATE STRICT WIRE ";
+        let suggestions = suggest_create_wire_schema(input, input.len());
+        assert!(suggestions.contains(&"JSON".to_string()));
+        assert!(suggestions.contains(&"CBOR".to_string()));
+        assert!(suggestions.contains(&"AVRO".to_string()));
+        assert!(!suggestions.contains(&"U32".to_string()));
+    }
+
+    #[test]
+    fn suggests_types_from_cbor_wire_schema_grammar_without_internal_leakage() {
+        let input = "CREATE LOOSE WIRE CBOR SCHEMA s (id ";
+        let suggestions = suggest_create_wire_schema(input, input.len());
+        assert!(suggestions.contains(&"STRING".to_string()));
+        assert!(suggestions.contains(&"INTEGER".to_string()));
+        assert!(suggestions.contains(&"OBJECT".to_string()));
+        assert!(!suggestions.contains(&"U32".to_string()));
+        assert!(!suggestions.contains(&"DATETIME".to_string()));
+    }
+
+    #[test]
     fn suggests_optional_after_wire_field_type_without_cross_leakage() {
-        let input = "CREATE JSON WIRE SCHEMA s (id STRING ";
+        let input = "CREATE STRICT WIRE JSON SCHEMA s (id STRING ";
         let suggestions = suggest_create_wire_schema(input, input.len());
         assert!(suggestions.contains(&"OPTIONAL".to_string()));
         assert!(!suggestions.contains(&"DATETIME".to_string()));

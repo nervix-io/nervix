@@ -13,7 +13,7 @@ Feature: Relay deduplication
         amount I64
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer
       );
@@ -85,7 +85,7 @@ Feature: Relay deduplication
         amount I64
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer
       );
@@ -163,7 +163,7 @@ Feature: Relay deduplication
         payload STRING
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         tenant string,
         transaction_id string,
         amount integer,
@@ -247,7 +247,7 @@ Feature: Relay deduplication
         amount I64
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         tenant string,
         transaction_id string,
         amount integer
@@ -330,7 +330,7 @@ Feature: Relay deduplication
         source STRING
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer,
         source string

@@ -21,7 +21,7 @@ Feature: Window processor runtime behavior
         total_latency I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -131,7 +131,7 @@ Feature: Window processor runtime behavior
         latency_p50 F64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -242,7 +242,7 @@ Feature: Window processor runtime behavior
         total_latency I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -333,7 +333,7 @@ Feature: Window processor runtime behavior
         latency_p90 F64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -466,7 +466,7 @@ Feature: Window processor runtime behavior
         total_latency I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -577,7 +577,7 @@ Feature: Window processor runtime behavior
         latency_p0 F64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -659,7 +659,7 @@ Feature: Window processor runtime behavior
         latency_p0 F64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -741,7 +741,7 @@ Feature: Window processor runtime behavior
         total_latency I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -819,7 +819,7 @@ Feature: Window processor runtime behavior
         total_latency I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -923,7 +923,7 @@ Feature: Window processor runtime behavior
         high_window_count I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
@@ -1033,12 +1033,12 @@ Feature: Window processor runtime behavior
         sample_count I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
 
-      CREATE JSON WIRE SCHEMA metric_summary_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_summary_wire (
         tenant string,
         sample_count integer
       );
@@ -1130,12 +1130,12 @@ Feature: Window processor runtime behavior
         sample_count I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
 
-      CREATE JSON WIRE SCHEMA metric_summary_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_summary_wire (
         tenant string,
         sample_count integer
       );

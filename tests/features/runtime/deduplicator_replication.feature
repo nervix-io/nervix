@@ -15,7 +15,7 @@ Feature: Deduplicator state replication
         amount I64
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer
       );

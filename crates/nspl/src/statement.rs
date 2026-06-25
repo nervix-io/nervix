@@ -414,6 +414,7 @@ mod tests {
                     }
                     Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
                         name: g.ident(),
+                        strictness: Default::default(),
                         fields,
                     }))
                 } else {
@@ -441,6 +442,7 @@ mod tests {
                     }
                     Model::WireSchema(CreateWireSchemaStmt::Avro(CreateWireSchema {
                         name: g.ident(),
+                        strictness: Default::default(),
                         fields,
                     }))
                 }
@@ -1790,7 +1792,7 @@ mod tests {
     #[test]
     fn canonical_roundtrip_wire_schema() {
         let input = r#"
-            CREATE JSON WIRE SCHEMA notification_wire (
+            CREATE STRICT WIRE JSON SCHEMA notification_wire (
                 user_id integer,
                 created_at string,
                 payload object

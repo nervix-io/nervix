@@ -1224,6 +1224,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                             nervix_models::Model::WireSchema(
                                 nervix_models::CreateWireSchemaStmt::Json(CreateJsonWireSchema {
                                     name: wire_schema.clone(),
+                                    strictness: Default::default(),
                                     fields: vec![WireSchemaField {
                                         name: identifier("user_id"),
                                         ty: JsonType::Integer,
@@ -1371,6 +1372,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                             nervix_models::Model::WireSchema(
                                 nervix_models::CreateWireSchemaStmt::Json(CreateJsonWireSchema {
                                     name: wire_schema.clone(),
+                                    strictness: Default::default(),
                                     fields: vec![WireSchemaField {
                                         name: identifier("user_id"),
                                         ty: JsonType::Integer,

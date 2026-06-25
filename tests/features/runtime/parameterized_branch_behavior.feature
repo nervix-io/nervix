@@ -15,7 +15,7 @@ Feature: Parameterized branch behavior
         body STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer,
         body string
@@ -79,7 +79,7 @@ Feature: Parameterized branch behavior
         amount I64
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         tenant string,
         transaction_id string,
         amount integer
@@ -165,7 +165,7 @@ Feature: Parameterized branch behavior
         sample_count I64
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency number
       );
@@ -244,7 +244,7 @@ Feature: Parameterized branch behavior
         source STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         source string
       );
@@ -327,7 +327,7 @@ Feature: Parameterized branch behavior
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );
