@@ -13,7 +13,7 @@ Feature: Reingestor repartitioning
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );
@@ -80,7 +80,7 @@ Feature: Reingestor repartitioning
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );
@@ -173,7 +173,7 @@ Feature: Reingestor repartitioning
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );
@@ -248,7 +248,7 @@ Feature: Reingestor repartitioning
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );
@@ -324,7 +324,7 @@ Feature: Reingestor repartitioning
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );

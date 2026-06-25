@@ -61,7 +61,7 @@ Feature: Cluster scheduling
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -126,7 +126,7 @@ Feature: Cluster scheduling
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -186,7 +186,7 @@ Feature: Cluster scheduling
         level STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         id integer,
         level string
       );
@@ -274,7 +274,7 @@ Feature: Cluster scheduling
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -347,7 +347,7 @@ Feature: Cluster scheduling
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -414,7 +414,7 @@ Feature: Cluster scheduling
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 

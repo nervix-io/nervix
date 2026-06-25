@@ -173,6 +173,7 @@ impl CreateWireSchemaStmt {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         match self {
             Self::Json(schema) => wire_schema_to_nspl("JSON", schema),
+            Self::Cbor(schema) => wire_schema_to_nspl("CBOR", schema),
             Self::Avro(schema) => wire_schema_to_nspl("AVRO", schema),
         }
     }
@@ -625,6 +626,17 @@ impl CreateCodec {
                     })?;
                     (
                         format!("WIRE JSON SCHEMA {}", wire_schema.as_str()),
+                        String::new(),
+                    )
+                }
+                CodecWireFormat::Cbor => {
+                    let wire_schema = self.wire_schema.as_ref().ok_or_else(|| {
+                        CanonicalNsplError::InvalidCodec {
+                            reason: "CBOR codec is missing wire schema reference".to_string(),
+                        }
+                    })?;
+                    (
+                        format!("WIRE CBOR SCHEMA {}", wire_schema.as_str()),
                         String::new(),
                     )
                 }
@@ -1162,7 +1174,8 @@ where
         .join(", ");
 
     Ok(format!(
-        "CREATE {format_kw} WIRE SCHEMA {} ({});",
+        "CREATE {} WIRE {format_kw} SCHEMA {} ({});",
+        schema.strictness.as_ref(),
         schema.name.as_str(),
         fields
     ))
@@ -1930,6 +1943,7 @@ mod tests {
     fn renders_wire_schema_canonical() {
         let schema = CreateWireSchemaStmt::Avro(CreateWireSchema {
             name: identifier("latency"),
+            strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
                     name: identifier("p99"),
@@ -1947,7 +1961,7 @@ mod tests {
         let nspl = schema.to_canonical_nspl().expect("must render");
         assert_eq!(
             nspl,
-            "CREATE AVRO WIRE SCHEMA latency (p99 DOUBLE, created_at STRING);"
+            "CREATE STRICT WIRE AVRO SCHEMA latency (p99 DOUBLE, created_at STRING);"
         );
     }
 
@@ -2030,6 +2044,7 @@ mod tests {
     fn renders_json_wire_schema_canonical() {
         let schema = CreateWireSchemaStmt::Json(CreateWireSchema {
             name: identifier("payload"),
+            strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
                     name: identifier("items"),
@@ -2046,7 +2061,25 @@ mod tests {
 
         assert_eq!(
             schema.to_canonical_nspl().expect("must render"),
-            "CREATE JSON WIRE SCHEMA payload (items ARRAY, active BOOLEAN);"
+            "CREATE STRICT WIRE JSON SCHEMA payload (items ARRAY, active BOOLEAN);"
+        );
+    }
+
+    #[test]
+    fn renders_loose_cbor_wire_schema_canonical() {
+        let schema = CreateWireSchemaStmt::Cbor(CreateWireSchema {
+            name: identifier("payload"),
+            strictness: crate::WireSchemaStrictness::Loose,
+            fields: vec![WireSchemaField {
+                name: identifier("active"),
+                ty: JsonType::Boolean,
+                optional: false,
+            }],
+        });
+
+        assert_eq!(
+            schema.to_canonical_nspl().expect("must render"),
+            "CREATE LOOSE WIRE CBOR SCHEMA payload (active BOOLEAN);"
         );
     }
 
@@ -2063,6 +2096,7 @@ mod tests {
         };
         let wire = CreateWireSchemaStmt::Json(CreateWireSchema {
             name: identifier("payload"),
+            strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: identifier("active"),
                 ty: JsonType::Boolean,
@@ -2076,7 +2110,7 @@ mod tests {
         );
         assert_eq!(
             wire.to_canonical_nspl().expect("must render"),
-            "CREATE JSON WIRE SCHEMA payload (active BOOLEAN OPTIONAL);"
+            "CREATE STRICT WIRE JSON SCHEMA payload (active BOOLEAN OPTIONAL);"
         );
     }
 

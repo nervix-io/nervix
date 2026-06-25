@@ -33,7 +33,7 @@ CREATE SCHEMA notification (
   payload STRING OPTIONAL
 );
 
-CREATE JSON WIRE SCHEMA notification_wire (
+CREATE STRICT WIRE JSON SCHEMA notification_wire (
   user_id integer,
   created_at string,
   payload string OPTIONAL
@@ -167,10 +167,25 @@ This is useful when inbound JSON wraps the actual record:
 {"payload":{"user_id":42,"created_at":"2025-01-02T03:04:05+00:00","payload":"hello"}}
 ```
 
-## CBOR Codec
+## Schemaful CBOR Codec
 
 ```nspl
+CREATE STRICT WIRE CBOR SCHEMA notification_cbor_wire (
+  user_id integer,
+  created_at string,
+  payload string
+);
+
 CREATE CODEC notification_cbor
+  FROM WIRE CBOR SCHEMA notification_cbor_wire
+  TO SCHEMA notification
+  ENCODE created_at AS RFC3339;
+```
+
+## CBOR JAQ Codec
+
+```nspl
+CREATE CODEC notification_cbor_jaq
   FROM CBOR
   TO SCHEMA notification
   WITH JAQ TRANSFORMATION '.';
@@ -209,7 +224,7 @@ CREATE SCHEMA sample (
   timestamp DATETIME
 );
 
-CREATE JSON WIRE SCHEMA sample_wire (
+CREATE STRICT WIRE JSON SCHEMA sample_wire (
   source string,
   value number,
   timestamp string

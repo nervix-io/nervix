@@ -14513,7 +14513,7 @@ mod tests {
         };
         let commands = [
             "CREATE SCHEMA notification ( user_id I64 );",
-            "CREATE JSON WIRE SCHEMA notification_wire ( user_id integer );",
+            "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
             "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
              notification;",
             "CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;",
@@ -14689,7 +14689,7 @@ mod tests {
         };
         for command in [
             "CREATE SCHEMA notification ( user_id I64 );",
-            "CREATE JSON WIRE SCHEMA notification_wire ( user_id integer );",
+            "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
             "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
              notification;",
             "CREATE RELAY notifications_a SCHEMA notification UNPARAMETERIZED;",
@@ -14860,7 +14860,8 @@ mod tests {
         };
         for command in [
             "CREATE SCHEMA transaction ( transaction_id STRING, amount I64 );",
-            "CREATE JSON WIRE SCHEMA transaction_wire ( transaction_id string, amount integer );",
+            "CREATE STRICT WIRE JSON SCHEMA transaction_wire ( transaction_id string, amount \
+             integer );",
             "CREATE CODEC transaction_codec FROM WIRE JSON SCHEMA transaction_wire TO SCHEMA \
              transaction;",
             "CREATE RELAY inbound SCHEMA transaction UNPARAMETERIZED;",

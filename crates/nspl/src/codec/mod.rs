@@ -96,12 +96,16 @@ pub fn create_codec_parser<'src>()
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(wire_schema_ref())
         .map(|wire_schema| (CodecWireFormat::Json, Some(wire_schema)));
+    let cbor_wire = kw(Identifier::Cbor)
+        .ignore_then(kw(Identifier::Schema))
+        .ignore_then(wire_schema_ref())
+        .map(|wire_schema| (CodecWireFormat::Cbor, Some(wire_schema)));
     let avro_wire = kw(Identifier::Avro)
         .ignore_then(kw(Identifier::Schema))
         .ignore_then(wire_schema_ref())
         .map(|wire_schema| (CodecWireFormat::Avro, Some(wire_schema)));
     let schemaful_codec = kw(Identifier::Wire)
-        .ignore_then(choice((json_wire, avro_wire)))
+        .ignore_then(choice((json_wire, cbor_wire, avro_wire)))
         .then_ignore(kw(Identifier::To))
         .then_ignore(kw(Identifier::Schema))
         .then(schema_ref())
@@ -353,6 +357,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_schemaful_cbor_codec() {
+        let tokens = to_tokens(
+            "CREATE CODEC notification_codec FROM WIRE CBOR SCHEMA notification_wire TO SCHEMA \
+             notification_schema;",
+        );
+        let parsed = parse_create_codec_tokens(&tokens).expect("parse should succeed");
+
+        assert_eq!(parsed.wire_format, CodecWireFormat::Cbor);
+        assert_eq!(
+            parsed
+                .wire_schema
+                .as_ref()
+                .map(|wire_schema| wire_schema.as_str()),
+            Some("notification_wire")
+        );
+        assert_eq!(parsed.schema.as_str(), "notification_schema");
+    }
+
+    #[test]
     fn parses_create_codec_with_rfc3339_datetime_encoding() {
         let tokens = to_tokens(
             "CREATE CODEC orders_codec FROM WIRE JSON SCHEMA orders_wire TO SCHEMA orders ENCODE \
@@ -469,7 +492,7 @@ mod tests {
 
         assert!(suggestions.contains(&"JSON".to_string()));
         assert!(suggestions.contains(&"AVRO".to_string()));
-        assert!(!suggestions.contains(&"CBOR".to_string()));
+        assert!(suggestions.contains(&"CBOR".to_string()));
     }
 
     #[test]

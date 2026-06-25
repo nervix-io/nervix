@@ -12,7 +12,7 @@ Feature: Kafka ingestor domain pacing
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -70,7 +70,7 @@ Feature: Kafka ingestor domain pacing
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -133,7 +133,7 @@ Feature: Kafka ingestor domain pacing
         occurred_at DATETIME
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         occurred_at string
       );
@@ -194,7 +194,7 @@ Feature: Kafka ingestor domain pacing
         occurred_at DATETIME
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         occurred_at string
       );
@@ -258,7 +258,7 @@ Feature: Kafka ingestor domain pacing
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -334,7 +334,7 @@ Feature: Kafka ingestor domain pacing
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -414,7 +414,7 @@ Feature: Kafka ingestor domain pacing
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -499,7 +499,7 @@ Feature: Kafka ingestor domain pacing
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -586,7 +586,7 @@ Feature: Kafka ingestor domain pacing
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 

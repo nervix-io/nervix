@@ -39,7 +39,7 @@ CREATE SCHEMA metric (
   value I32
 );
 
-CREATE JSON WIRE SCHEMA metric_wire (
+CREATE STRICT WIRE JSON SCHEMA metric_wire (
   value integer
 );
 

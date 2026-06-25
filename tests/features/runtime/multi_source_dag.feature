@@ -15,7 +15,7 @@ Feature: Multi-source DAG routing
         source STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         source string
       );

@@ -26,7 +26,7 @@ CREATE SCHEMA machine_signal (
   seq U64
 );
 
-CREATE JSON WIRE SCHEMA machine_signal_wire (
+CREATE STRICT WIRE JSON SCHEMA machine_signal_wire (
   site string,
   line string,
   asset_id string,
@@ -66,7 +66,7 @@ CREATE SCHEMA signal_window (
   value_percentiles ARRAY<F64, 3>
 );
 
-CREATE JSON WIRE SCHEMA signal_window_wire (
+CREATE STRICT WIRE JSON SCHEMA signal_window_wire (
   site string,
   line string,
   asset_id string,

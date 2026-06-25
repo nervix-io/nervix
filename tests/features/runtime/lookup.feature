@@ -28,7 +28,7 @@ Feature: Resource-backed lookups
         city STRING
       );
 
-      CREATE JSON WIRE SCHEMA zip_code_entry_wire (
+      CREATE STRICT WIRE JSON SCHEMA zip_code_entry_wire (
         zip string,
         city string
       );
@@ -114,7 +114,7 @@ Feature: Resource-backed lookups
         city STRING
       );
 
-      CREATE JSON WIRE SCHEMA zip_code_entry_wire (
+      CREATE STRICT WIRE JSON SCHEMA zip_code_entry_wire (
         zip string,
         city string
       );
@@ -164,7 +164,7 @@ Feature: Resource-backed lookups
         city STRING
       );
 
-      CREATE JSON WIRE SCHEMA zip_code_entry_wire (
+      CREATE STRICT WIRE JSON SCHEMA zip_code_entry_wire (
         zip string,
         city string
       );
@@ -237,7 +237,7 @@ Feature: Resource-backed lookups
         city STRING
       );
 
-      CREATE JSON WIRE SCHEMA zip_code_entry_wire (
+      CREATE STRICT WIRE JSON SCHEMA zip_code_entry_wire (
         zip string,
         city string
       );

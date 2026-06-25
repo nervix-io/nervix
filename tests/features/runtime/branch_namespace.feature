@@ -22,7 +22,7 @@ Feature: Branch namespace
         branch_tenant STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer,
         active boolean,
@@ -103,7 +103,7 @@ Feature: Branch namespace
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );

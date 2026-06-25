@@ -25,7 +25,7 @@ CREATE SCHEMA iot_telemetry (
   seq U64
 );
 
-CREATE JSON WIRE SCHEMA iot_telemetry_wire (
+CREATE STRICT WIRE JSON SCHEMA iot_telemetry_wire (
   site string,
   line string,
   device_id string,

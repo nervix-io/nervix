@@ -518,6 +518,7 @@ impl Model {
             Self::Schema(v) => &v.name,
             Self::WireSchema(v) => match v {
                 CreateWireSchemaStmt::Json(v) => &v.name,
+                CreateWireSchemaStmt::Cbor(v) => &v.name,
                 CreateWireSchemaStmt::Avro(v) => &v.name,
             },
             Self::Codec(v) => &v.name,
@@ -597,6 +598,7 @@ pub enum CodecJaqFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodecWireFormat {
     Json,
+    Cbor,
     Avro,
     JaqNative {
         format: CodecJaqFormat,
@@ -608,7 +610,7 @@ pub enum CodecWireFormat {
 impl CodecWireFormat {
     pub fn supports_decoding(&self) -> bool {
         match self {
-            Self::Json | Self::Avro => true,
+            Self::Json | Self::Cbor | Self::Avro => true,
             Self::JaqNative {
                 transformations, ..
             }
@@ -620,7 +622,7 @@ impl CodecWireFormat {
 
     pub fn supports_encoding(&self) -> bool {
         match self {
-            Self::Json | Self::Avro => true,
+            Self::Json | Self::Cbor | Self::Avro => true,
             Self::JaqNative {
                 transformations, ..
             }

@@ -51,7 +51,7 @@ CREATE SCHEMA edge_site (
   edge_lon F64
 );
 
-CREATE JSON WIRE SCHEMA edge_site_wire (
+CREATE STRICT WIRE JSON SCHEMA edge_site_wire (
   edge_id string,
   edge_name string,
   region string,
@@ -132,7 +132,7 @@ CREATE SCHEMA auth_activity (
   seq I64
 );
 
-CREATE JSON WIRE SCHEMA auth_activity_wire (
+CREATE STRICT WIRE JSON SCHEMA auth_activity_wire (
   source string,
   event_id string,
   tenant_id string,
@@ -369,7 +369,7 @@ CREATE SCHEMA security_event (
   source_event_id STRING
 );
 
-CREATE JSON WIRE SCHEMA security_event_wire (
+CREATE STRICT WIRE JSON SCHEMA security_event_wire (
   event_id string,
   tenant_id string,
   device_id string,
@@ -406,7 +406,7 @@ CREATE SCHEMA distance_alert (
   edge_lon F64 OPTIONAL
 );
 
-CREATE JSON WIRE SCHEMA distance_alert_wire (
+CREATE STRICT WIRE JSON SCHEMA distance_alert_wire (
   alert_id string,
   alert_type string,
   tenant_id string,

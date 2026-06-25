@@ -17,11 +17,17 @@ Core create statements:
 CREATE [IF NOT EXISTS] USER <name> WITH PASSWORD '<password>';
 
 CREATE [IF NOT EXISTS] SCHEMA <name> (<field> <type> [OPTIONAL], ...);
-CREATE [IF NOT EXISTS] JSON WIRE SCHEMA <name> (<field> <json_type> [OPTIONAL], ...);
-CREATE [IF NOT EXISTS] AVRO WIRE SCHEMA <name> (<field> <avro_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE JSON SCHEMA <name> (<field> <json_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE CBOR SCHEMA <name> (<field> <cbor_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE AVRO SCHEMA <name> (<field> <avro_type> [OPTIONAL], ...);
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM WIRE JSON SCHEMA <wire_schema>
+  TO SCHEMA <schema>
+  [ENCODE <field> AS RFC3339, ...];
+
+CREATE [IF NOT EXISTS] CODEC <name>
+  FROM WIRE CBOR SCHEMA <wire_schema>
   TO SCHEMA <schema>
   [ENCODE <field> AS RFC3339, ...];
 

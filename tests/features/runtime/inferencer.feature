@@ -22,7 +22,7 @@ Feature: Inferencer resources
         score <score_type>
       );
 
-      CREATE JSON WIRE SCHEMA features_wire (
+      CREATE STRICT WIRE JSON SCHEMA features_wire (
         tenant string,
         vector array
       );
@@ -93,7 +93,7 @@ Feature: Inferencer resources
         score <score_type>
       );
 
-      CREATE JSON WIRE SCHEMA features_wire (
+      CREATE STRICT WIRE JSON SCHEMA features_wire (
         tenant string,
         vector array
       );

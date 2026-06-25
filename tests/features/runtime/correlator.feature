@@ -28,13 +28,13 @@ Feature: Relay correlation
         memo STRING OPTIONAL
       );
 
-      CREATE JSON WIRE SCHEMA left_profile_wire (
+      CREATE STRICT WIRE JSON SCHEMA left_profile_wire (
         tenant string,
         first_name string,
         marker integer
       );
 
-      CREATE JSON WIRE SCHEMA right_profile_wire (
+      CREATE STRICT WIRE JSON SCHEMA right_profile_wire (
         tenant string,
         first_name string,
         surname string

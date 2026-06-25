@@ -14,7 +14,7 @@ Feature: Reorderer
         payload STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         sequence integer,
         payload string
@@ -104,7 +104,7 @@ Feature: Reorderer
         payload STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         category string,
         priority integer,

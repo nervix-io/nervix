@@ -14,7 +14,7 @@ Feature: Session subscription delivery options
         reading I64
       );
 
-      CREATE JSON WIRE SCHEMA telemetry_wire (
+      CREATE STRICT WIRE JSON SCHEMA telemetry_wire (
         device string,
         active boolean,
         reading integer
@@ -71,7 +71,7 @@ Feature: Session subscription delivery options
         reading I64
       );
 
-      CREATE JSON WIRE SCHEMA telemetry_wire (
+      CREATE STRICT WIRE JSON SCHEMA telemetry_wire (
         device string,
         active boolean,
         reading integer

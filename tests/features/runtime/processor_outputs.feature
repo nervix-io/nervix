@@ -21,7 +21,7 @@ Feature: Processor output routing
       normalized STRING
       );
 
-      CREATE JSON WIRE SCHEMA event_wire (
+      CREATE STRICT WIRE JSON SCHEMA event_wire (
         id string,
         active boolean,
         level string,
@@ -104,7 +104,7 @@ Feature: Processor output routing
         urgent BOOL
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         id string,
         active boolean,
         level string,
@@ -205,7 +205,7 @@ Feature: Processor output routing
         normalized STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer,
         active boolean,
@@ -301,7 +301,7 @@ Feature: Processor output routing
         severity STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         id string,
         active boolean,
         level string,

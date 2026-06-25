@@ -12,7 +12,7 @@ Feature: HTTP endpoint ingestion
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 
@@ -68,7 +68,7 @@ Feature: HTTP endpoint ingestion
         value I32
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         value integer
       );
 
@@ -148,7 +148,7 @@ Feature: HTTP endpoint ingestion
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 

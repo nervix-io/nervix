@@ -6,6 +6,7 @@ use crate::Identifier;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CreateWireSchemaStmt {
     Json(CreateWireSchema<JsonType>),
+    Cbor(CreateWireSchema<CborType>),
     Avro(CreateWireSchema<AvroType>),
 }
 
@@ -28,6 +29,8 @@ pub struct SchemaField {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWireSchema<T> {
     pub name: Identifier,
+    #[serde(default)]
+    pub strictness: WireSchemaStrictness,
     pub fields: Vec<WireSchemaField<T>>,
 }
 
@@ -40,7 +43,25 @@ pub struct WireSchemaField<T> {
 }
 
 pub type CreateJsonWireSchema = CreateWireSchema<JsonType>;
+pub type CreateCborWireSchema = CreateWireSchema<CborType>;
 pub type CreateAvroWireSchema = CreateWireSchema<AvroType>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, Default)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum WireSchemaStrictness {
+    #[default]
+    Strict,
+    Loose,
+}
+
+impl WireSchemaStrictness {
+    pub fn allows_unknown_fields(self) -> bool {
+        match self {
+            Self::Strict => false,
+            Self::Loose => true,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
 #[strum(serialize_all = "lowercase")]
@@ -64,6 +85,8 @@ pub enum JsonType {
     F32,
     F64,
 }
+
+pub type CborType = JsonType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
 #[strum(serialize_all = "lowercase")]

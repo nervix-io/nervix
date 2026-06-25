@@ -15,7 +15,7 @@ Feature: Optional fields
         raw STRING OPTIONAL
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
@@ -83,7 +83,7 @@ Feature: Optional fields
         raw STRING OPTIONAL
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
@@ -155,7 +155,7 @@ Feature: Optional fields
         raw STRING OPTIONAL
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
@@ -223,7 +223,7 @@ Feature: Optional fields
         raw STRING OPTIONAL
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,

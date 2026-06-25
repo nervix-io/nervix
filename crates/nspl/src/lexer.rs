@@ -126,6 +126,8 @@ pub enum Identifier {
     Transformations,
     Ingestion,
     Emitting,
+    Strict,
+    Loose,
     Json,
     Yaml,
     Toml,

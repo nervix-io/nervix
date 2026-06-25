@@ -20,7 +20,7 @@ Feature: WASM processor runtime behavior
         value I32
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         value integer
       );
 
@@ -124,7 +124,7 @@ Feature: WASM processor runtime behavior
         bucket STRING
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         value integer,
         source string
       );
@@ -216,7 +216,7 @@ Feature: WASM processor runtime behavior
         bucket STRING
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         value integer
       );
 
@@ -332,7 +332,7 @@ Feature: WASM processor runtime behavior
         value I32
       );
 
-      CREATE JSON WIRE SCHEMA metric_wire (
+      CREATE STRICT WIRE JSON SCHEMA metric_wire (
         value integer
       );
 
@@ -411,7 +411,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -468,7 +468,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -527,7 +527,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -612,7 +612,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -689,7 +689,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -752,7 +752,7 @@ Feature: WASM processor runtime behavior
         failed_node STRING,
         failed_record STRING
       );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -814,7 +814,7 @@ Feature: WASM processor runtime behavior
     And these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -867,7 +867,7 @@ Feature: WASM processor runtime behavior
     And these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -920,7 +920,7 @@ Feature: WASM processor runtime behavior
     And these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -974,7 +974,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
@@ -1019,7 +1019,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE JSON WIRE SCHEMA metric_wire ( value integer );
+      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
       CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;

@@ -13,7 +13,7 @@ Feature: Relay unification
         source STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         source string
       );
@@ -97,7 +97,7 @@ Feature: Relay unification
         source STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         source string
       );
@@ -193,7 +193,7 @@ Feature: Relay unification
         source STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         source string
       );

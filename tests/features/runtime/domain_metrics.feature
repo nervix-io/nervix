@@ -15,7 +15,7 @@ Feature: Domain metrics
         transaction_id STRING
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         tenant string,
         transaction_id string
       );

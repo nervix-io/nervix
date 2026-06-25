@@ -12,7 +12,7 @@ Feature: Drain node
         amount I64
       );
 
-      CREATE JSON WIRE SCHEMA transaction_wire (
+      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer
       );
@@ -67,7 +67,7 @@ Feature: Drain node
         user_id I64
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
 

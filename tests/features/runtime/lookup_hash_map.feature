@@ -44,14 +44,14 @@ Feature: LOOKUP_HASH_MAP filter-map function
         region_name STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         id string,
         active boolean,
         title string,
         legacy string
       );
 
-      CREATE JSON WIRE SCHEMA title_lookup_wire (
+      CREATE STRICT WIRE JSON SCHEMA title_lookup_wire (
         normalized_title string,
         city_name string,
         region_name string
@@ -187,12 +187,12 @@ Feature: LOOKUP_HASH_MAP filter-map function
         normalized_title STRING
       );
 
-      CREATE JSON WIRE SCHEMA notification_wire (
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
         id string,
         title string
       );
 
-      CREATE JSON WIRE SCHEMA title_lookup_wire (
+      CREATE STRICT WIRE JSON SCHEMA title_lookup_wire (
         normalized_title string
       );
 
