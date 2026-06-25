@@ -62,16 +62,17 @@ impl WebsocketsIngestor {
             } else {
                 None
             };
-        let (sender_relay, filter_map, codec, parameterization, parameterized_template) =
-            runtime.ingestor_dependencies(domain, &ingestor).await?;
+        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
             domain,
             &ingestor.name,
-            parameterized_template,
+            dependencies.parameterized_templates,
         );
-        let parameterized_sender = parameterized_runtime
-            .as_ref()
-            .map(|runtime| runtime.sender());
+        let parameterized_senders = parameterized_runtime.senders.clone();
+        let output_routes = dependencies.output_routes;
+        let filter_where = dependencies.filter_where;
+        let codec = dependencies.codec;
+        let parameterization = dependencies.parameterization;
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -235,9 +236,9 @@ impl WebsocketsIngestor {
                                         task_timestamp_source.as_ref(),
                                         &parameterization,
                                         &task_parameter_value_mappings,
-                                        &sender_relay,
-                                        filter_map.as_ref(),
-                                        parameterized_sender.as_ref(),
+                                        &output_routes,
+                                        filter_where.as_ref(),
+                                        &parameterized_senders,
                                         codec.clone(),
                                         payload.as_slice(),
                                         &task_events,
@@ -280,9 +281,9 @@ impl WebsocketsIngestor {
                                                         task_timestamp_source.as_ref(),
                                                         &parameterization,
                                                         &task_parameter_value_mappings,
-                                                        &sender_relay,
-                                                        filter_map.as_ref(),
-                                                        parameterized_sender.as_ref(),
+                                                        &output_routes,
+                                                        filter_where.as_ref(),
+                                                        &parameterized_senders,
                                                         codec.clone(),
                                                         &payload,
                                                         &task_events,
@@ -354,7 +355,7 @@ impl WebsocketsIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime,
+                parameterized: parameterized_runtime.runtimes,
                 tasks: vec![task],
             },
         );
@@ -369,15 +370,16 @@ impl WebsocketsIngestor {
         timestamp_source: Option<&IngestTimestampSource>,
         parameterization: &[Identifier],
         parameter_value_mappings: &[ParameterValueMapping],
-        sender_relay: &Identifier,
-        filter_map: Option<&CompiledProgramWithMaterializedInterest>,
-        parameterized_sender: Option<&mpsc::Sender<ParameterizedEntrypointInput>>,
+        output_routes: &RelayProcessorOutputsNode,
+        filter_where: Option<&CompiledProgramWithMaterializedInterest>,
+        parameterized_senders: &HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
         codec: Arc<CompiledCodec>,
         payload: &[u8],
         events: &broadcast::Sender<RuntimeEvent>,
     ) {
         match decode_ingested_payload(codec, payload).await {
             Ok(record) => {
+                let mut output_routes = output_routes.clone();
                 if let Err(error) = runtime
                     .dispatch_ingested_record(IngestDispatch {
                         domain,
@@ -385,9 +387,9 @@ impl WebsocketsIngestor {
                         timestamp_source,
                         parameterization,
                         parameter_value_mappings: Some(parameter_value_mappings),
-                        sender_relay,
-                        filter_map,
-                        parameterized_sender,
+                        output_routes: &mut output_routes,
+                        filter_where,
+                        parameterized_senders,
                         record,
                         filter_map_metadata: None,
                         ingested_at: current_timestamp(),

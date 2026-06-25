@@ -1,7 +1,8 @@
 use std::{cell::UnsafeCell, io::Cursor, panic::AssertUnwindSafe, sync::Arc};
 
-use arrow_array::{Array, Int32Array, RecordBatch};
+use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
+use arrow_schema::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
 const SUCCESS: i32 = 0;
@@ -24,9 +25,10 @@ struct GuestState {
     buffer: Vec<u8>,
     init_metadata: Vec<u8>,
     pending_batch: Vec<u8>,
-    pending_emit: Vec<u8>,
+    pending_emit: Vec<Vec<u8>>,
     global_error: Vec<u8>,
     saved_state: Vec<u8>,
+    output_schemas: Vec<ProcessorSchema>,
     pending_start_row: u64,
     initialized: bool,
     processed_batches: u64,
@@ -52,8 +54,52 @@ struct GuestSnapshot {
 
 #[derive(Clone)]
 struct BatchEnvelope {
+    output_relay: Option<String>,
     arrow_ipc_batch: Vec<u8>,
     acks: AckSidecar,
+}
+
+#[derive(Clone, Deserialize)]
+struct BranchInitMetadata {
+    #[serde(default)]
+    output_schemas: Vec<ProcessorSchema>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ProcessorSchema {
+    name: String,
+    fields: Vec<ProcessorField>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ProcessorField {
+    name: String,
+    ty: ProcessorType,
+    optional: bool,
+}
+
+#[derive(Clone, Deserialize)]
+enum ProcessorType {
+    U8,
+    I8,
+    U16,
+    I16,
+    U32,
+    I32,
+    U64,
+    I64,
+    Bool,
+    String,
+    Datetime,
+    F32,
+    F64,
+    Array {
+        element: Box<ProcessorType>,
+        len: u32,
+    },
+    Vec {
+        element: Box<ProcessorType>,
+    },
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -97,6 +143,7 @@ impl GuestState {
             pending_emit: Vec::new(),
             global_error: Vec::new(),
             saved_state: Vec::new(),
+            output_schemas: Vec::new(),
             pending_start_row: 0,
             initialized: false,
             processed_batches: 0,
@@ -139,11 +186,17 @@ impl GuestState {
             Ok(envelope) => envelope,
             Err(error) => return error,
         };
-        match filter_envelope_by_global_row(envelope, self.pending_start_row) {
-            Ok(filtered) => match filtered.encode() {
-                Ok(encoded) => self.pending_emit = encoded,
-                Err(error) => return error,
-            },
+        match filter_envelope_by_global_row(envelope, self.pending_start_row, &self.output_schemas)
+        {
+            Ok(filtered) => {
+                self.pending_emit.clear();
+                for envelope in filtered {
+                    match envelope.encode() {
+                        Ok(encoded) => self.pending_emit.push(encoded),
+                        Err(error) => return error,
+                    }
+                }
+            }
             Err(error) => return error,
         }
         self.pending_batch.clear();
@@ -177,6 +230,7 @@ impl GuestState {
         self.pending_emit.clear();
         self.global_error.clear();
         self.saved_state.clear();
+        self.output_schemas.clear();
         self.pending_start_row = 0;
         self.initialized = false;
         self.processed_batches = 0;
@@ -206,6 +260,8 @@ impl GuestState {
         self.last_timeout_handle = snapshot.last_timeout_handle;
         self.pending_batch = snapshot.pending_batch;
         self.init_metadata = snapshot.init_metadata;
+        self.output_schemas = output_schemas_from_init_metadata(&self.init_metadata)
+            .unwrap_or_default();
         self.saved_state = snapshot.saved_state;
         self.error_state = snapshot.error_state;
         SUCCESS
@@ -214,11 +270,16 @@ impl GuestState {
 
 impl BatchEnvelope {
     fn encode(&self) -> Result<Vec<u8>, i32> {
+        let output_relay = self.output_relay.as_deref().unwrap_or_default().as_bytes();
+        let output_len = u32::try_from(output_relay.len()).map_err(|_| ERR_ENVELOPE)?;
         let arrow_len = u32::try_from(self.arrow_ipc_batch.len()).map_err(|_| ERR_ENVELOPE)?;
         let mut ack_bytes = Vec::new();
         ciborium::into_writer(&self.acks, &mut ack_bytes).map_err(|_| ERR_ENVELOPE)?;
         let ack_len = u32::try_from(ack_bytes.len()).map_err(|_| ERR_ENVELOPE)?;
-        let mut encoded = Vec::with_capacity(8 + self.arrow_ipc_batch.len() + ack_bytes.len());
+        let mut encoded =
+            Vec::with_capacity(12 + output_relay.len() + self.arrow_ipc_batch.len() + ack_bytes.len());
+        encoded.extend_from_slice(&output_len.to_le_bytes());
+        encoded.extend_from_slice(output_relay);
         encoded.extend_from_slice(&arrow_len.to_le_bytes());
         encoded.extend_from_slice(&self.arrow_ipc_batch);
         encoded.extend_from_slice(&ack_len.to_le_bytes());
@@ -227,11 +288,26 @@ impl BatchEnvelope {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, i32> {
-        if bytes.len() < 8 {
+        if bytes.len() < 12 {
             return Err(ERR_ENVELOPE);
         }
-        let arrow_len = read_u32_len(bytes, 0)?;
-        let arrow_start = 4_usize;
+        let output_len = read_u32_len(bytes, 0)?;
+        let output_start = 4_usize;
+        let output_end = output_start.checked_add(output_len).ok_or(ERR_ENVELOPE)?;
+        if output_end.checked_add(8).ok_or(ERR_ENVELOPE)? > bytes.len() {
+            return Err(ERR_ENVELOPE);
+        }
+        let output_relay = if output_len == 0 {
+            None
+        } else {
+            Some(
+                std::str::from_utf8(&bytes[output_start..output_end])
+                    .map_err(|_| ERR_ENVELOPE)?
+                    .to_string(),
+            )
+        };
+        let arrow_len = read_u32_len(bytes, output_end)?;
+        let arrow_start = output_end + 4;
         let arrow_end = arrow_start.checked_add(arrow_len).ok_or(ERR_ENVELOPE)?;
         if arrow_end.checked_add(4).ok_or(ERR_ENVELOPE)? > bytes.len() {
             return Err(ERR_ENVELOPE);
@@ -244,6 +320,7 @@ impl BatchEnvelope {
         }
         let acks = ciborium::from_reader(&bytes[ack_start..ack_end]).map_err(|_| ERR_ENVELOPE)?;
         Ok(Self {
+            output_relay,
             arrow_ipc_batch: bytes[arrow_start..arrow_end].to_vec(),
             acks,
         })
@@ -361,7 +438,12 @@ pub extern "C" fn nervix_alloc(size: i32) -> i32 {
 pub extern "C" fn nervix_init(ptr: i32, size: i32) -> i32 {
     STATE.guarded_export(|state| match state.read_memory(ptr, size) {
         Ok(metadata) => {
+            let output_schemas = match output_schemas_from_init_metadata(&metadata) {
+                Ok(output_schemas) => output_schemas,
+                Err(error) => return error,
+            };
             state.init_metadata = metadata;
+            state.output_schemas = output_schemas;
             state.initialized = true;
             SUCCESS
         }
@@ -411,6 +493,10 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
             Ok(Some(-100)) => {
                 let encoded = match message_error_envelope(
                     envelope,
+                    state
+                        .output_schemas
+                        .first()
+                        .map(|schema| schema.name.clone()),
                     "guest message error for value -100".to_string(),
                 ) {
                     Ok(envelope) => match envelope.encode() {
@@ -419,7 +505,8 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
                     },
                     Err(error) => return error,
                 };
-                state.pending_emit = encoded;
+                state.pending_emit.clear();
+                state.pending_emit.push(encoded);
                 return SUCCESS;
             }
             Ok(_) => {}
@@ -460,8 +547,7 @@ pub extern "C" fn nervix_read_emit() -> i32 {
             return 0;
         }
         state.buffer.clear();
-        state.buffer.extend_from_slice(&state.pending_emit);
-        state.pending_emit.clear();
+        state.buffer.extend_from_slice(&state.pending_emit.remove(0));
         state.buffer.len() as i32
     })
 }
@@ -500,17 +586,16 @@ fn arrow_ipc_row_count(bytes: &[u8]) -> Result<u64, i32> {
 fn filter_envelope_by_global_row(
     envelope: BatchEnvelope,
     start_row: u64,
-) -> Result<BatchEnvelope, i32> {
+    output_schemas: &[ProcessorSchema],
+) -> Result<Vec<BatchEnvelope>, i32> {
     let reader = StreamReader::try_new(Cursor::new(&envelope.arrow_ipc_batch), None)
         .map_err(|_| ERR_ARROW_IPC)?;
-    let schema = reader.schema();
-    let mut output_batches = Vec::new();
-    let mut output_acks = AckSidecar {
-        rows: Vec::new(),
-        acked: envelope.acks.acked,
-        nacked: envelope.acks.nacked,
-        message_errors: envelope.acks.message_errors,
-    };
+    if output_schemas.is_empty() {
+        return Err(ERR_NOT_INITIALIZED);
+    }
+    let mut selected_values = Vec::new();
+    let mut selected_acks = Vec::new();
+    let mut acked = envelope.acks.acked;
     let mut next_row = start_row;
     let mut input_row = 0_usize;
     for batch in reader {
@@ -520,12 +605,11 @@ fn filter_envelope_by_global_row(
             .as_any()
             .downcast_ref::<Int32Array>()
             .ok_or(ERR_ARROW_IPC)?;
-        let mut filtered = Vec::new();
         for row in 0..values.len() {
             next_row = next_row.saturating_add(1);
             if next_row.is_multiple_of(2) && values.is_valid(row) {
-                filtered.push(values.value(row));
-                output_acks.rows.push(
+                selected_values.push(values.value(row));
+                selected_acks.push(
                     envelope
                         .acks
                         .rows
@@ -534,27 +618,116 @@ fn filter_envelope_by_global_row(
                         .unwrap_or_default(),
                 );
             } else if let Some(ack) = envelope.acks.rows.get(input_row) {
-                output_acks.acked.push(ack.clone());
+                acked.push(ack.clone());
             }
             input_row += 1;
         }
-        let column: Arc<dyn Array> = Arc::new(Int32Array::from(filtered));
-        output_batches
-            .push(RecordBatch::try_new(schema.clone(), vec![column]).map_err(|_| ERR_ARROW_IPC)?);
     }
 
-    let mut output = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut output, &schema).map_err(|_| ERR_ARROW_IPC)?;
-        for batch in output_batches {
+    let mut envelopes = Vec::with_capacity(output_schemas.len());
+    for (index, output_schema) in output_schemas.iter().enumerate() {
+        let batch = output_batch_for_schema(output_schema, &selected_values)?;
+        let mut output = Vec::new();
+        {
+            let schema = output_arrow_schema(output_schema)?;
+            let mut writer =
+                StreamWriter::try_new(&mut output, &schema).map_err(|_| ERR_ARROW_IPC)?;
             writer.write(&batch).map_err(|_| ERR_ARROW_IPC)?;
+            writer.finish().map_err(|_| ERR_ARROW_IPC)?;
         }
-        writer.finish().map_err(|_| ERR_ARROW_IPC)?;
+        envelopes.push(BatchEnvelope {
+            output_relay: Some(output_schema.name.clone()),
+            arrow_ipc_batch: output,
+            acks: AckSidecar {
+                rows: selected_acks.clone(),
+                acked: if index == 0 { acked.clone() } else { Vec::new() },
+                nacked: if index == 0 {
+                    envelope.acks.nacked.clone()
+                } else {
+                    Vec::new()
+                },
+                message_errors: if index == 0 {
+                    envelope.acks.message_errors.clone()
+                } else {
+                    Vec::new()
+                },
+            },
+        });
     }
-    Ok(BatchEnvelope {
-        arrow_ipc_batch: output,
-        acks: output_acks,
-    })
+    Ok(envelopes)
+}
+
+fn output_schemas_from_init_metadata(metadata: &[u8]) -> Result<Vec<ProcessorSchema>, i32> {
+    ciborium::from_reader::<BranchInitMetadata, _>(Cursor::new(metadata))
+        .map(|metadata| metadata.output_schemas)
+        .map_err(|_| ERR_INVALID_SIZE)
+}
+
+fn output_batch_for_schema(
+    schema: &ProcessorSchema,
+    selected_values: &[i32],
+) -> Result<RecordBatch, i32> {
+    let arrow_schema = output_arrow_schema(schema)?;
+    let columns = schema
+        .fields
+        .iter()
+        .map(|field| output_column_for_field(field, selected_values))
+        .collect::<Result<Vec<_>, _>>()?;
+    RecordBatch::try_new(arrow_schema, columns).map_err(|_| ERR_ARROW_IPC)
+}
+
+fn output_arrow_schema(schema: &ProcessorSchema) -> Result<Arc<Schema>, i32> {
+    let fields = schema
+        .fields
+        .iter()
+        .map(|field| {
+            field_arrow_type(&field.ty)
+                .map(|ty| Field::new(field.name.as_str(), ty, field.optional))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Arc::new(Schema::new(fields)))
+}
+
+fn field_arrow_type(ty: &ProcessorType) -> Result<DataType, i32> {
+    match ty {
+        ProcessorType::I32 => Ok(DataType::Int32),
+        ProcessorType::String => Ok(DataType::Utf8),
+        ProcessorType::Array { element, len } => {
+            let _ = (element.as_ref(), len);
+            Err(ERR_ARROW_IPC)
+        }
+        ProcessorType::Vec { element } => {
+            let _ = element.as_ref();
+            Err(ERR_ARROW_IPC)
+        }
+        _ => Err(ERR_ARROW_IPC),
+    }
+}
+
+fn output_column_for_field(
+    field: &ProcessorField,
+    selected_values: &[i32],
+) -> Result<Arc<dyn Array>, i32> {
+    match &field.ty {
+        ProcessorType::I32 if field.name == "value" => {
+            Ok(Arc::new(Int32Array::from(selected_values.to_vec())))
+        }
+        ProcessorType::I32 if field.optional => Ok(Arc::new(Int32Array::from(
+            vec![None; selected_values.len()],
+        ))),
+        ProcessorType::String if field.name == "bucket" => {
+            let values = selected_values
+                .iter()
+                .map(|_| Some("EVEN"))
+                .collect::<Vec<_>>();
+            Ok(Arc::new(StringArray::from(values)))
+        }
+        ProcessorType::String if field.optional => {
+            let values = vec![None::<&str>; selected_values.len()];
+            Ok(Arc::new(StringArray::from(values)))
+        }
+        _ => Err(ERR_ARROW_IPC),
+    }
 }
 
 fn first_i32_value(bytes: &[u8]) -> Result<Option<i32>, i32> {
@@ -576,7 +749,11 @@ fn first_i32_value(bytes: &[u8]) -> Result<Option<i32>, i32> {
     Ok(None)
 }
 
-fn message_error_envelope(envelope: BatchEnvelope, reason: String) -> Result<BatchEnvelope, i32> {
+fn message_error_envelope(
+    envelope: BatchEnvelope,
+    output_relay: Option<String>,
+    reason: String,
+) -> Result<BatchEnvelope, i32> {
     let reader = StreamReader::try_new(Cursor::new(&envelope.arrow_ipc_batch), None)
         .map_err(|_| ERR_ARROW_IPC)?;
     let schema = reader.schema();
@@ -596,6 +773,7 @@ fn message_error_envelope(envelope: BatchEnvelope, reason: String) -> Result<Bat
         .map(|row| row.tokens.clone())
         .unwrap_or_default();
     Ok(BatchEnvelope {
+        output_relay,
         arrow_ipc_batch: output,
         acks: AckSidecar {
             rows: Vec::new(),

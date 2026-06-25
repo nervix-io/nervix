@@ -7,8 +7,8 @@ use crate::{
         ParseError, ParseFromSourceError, client_ref, codec_ref, correlator_ref,
         current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref,
         ingestor_ref, into_parse_error, kw, lex_input, node_id, reingestor_ref, relay_ref,
-        reorderer_ref, router_ref, schema_ref, suggestions_from_errors, tok, unifier_ref,
-        vhost_ref, wire_schema_ref,
+        reorderer_ref, schema_ref, suggestions_from_errors, tok, unifier_ref, vhost_ref,
+        wire_schema_ref,
     },
 };
 
@@ -62,12 +62,6 @@ pub fn drop_parser<'src>()
             .ignore_then(reingestor_ref())
             .map(|name| DropModel {
                 kind: ModelKind::Reingestor,
-                name,
-            }),
-        kw(Identifier::Router)
-            .ignore_then(router_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Router,
                 name,
             }),
         kw(Identifier::Reorderer)
@@ -201,14 +195,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_drop_router() {
-        let tokens = to_tokens("DROP ROUTER log_router;");
-        let parsed = parse_drop_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.kind, ModelKind::Router);
-        assert_eq!(parsed.name.as_str(), "log_router");
-    }
-
-    #[test]
     fn parses_drop_deduplicator() {
         let tokens = to_tokens("DROP DEDUPLICATOR dedup;");
         let parsed = parse_drop_tokens(&tokens).expect("parse should succeed");
@@ -246,7 +232,6 @@ mod tests {
         assert!(suggestions.contains(&"VHOST".to_string()));
         assert!(suggestions.contains(&"ENDPOINT".to_string()));
         assert!(suggestions.contains(&"INGESTOR".to_string()));
-        assert!(suggestions.contains(&"ROUTER".to_string()));
         assert!(suggestions.contains(&"RELAY".to_string()));
         assert!(suggestions.contains(&"UNIFIER".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));

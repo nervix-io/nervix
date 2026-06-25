@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization_with_values,
-        current_word_prefix, filter_map_program, flush_each, if_not_exists_clause,
-        into_parse_error, kw, lex_input, message_error_policy, reingestor_name, relay_ref,
-        suggestions_from_errors, tok,
+        current_word_prefix, filter_where_clause, flush_each, if_not_exists_clause,
+        into_parse_error, kw, lex_input, message_error_policy, processor_outputs, reingestor_name,
+        relay_ref, suggestions_from_errors, tok,
     },
 };
 
@@ -21,24 +21,20 @@ pub fn create_reingestor_parser<'src>()
         .then(reingestor_name())
         .then_ignore(kw(Identifier::From))
         .then(relay_ref())
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(processor_outputs())
         .then(branch_parameterization_with_values())
         .then(flush_each())
-        .then(filter_map_program().or_not())
         .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |(
                 (
                     (
-                        (
-                            ((((if_not_exists, mode), name), from_relay), into_relay),
-                            parameterized_by,
-                        ),
-                        flush_each,
+                        (((((if_not_exists, mode), name), from_relay), filter_where), outputs),
+                        parameterized_by,
                     ),
-                    filter_map,
+                    flush_each,
                 ),
                 message_error_policy,
             )| {
@@ -47,13 +43,13 @@ pub fn create_reingestor_parser<'src>()
                     CreateReingestor {
                         name,
                         from_relay,
-                        into_relay,
+                        output_routes: outputs,
                         parameterized_by,
                         flush_each,
                         max_batch_size,
                         mode: mode.unwrap_or(AckMode::Attached),
                         message_error_policy,
-                        filter_map,
+                        filter_where,
                     },
                     if_not_exists,
                 )
@@ -126,7 +122,16 @@ mod tests {
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "repartition");
         assert_eq!(parsed.from_relay.as_str(), "notifications");
-        assert_eq!(parsed.into_relay.as_str(), "tenant_notifications");
+        assert_eq!(
+            parsed
+                .output_routes
+                .routes
+                .first()
+                .expect("output route should parse")
+                .relay
+                .as_str(),
+            "tenant_notifications"
+        );
         assert_eq!(
             parsed
                 .parameterized_by

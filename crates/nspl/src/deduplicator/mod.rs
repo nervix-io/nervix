@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        deduplicator_name, duration_lit, filter_map_program, flush_each, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, message_error_policy, relay_ref,
-        suggestions_from_errors, tok,
+        deduplicator_name, duration_lit, filter_where_clause, flush_each, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, lex_input, message_error_policy, processor_outputs,
+        relay_ref, suggestions_from_errors, tok,
     },
 };
 
@@ -101,15 +101,14 @@ pub fn create_deduplicator_parser<'src>()
         .then(deduplicator_name())
         .then_ignore(kw(Identifier::From))
         .then(relay_ref())
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(processor_outputs())
         .then(branch_parameterization())
         .then(deduplicate_on_exprs())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
         .then(duration_lit())
         .then(flush_each())
-        .then(filter_map_program().or_not())
         .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
@@ -119,16 +118,16 @@ pub fn create_deduplicator_parser<'src>()
                         (
                             (
                                 (
-                                    ((((if_not_exists, mode), name), from_relay), into_relay),
-                                    parameterized_by,
+                                    ((((if_not_exists, mode), name), from_relay), filter_where),
+                                    outputs,
                                 ),
-                                deduplicate_on,
+                                parameterized_by,
                             ),
-                            max_time,
+                            deduplicate_on,
                         ),
-                        flush_each,
+                        max_time,
                     ),
-                    filter_map,
+                    flush_each,
                 ),
                 message_error_policy,
             )| {
@@ -137,7 +136,7 @@ pub fn create_deduplicator_parser<'src>()
                     CreateDeduplicator {
                         name,
                         from_relay,
-                        into_relay,
+                        output_routes: outputs,
                         parameterized_by,
                         deduplicate_on,
                         max_time,
@@ -145,7 +144,7 @@ pub fn create_deduplicator_parser<'src>()
                         max_batch_size,
                         message_error_policy,
                         mode: mode.unwrap_or(AckMode::Attached),
-                        filter_map,
+                        filter_where,
                     },
                     if_not_exists,
                 )
@@ -224,7 +223,16 @@ mod tests {
         let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "dedup_txns");
         assert_eq!(parsed.from_relay.as_str(), "ss1");
-        assert_eq!(parsed.into_relay.as_str(), "ss2");
+        assert_eq!(
+            parsed
+                .output_routes
+                .routes
+                .first()
+                .expect("output route should parse")
+                .relay
+                .as_str(),
+            "ss2"
+        );
         assert_eq!(parsed.deduplicate_on, "ss1.transaction_id");
         assert_eq!(parsed.max_time, "10m");
         assert_eq!(parsed.mode, AckMode::Attached);

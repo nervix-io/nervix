@@ -613,8 +613,8 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR raw_metrics_source TO raw_metrics DECODE USING metric_codec UNPARAMETERIZED FLUSH IMMEDIATE FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ROUTER rust_filter FROM raw_metrics WHERE raw_metrics.rust_keep DEFAULT TO rust_filtered_metrics UNPARAMETERIZED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE ROUTER go_filter FROM rust_filtered_metrics WHERE rust_filtered_metrics.go_keep DEFAULT TO go_filtered_metrics UNPARAMETERIZED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR rust_filter FROM raw_metrics FILTER WHERE raw_metrics.rust_keep TO rust_filtered_metrics UNPARAMETERIZED DEDUPLICATE ON raw_metrics.value MAX TIME 10m FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR go_filter FROM rust_filtered_metrics FILTER WHERE rust_filtered_metrics.go_keep TO go_filtered_metrics UNPARAMETERIZED DEDUPLICATE ON rust_filtered_metrics.value MAX TIME 10m FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -681,7 +681,7 @@ Feature: Web console NSPL REPL
     And selector ".terminal" does not contain 'value":2'
     And selector ".terminal" does not contain 'value":3'
 
-  Scenario: Web console graph processor actions describe routers and reorderers
+  Scenario: Web console graph processor actions describe deduplicators and reorderers
     Given a 3 node nervix cluster is started
     When these NSPL commands are executed on the leader node
       """
@@ -691,7 +691,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY priority_notifications SCHEMA notification UNPARAMETERIZED;
       CREATE RELAY default_notifications SCHEMA notification UNPARAMETERIZED;
       CREATE RELAY ordered_notifications SCHEMA notification UNPARAMETERIZED;
-      CREATE ROUTER route_notifications FROM notifications TO priority_notifications WHERE notifications.user_id = 1 DEFAULT TO default_notifications UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR route_notifications FROM notifications TO priority_notifications WHERE notifications.user_id = 1 TO default_notifications UNPARAMETERIZED DEDUPLICATE ON notifications.user_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       CREATE REORDERER order_notifications FROM default_notifications TO ordered_notifications UNPARAMETERIZED BY default_notifications.user_id MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -699,11 +699,11 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "route_notifications"
     And selector ".graph-hit-layer" contains "order_notifications"
     When selector ".node-hit:has-text('route_notifications')" is clicked
-    Then selector ".graph-action-menu" contains "ROUTER"
+    Then selector ".graph-action-menu" contains "DEDUPLICATOR"
     And selector ".graph-action-menu" contains "DESCRIBE"
     When selector ".graph-action-menu button:has-text('DESCRIBE')" is clicked
-    Then selector ".terminal" contains "DESCRIBE ROUTER route_notifications;"
-    And selector ".terminal" contains "router: route_notifications"
+    Then selector ".terminal" contains "DESCRIBE DEDUPLICATOR route_notifications;"
+    And selector ".terminal" contains "deduplicator: route_notifications"
     When selector ".node-hit:has-text('order_notifications')" is clicked
     Then selector ".graph-action-menu" contains "REORDERER"
     And selector ".graph-action-menu" contains "DESCRIBE"
@@ -878,33 +878,46 @@ Feature: Web console NSPL REPL
         INSTANCES 4
         MODE NO_ACK PARALLEL MAX 1024
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ROUTER connect_without_authorization
+      CREATE DEDUPLICATOR connect_without_authorization
         FROM auth_activity_landing
-        DEFAULT TO security_events PARAMETERIZED BY device_branch
+        TO security_events
+        PARAMETERIZED BY device_branch
+        DEDUPLICATE ON auth_activity_landing.tenant_id, auth_activity_landing.device_id, auth_activity_landing.event_type, auth_activity_landing.value
+        MAX TIME 30m
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE ROUTER connection_distance_alert_mapper
+      CREATE DEDUPLICATOR connection_distance_alert_mapper
         FROM device_activity_landing
-        DEFAULT TO connected_sessions PARAMETERIZED BY device_branch
+        TO connected_sessions
+        PARAMETERIZED BY device_branch
+        DEDUPLICATE ON device_activity_landing.tenant_id, device_activity_landing.device_id, device_activity_landing.event_type, device_activity_landing.value
+        MAX TIME 30m
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE ROUTER location_distance_alert_mapper
+      CREATE DEDUPLICATOR location_distance_alert_mapper
         FROM device_activity_landing
-        DEFAULT TO location_distance_alerts PARAMETERIZED BY device_branch
+        TO location_distance_alerts
+        PARAMETERIZED BY device_branch
+        DEDUPLICATE ON device_activity_landing.tenant_id, device_activity_landing.device_id, device_activity_landing.event_type, device_activity_landing.value
+        MAX TIME 30m
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE ROUTER edge_location_lookup
+      CREATE DEDUPLICATOR edge_location_lookup
         FROM edge_activity_landing
-        DEFAULT TO edge_activity_enriched_landing PARAMETERIZED BY device_branch
+        TO edge_activity_enriched_landing
+        PARAMETERIZED BY device_branch
+        DEDUPLICATE ON edge_activity_landing.tenant_id, edge_activity_landing.device_id, edge_activity_landing.event_type, edge_activity_landing.value
+        MAX TIME 30m
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE ROUTER edge_activity_router
+      CREATE DEDUPLICATOR edge_activity_splitter
         FROM edge_activity_enriched_landing
         TO edge_connect_events WHERE edge_activity_enriched_landing.event_type = "connect"
         TO edge_disconnect_events WHERE edge_activity_enriched_landing.event_type = "disconnect"
-        MATCH FIRST
-        DEFAULT TO edge_connect_events
+        TO edge_connect_events
         PARAMETERIZED BY device_branch
+        DEDUPLICATE ON edge_activity_enriched_landing.tenant_id, edge_activity_enriched_landing.device_id, edge_activity_enriched_landing.event_type, edge_activity_enriched_landing.value
+        MAX TIME 30m
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
       CREATE EMITTER kafka_security_events
@@ -967,7 +980,7 @@ Feature: Web console NSPL REPL
     And graph edge from "mqtt_devices" to "iot_device_activity" starts horizontally
     And graph edge from "nats_edge" to "edge_server_activity" starts horizontally
     And graph edge from "mqtt_devices" to "iot_device_activity" does not intersect graph edge from "nats_edge" to "edge_server_activity"
-    And graph edge from "edge_activity_enriched_landing" to "edge_activity_router" uses a direct curve
+    And graph edge from "edge_activity_enriched_landing" to "edge_activity_splitter" uses a direct curve
     And graph edge from "device_activity_landing" to "connection_distance_alert_mapper" has source plug at least 40 pixels
     And graph edge from "device_activity_landing" to "connection_distance_alert_mapper" has target plug at least 60 pixels
     And graph edge from "device_activity_landing" to "connection_distance_alert_mapper" has at most 2 rounded turns
@@ -1106,9 +1119,12 @@ Feature: Web console NSPL REPL
         PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ROUTER notification_forwarder
+      CREATE DEDUPLICATOR notification_forwarder
         FROM notifications
-        DEFAULT TO validated_notifications PARAMETERIZED BY tenant_user_id_branch
+        TO validated_notifications
+        PARAMETERIZED BY tenant_user_id_branch
+        DEDUPLICATE ON notifications.tenant, notifications.user_id
+        MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE REINGESTOR reingestor_metrics_node
@@ -1171,22 +1187,26 @@ Feature: Web console NSPL REPL
         PARAMETERIZED BY site_branch VALUES { site = telemetry_by_site.site } TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT telemetry_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ROUTER quality_gate
+      CREATE DEDUPLICATOR quality_gate
         FROM telemetry_by_site
         TO battery_alerts WHERE telemetry_by_site.battery_pct < 15.0
-        DEFAULT TO telemetry_clean
+        TO telemetry_clean
         PARAMETERIZED BY site_branch
+        DEDUPLICATE ON telemetry_by_site.site, telemetry_by_site.device_id
+        MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       CREATE REINGESTOR device_repartition
         FROM telemetry_clean
         TO telemetry_by_device
         PARAMETERIZED BY device_branch VALUES { device_id = telemetry_by_device.device_id } TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      CREATE ROUTER anomaly_router
+      CREATE DEDUPLICATOR anomaly_splitter
         FROM telemetry_by_device
         TO maintenance_alerts WHERE telemetry_by_device.value >= telemetry_by_device.warn_high
-        DEFAULT TO normal_telemetry
+        TO normal_telemetry
         PARAMETERIZED BY device_branch
+        DEDUPLICATE ON telemetry_by_device.device_id
+        MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       CREATE EMITTER redis_battery_alerts
         FROM battery_alerts
@@ -1209,9 +1229,9 @@ Feature: Web console NSPL REPL
     And branch group "device_branch" has 1 initiator callout and 1 finalizer callout
     And graph edge from "quality_gate" to "battery_alerts" starts horizontally
     And graph edge from "quality_gate" to "battery_alerts" ends horizontally
-    And graph edge from "anomaly_router" to "maintenance_alerts" starts horizontally
-    And graph edge from "anomaly_router" to "maintenance_alerts" ends horizontally
-    And graph edge from "anomaly_router" to "maintenance_alerts" uses a direct curve
+    And graph edge from "anomaly_splitter" to "maintenance_alerts" starts horizontally
+    And graph edge from "anomaly_splitter" to "maintenance_alerts" ends horizontally
+    And graph edge from "anomaly_splitter" to "maintenance_alerts" uses a direct curve
     And graph edge from "telemetry_clean" to "device_repartition" does not intersect graph edge from "battery_alerts" to "redis_battery_alerts"
     And graph edge from "redis_battery_alerts" to "redis_alerts" is visible
     And graph edge from "redis_battery_alerts" to "redis_alerts" starts horizontally
@@ -1243,9 +1263,12 @@ Feature: Web console NSPL REPL
         PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ROUTER relay_buffer_forwarder
+      CREATE DEDUPLICATOR relay_buffer_forwarder
         FROM notifications
-        DEFAULT TO forwarded_notifications PARAMETERIZED BY user_id_branch
+        TO forwarded_notifications
+        PARAMETERIZED BY user_id_branch
+        DEDUPLICATE ON notifications.user_id
+        MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       SUBSCRIBE SESSION TO notifications WHERE notifications.user_id = 42;
       START;
@@ -1315,7 +1338,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY rr1 SCHEMA txn PARAMETERIZED BY value_branch;
       CREATE ENDPOINT state_txns_endpoint ON edge PATH '/state' TYPE HTTP;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING ); CREATE INGESTOR state_txns_ingestor TO state_txns DECODE USING txn_codec PARAMETERIZED BY value_branch VALUES { value = state_txns.value } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT state_txns_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ROUTER fwd FROM ss2 DEFAULT TO rr1 PARAMETERIZED BY value_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR fwd FROM ss2 TO rr1 PARAMETERIZED BY value_branch DEDUPLICATE ON ss2.value MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "state_txns_ingestor"
     And selector ".graph-hit-layer" contains "state_txns"

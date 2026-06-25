@@ -94,6 +94,223 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: WASM processor routes guest output through output clauses
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_route_filter;
+      UPLOAD RESOURCE wasm_route_filter VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric_input (
+        value I32,
+        source STRING
+      );
+
+      CREATE SCHEMA metric_value (
+        value I32
+      );
+
+      CREATE SCHEMA routed_metric (
+        value I32,
+        source STRING OPTIONAL,
+        bucket STRING
+      );
+
+      CREATE JSON WIRE SCHEMA metric_wire (
+        value integer,
+        source string
+      );
+
+      CREATE CODEC metric_codec
+        FROM WIRE JSON SCHEMA metric_wire
+        TO SCHEMA metric_input;
+
+      CREATE RELAY raw_metrics SCHEMA metric_input UNPARAMETERIZED;
+      CREATE RELAY selected_metrics SCHEMA metric_value UNPARAMETERIZED;
+      CREATE RELAY routed_metrics SCHEMA routed_metric UNPARAMETERIZED;
+
+      CREATE VHOST edge http-{{test_id}}.example.com;
+
+      CREATE ENDPOINT ingress
+        ON edge
+        PATH '/metrics'
+        TYPE HTTP;
+
+      CREATE INGESTOR metric_source
+        TO raw_metrics
+        DECODE USING metric_codec
+        UNPARAMETERIZED
+        FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      CREATE WASM PROCESSOR filter_even_rows
+        USING RESOURCE wasm_route_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        FROM raw_metrics FILTER WHERE raw_metrics.value = raw_metrics.value
+        TO selected_metrics WHERE selected_metrics.value < selected_metrics.value
+        TO routed_metrics
+          SET routed_metrics.source = input.source,
+              routed_metrics.bucket = lower(routed_metrics.bucket)
+        UNPARAMETERIZED
+        ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO routed_metrics;
+      START;
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1,"source":"ignored"}
+      """
+    Then the relay subscription does not receive a payload within "500ms"
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":2,"source":"tenant-a"}
+      """
+    Then the relay subscription receives a payload
+      """
+      "value":2
+      """
+    And the last relay subscription payload contains
+      """
+      "source":"tenant-a"
+      """
+    And the last relay subscription payload contains
+      """
+      "bucket":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
+  Scenario Outline: WASM processor applies FILTER WHERE before guest execution and TO WHERE after guest output
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_route_timing_filter;
+      UPLOAD RESOURCE wasm_route_timing_filter VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric (
+        value I32
+      );
+
+      CREATE SCHEMA routed_metric (
+        value I32,
+        bucket STRING
+      );
+
+      CREATE JSON WIRE SCHEMA metric_wire (
+        value integer
+      );
+
+      CREATE CODEC metric_codec
+        FROM WIRE JSON SCHEMA metric_wire
+        TO SCHEMA metric;
+
+      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY selected_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY routed_metrics SCHEMA routed_metric UNPARAMETERIZED;
+
+      CREATE VHOST edge http-{{test_id}}.example.com;
+
+      CREATE ENDPOINT ingress
+        ON edge
+        PATH '/metrics'
+        TYPE HTTP;
+
+      CREATE INGESTOR metric_source
+        TO raw_metrics
+        DECODE USING metric_codec
+        UNPARAMETERIZED
+        FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      CREATE WASM PROCESSOR filter_even_rows
+        USING RESOURCE wasm_route_timing_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        FROM raw_metrics FILTER WHERE raw_metrics.value != 10 AS I32
+        TO selected_metrics
+        TO routed_metrics
+          SET routed_metrics.bucket = lower(routed_metrics.bucket)
+          WHERE routed_metrics.value != 4 AS I32
+        UNPARAMETERIZED
+        ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+
+      SUBSCRIBE SESSION TO routed_metrics;
+      START;
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1}
+      """
+    Then the relay subscription does not receive a payload within "1s"
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":10}
+      """
+    Then the relay subscription does not receive a payload within "1s"
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":2}
+      """
+    Then the relay subscription receives a payload
+      """
+      "value":2
+      """
+    And the last relay subscription payload contains
+      """
+      "bucket":"even"
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":3}
+      """
+    Then the relay subscription does not receive a payload within "1s"
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":4}
+      """
+    Then the relay subscription does not receive a payload within "1s"
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":6}
+      """
+    Then the relay subscription does not receive a payload within "1s"
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":8}
+      """
+    Then the relay subscription receives a payload
+      """
+      "value":8
+      """
+    And the last relay subscription payload contains
+      """
+      "bucket":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: WASM processor restores guest state after cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

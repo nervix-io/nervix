@@ -30,6 +30,23 @@ pub struct Program {
     pub unset: Vec<FieldRef>,
 }
 
+impl Program {
+    pub fn rewrite_unset_sources_to_destination(
+        &mut self,
+        source_relays: &[String],
+        destination_relay: &str,
+    ) {
+        for field_ref in &mut self.unset {
+            if source_relays
+                .iter()
+                .any(|source_relay| source_relay == &field_ref.relay)
+            {
+                field_ref.relay = destination_relay.to_string();
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Literal),

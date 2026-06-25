@@ -448,6 +448,7 @@ CREATE RELAY auth_authorized_events SCHEMA auth_activity PARAMETERIZED BY device
 CREATE RELAY auth_denied_events SCHEMA auth_activity PARAMETERIZED BY device_branch CAPACITY 256;
 
 CREATE RELAY device_location_geo_events SCHEMA device_location_geo PARAMETERIZED BY device_branch CAPACITY 512;
+CREATE RELAY device_location_geo_audit_events SCHEMA device_location_geo PARAMETERIZED BY device_branch CAPACITY 256;
 CREATE RELAY device_location_checked_events SCHEMA device_location_checked PARAMETERIZED BY device_branch CAPACITY 512;
 CREATE RELAY device_edge_connect_events SCHEMA device_edge_connect PARAMETERIZED BY device_branch CAPACITY 512;
 CREATE RELAY device_edge_connect_scored_events SCHEMA device_edge_connect PARAMETERIZED BY device_branch CAPACITY 512;
@@ -514,6 +515,10 @@ CREATE CLIENT lakehouse_catalog
 
 CREATE INGESTOR iot_device_activity
   TO device_activity_landing
+    SET device_activity_landing.source = "iot_device",
+        device_activity_landing.event_type = lower(trim(message.event_type)),
+        device_activity_landing.edge_id = lower(trim(message.edge_id)),
+        device_activity_landing.firmware = lower(trim(message.firmware))
   DECODE USING device_activity_cbor_codec
   PARAMETERIZED BY device_branch VALUES {
     tenant_id = device_activity_landing.tenant_id,
@@ -525,14 +530,15 @@ CREATE INGESTOR iot_device_activity
   TOPIC 'datalake/device_activity'
   INSTANCES 2
   MODE NO_ACK SEQUENTIAL
-  SET device_activity_landing.source = "iot_device",
-      device_activity_landing.event_type = lower(trim(message.event_type)),
-      device_activity_landing.edge_id = lower(trim(message.edge_id)),
-      device_activity_landing.firmware = lower(trim(message.firmware))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE INGESTOR edge_server_activity
   TO edge_activity_landing
+    SET edge_activity_landing.source = "edge_server",
+        edge_activity_landing.event_type = lower(trim(message.event_type)),
+        edge_activity_landing.edge_id = lower(trim(message.edge_id)),
+        edge_activity_landing.edge_name = lower(trim(message.edge_name)),
+        edge_activity_landing.protocol = lower(trim(message.protocol))
   DECODE USING edge_activity_protobuf_codec
   PARAMETERIZED BY device_branch VALUES {
     tenant_id = edge_activity_landing.tenant_id,
@@ -545,15 +551,14 @@ CREATE INGESTOR edge_server_activity
   QUEUE GROUP datalake_edge_servers
   INSTANCES 2
   MODE NO_ACK SEQUENTIAL
-  SET edge_activity_landing.source = "edge_server",
-      edge_activity_landing.event_type = lower(trim(message.event_type)),
-      edge_activity_landing.edge_id = lower(trim(message.edge_id)),
-      edge_activity_landing.edge_name = lower(trim(message.edge_name)),
-      edge_activity_landing.protocol = lower(trim(message.protocol))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE INGESTOR auth_server_activity
   TO auth_activity_landing
+    SET auth_activity_landing.source = "auth_server",
+        auth_activity_landing.event_type = lower(trim(message.event_type)),
+        auth_activity_landing.auth_result = lower(trim(message.auth_result)),
+        auth_activity_landing.edge_id = lower(trim(message.edge_id))
   DECODE USING auth_activity_json_codec
   PARAMETERIZED BY device_branch VALUES {
     tenant_id = auth_activity_landing.tenant_id,
@@ -566,52 +571,53 @@ CREATE INGESTOR auth_server_activity
   OFFSET BY CONSUMER GROUP datalake_demo_auth
   INSTANCES 4
   MODE NO_ACK PARALLEL MAX 1024
-  SET auth_activity_landing.source = "auth_server",
-      auth_activity_landing.event_type = lower(trim(message.event_type)),
-      auth_activity_landing.auth_result = lower(trim(message.auth_result)),
-      auth_activity_landing.edge_id = lower(trim(message.edge_id))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-CREATE ROUTER edge_location_lookup
+CREATE DEDUPLICATOR edge_location_lookup
   FROM edge_activity_landing
-  SET edge_activity_landing.edge_region = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "region"),
-      edge_activity_landing.edge_site_tier = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "site_tier"),
-      edge_activity_landing.edge_lat = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lat"),
-      edge_activity_landing.edge_lon = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lon")
-  WHERE NOT is_null(LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lat"))
-  DEFAULT TO edge_activity_enriched_landing
+  TO edge_activity_enriched_landing
+    SET edge_activity_enriched_landing.edge_region = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "region"),
+        edge_activity_enriched_landing.edge_site_tier = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "site_tier"),
+        edge_activity_enriched_landing.edge_lat = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lat"),
+        edge_activity_enriched_landing.edge_lon = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lon")
+    WHERE NOT is_null(LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lat"))
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON edge_activity_landing.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER device_activity_router
+CREATE DEDUPLICATOR device_activity_splitter
   FROM device_activity_landing
   TO device_connect_events WHERE device_activity_landing.event_type = "connect"
   TO device_location_events WHERE device_activity_landing.event_type = "location"
   TO device_disconnect_events WHERE device_activity_landing.event_type = "disconnect"
-  MATCH FIRST
-  DEFAULT TO device_location_events
+  TO device_location_events
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON device_activity_landing.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER edge_activity_router
+CREATE DEDUPLICATOR edge_activity_splitter
   FROM edge_activity_enriched_landing
   TO edge_connect_events WHERE edge_activity_enriched_landing.event_type = "connect"
   TO edge_disconnect_events WHERE edge_activity_enriched_landing.event_type = "disconnect"
-  MATCH FIRST
-  DEFAULT TO edge_connect_events
+  TO edge_connect_events
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON edge_activity_enriched_landing.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER auth_activity_router
+CREATE DEDUPLICATOR auth_activity_splitter
   FROM auth_activity_landing
   TO auth_authorized_events WHERE auth_activity_landing.event_type = "authorized" AND auth_activity_landing.auth_result = "allow"
   TO auth_denied_events WHERE auth_activity_landing.auth_result != "allow"
-  MATCH FIRST
-  DEFAULT TO auth_denied_events
+  TO auth_denied_events
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON auth_activity_landing.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
@@ -620,20 +626,23 @@ CREATE WASM PROCESSOR geoip_device_location_resolver
   FILE 'nervix_datalake_geo_wasm_guest.wasm'
   FROM device_location_events
   TO device_location_geo_events
+  TO device_location_geo_audit_events WHERE device_location_geo_audit_events.distance_to_hub_km > 0.0
   PARAMETERIZED BY device_branch
   ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
-CREATE ROUTER device_location_distance
+CREATE DEDUPLICATOR device_location_distance
   FROM device_location_geo_events
-  SET device_location_geo_events.edge_name = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_name"),
-      device_location_geo_events.edge_region = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "region"),
-      device_location_geo_events.edge_site_tier = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "site_tier"),
-      device_location_geo_events.edge_lat = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat"),
-      device_location_geo_events.edge_lon = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lon"),
-      device_location_geo_events.distance_to_edge_km = 111.32 * sqrt(pow(LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat") - device_location_geo_events.device_lat, 2.0) + pow((LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lon") - device_location_geo_events.device_lon) * cos(device_location_geo_events.device_lat * 0.017453292519943295), 2.0))
-  WHERE NOT is_null(LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat"))
-  DEFAULT TO device_location_checked_events
+  TO device_location_checked_events
+    SET device_location_checked_events.edge_name = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_name"),
+        device_location_checked_events.edge_region = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "region"),
+        device_location_checked_events.edge_site_tier = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "site_tier"),
+        device_location_checked_events.edge_lat = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat"),
+        device_location_checked_events.edge_lon = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lon"),
+        device_location_checked_events.distance_to_edge_km = 111.32 * sqrt(pow(LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat") - device_location_geo_events.device_lat, 2.0) + pow((LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lon") - device_location_geo_events.device_lon) * cos(device_location_geo_events.device_lat * 0.017453292519943295), 2.0))
+    WHERE NOT is_null(LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat"))
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON device_location_geo_events.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
@@ -671,11 +680,13 @@ CREATE CORRELATOR device_edge_connect_correlator
   ON CORRELATION TIMEOUT DROP, DROP
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER connect_distance_score
+CREATE DEDUPLICATOR connect_distance_score
   FROM device_edge_connect_events
-  SET device_edge_connect_events.distance_to_edge_km = 111.32 * sqrt(pow(device_edge_connect_events.edge_lat - device_edge_connect_events.device_lat, 2.0) + pow((device_edge_connect_events.edge_lon - device_edge_connect_events.device_lon) * cos(device_edge_connect_events.device_lat * 0.017453292519943295), 2.0))
-  DEFAULT TO device_edge_connect_scored_events
+  TO device_edge_connect_scored_events
+    SET device_edge_connect_scored_events.distance_to_edge_km = 111.32 * sqrt(pow(device_edge_connect_events.edge_lat - device_edge_connect_events.device_lat, 2.0) + pow((device_edge_connect_events.edge_lon - device_edge_connect_events.device_lon) * cos(device_edge_connect_events.device_lat * 0.017453292519943295), 2.0))
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON device_edge_connect_events.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
@@ -751,110 +762,120 @@ CREATE CORRELATOR disconnect_correlator
   ON CORRELATION TIMEOUT SEND TO device_disconnect_unmatched, SEND TO edge_disconnect_unmatched
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER device_disconnect_only_projector
+CREATE DEDUPLICATOR device_disconnect_only_projector
   FROM device_disconnect_unmatched
-  SET device_disconnect_unmatched.event_id = concat("device-only-", device_disconnect_unmatched.event_id),
-      device_disconnect_unmatched.disconnect_kind = "device_only",
-      device_disconnect_unmatched.device_event_id = device_disconnect_unmatched.event_id,
-      device_disconnect_unmatched.edge_event_id = NULL,
-      device_disconnect_unmatched.device_disconnected_at = device_disconnect_unmatched.ts,
-      device_disconnect_unmatched.edge_disconnected_at = NULL,
-      device_disconnect_unmatched.edge_name = NULL,
-      device_disconnect_unmatched.protocol = NULL,
-      device_disconnect_unmatched.edge_region = NULL,
-      device_disconnect_unmatched.edge_site_tier = NULL,
-      device_disconnect_unmatched.edge_lat = NULL,
-      device_disconnect_unmatched.edge_lon = NULL
-  UNSET device_disconnect_unmatched.source,
-        device_disconnect_unmatched.event_type,
-        device_disconnect_unmatched.ts,
-        device_disconnect_unmatched.seq
-  DEFAULT TO disconnect_events_device_only
+  TO disconnect_events_device_only
+    SET disconnect_events_device_only.event_id = concat("device-only-", device_disconnect_unmatched.event_id),
+        disconnect_events_device_only.disconnect_kind = "device_only",
+        disconnect_events_device_only.device_event_id = device_disconnect_unmatched.event_id,
+        disconnect_events_device_only.edge_event_id = NULL,
+        disconnect_events_device_only.device_disconnected_at = device_disconnect_unmatched.ts,
+        disconnect_events_device_only.edge_disconnected_at = NULL,
+        disconnect_events_device_only.edge_name = NULL,
+        disconnect_events_device_only.protocol = NULL,
+        disconnect_events_device_only.edge_region = NULL,
+        disconnect_events_device_only.edge_site_tier = NULL,
+        disconnect_events_device_only.edge_lat = NULL,
+        disconnect_events_device_only.edge_lon = NULL
+    UNSET device_disconnect_unmatched.source,
+          device_disconnect_unmatched.event_type,
+          device_disconnect_unmatched.ts,
+          device_disconnect_unmatched.seq
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON device_disconnect_unmatched.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER edge_disconnect_only_projector
+CREATE DEDUPLICATOR edge_disconnect_only_projector
   FROM edge_disconnect_unmatched
-  SET edge_disconnect_unmatched.event_id = concat("edge-only-", edge_disconnect_unmatched.event_id),
-      edge_disconnect_unmatched.disconnect_kind = "edge_only",
-      edge_disconnect_unmatched.device_event_id = NULL,
-      edge_disconnect_unmatched.edge_event_id = edge_disconnect_unmatched.event_id,
-      edge_disconnect_unmatched.device_disconnected_at = NULL,
-      edge_disconnect_unmatched.edge_disconnected_at = edge_disconnect_unmatched.ts,
-      edge_disconnect_unmatched.source_ip = NULL,
-      edge_disconnect_unmatched.device_lat = NULL,
-      edge_disconnect_unmatched.device_lon = NULL,
-      edge_disconnect_unmatched.battery_pct = NULL,
-      edge_disconnect_unmatched.firmware = NULL
-  UNSET edge_disconnect_unmatched.source,
-        edge_disconnect_unmatched.event_type,
-        edge_disconnect_unmatched.ts,
-        edge_disconnect_unmatched.seq
-  DEFAULT TO disconnect_events_edge_only
+  TO disconnect_events_edge_only
+    SET disconnect_events_edge_only.event_id = concat("edge-only-", edge_disconnect_unmatched.event_id),
+        disconnect_events_edge_only.disconnect_kind = "edge_only",
+        disconnect_events_edge_only.device_event_id = NULL,
+        disconnect_events_edge_only.edge_event_id = edge_disconnect_unmatched.event_id,
+        disconnect_events_edge_only.device_disconnected_at = NULL,
+        disconnect_events_edge_only.edge_disconnected_at = edge_disconnect_unmatched.ts,
+        disconnect_events_edge_only.source_ip = NULL,
+        disconnect_events_edge_only.device_lat = NULL,
+        disconnect_events_edge_only.device_lon = NULL,
+        disconnect_events_edge_only.battery_pct = NULL,
+        disconnect_events_edge_only.firmware = NULL
+    UNSET edge_disconnect_unmatched.source,
+          edge_disconnect_unmatched.event_type,
+          edge_disconnect_unmatched.ts,
+          edge_disconnect_unmatched.seq
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON edge_disconnect_unmatched.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER denied_auth_security_mapper
+CREATE DEDUPLICATOR denied_auth_security_mapper
   FROM auth_denied_events
-  SET auth_denied_events.event_id = concat("security-", auth_denied_events.event_id),
-      auth_denied_events.security_reason = "auth_denied",
-      auth_denied_events.observed_at = auth_denied_events.ts,
-      auth_denied_events.source_event_id = auth_denied_events.event_id
-  UNSET auth_denied_events.source,
-        auth_denied_events.event_type,
-        auth_denied_events.reason,
-        auth_denied_events.ts,
-        auth_denied_events.seq
-  DEFAULT TO security_auth_denied_events
+  TO security_auth_denied_events
+    SET security_auth_denied_events.event_id = concat("security-", auth_denied_events.event_id),
+        security_auth_denied_events.security_reason = "auth_denied",
+        security_auth_denied_events.observed_at = auth_denied_events.ts,
+        security_auth_denied_events.source_event_id = auth_denied_events.event_id
+    UNSET auth_denied_events.source,
+          auth_denied_events.event_type,
+          auth_denied_events.reason,
+          auth_denied_events.ts,
+          auth_denied_events.seq
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON auth_denied_events.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER uncorrelated_auth_security_mapper
+CREATE DEDUPLICATOR uncorrelated_auth_security_mapper
   FROM uncorrelated_auth_events
-  SET uncorrelated_auth_events.event_id = concat("security-", uncorrelated_auth_events.event_id),
-      uncorrelated_auth_events.security_reason = "authorized_without_device_edge_connect",
-      uncorrelated_auth_events.observed_at = uncorrelated_auth_events.ts,
-      uncorrelated_auth_events.source_event_id = uncorrelated_auth_events.event_id
-  UNSET uncorrelated_auth_events.source,
-        uncorrelated_auth_events.event_type,
-        uncorrelated_auth_events.reason,
-        uncorrelated_auth_events.ts,
-        uncorrelated_auth_events.seq
-  DEFAULT TO security_uncorrelated_auth_events
+  TO security_uncorrelated_auth_events
+    SET security_uncorrelated_auth_events.event_id = concat("security-", uncorrelated_auth_events.event_id),
+        security_uncorrelated_auth_events.security_reason = "authorized_without_device_edge_connect",
+        security_uncorrelated_auth_events.observed_at = uncorrelated_auth_events.ts,
+        security_uncorrelated_auth_events.source_event_id = uncorrelated_auth_events.event_id
+    UNSET uncorrelated_auth_events.source,
+          uncorrelated_auth_events.event_type,
+          uncorrelated_auth_events.reason,
+          uncorrelated_auth_events.ts,
+          uncorrelated_auth_events.seq
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON uncorrelated_auth_events.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER connect_without_auth_security_mapper
+CREATE DEDUPLICATOR connect_without_auth_security_mapper
   FROM connect_without_auth_events
-  SET connect_without_auth_events.event_id = concat("security-", connect_without_auth_events.event_id),
-      connect_without_auth_events.security_reason = "device_edge_connect_without_auth",
-      connect_without_auth_events.observed_at = connect_without_auth_events.edge_connected_at,
-      connect_without_auth_events.source_event_id = connect_without_auth_events.event_id,
-      connect_without_auth_events.principal_id = "unknown",
-      connect_without_auth_events.auth_result = "missing",
-      connect_without_auth_events.risk_score = 0.0
-  UNSET connect_without_auth_events.device_event_id,
-        connect_without_auth_events.edge_event_id,
-        connect_without_auth_events.device_connected_at,
-        connect_without_auth_events.edge_connected_at,
-        connect_without_auth_events.source_ip,
-        connect_without_auth_events.device_lat,
-        connect_without_auth_events.device_lon,
-        connect_without_auth_events.battery_pct,
-        connect_without_auth_events.firmware,
-        connect_without_auth_events.edge_name,
-        connect_without_auth_events.protocol,
-        connect_without_auth_events.edge_region,
-        connect_without_auth_events.edge_site_tier,
-        connect_without_auth_events.edge_lat,
-        connect_without_auth_events.edge_lon,
-        connect_without_auth_events.distance_to_edge_km
-  DEFAULT TO security_connect_without_auth_events
+  TO security_connect_without_auth_events
+    SET security_connect_without_auth_events.event_id = concat("security-", connect_without_auth_events.event_id),
+        security_connect_without_auth_events.security_reason = "device_edge_connect_without_auth",
+        security_connect_without_auth_events.observed_at = connect_without_auth_events.edge_connected_at,
+        security_connect_without_auth_events.source_event_id = connect_without_auth_events.event_id,
+        security_connect_without_auth_events.principal_id = "unknown",
+        security_connect_without_auth_events.auth_result = "missing",
+        security_connect_without_auth_events.risk_score = 0.0
+    UNSET connect_without_auth_events.device_event_id,
+          connect_without_auth_events.edge_event_id,
+          connect_without_auth_events.device_connected_at,
+          connect_without_auth_events.edge_connected_at,
+          connect_without_auth_events.source_ip,
+          connect_without_auth_events.device_lat,
+          connect_without_auth_events.device_lon,
+          connect_without_auth_events.battery_pct,
+          connect_without_auth_events.firmware,
+          connect_without_auth_events.edge_name,
+          connect_without_auth_events.protocol,
+          connect_without_auth_events.edge_region,
+          connect_without_auth_events.edge_site_tier,
+          connect_without_auth_events.edge_lat,
+          connect_without_auth_events.edge_lon,
+          connect_without_auth_events.distance_to_edge_km
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON connect_without_auth_events.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
@@ -865,68 +886,72 @@ CREATE UNIFIER security_event_unifier
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER location_distance_alert_mapper
+CREATE DEDUPLICATOR location_distance_alert_mapper
   FROM device_location_checked_events
-  SET device_location_checked_events.alert_id = concat("distance-", device_location_checked_events.event_id),
-      device_location_checked_events.alert_type = "device_location_too_far_from_edge",
-      device_location_checked_events.edge_label = coalesce(device_location_checked_events.edge_name, device_location_checked_events.edge_id),
-      device_location_checked_events.source_event_id = device_location_checked_events.event_id,
-      device_location_checked_events.observed_at = device_location_checked_events.ts,
-      device_location_checked_events.threshold_km = 500.0
-  UNSET device_location_checked_events.source,
-        device_location_checked_events.event_id,
-        device_location_checked_events.event_type,
-        device_location_checked_events.source_ip,
-        device_location_checked_events.battery_pct,
-        device_location_checked_events.firmware,
-        device_location_checked_events.ts,
-        device_location_checked_events.seq,
-        device_location_checked_events.geoip_database,
-        device_location_checked_events.geoip_continent,
-        device_location_checked_events.geoip_country,
-        device_location_checked_events.geoip_region,
-        device_location_checked_events.geoip_city,
-        device_location_checked_events.geoip_lat,
-        device_location_checked_events.geoip_lon,
-        device_location_checked_events.geoip_geohash,
-        device_location_checked_events.nearest_hub,
-        device_location_checked_events.distance_to_hub_km,
-        device_location_checked_events.edge_name,
-        device_location_checked_events.edge_region,
-        device_location_checked_events.edge_site_tier
-  WHERE device_location_checked_events.distance_to_edge_km > 500.0
-  DEFAULT TO location_distance_alerts
+  TO location_distance_alerts
+    SET location_distance_alerts.alert_id = concat("distance-", device_location_checked_events.event_id),
+        location_distance_alerts.alert_type = "device_location_too_far_from_edge",
+        location_distance_alerts.edge_label = coalesce(device_location_checked_events.edge_name, device_location_checked_events.edge_id),
+        location_distance_alerts.source_event_id = device_location_checked_events.event_id,
+        location_distance_alerts.observed_at = device_location_checked_events.ts,
+        location_distance_alerts.threshold_km = 500.0
+    UNSET device_location_checked_events.source,
+          device_location_checked_events.event_id,
+          device_location_checked_events.event_type,
+          device_location_checked_events.source_ip,
+          device_location_checked_events.battery_pct,
+          device_location_checked_events.firmware,
+          device_location_checked_events.ts,
+          device_location_checked_events.seq,
+          device_location_checked_events.geoip_database,
+          device_location_checked_events.geoip_continent,
+          device_location_checked_events.geoip_country,
+          device_location_checked_events.geoip_region,
+          device_location_checked_events.geoip_city,
+          device_location_checked_events.geoip_lat,
+          device_location_checked_events.geoip_lon,
+          device_location_checked_events.geoip_geohash,
+          device_location_checked_events.nearest_hub,
+          device_location_checked_events.distance_to_hub_km,
+          device_location_checked_events.edge_name,
+          device_location_checked_events.edge_region,
+          device_location_checked_events.edge_site_tier
+    WHERE device_location_checked_events.distance_to_edge_km > 500.0
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON device_location_checked_events.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER connection_distance_alert_mapper
+CREATE DEDUPLICATOR connection_distance_alert_mapper
   FROM connected_sessions
-  SET connected_sessions.alert_id = concat("distance-", connected_sessions.event_id),
-      connected_sessions.alert_type = "connected_session_too_far_from_edge",
-      connected_sessions.edge_label = LOOKUP_HASH_MAP("edge_sites_by_id", connected_sessions.edge_id, "edge_name"),
-      connected_sessions.source_event_id = connected_sessions.event_id,
-      connected_sessions.observed_at = connected_sessions.authorized_at,
-      connected_sessions.threshold_km = 500.0
-  UNSET connected_sessions.event_id,
-        connected_sessions.principal_id,
-        connected_sessions.device_event_id,
-        connected_sessions.edge_event_id,
-        connected_sessions.auth_event_id,
-        connected_sessions.device_connected_at,
-        connected_sessions.edge_connected_at,
-        connected_sessions.authorized_at,
-        connected_sessions.source_ip,
-        connected_sessions.battery_pct,
-        connected_sessions.firmware,
-        connected_sessions.edge_name,
-        connected_sessions.protocol,
-        connected_sessions.edge_region,
-        connected_sessions.edge_site_tier,
-        connected_sessions.risk_score
-  WHERE connected_sessions.distance_to_edge_km > 500.0
-  DEFAULT TO connection_distance_alerts
+  TO connection_distance_alerts
+    SET connection_distance_alerts.alert_id = concat("distance-", connected_sessions.event_id),
+        connection_distance_alerts.alert_type = "connected_session_too_far_from_edge",
+        connection_distance_alerts.edge_label = LOOKUP_HASH_MAP("edge_sites_by_id", connected_sessions.edge_id, "edge_name"),
+        connection_distance_alerts.source_event_id = connected_sessions.event_id,
+        connection_distance_alerts.observed_at = connected_sessions.authorized_at,
+        connection_distance_alerts.threshold_km = 500.0
+    UNSET connected_sessions.event_id,
+          connected_sessions.principal_id,
+          connected_sessions.device_event_id,
+          connected_sessions.edge_event_id,
+          connected_sessions.auth_event_id,
+          connected_sessions.device_connected_at,
+          connected_sessions.edge_connected_at,
+          connected_sessions.authorized_at,
+          connected_sessions.source_ip,
+          connected_sessions.battery_pct,
+          connected_sessions.firmware,
+          connected_sessions.edge_name,
+          connected_sessions.protocol,
+          connected_sessions.edge_region,
+          connected_sessions.edge_site_tier,
+          connected_sessions.risk_score
+    WHERE connected_sessions.distance_to_edge_km > 500.0
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON connected_sessions.event_id
+  MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 

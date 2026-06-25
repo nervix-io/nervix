@@ -164,9 +164,12 @@ Feature: Relay metrics
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE ROUTER relay_buffer_forwarder
+      CREATE DEDUPLICATOR relay_buffer_forwarder
         FROM notifications
-        DEFAULT TO forwarded_notifications PARAMETERIZED BY user_id_branch
+        TO forwarded_notifications
+        PARAMETERIZED BY user_id_branch
+        DEDUPLICATE ON notifications.user_id
+        MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO notifications WHERE notifications.user_id = 42;

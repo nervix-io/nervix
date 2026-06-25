@@ -169,7 +169,7 @@ pub struct WasmBranchInit {
     pub domain_type: String,
     pub branch_key: Option<Vec<u8>>,
     pub input_schema: WasmProcessorSchema,
-    pub output_schema: WasmProcessorSchema,
+    pub output_schemas: Vec<WasmProcessorSchema>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +332,7 @@ pub struct WasmAckSidecar {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmBatchEnvelope {
+    pub output_relay: Option<String>,
     pub arrow_ipc_batch: Vec<u8>,
     pub acks: WasmAckSidecar,
 }
@@ -339,6 +340,19 @@ pub struct WasmBatchEnvelope {
 impl WasmBatchEnvelope {
     pub fn new(arrow_ipc_batch: Vec<u8>, acks: WasmAckSidecar) -> Self {
         Self {
+            output_relay: None,
+            arrow_ipc_batch,
+            acks,
+        }
+    }
+
+    pub fn output(
+        output_relay: impl Into<String>,
+        arrow_ipc_batch: Vec<u8>,
+        acks: WasmAckSidecar,
+    ) -> Self {
+        Self {
+            output_relay: Some(output_relay.into()),
             arrow_ipc_batch,
             acks,
         }
@@ -346,12 +360,17 @@ impl WasmBatchEnvelope {
 
     pub fn arrow_only(arrow_ipc_batch: Vec<u8>) -> Self {
         Self {
+            output_relay: None,
             arrow_ipc_batch,
             acks: WasmAckSidecar::default(),
         }
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, WasmProcessorError> {
+        let output_relay = self.output_relay.as_deref().unwrap_or_default().as_bytes();
+        let output_len = u32::try_from(output_relay.len()).map_err(|_| {
+            WasmProcessorError::DecodeEnvelope("output relay name is too large".to_string())
+        })?;
         let arrow_len = u32::try_from(self.arrow_ipc_batch.len()).map_err(|_| {
             WasmProcessorError::DecodeEnvelope("Arrow IPC payload is too large".to_string())
         })?;
@@ -361,7 +380,11 @@ impl WasmBatchEnvelope {
         let ack_len = u32::try_from(ack_bytes.len()).map_err(|_| {
             WasmProcessorError::DecodeEnvelope("ack sidecar payload is too large".to_string())
         })?;
-        let mut encoded = Vec::with_capacity(8 + self.arrow_ipc_batch.len() + ack_bytes.len());
+        let mut encoded = Vec::with_capacity(
+            12 + output_relay.len() + self.arrow_ipc_batch.len() + ack_bytes.len(),
+        );
+        encoded.extend_from_slice(&output_len.to_le_bytes());
+        encoded.extend_from_slice(output_relay);
         encoded.extend_from_slice(&arrow_len.to_le_bytes());
         encoded.extend_from_slice(&self.arrow_ipc_batch);
         encoded.extend_from_slice(&ack_len.to_le_bytes());
@@ -370,13 +393,36 @@ impl WasmBatchEnvelope {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, WasmProcessorError> {
-        if bytes.len() < 8 {
+        if bytes.len() < 12 {
             return Err(WasmProcessorError::DecodeEnvelope(
                 "envelope is shorter than length prefixes".to_string(),
             ));
         }
-        let arrow_len = read_u32_len(bytes, 0, "Arrow IPC")?;
-        let arrow_start = 4_usize;
+        let output_len = read_u32_len(bytes, 0, "output relay")?;
+        let output_start = 4_usize;
+        let output_end = output_start.checked_add(output_len).ok_or_else(|| {
+            WasmProcessorError::DecodeEnvelope("output relay length overflow".to_string())
+        })?;
+        if output_end + 8 > bytes.len() {
+            return Err(WasmProcessorError::DecodeEnvelope(
+                "output relay length exceeds envelope size".to_string(),
+            ));
+        }
+        let output_relay = if output_len == 0 {
+            None
+        } else {
+            Some(
+                std::str::from_utf8(&bytes[output_start..output_end])
+                    .map_err(|error| {
+                        WasmProcessorError::DecodeEnvelope(format!(
+                            "invalid output relay UTF-8: {error}"
+                        ))
+                    })?
+                    .to_string(),
+            )
+        };
+        let arrow_len = read_u32_len(bytes, output_end, "Arrow IPC")?;
+        let arrow_start = output_end + 4;
         let arrow_end = arrow_start.checked_add(arrow_len).ok_or_else(|| {
             WasmProcessorError::DecodeEnvelope("Arrow IPC length overflow".to_string())
         })?;
@@ -399,6 +445,7 @@ impl WasmBatchEnvelope {
             WasmProcessorError::DecodeEnvelope(format!("invalid ack sidecar CBOR: {error}"))
         })?;
         Ok(Self {
+            output_relay,
             arrow_ipc_batch: bytes[arrow_start..arrow_end].to_vec(),
             acks,
         })
@@ -1112,7 +1159,9 @@ mod tests {
             domain_type: "PACED".to_string(),
             branch_key: Some(b"user=42".to_vec()),
             input_schema: WasmProcessorSchema::from(&processor_schema("input_events")),
-            output_schema: WasmProcessorSchema::from(&processor_schema("output_events")),
+            output_schemas: vec![WasmProcessorSchema::from(&processor_schema(
+                "output_events",
+            ))],
         }
     }
 

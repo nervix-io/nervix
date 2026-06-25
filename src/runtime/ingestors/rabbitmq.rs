@@ -31,35 +31,13 @@ impl RabbitMqIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
                 reason,
             })?;
-        let (
-            queue,
-            instances,
-            sender_relay,
-            filter_map,
-            codec,
-            parameterization,
-            parameterized_template,
-            ack_mode,
-        ) = match &ingestor.source {
+        let (queue, instances, ack_mode) = match &ingestor.source {
             IngestSource::RabbitMq {
                 queue,
                 instances,
                 mode,
                 ..
-            } => {
-                let (sender_relay, filter_map, codec, parameterization, parameterized_template) =
-                    runtime.ingestor_dependencies(domain, &ingestor).await?;
-                (
-                    queue.clone(),
-                    *instances,
-                    sender_relay,
-                    filter_map,
-                    codec,
-                    parameterization,
-                    parameterized_template,
-                    mode.clone(),
-                )
-            }
+            } => (queue.clone(), *instances, mode.clone()),
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
@@ -68,11 +46,16 @@ impl RabbitMqIngestor {
                 });
             }
         };
+        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
             domain,
             &ingestor.name,
-            parameterized_template,
+            dependencies.parameterized_templates,
         );
+        let output_routes = dependencies.output_routes;
+        let filter_where = dependencies.filter_where;
+        let codec = dependencies.codec;
+        let parameterization = dependencies.parameterization;
         let ack_timeout = match &ack_mode {
             RabbitMqIngestMode::AckSequential { timeout, .. } => {
                 Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?
@@ -91,14 +74,12 @@ impl RabbitMqIngestor {
             let task_timestamp_source = ingestor.timestamp_source.clone();
             let task_queue = queue.clone();
             let task_events = runtime.events.clone();
-            let task_sender = sender_relay.clone();
-            let task_filter_map = filter_map.clone();
+            let task_output_routes = output_routes.clone();
+            let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
             let task_parameterization = parameterization.clone();
             let task_parameter_value_mappings = ingestor.parameterized_by.values().to_vec();
-            let task_parameterized_sender = parameterized_runtime
-                .as_ref()
-                .map(|runtime| runtime.sender());
+            let task_parameterized_senders = parameterized_runtime.senders.clone();
             let task_ack_mode = ack_mode.clone();
             let task_config = resolved_client.entries.clone();
             let task_client_mounts = resolved_client.mounts.clone();
@@ -241,6 +222,8 @@ impl RabbitMqIngestor {
                                             Ok(record) => {
                                                 match &task_ack_mode {
                                                     RabbitMqIngestMode::AckSequential { .. } => {
+                                                        let mut output_routes =
+                                                            task_output_routes.clone();
                                                         let (acks, completion) = AckSet::root();
                                                         let dispatched = task_runtime
                                                             .dispatch_ingested_record(IngestDispatch {
@@ -251,10 +234,10 @@ impl RabbitMqIngestor {
                                                                 parameterization:
                                                                     &task_parameterization,
                                                                 parameter_value_mappings: Some(&task_parameter_value_mappings),
-                                                                sender_relay: &task_sender,
-                                                                filter_map: task_filter_map.as_ref(),
-                                                                parameterized_sender:
-                                                                    task_parameterized_sender.as_ref(),
+                                                                output_routes: &mut output_routes,
+                                                                filter_where: task_filter_where.as_ref(),
+                                                                parameterized_senders:
+                                                                    &task_parameterized_senders,
                                                                 record,
                                                                 filter_map_metadata: Some(
                                                                     IngestFilterMapMetadata::from_headers(
@@ -262,8 +245,7 @@ impl RabbitMqIngestor {
                                                                     ),
                                                                 ),
                                                                 ingested_at: current_timestamp(),
-                                                                acks: if task_parameterized_sender
-                                                                    .is_some()
+                                                                acks: if !task_parameterized_senders.is_empty()
                                                                 {
                                                                     acks.attached()
                                                                 } else {
@@ -396,7 +378,7 @@ impl RabbitMqIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime,
+                parameterized: parameterized_runtime.runtimes,
                 tasks,
             },
         );

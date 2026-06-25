@@ -24,7 +24,6 @@ pub fn statement_parser<'src>()
             crate::describe_ingestor::describe_ingestor_parser().map(Statement::DescribeIngestor),
             crate::describe_lookup::describe_lookup_parser().map(Statement::DescribeLookup),
             crate::describe_resource::describe_resource_parser().map(Statement::DescribeResource),
-            crate::describe_router::describe_router_parser().map(Statement::DescribeRouter),
             crate::describe_stream::describe_stream_parser().map(Statement::DescribeRelay),
             crate::describe_window_processor::describe_window_processor_parser()
                 .map(Statement::DescribeWindowProcessor),
@@ -43,8 +42,6 @@ pub fn statement_parser<'src>()
             crate::reorderer::create_reorderer_parser().map(|create| {
                 Statement::Create(create.map_body(Model::Reorderer).map_body(Box::new))
             }),
-            crate::router::create_router_parser()
-                .map(|create| Statement::Create(create.map_body(Model::Router).map_body(Box::new))),
             crate::codec::create_codec_parser()
                 .map(|create| Statement::Create(create.map_body(Model::Codec).map_body(Box::new))),
             crate::unifier::create_unifier_parser().map(|create| {
@@ -237,16 +234,15 @@ mod tests {
         CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
-        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateRelay, CreateRouter,
-        CreateSchema, CreateSignalingProtocol, CreateUnifier, CreateWireSchema,
-        CreateWireSchemaStmt, DescribeRelay, DrainNode, DropModel, DropNode, EmitSink,
-        EndpointIngestMode, EndpointType, ErrorPolicies, Identifier as ModelIdentifier,
-        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-        MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
-        ParameterValueMapping, ParseAsType, PulsarIngestMode, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RetryPolicy, RouterRoute, SchemaField, SignalingProtocolOnConnect,
-        SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
-        WireSchemaField, ZeroMqIngestMode,
+        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateRelay, CreateSchema,
+        CreateSignalingProtocol, CreateUnifier, CreateWireSchema, CreateWireSchemaStmt,
+        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType,
+        ErrorPolicies, Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, MessageErrorPolicy, Model, ModelKind, MqttIngestMode,
+        MqttQos, MqttSession, NatsIngestMode, ParameterValueMapping, ParseAsType, ProcessorOutputs,
+        PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SchemaField,
+        SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
+        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
     };
 
     use super::*;
@@ -523,7 +519,7 @@ mod tests {
                     if g.bool() {
                         Model::Ingestor(CreateIngestor {
                             name: g.ident(),
-                            into_relay: g.ident(),
+                            output_routes: ProcessorOutputs::single(g.ident()),
                             decode_using_codec: g.ident(),
                             parameterized_by: params,
                             flush_each: "100ms".to_string(),
@@ -537,12 +533,12 @@ mod tests {
                                 mode,
                             },
                             error_policies: ErrorPolicies::handled_by_log(),
-                            filter_map: None,
+                            filter_where: None,
                         })
                     } else {
                         Model::Ingestor(CreateIngestor {
                             name: g.ident(),
-                            into_relay: g.ident(),
+                            output_routes: ProcessorOutputs::single(g.ident()),
                             decode_using_codec: g.ident(),
                             parameterized_by: params,
                             flush_each: "100ms".to_string(),
@@ -578,13 +574,13 @@ mod tests {
                                 },
                             },
                             error_policies: ErrorPolicies::handled_by_log(),
-                            filter_map: None,
+                            filter_where: None,
                         })
                     }
                 } else {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        into_relay: g.ident(),
+                        output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
                         parameterized_by: params,
                         flush_each: "100ms".to_string(),
@@ -603,7 +599,7 @@ mod tests {
                             },
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
-                        filter_map: None,
+                        filter_where: None,
                     })
                 }
             }
@@ -643,7 +639,7 @@ mod tests {
             9 => Model::Unifier(CreateUnifier {
                 name: g.ident(),
                 from_relays: vec![g.ident(), g.ident(), g.ident()],
-                into_relay: g.ident(),
+                output_routes: ProcessorOutputs::single(g.ident()),
                 parameterized_by: processor_parameterized_by(g.ident()),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
@@ -653,13 +649,12 @@ mod tests {
                     AckMode::Detached
                 },
                 message_error_policy: MessageErrorPolicy::Log,
-
-                filter_map: None,
+                filter_where: None,
             }),
             10 => Model::Deduplicator(CreateDeduplicator {
                 name: g.ident(),
                 from_relay: g.ident(),
-                into_relay: g.ident(),
+                output_routes: ProcessorOutputs::single(g.ident()),
                 parameterized_by: processor_parameterized_by(g.ident()),
                 deduplicate_on: g.ident().to_string(),
                 max_time: "10m".to_string(),
@@ -671,8 +666,7 @@ mod tests {
                     AckMode::Detached
                 },
                 message_error_policy: MessageErrorPolicy::Log,
-
-                filter_map: None,
+                filter_where: None,
             }),
             11 => Model::ClientPrometheus(CreateClientPrometheus {
                 name: g.ident(),
@@ -692,7 +686,7 @@ mod tests {
 
                 Model::Ingestor(CreateIngestor {
                     name: g.ident(),
-                    into_relay: g.ident(),
+                    output_routes: ProcessorOutputs::single(g.ident()),
                     decode_using_codec: g.ident(),
                     parameterized_by: params,
                     flush_each: "100ms".to_string(),
@@ -704,14 +698,14 @@ mod tests {
                         mode: RedisPubSubIngestMode::NoAckSequential,
                     },
                     error_policies: ErrorPolicies::handled_by_log(),
-                    filter_map: None,
+                    filter_where: None,
                 })
             }
             13 => {
                 if g.bool() {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        into_relay: g.ident(),
+                        output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
                         parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                         flush_each: "100ms".to_string(),
@@ -727,12 +721,12 @@ mod tests {
                             },
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
-                        filter_map: None,
+                        filter_where: None,
                     })
                 } else if g.bool() {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        into_relay: g.ident(),
+                        output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
                         parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                         flush_each: "100ms".to_string(),
@@ -745,7 +739,7 @@ mod tests {
                             every: "15s".to_string(),
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
-                        filter_map: None,
+                        filter_where: None,
                     })
                 } else {
                     let sink = match g.next_u8() % 3 {
@@ -840,7 +834,7 @@ mod tests {
             }),
             19 => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                into_relay: g.ident(),
+                output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
                 parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
@@ -851,7 +845,7 @@ mod tests {
                     mode: ZeroMqIngestMode::NoAckSequential,
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
-                filter_map: None,
+                filter_where: None,
             }),
             20 => Model::Emitter(CreateEmitter {
                 name: g.ident(),
@@ -873,7 +867,7 @@ mod tests {
             }),
             21 => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                into_relay: g.ident(),
+                output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
                 parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
@@ -887,28 +881,27 @@ mod tests {
                     mode: NatsIngestMode::NoAckSequential,
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
-                filter_map: None,
+                filter_where: None,
             }),
             22 => {
                 let from_relay = ModelIdentifier::try_from("source").expect("valid identifier");
                 let error_condition = format!(r#"{}.level = "error""#, from_relay.as_str());
                 let warn_condition = format!(r#"{}.level = "warn""#, from_relay.as_str());
-                Model::Router(CreateRouter {
+                Model::Reingestor(nervix_models::CreateReingestor {
                     name: g.ident(),
                     from_relay,
-                    routes: vec![
-                        RouterRoute {
-                            into_relay: g.ident(),
-                            condition: error_condition,
+                    output_routes: ProcessorOutputs::new(vec![
+                        nervix_models::ProcessorOutput {
+                            relay: g.ident(),
+                            filter_map: Some(format!("WHERE {error_condition}")),
                         },
-                        RouterRoute {
-                            into_relay: g.ident(),
-                            condition: warn_condition,
+                        nervix_models::ProcessorOutput {
+                            relay: g.ident(),
+                            filter_map: Some(format!("WHERE {warn_condition}")),
                         },
-                    ],
-                    match_policy: Default::default(),
-                    default_into_relay: g.ident(),
-                    parameterized_by: processor_parameterized_by(g.ident()),
+                        nervix_models::ProcessorOutput::new(g.ident()),
+                    ]),
+                    parameterized_by: BranchParameterization::unparameterized(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: if g.bool() {
@@ -917,8 +910,7 @@ mod tests {
                         AckMode::Detached
                     },
                     message_error_policy: MessageErrorPolicy::Log,
-
-                    filter_map: None,
+                    filter_where: None,
                 })
             }
             23 => Model::ClientS3(CreateClientS3 {
@@ -987,7 +979,7 @@ mod tests {
             }),
             _ => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                into_relay: g.ident(),
+                output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
                 parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
@@ -1013,7 +1005,7 @@ mod tests {
                     }
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
-                filter_map: None,
+                filter_where: None,
             }),
         }
     }
@@ -1089,7 +1081,6 @@ mod tests {
         assert!(suggestions.contains(&"RELAY".to_string()));
         assert!(suggestions.contains(&"UNIFIER".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
-        assert!(suggestions.contains(&"ROUTER".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
@@ -1144,10 +1135,11 @@ mod tests {
     }
 
     #[test]
-    fn router_context_suggestions_do_not_leak_schema_keywords() {
-        let input = "CREATE ROUTER log_router FROM incoming_logs TO errors_ss ";
+    fn reingestor_output_context_suggestions_do_not_leak_schema_keywords() {
+        let input = "CREATE REINGESTOR log_splitter FROM incoming_logs TO errors_ss ";
         let suggestions = suggest_statement(input, input.len());
-        assert!(suggestions.contains(&"WHERE".to_string()));
+        assert!(suggestions.contains(&"UNPARAMETERIZED".to_string()));
+        assert!(suggestions.contains(&"PARAMETERIZED BY".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
@@ -1379,18 +1371,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_describe_router_statement() {
-        let parsed =
-            parse_statement("DESCRIBE ROUTER route_notifications;").expect("parse should succeed");
-        assert_eq!(
-            parsed,
-            Statement::DescribeRouter(nervix_models::DescribeRouter {
-                name: ModelIdentifier::parse("route_notifications").expect("valid identifier"),
-            })
-        );
-    }
-
-    #[test]
     fn parses_describe_reorderer_statement() {
         let parsed = parse_statement("DESCRIBE REORDERER order_notifications;")
             .expect("parse should succeed");
@@ -1542,47 +1522,63 @@ mod tests {
     }
 
     #[test]
-    fn parses_router_statement_with_implicit_attached_mode() {
+    fn parses_reingestor_statement_with_multiple_output_routes() {
         let parsed = parse_statement(
-            r#"CREATE ROUTER log_router FROM incoming_logs SET incoming_logs.severity = lower(incoming_logs.level) UNSET incoming_logs.legacy WHERE incoming_logs.active TO errors_ss WHERE incoming_logs.level = "error" TO warnings_ss WHERE incoming_logs.level = "warn" DEFAULT TO info_ss PARAMETERIZED BY tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
+            r#"CREATE REINGESTOR log_splitter FROM incoming_logs FILTER WHERE incoming_logs.active TO errors_ss SET errors_ss.severity = lower(incoming_logs.level) WHERE incoming_logs.level = "error" TO warnings_ss WHERE incoming_logs.level = "warn" TO info_ss PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_logs.tenant } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
         let Statement::Create(parsed) = parsed else {
-            panic!("expected router statement");
+            panic!("expected reingestor statement");
         };
-        let Model::Router(router) = parsed.body.as_ref() else {
-            panic!("expected router statement");
+        let Model::Reingestor(reingestor) = parsed.body.as_ref() else {
+            panic!("expected reingestor statement");
         };
-        assert_eq!(router.mode, AckMode::Attached);
-        assert_eq!(router.routes.len(), 2);
-        assert_eq!(router.default_into_relay.as_str(), "info_ss");
-        assert_eq!(router.flush_each, "100ms");
+        assert_eq!(reingestor.mode, AckMode::Attached);
+        assert_eq!(reingestor.output_routes.routes.len(), 3);
+        assert_eq!(
+            reingestor
+                .output_routes
+                .routes
+                .get(2)
+                .map(|output| output.relay.as_str()),
+            Some("info_ss")
+        );
+        assert_eq!(reingestor.flush_each, "100ms");
+        assert_eq!(
+            reingestor.filter_where.as_deref(),
+            Some("WHERE incoming_logs.active")
+        );
     }
 
     #[test]
-    fn parses_default_only_router_statement_with_filter_map() {
+    fn parses_single_reingestor_output_route_with_filter_map() {
         let parsed = parse_statement(
-            "CREATE ROUTER fw1 FROM ss1 SET ss1.normalized = lower(ss1.raw) UNSET ss1.raw WHERE \
-             ss1.active DEFAULT TO ss3 PARAMETERIZED BY tenant FLUSH EACH 100ms MAX BATCH SIZE \
-             1MiB ON MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR fw1 FROM ss1 TO ss3 SET ss3.normalized = lower(ss1.raw) UNSET \
+             ss3.raw WHERE ss1.active PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant \
+             } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
         let Statement::Create(parsed) = parsed else {
-            panic!("expected router statement");
+            panic!("expected reingestor statement");
         };
-        let Model::Router(router) = parsed.body.as_ref() else {
-            panic!("expected router statement");
+        let Model::Reingestor(reingestor) = parsed.body.as_ref() else {
+            panic!("expected reingestor statement");
         };
-        assert_eq!(router.mode, AckMode::Attached);
-        assert_eq!(router.from_relay.as_str(), "ss1");
-        assert!(router.routes.is_empty());
-        assert_eq!(router.default_into_relay.as_str(), "ss3");
-        assert_eq!(router.flush_each, "100ms");
+        assert_eq!(reingestor.mode, AckMode::Attached);
+        assert_eq!(reingestor.from_relay.as_str(), "ss1");
+        assert_eq!(reingestor.output_routes.routes.len(), 1);
+        let output = reingestor
+            .output_routes
+            .routes
+            .first()
+            .expect("output route should parse");
+        assert_eq!(output.relay.as_str(), "ss3");
+        assert_eq!(reingestor.flush_each, "100ms");
         assert_eq!(
-            router.filter_map.as_deref(),
-            Some("SET ss1.normalized = lower ( ss1.raw ) UNSET ss1.raw WHERE ss1.active")
+            output.filter_map.as_deref(),
+            Some("SET ss3.normalized = lower ( ss1.raw ) UNSET ss3.raw WHERE ss1.active")
         );
     }
 
@@ -1650,10 +1646,6 @@ mod tests {
                  TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB",
             ),
             (
-                "router",
-                r#"CREATE ROUTER log_router FROM incoming_logs TO errors_ss WHERE incoming_logs.level = "error" DEFAULT TO info_ss PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB"#,
-            ),
-            (
                 "unifier",
                 "CREATE UNIFIER join_streams FROM notifications_a, notifications_b TO \
                  notifications_all PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE \
@@ -1708,9 +1700,10 @@ mod tests {
     #[test]
     fn message_error_policy_accepts_dlq_but_general_policy_does_not() {
         parse_statement(
-            "CREATE ROUTER pass_through FROM notifications DEFAULT TO forwarded_notifications \
-             PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-             DLQ error_stream SET error_message = message_error.message;",
+            "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications \
+             PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR DLQ error_stream SET error_message = \
+             message_error.message;",
         )
         .expect("message error DLQ policy should parse");
 
@@ -1729,14 +1722,10 @@ mod tests {
     fn branch_preserving_processors_accept_unparameterized() {
         for statement in [
             "CREATE RELAY raw SCHEMA metric UNPARAMETERIZED;",
-            "CREATE ROUTER pass_through FROM raw DEFAULT TO projected UNPARAMETERIZED FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE DEDUPLICATOR dedup FROM raw TO projected UNPARAMETERIZED DEDUPLICATE ON \
              raw.value MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE REORDERER reorder FROM raw TO projected UNPARAMETERIZED BY raw.value MAX TIME \
              10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
-            "CREATE ROUTER route FROM raw TO projected WHERE raw.value > 0 DEFAULT TO fallback \
-             UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE UNIFIER join_streams FROM left, right TO joined UNPARAMETERIZED FLUSH EACH \
              100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE WINDOW PROCESSOR window_metrics FROM raw TO projected UNPARAMETERIZED WIDTH 2 \
@@ -1767,7 +1756,6 @@ mod tests {
         assert!(suggestions.contains(&"VHOST".to_string()));
         assert!(suggestions.contains(&"ENDPOINT".to_string()));
         assert!(suggestions.contains(&"NODE".to_string()));
-        assert!(suggestions.contains(&"ROUTER".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }

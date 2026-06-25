@@ -24,7 +24,7 @@ CREATE [IF NOT EXISTS] INGESTOR kafka_notifications
 
 Every ingestor defines:
 
-- the destination relay
+- the destination relay or relays
 - the codec used for decoding
 - the parameterization schema and direct outgoing-field mappings used for branch grouping
 - the branch TTL for parameterized branch groups
@@ -32,17 +32,17 @@ Every ingestor defines:
 - the timestamp source
 - the transport-specific source
 - the delivery mode
-- an optional filter-map program
+- optional node-level `FILTER WHERE` and per-route `SET` / `UNSET` / `WHERE` programs
 
 `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required on ingestors and configures the ingestor-local batcher.
 
 At runtime, the ingestor:
 
 - decodes inbound payloads into runtime records
-- optionally executes a row-level filter-map program
+- optionally executes `FILTER WHERE` against the decoded input batch
 - resolves the concrete branch group from `PARAMETERIZED BY <schema> VALUES { ... }`
 - accumulates decoded rows for that group until the flush interval fires
-- writes buffered rows into the destination relay inside that group's branch
+- writes buffered rows into each matching destination relay inside that group's branch
 
 ## Branch Semantics
 
@@ -52,7 +52,7 @@ Ingestors are where external mixed flows enter branch-isolated processing. The i
 - `PARAMETERIZED BY <schema> VALUES { ... } TTL <duration>` makes inactive concrete branch groups expire after the same duration across relays and downstream processor state
 - `UNPARAMETERIZED` uses the single root group without declaring or referencing a branch schema, and does not declare TTL
 - the parameterization schema defines the branch key shape shared by downstream relays and branch-preserving processors
-- decoded rows are appended to the destination relay inside that group's branch
+- decoded rows are appended to matching destination relays inside that group's branch
 - downstream normal processors keep the same group until a `REINGESTOR` or `EMITTER` boundary
 
 Per-group behavior such as downstream deduplication, reordering, and window aggregation stays scoped to that branch.
@@ -66,25 +66,26 @@ Client-backed ingestors can use resource-mounted client config values for TLS ma
 
 ## Filter-Map Programs
 
-Ingestors may end with an optional filter-map clause:
+Ingestors may declare an optional arrival filter and per-route filter-map clauses:
 
 ```nspl
 CREATE [IF NOT EXISTS] INGESTOR notifications_in
+  FILTER WHERE message.active
   TO notifications
+    SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
+    UNSET notifications.raw
+    WHERE message.tenant = 'acme'
   DECODE USING notification_codec
   PARAMETERIZED BY tenant_branch VALUES {
     tenant = notifications.tenant
   } TTL 5m
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-  SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
-  UNSET notifications.raw
-  WHERE message.active
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
-The clause is evaluated after codec decoding and before the ingestor writes into the destination relay.
+`FILTER WHERE` is evaluated after codec decoding and before the ingestor writes into any destination relay. Sources that naturally decode batches can evaluate the filter over the whole Arrow batch; sources that receive individual messages evaluate a single-row batch. Each `TO` route then applies its own `SET` / `UNSET` / `WHERE` program before writing to that destination.
 
 Supported blocks:
 

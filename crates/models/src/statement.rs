@@ -34,7 +34,6 @@ pub enum Statement {
     DescribeDeduplicator(DescribeDeduplicator),
     DescribeReingestor(DescribeReingestor),
     DescribeCorrelator(DescribeCorrelator),
-    DescribeRouter(DescribeRouter),
     DescribeReorderer(DescribeReorderer),
     DescribeEmitter(DescribeEmitter),
     DescribeWindowProcessor(DescribeWindowProcessor),
@@ -138,8 +137,6 @@ pub enum ModelKind {
     Ingestor,
     #[strum(props(completion_label = "ref:reingestor"))]
     Reingestor,
-    #[strum(props(completion_label = "ref:router"))]
-    Router,
     #[strum(props(completion_label = "ref:relay"))]
     Relay,
     #[strum(props(completion_label = "ref:materializer"))]
@@ -384,11 +381,6 @@ pub struct DescribeEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DescribeRouter {
-    pub name: Identifier,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DescribeReorderer {
     pub name: Identifier,
 }
@@ -464,7 +456,6 @@ pub enum Model {
     WasmProcessor(CreateWasmProcessor),
     Ingestor(CreateIngestor),
     Reingestor(CreateReingestor),
-    Router(CreateRouter),
     Relay(CreateRelay),
     Materializer(CreateMaterializer),
     Lookup(CreateLookup),
@@ -510,7 +501,6 @@ impl Model {
             Self::WasmProcessor(_) => ModelKind::WasmProcessor,
             Self::Ingestor(_) => ModelKind::Ingestor,
             Self::Reingestor(_) => ModelKind::Reingestor,
-            Self::Router(_) => ModelKind::Router,
             Self::Relay(_) => ModelKind::Relay,
             Self::Materializer(_) => ModelKind::Materializer,
             Self::Lookup(_) => ModelKind::Lookup,
@@ -559,7 +549,6 @@ impl Model {
             Self::WasmProcessor(v) => &v.name,
             Self::Ingestor(v) => &v.name,
             Self::Reingestor(v) => &v.name,
-            Self::Router(v) => &v.name,
             Self::Relay(v) => &v.name,
             Self::Materializer(v) => &v.relay,
             Self::Lookup(v) => &v.name,
@@ -1213,7 +1202,7 @@ impl BranchParameterization {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateIngestor {
     pub name: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub decode_using_codec: Identifier,
     pub parameterized_by: BranchParameterization,
     pub flush_each: String,
@@ -1223,7 +1212,53 @@ pub struct CreateIngestor {
     pub source: IngestSource,
     pub error_policies: ErrorPolicies,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_where: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessorOutput {
+    pub relay: Identifier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_map: Option<String>,
+}
+
+impl ProcessorOutput {
+    pub fn new(relay: Identifier) -> Self {
+        Self {
+            relay,
+            filter_map: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessorOutputs {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<ProcessorOutput>,
+}
+
+impl ProcessorOutputs {
+    pub fn new(routes: Vec<ProcessorOutput>) -> Self {
+        Self { routes }
+    }
+
+    pub fn single(relay: Identifier) -> Self {
+        Self {
+            routes: vec![ProcessorOutput::new(relay)],
+        }
+    }
+
+    pub fn relays(&self) -> impl Iterator<Item = &Identifier> {
+        self.outputs().map(|output| &output.relay)
+    }
+
+    pub fn outputs(&self) -> impl Iterator<Item = &ProcessorOutput> {
+        self.routes.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1236,7 +1271,7 @@ pub enum IngestTimestampSource {
 pub struct CreateReingestor {
     pub name: Identifier,
     pub from_relay: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1244,33 +1279,14 @@ pub struct CreateReingestor {
     pub mode: AckMode,
     pub message_error_policy: MessageErrorPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateRouter {
-    pub name: Identifier,
-    pub from_relay: Identifier,
-    pub routes: Vec<RouterRoute>,
-    #[serde(default)]
-    pub match_policy: RouterMatchPolicy,
-    pub default_into_relay: Identifier,
-    pub parameterized_by: BranchParameterization,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
-    pub message_error_policy: MessageErrorPolicy,
-    #[serde(default)]
-    pub mode: AckMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateInferencer {
     pub name: Identifier,
     pub from_relay: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub resource: Identifier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1285,14 +1301,14 @@ pub struct CreateInferencer {
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWasmProcessor {
     pub name: Identifier,
     pub from_relay: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub resource: Identifier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1302,6 +1318,8 @@ pub struct CreateWasmProcessor {
     pub global_error_policy: GeneralErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1309,35 +1327,6 @@ pub struct InferencerTensorMapping {
     pub tensor: String,
     pub relay: Identifier,
     pub field: Identifier,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RouterRoute {
-    pub into_relay: Identifier,
-    pub condition: String,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    Default,
-    AsRefStr,
-    EnumString,
-    IntoStaticStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
-pub enum RouterMatchPolicy {
-    First,
-    #[default]
-    All,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1879,7 +1868,7 @@ pub struct CreateLookup {
 pub struct CreateUnifier {
     pub name: Identifier,
     pub from_relays: Vec<Identifier>,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1888,14 +1877,14 @@ pub struct CreateUnifier {
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateDeduplicator {
     pub name: Identifier,
     pub from_relay: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub deduplicate_on: String,
     pub max_time: String,
@@ -1906,7 +1895,7 @@ pub struct CreateDeduplicator {
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1914,7 +1903,7 @@ pub struct CreateCorrelator {
     pub name: Identifier,
     pub left_relay: Identifier,
     pub right_relay: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub left_on: Vec<String>,
     pub right_on: Vec<String>,
@@ -1928,6 +1917,8 @@ pub struct CreateCorrelator {
     pub message_error_policy: MessageErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_where: Option<String>,
 }
 
 #[derive(
@@ -1955,7 +1946,7 @@ pub enum CorrelationTimeoutAction {
 pub struct CreateReorderer {
     pub name: Identifier,
     pub from_relay: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub order_by: String,
     pub max_time: String,
@@ -1966,14 +1957,14 @@ pub struct CreateReorderer {
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWindowProcessor {
     pub name: Identifier,
     pub from_relay: Identifier,
-    pub into_relay: Identifier,
+    pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub width: WindowBound,
     pub step: WindowBound,
@@ -1981,6 +1972,8 @@ pub struct CreateWindowProcessor {
     pub message_error_policy: MessageErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_where: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2040,7 +2033,7 @@ mod tests {
     };
     use crate::{
         CreateIngestor, CreateUnifier, Domain, EndpointIngestMode, Identifier, IngestSource,
-        ParseAsType, SchemaField,
+        ParseAsType, ProcessorOutputs, SchemaField,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2068,7 +2061,6 @@ mod tests {
             (ModelKind::Inferencer, "ref:inferencer", "inferencer"),
             (ModelKind::Ingestor, "ref:ingestor", "ingestor"),
             (ModelKind::Reingestor, "ref:reingestor", "reingestor"),
-            (ModelKind::Router, "ref:router", "router"),
             (ModelKind::Relay, "ref:relay", "relay"),
             (ModelKind::Unifier, "ref:unifier", "unifier"),
             (ModelKind::Deduplicator, "ref:deduplicator", "deduplicator"),
@@ -2213,14 +2205,13 @@ mod tests {
             config: Box::new(Model::Unifier(CreateUnifier {
                 name: identifier("orders_merge"),
                 from_relays: vec![identifier("orders_in_a"), identifier("orders_in_b")],
-                into_relay: identifier("orders_out"),
+                output_routes: ProcessorOutputs::single(identifier("orders_out")),
                 parameterized_by: BranchParameterization::unparameterized(),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
-
-                filter_map: None,
+                filter_where: None,
             })),
             effective_parameterization: None,
             kafka_partition_schedule: None,
@@ -2232,7 +2223,7 @@ mod tests {
             kind: ModelKind::Ingestor,
             config: Box::new(Model::Ingestor(CreateIngestor {
                 name: identifier("orders_http"),
-                into_relay: identifier("orders_out"),
+                output_routes: ProcessorOutputs::single(identifier("orders_out")),
                 decode_using_codec: identifier("codec"),
                 parameterized_by: BranchParameterization::unparameterized(),
                 flush_each: "100ms".to_string(),
@@ -2244,7 +2235,7 @@ mod tests {
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
 
-                filter_map: None,
+                filter_where: None,
             })),
             effective_parameterization: None,
             kafka_partition_schedule: None,

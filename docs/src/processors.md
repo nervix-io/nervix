@@ -20,8 +20,7 @@ Pure runtime processors end with `ON MESSAGE ERROR <policy>` only. `ON GENERAL E
 Branch behavior by node type:
 
 - `INGESTOR` starts a branch
-- `ROUTER` preserves that branch while fanning records out to multiple downstream relays
-- `DEDUPLICATOR`, `REORDERER`, `CORRELATOR`, and `UNIFIER` run inside that branch under one concrete parameter group
+- `DEDUPLICATOR`, `REORDERER`, `CORRELATOR`, and `UNIFIER` run inside that branch under one concrete parameter group and may fan records out through output routes
 - `WASM PROCESSOR` runs inside that branch under one concrete parameter group
 - `WINDOW PROCESSOR` keeps window state inside that branch under one concrete parameter group
 - `REINGESTOR` is the boundary that consumes from the whole input relay and starts new downstream branches
@@ -31,33 +30,33 @@ Processors between ingestor and reingestor/emitter are scoped to one parameter g
 
 Every flush-based runtime node must declare either `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` in its NSPL definition. `FLUSH EACH` uses the duration as the local batch boundary: the node buffers input under one concrete branch group and forwards it downstream on that cadence. `FLUSH IMMEDIATE` forwards each received batch without waiting for a flush deadline. Emitters also declare `FLUSH` and use it to collect a terminal output batch before publishing externally. Window processors use `WIDTH` and `STEP` instead. WASM processors do not declare a flush policy: output emission is controlled by the guest through `process` output and guest-requested timeouts.
 
-## Filter-Map Programs
+## Processor Outputs
 
-Processors may also carry an optional filter-map clause after their main definition:
+Relay-consuming processors declare one or more destination outputs after their input and optional arrival filter:
 
 ```nspl
-[SET <relay>.<field> = <expr>, ...]
-[UNSET <relay>.<field>, ...]
-[WHERE <expr>]
+[FILTER WHERE <expr>]
+TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]
+[TO <relay> ...]
 ```
 
-When more than one filter-map block is present, the grammar order is `SET`, then `UNSET`, then `WHERE`. The order keeps processor declarations consistent; identifiers in each expression are still validated against the processor's input scope.
+`FILTER WHERE` is a node-level arrival filter. It runs before the processor accepts a row into its buffer or state. It replaces the old global processor-level `WHERE` form.
 
-This surface is available on:
+Each `TO` route may carry its own destination filter-map. `SET` and `UNSET` are destination-owned and therefore appear after the destination relay is known. `WHERE` is optional; a route without `WHERE` receives every row produced by the processor.
 
-- `UNIFIER`
-- `DEDUPLICATOR`
-- `REINGESTOR`
-- `ROUTER`
-- `REORDERER`
+Passthrough inheritance only exists for processors with a natural one-input-row to one-output-row shape, such as deduplicators, reorderers, unifiers, and reingestors. For those processors, a destination without a filter-map inherits same-named fields from the source row; if the destination schema should not receive a source field, write `UNSET`.
 
-The clause is a row-level filter-map over the processor output:
+Generated-output processors do not inherit input fields. Window processors emit the `AGGREGATE` record, inferencers emit ONNX tensor outputs plus explicitly `SET` fields, correlators emit their `OUTPUT` record, and WASM processors emit the guest's Arrow output. Their route clauses run after that generated record exists.
+
+Per-output clauses are row-level filter-map programs:
 
 - `WHERE` drops rows
-- `SET` rewrites or appends fields
-- `UNSET` removes fields from the downstream shape
+- `SET` writes destination fields
+- `UNSET` removes inherited source fields from the downstream shape on one-to-one processors
 
-Schema validation is applied at statement time against the processor's effective output schema after `SET` and `UNSET`.
+Schema validation is applied at statement time against each destination relay's effective output schema after `SET` and `UNSET`. Sensitive fields may flow to external emitters, but sensitive data cannot be stored into a non-sensitive internal destination field unless the expression explicitly uses `leak_sensitive`.
+
+Output routes use fan-out semantics: each row is evaluated independently against every `TO` route. A row is forwarded to every route whose optional `WHERE` condition matches, and to every unconditional route. There is no fallback route for rows that do not match a conditional route.
 
 Processors use the same filter-map expression surface as ingestors and emitters:
 
@@ -76,58 +75,26 @@ That expression surface applies to the full Nervix internal schema type set:
 
 Nested conditions and chained calls such as `lower(trim(raw))` are supported here as well.
 
-## Router
-
-```nspl
-CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] ROUTER <name>
-  FROM <input>
-  [SET <relay>.<field> = <expr>, ...]
-  [UNSET <relay>.<field>, ...]
-  [WHERE <expr>]
-  [TO <output> WHERE <expr> ...]
-  [MATCH FIRST|ALL]
-  DEFAULT TO <output>
-  PARAMETERIZED BY <schema>
-  FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  ON MESSAGE ERROR <policy>;
-```
-
-A router evaluates rows from one input relay and forwards each surviving row into downstream relays.
-
-The optional filter-map clause runs before route selection. After that, each `TO ... WHERE ...` branch is tested in order and `DEFAULT TO ...` handles the remaining rows. `MATCH ALL` forwards a row to every matching route and is the default when conditional routes are present. `MATCH FIRST` forwards a row only to the first matching route. A router with only `DEFAULT TO` is the single-output pass-through/projection form.
-
-Router outputs keep the upstream branch group exactly as received.
-
-`DESCRIBE ROUTER <name>` reports the scheduled owner and replicas, input relay, default output relay, match policy, route conditions, flush policy, filter-map presence, branch-local execution marker, and runtime metrics when available.
-
-Typical use cases:
-
-- reshape a relay into a smaller downstream schema
-- apply a `WHERE` filter before materialization or emitting
-- normalize fields with `SET` and remove staging fields with `UNSET`
-- make a processor boundary explicit without changing branch grouping
-
 Example:
 
 ```nspl
-CREATE SCHEMA user_branch (
-  tenant STRING,
-  user_id U32
-);
-
-CREATE [IF NOT EXISTS] ROUTER project_notifications
+CREATE DEDUPLICATOR project_notifications
   FROM notifications
-  SET notifications.normalized = lower(trim(notifications.raw)), notifications.amount = notifications.amount + 1
-  UNSET notifications.raw, notifications.active
-  WHERE notifications.active
-  DEFAULT TO projected_notifications
+  TO projected_notifications
+    SET projected_notifications.normalized = lower(trim(notifications.raw)),
+        projected_notifications.amount = notifications.amount + 1
+    UNSET notifications.raw, notifications.active
+    WHERE trim(notifications.raw) != ''
   PARAMETERIZED BY user_branch
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  DEDUPLICATE ON notifications.tenant, notifications.user_id
+  MAX TIME 10m
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG;
 ```
 
-That example keeps the existing branch grouping, drops inactive rows, rewrites `normalized` and `amount`, removes `raw` and `active`, and forwards the surviving rows into `projected_notifications`.
+That example keeps the existing branch grouping, rewrites `normalized` and `amount`, removes `raw` and `active`, and forwards the surviving rows into `projected_notifications`.
 
-Branch-preserving processor filter-map programs can also read the current parameter group through `branch.<key>`. For example, `SET notifications.tenant = branch.tenant WHERE branch.tenant = notifications.tenant` copies and tests the branch key without requiring the key to be present in the message payload.
+Branch-preserving processor output programs can also read the current parameter group through `branch.<key>`. For example, `SET projected_notifications.tenant = branch.tenant WHERE branch.tenant = notifications.tenant` copies and tests the branch key without requiring the key to be present in the message payload.
 
 ## Generator
 
@@ -157,12 +124,10 @@ Generator rules:
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] UNIFIER <name>
   FROM <input>, <input>, ...
-  TO <output>
+  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
+  [TO <output> ...]
   PARAMETERIZED BY <schema>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  [SET <relay>.<field> = <expr>, ...]
-  [UNSET <relay>.<field>, ...]
-  [WHERE <expr>]
   ON MESSAGE ERROR <policy>;
 ```
 
@@ -177,12 +142,11 @@ Use it when multiple sources should feed a common downstream path.
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
   FROM <input>
-  TO <output>
+  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
+  [TO <output> ...]
   PARAMETERIZED BY <schema>
   USING RESOURCE <resource> [VERSION <n>]
   FILE '<model.onnx>'
-  [SET <relay>.<field> = <expr>, ...]
-  [WHERE <expr>]
   INPUTS {
     "<onnx_input_name>" = <input>.<field>,
     ...
@@ -197,7 +161,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
 
 An inferencer declares a branch-local ONNX model execution node. The model file is loaded from a versioned `RESOURCE`; if `VERSION` is omitted, Nervix resolves the latest uploaded resource version.
 
-The optional filter-map clause runs before tensor construction. `INPUTS` maps ONNX input tensor names to fields on the input relay after that filter-map shape is applied. `OUTPUTS` maps ONNX output tensor names to fields on the output relay.
+The optional `FILTER WHERE` clause runs before tensor construction. `INPUTS` maps ONNX input tensor names to fields on the input relay after that arrival filter. `OUTPUTS` maps ONNX output tensor names to fields on the output relay. Inferencers do not pass input fields through automatically; every required output field must come from `OUTPUTS` or a route-level `SET`.
 
 Inferencers preserve the upstream parameter group exactly as received. Runtime ONNX execution is still under implementation; the control plane currently validates the resource/file reference and schema field mappings before accepting the model.
 
@@ -206,14 +170,12 @@ Inferencers preserve the upstream parameter group exactly as received. Runtime O
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] DEDUPLICATOR <name>
   FROM <input>
-  TO <output>
+  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
+  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema>
   DEDUPLICATE ON <expr>[, <expr> ...]
   MAX TIME <duration>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  [SET <relay>.<field> = <expr>, ...]
-  [UNSET <relay>.<field>, ...]
-  [WHERE <expr>]
   ON MESSAGE ERROR <policy>;
 ```
 
@@ -234,14 +196,12 @@ State-holding `DESCRIBE` commands expose the scheduled `owner` and `replicas` un
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REORDERER <name>
   FROM <input>
-  TO <output>
+  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
+  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema>
   BY <expr>, <expr>, ...
   MAX TIME <duration>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  [SET <relay>.<field> = <expr>, ...]
-  [UNSET <relay>.<field>, ...]
-  [WHERE <expr>]
   ON MESSAGE ERROR <policy>;
 ```
 
@@ -260,7 +220,8 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] CORRELATOR <name>
   FROM <left_input>, <right_input>
   ON (<left_expr>, ...), (<right_expr>, ...)
   MATCH EARLIEST | LATEST
-  TO <output>
+  [TO <output> WHERE <expr>]
+  [TO <output>]
   PARAMETERIZED BY <schema>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
   OUTPUT
@@ -285,8 +246,9 @@ Correlators preserve the upstream parameter group. Each concrete branch gets a s
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
   USING RESOURCE <resource> [VERSION <n>]
   FILE '<path>'
-  FROM <input>
-  TO <output>
+  FROM <input> [FILTER WHERE <expr>]
+  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
+  [TO <output> ...]
   PARAMETERIZED BY <schema>
   ON MESSAGE ERROR <policy>
   ON GLOBAL ERROR <policy>;
@@ -296,11 +258,11 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
 DESCRIBE WASM PROCESSOR <name>;
 ```
 
-A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix resource and runs one guest instance per concrete branch. The guest receives Arrow IPC record batches plus an ACK sidecar, and it emits Arrow IPC batches back to the configured output relay.
+A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix resource and runs one guest instance per concrete branch. `FILTER WHERE` runs before the guest receives a row. The guest receives Arrow IPC record batches plus an ACK sidecar, and it emits Arrow IPC batches that each name one declared `TO` relay and match that relay's schema. Nervix then applies that route's `SET` and `WHERE` clauses.
 
 See [WASM Processor Guests](wasm-processor-guests.md) for the guest ABI and Rust/Go authoring examples.
 
-The declared `PARAMETERIZED BY` schema must match the input and output relays. WASM processors preserve the upstream branch group exactly as received; they do not consume from a mixed logical relay and they do not fan in records across branches.
+The declared `PARAMETERIZED BY` schema must match the input and output relays. WASM processors preserve the upstream branch group exactly as received; they do not consume from a mixed logical relay and they do not fan in records across branches. WASM processors do not inherit input fields. Route `SET` clauses may read guest output fields through the destination relay namespace, and may read the original source row through the `input` namespace, for example `TO out1 SET out1.name = lower(out1.name), out1.surname = input.surname`. `UNSET` is not valid on WASM output routes.
 
 The host initializes each branch instance with CBOR metadata:
 
@@ -308,7 +270,7 @@ The host initializes each branch instance with CBOR metadata:
 - domain type
 - branch key
 - input relay schema
-- output relay schema
+- output relay schemas
 
 Guest state is branch-local processor state. The host saves it through the guest `nervix_dump_state` export and restores it through `nervix_load_state` when a branch instance is recreated. Nervix persists and replicates those guest-owned bytes.
 
@@ -323,7 +285,8 @@ Flush is guest-controlled for WASM processors. Nervix calls the guest `process` 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WINDOW PROCESSOR <name>
   FROM <input>
-  TO <output>
+  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
+  [TO <output> ...]
   PARAMETERIZED BY <schema>
   WIDTH [<n> MESSAGES] [<duration> DURATION]
   STEP [<n> MESSAGES] [<duration> DURATION]
@@ -337,7 +300,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WINDOW PROCESSOR <name>
 DESCRIBE WINDOW PROCESSOR <name>;
 ```
 
-A window processor consumes one branch-local input relay and emits aggregate records into one branch-local output relay. It does not inherit input fields automatically. The `AGGREGATE` block fully defines the emitted record shape.
+A window processor consumes one branch-local input relay and emits aggregate records in the first declared output relay's schema before routing them to matching destinations. It does not inherit input fields automatically. The `AGGREGATE` block fully defines the emitted base record shape.
 
 Window processors preserve the upstream parameter group exactly as received. Each concrete branch gets its own independent window state, and each window contains records from one branch group.
 
@@ -428,12 +391,10 @@ ACK behavior follows branch mode. In `ATTACHED` mode, the aggregate output carri
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
   FROM <relay>
-  TO <relay>
+  [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
+  [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema> VALUES { <field> = <relay>.<field>, ... } TTL 5m
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  [SET <relay>.<field> = <expr>, ...]
-  [UNSET <relay>.<field>, ...]
-  [WHERE <expr>]
   ON MESSAGE ERROR <policy>;
 ```
 

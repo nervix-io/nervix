@@ -1,6 +1,23 @@
-use nervix_models::{CorrelationTimeoutAction, ParameterValueMapping};
+use nervix_models::{
+    CorrelationTimeoutAction, ParameterValueMapping, ProcessorOutput as ModelProcessorOutput,
+    ProcessorOutputs as ModelProcessorOutputs,
+};
 
 use super::*;
+
+fn parameterized_output(output: &ModelProcessorOutput) -> ParameterizedProcessorOutputSpec {
+    ParameterizedProcessorOutputSpec {
+        relay: output.relay.clone(),
+        filter_map: output.filter_map.clone(),
+        children: Vec::new(),
+    }
+}
+
+fn parameterized_outputs(outputs: &ModelProcessorOutputs) -> ParameterizedProcessorOutputsSpec {
+    ParameterizedProcessorOutputsSpec {
+        routes: outputs.routes.iter().map(parameterized_output).collect(),
+    }
+}
 
 pub(in crate::runtime) fn parameterized_ingestor_specs_from_scheduled_nodes(
     nodes: &[ScheduledNode],
@@ -50,46 +67,11 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         error_policies: message_only_error_policies(
                             &deduplicator.message_error_policy,
                         ),
+                        filter_where: deduplicator.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::Deduplicator {
-                            output: ParameterizedProcessorOutputSpec {
-                                relay: deduplicator.into_relay.clone(),
-                                children: Vec::new(),
-                            },
+                            output_routes: parameterized_outputs(&deduplicator.output_routes),
                             deduplicate_on: deduplicator.deduplicate_on.clone(),
                             max_time: deduplicator.max_time.clone(),
-                            filter_map: deduplicator.filter_map.clone(),
-                        },
-                    });
-            }
-            Model::Router(router) => {
-                processors_by_input
-                    .entry(router.from_relay.clone())
-                    .or_default()
-                    .push(ParameterizedProcessorSpec {
-                        kind,
-                        processor: identifier,
-                        input_relay: router.from_relay.clone(),
-                        input_relays: vec![router.from_relay.clone()],
-                        mode: router.mode,
-                        error_policies: message_only_error_policies(&router.message_error_policy),
-                        operation: ParameterizedProcessorOperationSpec::Router {
-                            filter_map: router.filter_map.clone(),
-                            match_policy: router.match_policy,
-                            routes: router
-                                .routes
-                                .iter()
-                                .map(|route| ParameterizedRouterRouteSpec {
-                                    condition: route.condition.clone(),
-                                    output: ParameterizedProcessorOutputSpec {
-                                        relay: route.into_relay.clone(),
-                                        children: Vec::new(),
-                                    },
-                                })
-                                .collect(),
-                            default_output: ParameterizedProcessorOutputSpec {
-                                relay: router.default_into_relay.clone(),
-                                children: Vec::new(),
-                            },
                         },
                     });
             }
@@ -106,16 +88,13 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         error_policies: message_only_error_policies(
                             &reorderer.message_error_policy,
                         ),
+                        filter_where: reorderer.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::Reorderer {
-                            output: ParameterizedProcessorOutputSpec {
-                                relay: reorderer.into_relay.clone(),
-                                children: Vec::new(),
-                            },
+                            output_routes: parameterized_outputs(&reorderer.output_routes),
                             order_by: reorderer.order_by.clone(),
                             max_time: reorderer.max_time.clone(),
                             flush_each: reorderer.flush_each.clone(),
                             max_batch_size: reorderer.max_batch_size.clone(),
-                            filter_map: reorderer.filter_map.clone(),
                         },
                     });
             }
@@ -130,11 +109,9 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     ],
                     mode: correlator.mode,
                     error_policies: message_only_error_policies(&correlator.message_error_policy),
+                    filter_where: correlator.filter_where.clone(),
                     operation: ParameterizedProcessorOperationSpec::Correlator {
-                        output: ParameterizedProcessorOutputSpec {
-                            relay: correlator.into_relay.clone(),
-                            children: Vec::new(),
-                        },
+                        output_routes: parameterized_outputs(&correlator.output_routes),
                         left_relay: correlator.left_relay.clone(),
                         right_relay: correlator.right_relay.clone(),
                         left_on: correlator.left_on.clone(),
@@ -169,11 +146,9 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         error_policies: message_only_error_policies(
                             &window_processor.message_error_policy,
                         ),
+                        filter_where: window_processor.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::WindowProcessor {
-                            output: ParameterizedProcessorOutputSpec {
-                                relay: window_processor.into_relay.clone(),
-                                children: Vec::new(),
-                            },
+                            output_routes: parameterized_outputs(&window_processor.output_routes),
                             width: window_processor.width.clone(),
                             step: window_processor.step.clone(),
                             aggregate: window_processor.aggregate.clone(),
@@ -191,14 +166,11 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     input_relays: unifier.from_relays.clone(),
                     mode: unifier.mode,
                     error_policies: message_only_error_policies(&unifier.message_error_policy),
+                    filter_where: unifier.filter_where.clone(),
                     operation: ParameterizedProcessorOperationSpec::Unifier {
-                        output: ParameterizedProcessorOutputSpec {
-                            relay: unifier.into_relay.clone(),
-                            children: Vec::new(),
-                        },
+                        output_routes: parameterized_outputs(&unifier.output_routes),
                         flush_each: unifier.flush_each.clone(),
                         max_batch_size: unifier.max_batch_size.clone(),
-                        filter_map: unifier.filter_map.clone(),
                     },
                 };
                 for from_relay in &unifier.from_relays {
@@ -221,11 +193,9 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         error_policies: message_only_error_policies(
                             &inferencer.message_error_policy,
                         ),
+                        filter_where: inferencer.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::Inferencer {
-                            output: ParameterizedProcessorOutputSpec {
-                                relay: inferencer.into_relay.clone(),
-                                children: Vec::new(),
-                            },
+                            output_routes: parameterized_outputs(&inferencer.output_routes),
                             resource: inferencer.resource.clone(),
                             resource_version: inferencer.resource_version,
                             file: inferencer.file.clone(),
@@ -233,7 +203,6 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                             outputs: inferencer.outputs.clone(),
                             flush_each: inferencer.flush_each.clone(),
                             max_batch_size: inferencer.max_batch_size.clone(),
-                            filter_map: inferencer.filter_map.clone(),
                         },
                     });
             }
@@ -251,11 +220,9 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                             &processor.message_error_policy,
                             &processor.global_error_policy,
                         ),
+                        filter_where: processor.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::WasmProcessor {
-                            output: ParameterizedProcessorOutputSpec {
-                                relay: processor.into_relay.clone(),
-                                children: Vec::new(),
-                            },
+                            output_routes: parameterized_outputs(&processor.output_routes),
                             resource: processor.resource.clone(),
                             resource_version: processor.resource_version,
                             file: processor.file.clone(),
@@ -263,30 +230,34 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     });
             }
             Model::Ingestor(ingestor) => {
-                ingestors.push((
-                    kind,
-                    identifier,
-                    ingestor.into_relay.clone(),
-                    ingestor.parameterized_by.ttl().map(str::to_string),
-                    ingestor.parameterized_by.values().to_vec(),
-                    ParametrizerAckBoundary::Preserve,
-                    ingestor.flush_each.clone(),
-                    ingestor.max_batch_size.clone(),
-                    ingestor.error_policies.clone(),
-                ));
+                for output in ingestor.output_routes.outputs() {
+                    ingestors.push((
+                        kind,
+                        identifier.clone(),
+                        output.relay.clone(),
+                        ingestor.parameterized_by.ttl().map(str::to_string),
+                        ingestor.parameterized_by.values().to_vec(),
+                        ParametrizerAckBoundary::Preserve,
+                        ingestor.flush_each.clone(),
+                        ingestor.max_batch_size.clone(),
+                        ingestor.error_policies.clone(),
+                    ));
+                }
             }
             Model::Reingestor(reingestor) => {
-                ingestors.push((
-                    kind,
-                    identifier,
-                    reingestor.into_relay.clone(),
-                    reingestor.parameterized_by.ttl().map(str::to_string),
-                    reingestor.parameterized_by.values().to_vec(),
-                    ParametrizerAckBoundary::Reingestor(reingestor.mode),
-                    reingestor.flush_each.clone(),
-                    reingestor.max_batch_size.clone(),
-                    message_only_error_policies(&reingestor.message_error_policy),
-                ));
+                for output in reingestor.output_routes.outputs() {
+                    ingestors.push((
+                        kind,
+                        identifier.clone(),
+                        output.relay.clone(),
+                        reingestor.parameterized_by.ttl().map(str::to_string),
+                        reingestor.parameterized_by.values().to_vec(),
+                        ParametrizerAckBoundary::Reingestor(reingestor.mode),
+                        reingestor.flush_each.clone(),
+                        reingestor.max_batch_size.clone(),
+                        message_only_error_policies(&reingestor.message_error_policy),
+                    ));
+                }
             }
             Model::Relay(_) if effective_parameterization.is_some() => {
                 relay_roots.push((kind, identifier.clone(), identifier));
@@ -306,38 +277,20 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
             processors.sort_by(|left, right| left.processor.cmp(&right.processor));
             for mut processor in processors {
                 match &mut processor.operation {
-                    ParameterizedProcessorOperationSpec::Deduplicator { output, .. } => {
-                        output.children = build_nodes(&output.relay, processors_by_input);
+                    ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::WindowProcessor {
+                        output_routes, ..
                     }
-                    ParameterizedProcessorOperationSpec::Router {
-                        routes,
-                        default_output,
-                        ..
+                    | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::WasmProcessor {
+                        output_routes, ..
                     } => {
-                        for route in routes {
-                            route.output.children =
-                                build_nodes(&route.output.relay, processors_by_input);
+                        for output in output_routes.outputs_mut() {
+                            output.children = build_nodes(&output.relay, processors_by_input);
                         }
-                        default_output.children =
-                            build_nodes(&default_output.relay, processors_by_input);
-                    }
-                    ParameterizedProcessorOperationSpec::WindowProcessor { output, .. } => {
-                        output.children = build_nodes(&output.relay, processors_by_input);
-                    }
-                    ParameterizedProcessorOperationSpec::Reorderer { output, .. } => {
-                        output.children = build_nodes(&output.relay, processors_by_input);
-                    }
-                    ParameterizedProcessorOperationSpec::Correlator { output, .. } => {
-                        output.children = build_nodes(&output.relay, processors_by_input);
-                    }
-                    ParameterizedProcessorOperationSpec::Unifier { output, .. } => {
-                        output.children = build_nodes(&output.relay, processors_by_input);
-                    }
-                    ParameterizedProcessorOperationSpec::Inferencer { output, .. } => {
-                        output.children = build_nodes(&output.relay, processors_by_input);
-                    }
-                    ParameterizedProcessorOperationSpec::WasmProcessor { output, .. } => {
-                        output.children = build_nodes(&output.relay, processors_by_input);
                     }
                 }
                 nodes.push(processor);
@@ -423,34 +376,16 @@ pub(in crate::runtime) fn collect_reachable_processors(
                 continue;
             }
             match &processor.operation {
-                ParameterizedProcessorOperationSpec::Deduplicator { output, .. }
-                | ParameterizedProcessorOperationSpec::Reorderer { output, .. }
-                | ParameterizedProcessorOperationSpec::Correlator { output, .. }
-                | ParameterizedProcessorOperationSpec::WindowProcessor { output, .. }
-                | ParameterizedProcessorOperationSpec::Unifier { output, .. }
-                | ParameterizedProcessorOperationSpec::Inferencer { output, .. }
-                | ParameterizedProcessorOperationSpec::WasmProcessor { output, .. } => {
-                    visit_stream(&output.relay, processors_by_input, seen_processors, out);
-                }
-                ParameterizedProcessorOperationSpec::Router {
-                    routes,
-                    default_output,
-                    ..
-                } => {
-                    for route in routes {
-                        visit_stream(
-                            &route.output.relay,
-                            processors_by_input,
-                            seen_processors,
-                            out,
-                        );
+                ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
+                    for output in output_routes.outputs() {
+                        visit_stream(&output.relay, processors_by_input, seen_processors, out);
                     }
-                    visit_stream(
-                        &default_output.relay,
-                        processors_by_input,
-                        seen_processors,
-                        out,
-                    );
                 }
             }
             out.push(processor);
@@ -511,6 +446,19 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
     ) -> Result<RelayProcessorOutputTemplate, String> {
         Ok(RelayProcessorOutputTemplate {
             output_relay: output.relay.clone(),
+            filter_map: output.filter_map.clone(),
+        })
+    }
+
+    fn materialize_outputs(
+        outputs: &ParameterizedProcessorOutputsSpec,
+    ) -> Result<RelayProcessorOutputsTemplate, String> {
+        Ok(RelayProcessorOutputsTemplate {
+            routes: outputs
+                .routes
+                .iter()
+                .map(materialize_output)
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 
@@ -563,16 +511,17 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                 kind: node.kind,
                 processor: node.processor.clone(),
                 input_relay: node.input_relay.clone(),
+                input_relays: node.input_relays.clone(),
                 mode: node.mode,
                 error_policies: node.error_policies.clone(),
+                filter_where: node.filter_where.clone(),
                 operation: match &node.operation {
                     ParameterizedProcessorOperationSpec::Deduplicator {
-                        output,
+                        output_routes,
                         deduplicate_on,
                         max_time,
-                        filter_map,
                     } => RelayProcessorOperationTemplate::Deduplicator {
-                        output: materialize_output(output)?,
+                        output_routes: materialize_outputs(output_routes)?,
                         deduplicate_on: deduplicate_on.clone(),
                         max_time: humantime::parse_duration(max_time).map_err(|error| {
                             format!(
@@ -582,34 +531,14 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                                 error
                             )
                         })?,
-                        filter_map: filter_map.clone(),
-                    },
-                    ParameterizedProcessorOperationSpec::Router {
-                        filter_map,
-                        match_policy,
-                        routes,
-                        default_output,
-                    } => RelayProcessorOperationTemplate::Router {
-                        filter_map: filter_map.clone(),
-                        match_policy: *match_policy,
-                        routes: routes
-                            .iter()
-                            .map(|route| {
-                                Ok(StreamProcessorRouterRouteTemplate {
-                                    condition: route.condition.clone(),
-                                    output: materialize_output(&route.output)?,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, String>>()?,
-                        default_output: materialize_output(default_output)?,
                     },
                     ParameterizedProcessorOperationSpec::WindowProcessor {
-                        output,
+                        output_routes,
                         width,
                         step,
                         aggregate,
                     } => RelayProcessorOperationTemplate::WindowProcessor {
-                        output: materialize_output(output)?,
+                        output_routes: materialize_outputs(output_routes)?,
                         width_messages: width.messages.map(|messages| messages as usize),
                         step_messages: step.messages.map(|messages| messages as usize),
                         width_duration: parse_optional_window_duration(
@@ -633,14 +562,13 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                             .inner,
                     },
                     ParameterizedProcessorOperationSpec::Reorderer {
-                        output,
+                        output_routes,
                         order_by,
                         max_time,
                         flush_each,
                         max_batch_size,
-                        filter_map,
                     } => RelayProcessorOperationTemplate::Reorderer {
-                        output: materialize_output(output)?,
+                        output_routes: materialize_outputs(output_routes)?,
                         order_by: order_by.clone(),
                         max_time: humantime::parse_duration(max_time).map_err(|error| {
                             format!(
@@ -656,10 +584,9 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                             flush_each,
                             max_batch_size.as_deref(),
                         )?,
-                        filter_map: filter_map.clone(),
                     },
                     ParameterizedProcessorOperationSpec::Correlator {
-                        output,
+                        output_routes,
                         left_relay,
                         right_relay,
                         left_on,
@@ -671,7 +598,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                         max_batch_size,
                         timeout_policy,
                     } => RelayProcessorOperationTemplate::Correlator {
-                        output: materialize_output(output)?,
+                        output_routes: materialize_outputs(output_routes)?,
                         left_relay: left_relay.clone(),
                         right_relay: right_relay.clone(),
                         left_on: left_on.clone(),
@@ -695,22 +622,20 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                         timeout_policy: timeout_policy.clone(),
                     },
                     ParameterizedProcessorOperationSpec::Unifier {
-                        output,
+                        output_routes,
                         flush_each,
                         max_batch_size,
-                        filter_map,
                     } => RelayProcessorOperationTemplate::Unifier {
-                        output: materialize_output(output)?,
+                        output_routes: materialize_outputs(output_routes)?,
                         flush_each: parse_branch_flush_policy(
                             "unifier",
                             &node.processor,
                             flush_each,
                             max_batch_size.as_deref(),
                         )?,
-                        filter_map: filter_map.clone(),
                     },
                     ParameterizedProcessorOperationSpec::Inferencer {
-                        output,
+                        output_routes,
                         resource,
                         resource_version,
                         file,
@@ -718,9 +643,8 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                         outputs,
                         flush_each,
                         max_batch_size,
-                        filter_map,
                     } => RelayProcessorOperationTemplate::Inferencer {
-                        output: materialize_output(output)?,
+                        output_routes: materialize_outputs(output_routes)?,
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
@@ -732,15 +656,14 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                             flush_each,
                             max_batch_size.as_deref(),
                         )?,
-                        filter_map: filter_map.clone(),
                     },
                     ParameterizedProcessorOperationSpec::WasmProcessor {
-                        output,
+                        output_routes,
                         resource,
                         resource_version,
                         file,
                     } => RelayProcessorOperationTemplate::WasmProcessor {
-                        output: materialize_output(output)?,
+                        output_routes: materialize_outputs(output_routes)?,
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
@@ -756,36 +679,26 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
     for processor in &spec.processors {
         branch_relay_ids.extend(processor.input_relays.iter().cloned());
         match &processor.operation {
-            ParameterizedProcessorOperationSpec::Deduplicator { output, .. }
-            | ParameterizedProcessorOperationSpec::Reorderer { output, .. }
-            | ParameterizedProcessorOperationSpec::WindowProcessor { output, .. }
-            | ParameterizedProcessorOperationSpec::Unifier { output, .. }
-            | ParameterizedProcessorOperationSpec::Inferencer { output, .. }
-            | ParameterizedProcessorOperationSpec::WasmProcessor { output, .. } => {
-                branch_relay_ids.insert(output.relay.clone());
+            ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
+            | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
+            | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+            | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+            | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
+            | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
+                branch_relay_ids.extend(output_routes.outputs().map(|output| output.relay.clone()));
             }
             ParameterizedProcessorOperationSpec::Correlator {
-                output,
+                output_routes,
                 timeout_policy,
                 ..
             } => {
-                branch_relay_ids.insert(output.relay.clone());
+                branch_relay_ids.extend(output_routes.outputs().map(|output| output.relay.clone()));
                 if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.left {
                     branch_relay_ids.insert(relay.clone());
                 }
                 if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.right {
                     branch_relay_ids.insert(relay.clone());
                 }
-            }
-            ParameterizedProcessorOperationSpec::Router {
-                routes,
-                default_output,
-                ..
-            } => {
-                for route in routes {
-                    branch_relay_ids.insert(route.output.relay.clone());
-                }
-                branch_relay_ids.insert(default_output.relay.clone());
             }
         }
     }

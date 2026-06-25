@@ -857,18 +857,19 @@ fn build_ingestor_logic_commands(
       {}
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR logic_ingestor
         TO logic_notifications
+        {}
         DECODE USING {}
         PARAMETERIZED BY tenant_branch VALUES {{ tenant = logic_notifications.tenant }} TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         {}
-        {} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       {}
 "#,
         output_schema.schema_name(),
         transport.setup_fragment(),
+        logic_program,
         output_schema.input_codec_name(),
         transport.source_fragment(),
-        logic_program,
         subscription_commands
     )
 }

@@ -112,10 +112,13 @@ Feature: Sensitive data
         FLUSH IMMEDIATE
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE ROUTER reveal_notifications
+      CREATE DEDUPLICATOR reveal_notifications
         FROM notifications
-        SET notifications.secret = leak_sensitive(notifications.secret)
-        DEFAULT TO public_notifications UNPARAMETERIZED
+        TO public_notifications
+          SET public_notifications.secret = leak_sensitive(notifications.secret)
+        UNPARAMETERIZED
+        DEDUPLICATE ON notifications.user_id
+        MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO public_notifications;
@@ -159,9 +162,12 @@ Feature: Sensitive data
       CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;
       CREATE RELAY public_notifications SCHEMA public_notification UNPARAMETERIZED;
 
-      CREATE ROUTER leak_notifications
+      CREATE DEDUPLICATOR leak_notifications
         FROM notifications
-        DEFAULT TO public_notifications UNPARAMETERIZED
+        TO public_notifications
+        UNPARAMETERIZED
+        DEDUPLICATE ON notifications.user_id
+        MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
 

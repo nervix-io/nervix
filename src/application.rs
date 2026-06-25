@@ -77,17 +77,17 @@ use nervix_interconnect::{
 use nervix_models::{
     CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint,
     CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor, CreateReorderer,
-    CreateResource, CreateRouter, CreateStatement, CreateUser, CreateWindowProcessor,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeRouter, DescribeWasmProcessor, DescribeWindowProcessor, Domain,
-    DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
-    IcebergCatalog, Identifier, IngestSource, IngestTimestampSource, KafkaOffsetMode,
-    KafkaPartitionSchedule, LookupQuery, Model, ModelKind, MongoDbConflictAction,
-    MySqlConflictAction, ParseAsType, PostgresConflictAction, ResourceNodeState,
-    ResourceNodeStatus, ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    Timestamp, UploadResource, VhostTlsResource,
+    CreateResource, CreateStatement, CreateUser, CreateWindowProcessor, DescribeCorrelator,
+    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
+    DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig, DomainPace,
+    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier,
+    IngestSource, IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
+    Model, ModelKind, MongoDbConflictAction, MySqlConflictAction, ParseAsType,
+    PostgresConflictAction, ProcessorOutputs, ResourceNodeState, ResourceNodeStatus,
+    ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement,
+    StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
+    UploadResource, VhostTlsResource,
 };
 use nervix_nspl::{
     Token, Word,
@@ -3475,12 +3475,16 @@ impl SessionServiceImpl {
         }
 
         for mapping in &processor.outputs {
-            if mapping.relay != processor.into_relay {
+            if !processor
+                .output_routes
+                .relays()
+                .any(|relay| relay == &mapping.relay)
+            {
                 return Err(format!(
-                    "inferencer '{}' OUTPUTS tensor '{}' must map into relay '{}', got '{}'",
+                    "inferencer '{}' OUTPUTS tensor '{}' must map into a declared output relay, \
+                     got '{}'",
                     processor.name.as_str(),
                     mapping.tensor,
-                    processor.into_relay.as_str(),
                     mapping.relay.as_str()
                 ));
             }
@@ -4908,56 +4912,6 @@ impl SessionServiceImpl {
         ))
     }
 
-    async fn describe_router(&self, domain: &Domain, describe: DescribeRouter) -> CommandResult {
-        let scheduled_node = self
-            .scheduled_model_node(domain, ModelKind::Router, &describe.name)
-            .await;
-        let model = match self.registry.get(domain, ModelKind::Router, &describe.name) {
-            Ok(Some(model)) => model,
-            Ok(None) => {
-                let Some(scheduled_node) = scheduled_node.as_ref() else {
-                    return command_error(format!(
-                        "router '{}' does not exist in domain '{}'",
-                        describe.name.as_str(),
-                        domain.as_str()
-                    ));
-                };
-                (*scheduled_node.config).clone()
-            }
-            Err(error) => {
-                return command_error(format!(
-                    "failed to read router '{}' in domain '{}': {error:?}",
-                    describe.name.as_str(),
-                    domain.as_str()
-                ));
-            }
-        };
-        let Model::Router(router) = model else {
-            return command_error(format!(
-                "model '{}' in domain '{}' is not a router",
-                describe.name.as_str(),
-                domain.as_str()
-            ));
-        };
-
-        let metrics = match self
-            .describe_metrics_for_scheduled_node(
-                domain,
-                ModelKind::Router,
-                &describe.name,
-                scheduled_node.as_ref(),
-            )
-            .await
-        {
-            Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
-        };
-        command_ok(append_metrics_lines(
-            format_router_describe_output(&describe.name, &router, scheduled_node.as_ref()),
-            metrics,
-        ))
-    }
-
     async fn describe_correlator(
         &self,
         domain: &Domain,
@@ -6346,10 +6300,6 @@ impl SessionServiceImpl {
             Statement::DescribeCorrelator(describe) => {
                 let domain = domain.as_ref().expect("domain required");
                 self.describe_correlator(domain, describe).await
-            }
-            Statement::DescribeRouter(describe) => {
-                let domain = domain.as_ref().expect("domain required");
-                self.describe_router(domain, describe).await
             }
             Statement::DescribeReorderer(describe) => {
                 let domain = domain.as_ref().expect("domain required");
@@ -9177,7 +9127,15 @@ fn format_ingestor_describe_output(
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
         format!("source: {}", format_ingestor_source(&ingestor.source)),
-        format!("stream: {}", ingestor.into_relay.as_str()),
+        format!(
+            "streams: {}",
+            ingestor
+                .output_routes
+                .relays()
+                .map(Identifier::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         format!("codec: {}", ingestor.decode_using_codec.as_str()),
         format!("owner: {}", ingestor_node.execution_node().unwrap_or("-"),),
         format!(
@@ -9361,6 +9319,26 @@ fn format_replica_nodes(scheduled_node: &ScheduledNode) -> String {
     scheduled_node.replica_nodes().join(", ")
 }
 
+fn format_processor_output_lines(outputs: &ProcessorOutputs) -> Vec<String> {
+    let mut lines = Vec::new();
+    let output_count = outputs.outputs().count();
+    lines.push(format!("outputs: {output_count}"));
+
+    for (index, output) in outputs.routes.iter().enumerate() {
+        lines.push(format!(
+            "output {index}: into={} filter-map={}",
+            output.relay.as_str(),
+            if output.filter_map.is_some() {
+                "present"
+            } else {
+                "none"
+            }
+        ));
+    }
+
+    lines
+}
+
 fn format_lookup_describe_output(
     name: &Identifier,
     scheduled_node: &ScheduledNode,
@@ -9397,14 +9375,13 @@ fn format_deduplicator_describe_output(
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
         format!("from: {}", deduplicator.from_relay.as_str()),
-        format!("into: {}", deduplicator.into_relay.as_str()),
         format!("mode: {}", deduplicator.mode.as_ref()),
         format!("deduplicate on: {}", deduplicator.deduplicate_on),
         format!("max time: {}", deduplicator.max_time),
         format!("flush each: {}", deduplicator.flush_each),
         format!(
-            "filter-map: {}",
-            if deduplicator.filter_map.is_some() {
+            "filter-where: {}",
+            if deduplicator.filter_where.is_some() {
                 "present"
             } else {
                 "none"
@@ -9420,6 +9397,7 @@ fn format_deduplicator_describe_output(
         format!("  key expressions: {}", deduplicator.deduplicate_on),
         format!("  max time: {}", deduplicator.max_time),
     ]);
+    lines.extend(format_processor_output_lines(&deduplicator.output_routes));
     lines.join("\n")
 }
 
@@ -9435,7 +9413,6 @@ fn format_reingestor_describe_output(
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
         format!("from: {}", reingestor.from_relay.as_str()),
-        format!("into: {}", reingestor.into_relay.as_str()),
         format!(
             "parameterized by: {}",
             reingestor
@@ -9450,46 +9427,16 @@ fn format_reingestor_describe_output(
         ),
         format!("mode: {}", reingestor.mode.as_ref()),
         format!("flush each: {}", reingestor.flush_each),
-    ]);
-    lines.join("\n")
-}
-
-fn format_router_describe_output(
-    name: &Identifier,
-    router: &CreateRouter,
-    scheduled_node: Option<&ScheduledNode>,
-) -> String {
-    let mut lines = vec![
-        format!("router: {}", name.as_str()),
-        "kind: ROUTER".to_string(),
-    ];
-    lines.extend(format_schedule_placement_lines(scheduled_node));
-    lines.extend([
-        format!("from: {}", router.from_relay.as_str()),
-        format!("default into: {}", router.default_into_relay.as_str()),
-        format!("match policy: {}", router.match_policy.as_ref()),
-        format!("mode: {}", router.mode.as_ref()),
-        format!("flush each: {}", router.flush_each),
-        format!("routes: {}", router.routes.len()),
-    ]);
-    for (index, route) in router.routes.iter().enumerate() {
-        lines.push(format!(
-            "route {index}: into={} where={}",
-            route.into_relay.as_str(),
-            route.condition
-        ));
-    }
-    lines.extend([
         format!(
-            "filter-map: {}",
-            if router.filter_map.is_some() {
+            "filter-where: {}",
+            if reingestor.filter_where.is_some() {
                 "present"
             } else {
                 "none"
             }
         ),
-        "branch-local: true".to_string(),
     ]);
+    lines.extend(format_processor_output_lines(&reingestor.output_routes));
     lines.join("\n")
 }
 
@@ -9506,7 +9453,6 @@ fn format_correlator_describe_output(
     lines.extend([
         format!("left: {}", correlator.left_relay.as_str()),
         format!("right: {}", correlator.right_relay.as_str()),
-        format!("into: {}", correlator.into_relay.as_str()),
         format!(
             "parameterized by: {}",
             correlator
@@ -9523,6 +9469,14 @@ fn format_correlator_describe_output(
         format!("flush each: {}", correlator.flush_each),
         format!("output: {}", correlator.output),
         format!(
+            "filter-where: {}",
+            if correlator.filter_where.is_some() {
+                "present"
+            } else {
+                "none"
+            }
+        ),
+        format!(
             "timeout left: {}",
             format_correlation_timeout_action(&correlator.timeout_policy.left)
         ),
@@ -9534,6 +9488,7 @@ fn format_correlator_describe_output(
         "persistent state: true".to_string(),
         "replicated state: true".to_string(),
     ]);
+    lines.extend(format_processor_output_lines(&correlator.output_routes));
     lines.join("\n")
 }
 
@@ -9558,14 +9513,13 @@ fn format_reorderer_describe_output(
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
         format!("from: {}", reorderer.from_relay.as_str()),
-        format!("into: {}", reorderer.into_relay.as_str()),
         format!("mode: {}", reorderer.mode.as_ref()),
         format!("order by: {}", reorderer.order_by),
         format!("max time: {}", reorderer.max_time),
         format!("flush each: {}", reorderer.flush_each),
         format!(
-            "filter-map: {}",
-            if reorderer.filter_map.is_some() {
+            "filter-where: {}",
+            if reorderer.filter_where.is_some() {
                 "present"
             } else {
                 "none"
@@ -9575,6 +9529,7 @@ fn format_reorderer_describe_output(
         "persistent state: true".to_string(),
         "replicated state: true".to_string(),
     ]);
+    lines.extend(format_processor_output_lines(&reorderer.output_routes));
     lines.join("\n")
 }
 
@@ -9814,13 +9769,21 @@ fn format_window_processor_describe_output(
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
         format!("from: {}", processor.from_relay.as_str()),
-        format!("into: {}", processor.into_relay.as_str()),
         format!("mode: {:?}", processor.mode),
         format!("width: {}", processor.width.to_describe_string()),
         format!("step: {}", processor.step.to_describe_string()),
+        format!(
+            "filter-where: {}",
+            if processor.filter_where.is_some() {
+                "present"
+            } else {
+                "none"
+            }
+        ),
         "branch-local: true".to_string(),
         format!("aggregate structures: {}", aggregate.demands().len()),
     ]);
+    lines.extend(format_processor_output_lines(&processor.output_routes));
     let references = aggregate.demand_reference_counts();
     for demand in aggregate.demands() {
         lines.extend(format_window_aggregate_demand(demand, &references));
@@ -9845,16 +9808,24 @@ fn format_wasm_processor_describe_output(
         .unwrap_or_else(|| "latest".to_string());
     lines.extend([
         format!("from: {}", processor.from_relay.as_str()),
-        format!("into: {}", processor.into_relay.as_str()),
         format!("mode: {}", processor.mode.as_ref()),
         format!("resource: {}", processor.resource.as_str()),
         format!("resource version: {version}"),
         format!("file: {}", processor.file),
+        format!(
+            "filter-where: {}",
+            if processor.filter_where.is_some() {
+                "present"
+            } else {
+                "none"
+            }
+        ),
         "flush: guest-controlled".to_string(),
         "branch-local: true".to_string(),
         "persistent state: true".to_string(),
         "replicated state: true".to_string(),
     ]);
+    lines.extend(format_processor_output_lines(&processor.output_routes));
     lines.extend(state_lines);
     lines.join("\n")
 }
@@ -9972,7 +9943,6 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeDeduplicator(_)
             | Statement::DescribeReingestor(_)
             | Statement::DescribeCorrelator(_)
-            | Statement::DescribeRouter(_)
             | Statement::DescribeReorderer(_)
             | Statement::DescribeEmitter(_)
             | Statement::DescribeWasmProcessor(_)
@@ -11934,7 +11904,7 @@ impl Application {
             .await
             .change_context(AppError::StartCluster)?,
         );
-        runtime.attach_cluster_router(node_id.clone(), cluster.clone(), interconnect.clone());
+        runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
 
         let cluster_for_reconcile = cluster.clone();
         let consensus_for_reconcile = consensus.clone();
@@ -14768,7 +14738,15 @@ mod tests {
             panic!("stored model must be a unifier");
         };
         assert_eq!(unifier.from_relays.len(), 2);
-        assert_eq!(unifier.into_relay.as_str(), "notifications_all");
+        assert_eq!(
+            unifier
+                .output_routes
+                .relays()
+                .next()
+                .expect("unifier should declare an output")
+                .as_str(),
+            "notifications_all"
+        );
 
         subscriptions.stop_all(&service).await;
         let _ = std::fs::remove_dir_all(&path);
@@ -14926,7 +14904,15 @@ mod tests {
             panic!("stored model must be a deduplicator");
         };
         assert_eq!(deduplicator.from_relay.as_str(), "inbound");
-        assert_eq!(deduplicator.into_relay.as_str(), "deduped");
+        assert_eq!(
+            deduplicator
+                .output_routes
+                .relays()
+                .next()
+                .expect("deduplicator should declare an output")
+                .as_str(),
+            "deduped"
+        );
         assert_eq!(deduplicator.deduplicate_on, "inbound.transaction_id");
         assert_eq!(deduplicator.max_time, "10m");
         assert_eq!(deduplicator.mode, nervix_models::AckMode::Attached);

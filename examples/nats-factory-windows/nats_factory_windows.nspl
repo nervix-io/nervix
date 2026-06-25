@@ -121,6 +121,9 @@ CREATE CLIENT nats_edge
 
 CREATE INGESTOR nats_machine_signals
   TO signals_by_site
+    SET signals_by_site.status = lower(trim(message.status)),
+        signals_by_site.sensor = lower(trim(message.sensor)),
+        signals_by_site.unit = lower(trim(message.unit))
   DECODE USING machine_signal_codec
   PARAMETERIZED BY site_branch VALUES { site = signals_by_site.site } TTL 5m
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
@@ -130,17 +133,16 @@ CREATE INGESTOR nats_machine_signals
   QUEUE GROUP factory_signal_workers
   INSTANCES 4
   MODE NO_ACK SEQUENTIAL
-  SET signals_by_site.status = lower(trim(message.status)),
-      signals_by_site.sensor = lower(trim(message.sensor)),
-      signals_by_site.unit = lower(trim(message.unit))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-CREATE ROUTER intake_quality_gate
+CREATE DEDUPLICATOR intake_quality_gate
   FROM signals_by_site
   TO rejected_signals WHERE signals_by_site.asset_id = "" OR signals_by_site.sensor = "" OR signals_by_site.status = "offline"
   TO battery_alerts WHERE signals_by_site.battery_pct < 15.0
-  DEFAULT TO clean_signals
+  TO clean_signals
   PARAMETERIZED BY site_branch
+  DEDUPLICATE ON signals_by_site.site, signals_by_site.line, signals_by_site.asset_id, signals_by_site.sensor, signals_by_site.ts, signals_by_site.seq
+  MAX TIME 5m
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
   ON MESSAGE ERROR LOG;
 
@@ -165,12 +167,14 @@ CREATE REORDERER asset_signal_reorderer
   FLUSH EACH 500ms MAX BATCH SIZE 32kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER process_alert_router
+CREATE DEDUPLICATOR process_alert_splitter
   FROM signals_ordered
   TO critical_signals WHERE signals_ordered.status = "fault" OR signals_ordered.value >= signals_ordered.critical_high
   TO drift_signals WHERE signals_ordered.value < signals_ordered.target_min OR signals_ordered.value > signals_ordered.target_max
-  DEFAULT TO normal_signals
+  TO normal_signals
   PARAMETERIZED BY asset_signal_branch
+  DEDUPLICATE ON signals_ordered.site, signals_ordered.line, signals_ordered.asset_id, signals_ordered.sensor, signals_ordered.ts, signals_ordered.seq
+  MAX TIME 5m
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
   ON MESSAGE ERROR LOG;
 

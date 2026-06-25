@@ -19,35 +19,13 @@ impl NatsIngestor {
             });
         }
 
-        let (
-            subject,
-            queue_group,
-            instances,
-            sender_relay,
-            filter_map,
-            codec,
-            parameterization,
-            parameterized_template,
-        ) = match &ingestor.source {
+        let (subject, queue_group, instances) = match &ingestor.source {
             IngestSource::Nats {
                 subject,
                 queue_group,
                 instances,
                 ..
-            } => {
-                let (sender_relay, filter_map, codec, parameterization, parameterized_template) =
-                    runtime.ingestor_dependencies(domain, &ingestor).await?;
-                (
-                    subject.clone(),
-                    queue_group.clone(),
-                    *instances,
-                    sender_relay,
-                    filter_map,
-                    codec,
-                    parameterization,
-                    parameterized_template,
-                )
-            }
+            } => (subject.clone(), queue_group.clone(), *instances),
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
@@ -56,6 +34,7 @@ impl NatsIngestor {
                 });
             }
         };
+        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
 
         let resolved_client = runtime
             .resolve_client_config(client.mount.as_ref(), &client.config)
@@ -67,11 +46,13 @@ impl NatsIngestor {
         let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
             domain,
             &ingestor.name,
-            parameterized_template,
+            dependencies.parameterized_templates,
         );
-        let parameterized_sender = parameterized_runtime
-            .as_ref()
-            .map(|runtime| runtime.sender());
+        let parameterized_senders = parameterized_runtime.senders.clone();
+        let output_routes = dependencies.output_routes;
+        let filter_where = dependencies.filter_where;
+        let codec = dependencies.codec;
+        let parameterization = dependencies.parameterization;
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -87,11 +68,11 @@ impl NatsIngestor {
             let task_events = runtime.events.clone();
             let task_config = resolved_client.entries.clone();
             let task_client_mounts = resolved_client.mounts.clone();
-            let task_sender_relay = sender_relay.clone();
-            let task_filter_map = filter_map.clone();
+            let task_output_routes = output_routes.clone();
+            let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
             let task_parameterization = parameterization.clone();
-            let task_parameterized_sender = parameterized_sender.clone();
+            let task_parameterized_senders = parameterized_senders.clone();
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 let mut backoff = RuntimeReconnectBackoff::default();
@@ -214,6 +195,7 @@ impl NatsIngestor {
 
                                         match decode_ingested_payload(task_codec.clone(), payload).await {
                                             Ok(record) => {
+                                                let mut output_routes = task_output_routes.clone();
                                                 if let Err(error) = task_runtime
                                                     .dispatch_ingested_record(IngestDispatch {
                                                         domain: &task_domain,
@@ -221,10 +203,10 @@ impl NatsIngestor {
                                                         timestamp_source: task_timestamp_source.as_ref(),
                                                         parameterization: &task_parameterization,
                                                         parameter_value_mappings: Some(&task_parameter_value_mappings),
-                                                        sender_relay: &task_sender_relay,
-                                                        filter_map: task_filter_map.as_ref(),
-                                                        parameterized_sender:
-                                                            task_parameterized_sender.as_ref(),
+                                                        output_routes: &mut output_routes,
+                                                        filter_where: task_filter_where.as_ref(),
+                                                        parameterized_senders:
+                                                            &task_parameterized_senders,
                                                         record,
                                                         filter_map_metadata: Some(
                                                             IngestFilterMapMetadata::from_headers(
@@ -298,7 +280,7 @@ impl NatsIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime,
+                parameterized: parameterized_runtime.runtimes,
                 tasks,
             },
         );

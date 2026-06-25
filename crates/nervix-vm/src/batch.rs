@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-    Int64Array, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
-    UInt64Array,
+    Int64Array, RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Schema, TimeUnit};
 
@@ -160,6 +160,25 @@ impl TypedArray {
             _ => None,
         }
     }
+
+    pub fn to_array_ref(&self) -> ArrayRef {
+        match self {
+            Self::UInt8(array) => Arc::new(array.clone()),
+            Self::Int8(array) => Arc::new(array.clone()),
+            Self::UInt16(array) => Arc::new(array.clone()),
+            Self::Int16(array) => Arc::new(array.clone()),
+            Self::UInt32(array) => Arc::new(array.clone()),
+            Self::Int32(array) => Arc::new(array.clone()),
+            Self::UInt64(array) => Arc::new(array.clone()),
+            Self::Int64(array) => Arc::new(array.clone()),
+            Self::Float32(array) => Arc::new(array.clone()),
+            Self::Float64(array) => Arc::new(array.clone()),
+            Self::Boolean(array) => Arc::new(array.clone()),
+            Self::Utf8(array) => Arc::new(array.clone()),
+            Self::Datetime(array) => Arc::new(array.clone()),
+            Self::Generic(array) => array.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -222,6 +241,26 @@ impl TypedBatch {
 
     pub fn row_count(&self) -> usize {
         self.row_count
+    }
+
+    pub fn to_record_batch(&self) -> Result<RecordBatch, RuntimeError> {
+        let columns = self
+            .columns
+            .iter()
+            .map(TypedArray::to_array_ref)
+            .collect::<Vec<_>>();
+        let result = if columns.is_empty() {
+            RecordBatch::try_new_with_options(
+                self.schema.clone(),
+                columns,
+                &RecordBatchOptions::new().with_row_count(Some(self.row_count)),
+            )
+        } else {
+            RecordBatch::try_new(self.schema.clone(), columns)
+        };
+        result.map_err(|error| RuntimeError::InvalidBatch {
+            message: error.to_string(),
+        })
     }
 }
 

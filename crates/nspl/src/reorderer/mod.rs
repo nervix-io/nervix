@@ -5,8 +5,9 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        duration_lit, filter_map_program, flush_each, if_not_exists_clause, into_parse_error, kw,
-        lex_input, message_error_policy, relay_ref, reorderer_name, suggestions_from_errors, tok,
+        duration_lit, filter_where_clause, flush_each, if_not_exists_clause, into_parse_error, kw,
+        lex_input, message_error_policy, processor_outputs, relay_ref, reorderer_name,
+        suggestions_from_errors, tok,
     },
 };
 
@@ -100,15 +101,14 @@ pub fn create_reorderer_parser<'src>()
         .then(reorderer_name())
         .then_ignore(kw(Identifier::From))
         .then(relay_ref())
-        .then_ignore(kw(Identifier::To))
-        .then(relay_ref())
+        .then(filter_where_clause().or_not())
+        .then(processor_outputs())
         .then(branch_parameterization())
         .then(by_exprs())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
         .then(duration_lit())
         .then(flush_each())
-        .then(filter_map_program().or_not())
         .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
@@ -118,16 +118,16 @@ pub fn create_reorderer_parser<'src>()
                         (
                             (
                                 (
-                                    ((((if_not_exists, mode), name), from_relay), into_relay),
-                                    parameterized_by,
+                                    ((((if_not_exists, mode), name), from_relay), filter_where),
+                                    outputs,
                                 ),
-                                order_by,
+                                parameterized_by,
                             ),
-                            max_time,
+                            order_by,
                         ),
-                        flush_each,
+                        max_time,
                     ),
-                    filter_map,
+                    flush_each,
                 ),
                 message_error_policy,
             )| {
@@ -136,7 +136,7 @@ pub fn create_reorderer_parser<'src>()
                     CreateReorderer {
                         name,
                         from_relay,
-                        into_relay,
+                        output_routes: outputs,
                         parameterized_by,
                         order_by,
                         max_time,
@@ -144,7 +144,7 @@ pub fn create_reorderer_parser<'src>()
                         max_batch_size,
                         message_error_policy,
                         mode: mode.unwrap_or(AckMode::Attached),
-                        filter_map,
+                        filter_where,
                     },
                     if_not_exists,
                 )
@@ -206,14 +206,15 @@ mod tests {
     #[test]
     fn parses_create_reorderer() {
         let tokens = to_tokens(
-            "CREATE REORDERER order_notifications FROM s1 TO s2 PARAMETERIZED BY tenant BY \
-             s1.tenant, concat(lower(s1.id), '-', trim(s1.kind)) MAX TIME 10s FLUSH EACH 100ms \
-             MAX BATCH SIZE 1MiB SET s1.id = trim(s1.id) WHERE s1.active ON MESSAGE ERROR LOG;",
+            "CREATE REORDERER order_notifications FROM s1 TO s2 SET s2.id = trim(s1.id) WHERE \
+             s1.active PARAMETERIZED BY tenant BY s1.tenant, concat(lower(s1.id), '-', \
+             trim(s1.kind)) MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
+             LOG;",
         );
         let parsed = parse_create_reorderer_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "order_notifications");
         assert_eq!(parsed.from_relay.as_str(), "s1");
-        assert_eq!(parsed.into_relay.as_str(), "s2");
+        assert_eq!(parsed.output_routes.routes[0].relay.as_str(), "s2");
         assert_eq!(
             parsed.order_by,
             "s1.tenant, concat (lower (s1.id), '-', trim (s1.kind))"
@@ -221,8 +222,10 @@ mod tests {
         assert_eq!(parsed.max_time, "10s");
         assert_eq!(parsed.flush_each, "100ms");
         let filter_map = parsed
-            .filter_map
-            .as_deref()
+            .output_routes
+            .routes
+            .first()
+            .and_then(|output| output.filter_map.as_deref())
             .expect("filter-map should parse");
         assert!(filter_map.contains("WHERE"));
         assert!(filter_map.contains("SET"));

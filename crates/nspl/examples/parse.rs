@@ -147,26 +147,16 @@ fn main() -> ExitCode {
          ICEBERG_REST|WEBSOCKETS CONFIG {{ 'k' = 'v', ... }} [;]"
     );
     println!(
-        "  CREATE INGESTOR <name> FROM \
-         HTTP|KAFKA|PULSAR|PROMETHEUS|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS|ENDPOINT|WEBSOCKETS ... \
-         [ ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;]"
+        "  CREATE INGESTOR <name> [FILTER WHERE <expr>] TO <relay> ... DECODE USING <codec> ... \
+         FROM HTTP|KAFKA|PULSAR|PROMETHEUS|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS|ENDPOINT|WEBSOCKETS \
+         ... [ ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;]"
     );
     println!(
         "  CREATE EMITTER <name> FROM <s> ENCODE USING <codec> TO \
          KAFKA|PULSAR|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS ... [ ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;]"
     );
-    println!(
-        "  CREATE ROUTER <name> FROM <s> [SET|UNSET|WHERE ...] TO <s> WHERE <expr> ... [MATCH \
-         FIRST|ALL] DEFAULT TO <s> [ ON MESSAGE ERROR LOG;]"
-    );
-    println!(
-        "  CREATE ROUTER <name> FROM <s> [SET|UNSET|WHERE ...] DEFAULT TO <s> [ ON MESSAGE ERROR \
-         LOG;]"
-    );
-    println!(
-        "  SHOW CREATE SCHEMA|CODEC|CLIENT|VHOST|ENDPOINT|INGESTOR|ROUTER|RELAY|EMITTER <name> [;]"
-    );
+    println!("  SHOW CREATE SCHEMA|CODEC|CLIENT|VHOST|ENDPOINT|INGESTOR|RELAY|EMITTER <name> [;]");
     println!("  SHOW CLUSTER STATUS [;]");
     println!("History: Up/Down. Completion: Tab. Type 'exit' to quit.");
 

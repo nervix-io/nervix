@@ -253,9 +253,8 @@ Feature: Relay unification
 
       CREATE UNIFIER join_streams
         FROM ss1, ss2
-        TO ss10 PARAMETERIZED BY user_id_branch
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        SET ss1.source = state_notifications.source ON MESSAGE ERROR LOG;
+        TO ss10 SET ss10.source = state_notifications.source PARAMETERIZED BY user_id_branch
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO ss10;
       START;

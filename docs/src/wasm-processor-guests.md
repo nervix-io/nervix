@@ -4,7 +4,7 @@ WASM processors are native WebAssembly modules loaded by Wasmtime. They do not u
 
 The runtime creates one guest instance per concrete branch. Guest state must therefore be branch-local. Do not aggregate across branch keys inside the guest.
 
-WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does not accept `FLUSH EACH` or `FLUSH IMMEDIATE`; Nervix forwards batches returned from `nervix_process_batch` and batches returned later from `nervix_on_timeout` callbacks requested by the guest.
+WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does not accept `FLUSH EACH` or `FLUSH IMMEDIATE`; Nervix routes batches returned from `nervix_process_batch` and batches returned later from `nervix_on_timeout` callbacks requested by the guest through the processor's declared `TO` clauses.
 
 ## Contract Summary
 
@@ -49,7 +49,7 @@ The host enforces a maximum guest buffer size. A guest should still validate siz
 
 ## Init Payload
 
-`nervix_init` receives CBOR:
+`nervix_init` receives CBOR. `output_schemas` contains one schema per declared `TO` relay. A guest output envelope must name one of those relays and its Arrow IPC batch must match that relay's schema before Nervix applies the route-level `SET` and `WHERE` clauses. `UNSET` is not valid on WASM output routes.
 
 ```text
 {
@@ -62,12 +62,14 @@ The host enforces a maximum guest buffer size. A guest should still validate siz
       { "name": text, "ty": WasmProcessorType, "optional": bool }
     ]
   },
-  "output_schema": {
-    "name": text,
-    "fields": [
-      { "name": text, "ty": WasmProcessorType, "optional": bool }
-    ]
-  }
+  "output_schemas": [
+    {
+      "name": text,
+      "fields": [
+        { "name": text, "ty": WasmProcessorType, "optional": bool }
+      ]
+    }
+  ]
 }
 ```
 
@@ -105,11 +107,16 @@ Treat this as configuration for the branch instance. Store what you need in gues
 Every input and output payload is:
 
 ```text
+u32 little-endian output relay name byte size
+UTF-8 output relay name bytes, empty on host-to-guest input
 u32 little-endian Arrow IPC stream byte size
 Arrow IPC stream bytes
 u32 little-endian ACK sidecar byte size
 CBOR ACK sidecar bytes
 ```
+
+Host-to-guest input envelopes leave the output relay name empty. Guest-to-host
+output envelopes must set it to the target relay for that Arrow IPC batch.
 
 The ACK sidecar is:
 
@@ -211,8 +218,8 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
         };
 
         match filter_arrow_batch(envelope) {
-            Ok(output) => {
-                state.pending_emit = output;
+            Ok(outputs) => {
+                state.pending_emit = outputs;
                 0
             }
             Err(code) => code,
@@ -226,9 +233,9 @@ pub extern "C" fn nervix_read_emit() -> i32 {
         if state.pending_emit.is_empty() {
             return 0;
         }
+        let next = state.pending_emit.remove(0);
         state.buffer.clear();
-        state.buffer.extend_from_slice(&state.pending_emit);
-        state.pending_emit.clear();
+        state.buffer.extend_from_slice(&next);
         state.buffer.len() as i32
     })
 }
@@ -240,7 +247,8 @@ The core filtering flow in the prototype is:
 fn filter_envelope_by_global_row(
     envelope: BatchEnvelope,
     start_row: u64,
-) -> Result<BatchEnvelope, i32> {
+    output_schemas: &[ProcessorSchema],
+) -> Result<Vec<BatchEnvelope>, i32> {
     let input = read_single_i32_batch(&envelope.arrow_ipc_batch)?;
     let mut kept_values = Vec::new();
     let mut output_acks = AckSidecar::default();
@@ -256,10 +264,16 @@ fn filter_envelope_by_global_row(
         }
     }
 
-    Ok(BatchEnvelope {
-        arrow_ipc_batch: write_single_i32_batch(&kept_values)?,
-        acks: output_acks,
-    })
+    output_schemas
+        .iter()
+        .map(|schema| {
+            Ok(BatchEnvelope {
+                output_relay: Some(schema.name.clone()),
+                arrow_ipc_batch: write_output_batch_for_schema(schema, &kept_values)?,
+                acks: output_acks.clone(),
+            })
+        })
+        .collect()
 }
 ```
 
@@ -314,7 +328,7 @@ func hostDomainTimeNanos() int64
 func hostTimeoutAfterNanos(delayNanos int64) int64
 
 var buffer []byte
-var pendingEmit []byte
+var pendingEmit [][]byte
 
 //export nervix_alloc
 func nervixAlloc(size int32) int32 {
@@ -337,7 +351,7 @@ func nervixProcessBatch(size int32) int32 {
         return code
     }
     _ = hostTimeoutAfterNanos(1_000_000_000)
-    pendingEmit, code = buildOutputEnvelope(envelope)
+    pendingEmit, code = buildOutputEnvelopes(envelope)
     return code
 }
 
@@ -346,8 +360,9 @@ func nervixReadEmit() int32 {
     if len(pendingEmit) == 0 {
         return 0
     }
-    buffer = append(buffer[:0], pendingEmit...)
-    pendingEmit = pendingEmit[:0]
+    next := pendingEmit[0]
+    pendingEmit = pendingEmit[1:]
+    buffer = append(buffer[:0], next...)
     return int32(len(buffer))
 }
 ```

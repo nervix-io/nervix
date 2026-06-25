@@ -40,28 +40,8 @@ impl PrometheusIngestor {
             });
         }
 
-        let (
-            query,
-            every,
-            sender_relay,
-            filter_map,
-            codec,
-            parameterization,
-            parameterized_template,
-        ) = match &ingestor.source {
-            IngestSource::Prometheus { query, every, .. } => {
-                let (sender_relay, filter_map, codec, parameterization, parameterized_template) =
-                    runtime.ingestor_dependencies(domain, &ingestor).await?;
-                (
-                    query.clone(),
-                    every.clone(),
-                    sender_relay,
-                    filter_map,
-                    codec,
-                    parameterization,
-                    parameterized_template,
-                )
-            }
+        let (query, every) = match &ingestor.source {
+            IngestSource::Prometheus { query, every, .. } => (query.clone(), every.clone()),
             _ => {
                 return Err(RuntimeError::StartIngestor {
                     domain: domain.as_str().to_string(),
@@ -70,6 +50,7 @@ impl PrometheusIngestor {
                 });
             }
         };
+        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
 
         let resolved_client = runtime
             .resolve_client_config(client.mount.as_ref(), &client.config)
@@ -101,11 +82,13 @@ impl PrometheusIngestor {
         let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
             domain,
             &ingestor.name,
-            parameterized_template,
+            dependencies.parameterized_templates,
         );
-        let parameterized_sender = parameterized_runtime
-            .as_ref()
-            .map(|runtime| runtime.sender());
+        let parameterized_senders = parameterized_runtime.senders.clone();
+        let output_routes = dependencies.output_routes;
+        let filter_where = dependencies.filter_where;
+        let codec = dependencies.codec;
+        let parameterization = dependencies.parameterization;
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -246,6 +229,7 @@ impl PrometheusIngestor {
                                     match Self::sample_payload(&sample) {
                                         Ok(payload) => match decode_ingested_payload(codec.clone(), &payload).await {
                                             Ok(record) => {
+                                                let mut output_routes = output_routes.clone();
                                                 if let Err(error) = task_runtime
                                                 .dispatch_ingested_record(IngestDispatch {
                                                     domain: &task_domain,
@@ -254,10 +238,10 @@ impl PrometheusIngestor {
                                                         .as_ref(),
                                                     parameterization: &parameterization,
                                                     parameter_value_mappings: Some(&task_parameter_value_mappings),
-                                                    sender_relay: &sender_relay,
-                                                    filter_map: filter_map.as_ref(),
-                                                    parameterized_sender:
-                                                        parameterized_sender.as_ref(),
+                                                    output_routes: &mut output_routes,
+                                                    filter_where: filter_where.as_ref(),
+                                                    parameterized_senders:
+                                                        &parameterized_senders,
                                                     record,
                                                     filter_map_metadata: None,
                                                         ingested_at: current_timestamp(),
@@ -340,7 +324,7 @@ impl PrometheusIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime,
+                parameterized: parameterized_runtime.runtimes,
                 tasks: vec![task],
             },
         );

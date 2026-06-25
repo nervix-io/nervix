@@ -82,6 +82,9 @@ CREATE CLIENT redis_alerts
 
 CREATE INGESTOR mqtt_telemetry
   TO telemetry_by_site
+    SET telemetry_by_site.status = lower(trim(message.status)),
+        telemetry_by_site.sensor = lower(trim(message.sensor)),
+        telemetry_by_site.unit = lower(trim(message.unit))
   DECODE USING iot_telemetry_codec
   PARAMETERIZED BY site_branch VALUES { site = telemetry_by_site.site } TTL 5m
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
@@ -90,17 +93,16 @@ CREATE INGESTOR mqtt_telemetry
   TOPIC factory_telemetry
   INSTANCES 4
   MODE NO_ACK PARALLEL MAX 1024
-  SET telemetry_by_site.status = lower(trim(message.status)),
-      telemetry_by_site.sensor = lower(trim(message.sensor)),
-      telemetry_by_site.unit = lower(trim(message.unit))
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-CREATE ROUTER quality_gate
+CREATE DEDUPLICATOR quality_gate
   FROM telemetry_by_site
   TO telemetry_rejected WHERE telemetry_by_site.device_id = "" OR telemetry_by_site.sensor = "" OR telemetry_by_site.status = "offline"
   TO battery_alerts WHERE telemetry_by_site.battery_pct < 15.0
-  DEFAULT TO telemetry_clean
+  TO telemetry_clean
   PARAMETERIZED BY site_branch
+  DEDUPLICATE ON telemetry_by_site.site, telemetry_by_site.device_id, telemetry_by_site.sensor, telemetry_by_site.ts, telemetry_by_site.seq
+  MAX TIME 5m
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
   ON MESSAGE ERROR LOG;
 
@@ -124,13 +126,15 @@ CREATE REORDERER device_event_reorderer
   FLUSH EACH 500ms MAX BATCH SIZE 10kb
   ON MESSAGE ERROR LOG;
 
-CREATE ROUTER anomaly_router
+CREATE DEDUPLICATOR anomaly_splitter
   FROM telemetry_ordered
   TO critical_alerts WHERE telemetry_ordered.status = "fault" OR telemetry_ordered.value >= telemetry_ordered.critical_high
   TO thermal_alerts WHERE telemetry_ordered.sensor = "temperature" AND telemetry_ordered.value >= 80.0
   TO maintenance_alerts WHERE telemetry_ordered.value >= telemetry_ordered.warn_high
-  DEFAULT TO normal_telemetry
+  TO normal_telemetry
   PARAMETERIZED BY device_branch
+  DEDUPLICATE ON telemetry_ordered.site, telemetry_ordered.line, telemetry_ordered.device_id, telemetry_ordered.sensor, telemetry_ordered.ts, telemetry_ordered.seq
+  MAX TIME 5m
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
   ON MESSAGE ERROR LOG;
 
