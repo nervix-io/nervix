@@ -3904,15 +3904,15 @@ impl Runtime {
                         })?;
                     lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
                 }
-                Model::Unifier(unifier) => {
+                Model::Junction(junction) => {
                     if handled_processors.contains(&node.identifier) {
                         continue;
                     }
                     return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
-                            "unifier '{}' is not attached to a branch root",
-                            unifier.name.as_str()
+                            "junction '{}' is not attached to a branch root",
+                            junction.name.as_str()
                         ),
                     });
                 }
@@ -5561,15 +5561,15 @@ impl Runtime {
                         output_schema,
                     ));
                 }
-                Model::Unifier(unifier) => {
+                Model::Junction(junction) => {
                     if handled_processors.contains(&node.identifier) {
                         continue;
                     }
                     return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
-                            "unifier '{}' is not attached to a branch root",
-                            unifier.name.as_str()
+                            "junction '{}' is not attached to a branch root",
+                            junction.name.as_str()
                         ),
                     });
                 }

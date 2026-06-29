@@ -20,7 +20,7 @@ Pure runtime processors end with `ON MESSAGE ERROR <policy>` only. `ON GENERAL E
 Branch behavior by node type:
 
 - `INGESTOR` starts a branch
-- `DEDUPLICATOR`, `REORDERER`, `CORRELATOR`, and `UNIFIER` run inside that branch under one concrete parameter group and may fan records out through output routes
+- `DEDUPLICATOR`, `REORDERER`, `CORRELATOR`, and `JUNCTION` run inside that branch under one concrete parameter group and may fan records out through output routes
 - `WASM PROCESSOR` runs inside that branch under one concrete parameter group
 - `WINDOW PROCESSOR` keeps window state inside that branch under one concrete parameter group
 - `REINGESTOR` is the boundary that consumes from the whole input relay and starts new downstream branches
@@ -47,7 +47,7 @@ TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHE
 
 Each `TO` route may carry its own destination filter-map. `SET` and `UNSET` are destination-owned and therefore appear after the destination relay is known. `WHERE` is optional; a route without `WHERE` receives every row produced by the processor.
 
-Passthrough inheritance only exists for processors with a natural one-input-row to one-output-row shape, such as deduplicators, reorderers, unifiers, and reingestors. For those processors, a destination without a filter-map inherits same-named fields from the source row; if the destination schema should not receive a source field, write `UNSET`.
+Passthrough inheritance only exists for processors with a natural one-input-row to one-output-row shape, such as deduplicators, reorderers, junctions, and reingestors. For those processors, a destination without a filter-map inherits same-named fields from the source row; if the destination schema should not receive a source field, write `UNSET`.
 
 Generated-output processors do not inherit input fields. Window processors emit the `AGGREGATE` record, inferencers emit ONNX tensor outputs plus explicitly `SET` fields, correlators emit their `OUTPUT` record, and WASM processors emit the guest's Arrow output. Their route clauses run after that generated record exists.
 
@@ -122,11 +122,11 @@ Generator rules:
 - in unpaced domains, both `EACH <duration>` and `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` use wall clock time
 - `FLUSH IMMEDIATE` emits after every generation cycle that produces rows
 
-## Unifier
+## Junction
 
 ```nspl
-CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] UNIFIER <name>
-  FROM <input> [WHERE <expr>], <input> [WHERE <expr>], ...
+CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] JUNCTION <name>
+  FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
   PARAMETERIZED BY <schema>
@@ -134,11 +134,11 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] UNIFIER <name>
   ON MESSAGE ERROR <policy>;
 ```
 
-A unifier merges multiple upstream relays into one output relay.
+A junction is a branch-local pass-through processor. It consumes one or more same-schema upstream relays, applies source `WHERE` and node `FILTER WHERE` filters, buffers accepted Arrow batches until its flush policy fires, concatenates buffered batches when needed, and forwards records through one or more output routes.
 
-Unification happens per aligned parameter group. Each group has its own unifier execution and state.
+Each output route may use the normal processor `SET`, `UNSET`, and `WHERE` filter-map clauses. Routes without a `WHERE` receive every accepted record.
 
-Use it when multiple sources should feed a common downstream path.
+Use it when records should be filtered, projected, fanned out, or joined into downstream relay paths without additional node-specific state.
 
 ## Inferencer
 

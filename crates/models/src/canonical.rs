@@ -9,9 +9,9 @@ use crate::{
     CreateClientNats, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
     CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
-    CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
-    CreateSignalingProtocol, CreateUnifier, CreateVhost, CreateWasmProcessor,
+    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateJunction, CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
     EndpointType, ErrorPolicies, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
     IcebergCatalog, Identifier, InferencerTensorMapping, IngestSource, IngestTimestampSource,
@@ -143,7 +143,7 @@ impl Model {
             Self::Relay(relay) => relay.to_canonical_nspl(),
             Self::Materializer(materializer) => materializer.to_canonical_nspl(),
             Self::Lookup(lookup) => lookup.to_canonical_nspl(),
-            Self::Unifier(unifier) => unifier.to_canonical_nspl(),
+            Self::Junction(junction) => junction.to_canonical_nspl(),
             Self::Deduplicator(deduplicator) => deduplicator.to_canonical_nspl(),
             Self::Correlator(correlator) => correlator.to_canonical_nspl(),
             Self::Reorderer(reorderer) => reorderer.to_canonical_nspl(),
@@ -884,10 +884,10 @@ fn general_error_policy_to_nspl(policy: &GeneralErrorPolicy) -> &'static str {
     }
 }
 
-impl CreateUnifier {
+impl CreateJunction {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} UNIFIER {} FROM {}{}{} {} {} {};",
+            "CREATE {} JUNCTION {} FROM {}{}{} {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             processor_inputs_to_nspl(&self.from),
@@ -1904,8 +1904,8 @@ mod tests {
         CreateClientHttp, CreateClientKafka, CreateClientKinesis, CreateClientMqtt,
         CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
         CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateReingestor,
-        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUnifier, CreateVhost,
+        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
+        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
         CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
         EndpointIngestMode, EndpointType, ErrorPolicies, HttpConfigEntry, Identifier, IngestSource,
         JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode,
@@ -2433,8 +2433,8 @@ mod tests {
             "CREATE RELAY orders_stream SCHEMA orders UNPARAMETERIZED CAPACITY 1;"
         );
 
-        let unifier = CreateUnifier {
-            name: identifier("orders_unifier"),
+        let junction = CreateJunction {
+            name: identifier("orders_junction"),
             from: ProcessorInputs::new(
                 vec![identifier("orders_a"), identifier("orders_b")],
                 Vec::new(),
@@ -2448,9 +2448,9 @@ mod tests {
             filter_where: None,
         };
         assert_eq!(
-            unifier.to_canonical_nspl().expect("must render"),
+            junction.to_canonical_nspl().expect("must render"),
             with_message_error_policy(
-                "CREATE ATTACHED UNIFIER orders_unifier FROM orders_a, orders_b TO orders_all \
+                "CREATE ATTACHED JUNCTION orders_junction FROM orders_a, orders_b TO orders_all \
                  PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"
             )
         );

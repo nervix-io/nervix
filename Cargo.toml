@@ -368,7 +368,7 @@ url = "2.5"
 uuid = "1.18"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-wasmtime = { version = "45.0.0", default-features = false, features = [
+wasmtime = { version = "46.0.0", default-features = false, features = [
   "anyhow",
   "async",
   "cranelift",

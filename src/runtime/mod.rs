@@ -153,15 +153,15 @@ use planning::{
 use processors::{
     CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram, CompiledReordererProgram,
     CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
-    ParameterizedIngestorSpec, ParameterizedProcessorOperationSpec,
+    JunctionFlushContext, ParameterizedIngestorSpec, ParameterizedProcessorOperationSpec,
     ParameterizedProcessorOutputSpec, ParameterizedProcessorOutputsSpec,
     ParameterizedProcessorSpec, ParametrizerAckBoundary, ParametrizerTemplate, PlannedGeneralError,
     PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
     RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
     RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
     RelayProcessorTemplate, ReorderKeyPart, ReordererPendingMessage, SharedCorrelatorBranchState,
-    UnifierFlushContext, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext,
-    WindowBounds, WindowFlushContext,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -3501,7 +3501,7 @@ impl RelayProcessorNode {
                         .await;
                     }
                 }
-                RelayProcessorOperationNode::Unifier {
+                RelayProcessorOperationNode::Junction {
                     output_routes,
                     flush_each,
                     pending,
@@ -3516,8 +3516,8 @@ impl RelayProcessorNode {
                     pending.push(batch);
                     match flush_each {
                         RuntimeFlushPolicy::Immediate => {
-                            flush_branch_unifier(
-                                UnifierFlushContext {
+                            flush_branch_junction(
+                                JunctionFlushContext {
                                     graph,
                                     branch,
                                     node_kind: self.kind.as_str(),
@@ -3542,8 +3542,8 @@ impl RelayProcessorNode {
                             if next_flush.is_some_and(|deadline| deadline <= now)
                                 || relay_batches_estimated_bytes(pending) >= *max_batch_size
                             {
-                                flush_branch_unifier(
-                                    UnifierFlushContext {
+                                flush_branch_junction(
+                                    JunctionFlushContext {
                                         graph,
                                         branch,
                                         node_kind: self.kind.as_str(),
@@ -3729,7 +3729,7 @@ impl RelayProcessorNode {
                         state.clear(aggregate);
                     }
                 }
-                RelayProcessorOperationNode::Unifier {
+                RelayProcessorOperationNode::Junction {
                     output_routes,
                     flush_each,
                     pending,
@@ -3739,8 +3739,8 @@ impl RelayProcessorNode {
                     if let RuntimeFlushPolicy::Each { .. } = flush_each
                         && next_flush.is_some_and(|deadline| deadline <= now)
                     {
-                        flush_branch_unifier(
-                            UnifierFlushContext {
+                        flush_branch_junction(
+                            JunctionFlushContext {
                                 graph,
                                 branch,
                                 node_kind: self.kind.as_str(),
@@ -4028,7 +4028,7 @@ impl RelayProcessorNode {
                 state,
                 ..
             } => window_next_deadline(state, *width_duration),
-            RelayProcessorOperationNode::Unifier { next_flush, .. } => *next_flush,
+            RelayProcessorOperationNode::Junction { next_flush, .. } => *next_flush,
             RelayProcessorOperationNode::Reorderer {
                 next_flush,
                 max_time,
@@ -4216,10 +4216,10 @@ impl RelayProcessorTemplate {
                         branch_key: key.clone(),
                     }),
                 },
-                RelayProcessorOperationTemplate::Unifier {
+                RelayProcessorOperationTemplate::Junction {
                     output_routes,
                     flush_each,
-                } => RelayProcessorOperationNode::Unifier {
+                } => RelayProcessorOperationNode::Junction {
                     output_routes: Self::instantiate_outputs(output_routes),
                     flush_each: *flush_each,
                     pending: Vec::new(),
@@ -11376,12 +11376,12 @@ fn materialized_stream_specs_for_graph(
     execution.materialized_stream_specs.clone()
 }
 
-async fn flush_branch_unifier(
-    context: UnifierFlushContext<'_>,
+async fn flush_branch_junction(
+    context: JunctionFlushContext<'_>,
     pending: &mut Vec<RelayRecordBatch>,
     next_flush: &mut Option<Timestamp>,
 ) {
-    let UnifierFlushContext {
+    let JunctionFlushContext {
         graph,
         branch,
         node_kind,
@@ -11407,7 +11407,7 @@ async fn flush_branch_unifier(
                     error_policies,
                     batch.acks.iter(),
                     format!(
-                        "unifier '{}' failed to concat arrow batches: {}",
+                        "junction '{}' failed to concat arrow batches: {}",
                         processor.as_str(),
                         error
                     ),
@@ -11422,7 +11422,7 @@ async fn flush_branch_unifier(
             graph,
             branch,
             node_kind,
-            source_kind: ModelKind::Unifier,
+            source_kind: ModelKind::Junction,
             processor,
             error_policies,
             input_relays,

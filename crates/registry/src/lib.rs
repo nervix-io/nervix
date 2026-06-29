@@ -1683,7 +1683,7 @@ impl DomainState {
                         &reorderer.message_error_policy,
                     )?;
                 }
-                Model::Unifier(unifier) => {
+                Model::Junction(junction) => {
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -1691,7 +1691,7 @@ impl DomainState {
                         &indices,
                         &mut graph,
                         source,
-                        &unifier.output_routes,
+                        &junction.output_routes,
                     )?;
 
                     let input_schemas = processor_input_schemas(
@@ -1701,14 +1701,14 @@ impl DomainState {
                         &indices,
                         &mut graph,
                         source,
-                        &unifier.from,
-                        "unifier input",
+                        &junction.from,
+                        "junction input",
                     )?;
                     let first_input_relay = processor_first_input_relay(
                         domain,
                         identifier,
-                        &unifier.from,
-                        "unifier input",
+                        &junction.from,
+                        "junction input",
                     )?;
                     let branch_schema = relay_declared_branch_schema(
                         domain,
@@ -1722,7 +1722,7 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        &unifier.from.r#where,
+                        &junction.from.r#where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
@@ -1730,16 +1730,16 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        unifier.filter_where.as_deref(),
+                        junction.filter_where.as_deref(),
                     )?;
                     ensure_processor_output_schemas(
                         domain,
                         identifier,
                         models,
-                        &unifier.output_routes,
+                        &junction.output_routes,
                         &input_schemas,
                         branch_schema,
-                        "unifier flow",
+                        "junction flow",
                         ProcessorOutputSchemaCompatibility::Equal,
                     )?;
                     add_message_error_policy_edges(
@@ -1749,7 +1749,7 @@ impl DomainState {
                         &indices,
                         &mut graph,
                         source,
-                        &unifier.message_error_policy,
+                        &junction.message_error_policy,
                     )?;
                 }
                 Model::WindowProcessor(window_processor) => {
@@ -2377,7 +2377,7 @@ impl ActiveNode {
                 | ModelKind::WasmProcessor
                 | ModelKind::Reingestor
                 | ModelKind::Correlator
-                | ModelKind::Unifier
+                | ModelKind::Junction
                 | ModelKind::Deduplicator
                 | ModelKind::Reorderer
                 | ModelKind::WindowProcessor
@@ -2534,7 +2534,7 @@ fn is_schedulable_model(model: &Model) -> bool {
             | Model::Deduplicator(_)
             | Model::Correlator(_)
             | Model::Reorderer(_)
-            | Model::Unifier(_)
+            | Model::Junction(_)
             | Model::WindowProcessor(_)
             | Model::Emitter(_)
     )
@@ -3173,7 +3173,7 @@ impl AssignmentPlanner<'_> {
             | Model::Lookup(_)
             | Model::Deduplicator(_)
             | Model::Correlator(_)
-            | Model::Unifier(_)
+            | Model::Junction(_)
             | Model::WindowProcessor(_)
             | Model::Emitter(_) => {
                 let preferred_order =
@@ -6304,7 +6304,7 @@ fn infer_stream_parameterizations(
                         | Model::Reingestor(_)
                         | Model::Deduplicator(_)
                         | Model::Correlator(_)
-                        | Model::Unifier(_)
+                        | Model::Junction(_)
                         | Model::WindowProcessor(_)
                 )
                 .then_some(key.identifier.clone())
@@ -6345,7 +6345,7 @@ fn infer_stream_parameterizations(
                         producer_id.clone(),
                     ))
                 })
-                .or_else(|| models.get(&RegistryKey::new(ModelKind::Unifier, producer_id.clone())))
+                .or_else(|| models.get(&RegistryKey::new(ModelKind::Junction, producer_id.clone())))
                 .or_else(|| {
                     models.get(&RegistryKey::new(
                         ModelKind::WindowProcessor,
@@ -6462,15 +6462,15 @@ fn infer_stream_parameterizations(
                             .collect(),
                     )
                 }
-                Model::Unifier(unifier) => {
+                Model::Junction(junction) => {
                     let parameterization = resolved_branch_parameterization(
                         domain,
                         producer_id,
                         models,
-                        &unifier.parameterized_by,
+                        &junction.parameterized_by,
                     )?;
                     Some(
-                        unifier
+                        junction
                             .output_routes
                             .relays()
                             .cloned()
@@ -6626,17 +6626,17 @@ fn validate_processing_branch_parameterizations(
                     check.matches_relay(&window_processor.parameterized_by, from_relay)?;
                 }
             }
-            Model::Unifier(unifier) => {
+            Model::Junction(junction) => {
                 let check = ProcessorParameterizationCheck {
                     domain,
                     identifier: &key.identifier,
-                    model_kind: "unifier",
+                    model_kind: "junction",
                     models,
                     indices,
                     graph,
                 };
-                for from_relay in unifier.from.relays() {
-                    check.matches_relay(&unifier.parameterized_by, from_relay)?;
+                for from_relay in junction.from.relays() {
+                    check.matches_relay(&junction.parameterized_by, from_relay)?;
                 }
             }
             _ => {}
@@ -7443,8 +7443,8 @@ mod tests {
         CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
         CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
         CorrelatorMatchPolicy, CreateClientKafka, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay,
-        CreateSchema, CreateUnifier, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+        CreateDeduplicator, CreateEmitter, CreateIngestor, CreateJunction, CreateReingestor,
+        CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
         CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink,
         ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource,
         JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
@@ -7503,7 +7503,7 @@ mod tests {
         match &mut model {
             Model::Deduplicator(processor) => processor.parameterized_by = parameterized_by,
             Model::Correlator(processor) => processor.parameterized_by = parameterized_by,
-            Model::Unifier(processor) => processor.parameterized_by = parameterized_by,
+            Model::Junction(processor) => processor.parameterized_by = parameterized_by,
             Model::WindowProcessor(processor) => processor.parameterized_by = parameterized_by,
             _ => panic!("model is not a branch-preserving processor"),
         }
@@ -7887,8 +7887,8 @@ mod tests {
         })
     }
 
-    fn unifier(name: &str, from_relays: &[&str], into_relay: &str) -> Model {
-        Model::Unifier(CreateUnifier {
+    fn junction(name: &str, from_relays: &[&str], into_relay: &str) -> Model {
+        Model::Junction(CreateJunction {
             name: Identifier::parse(name).expect("valid identifier"),
             from: ProcessorInputs::new(
                 from_relays
@@ -10246,7 +10246,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_incompatible_unifier_stream_schemas() {
+    fn apply_batch_rejects_incompatible_junction_stream_schemas() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -10276,14 +10276,14 @@ mod tests {
                     relay("notifications_a", "event_schema"),
                     relay("notifications_b", "wide_schema"),
                     relay("merged", "event_schema"),
-                    unifier(
+                    junction(
                         "join_streams",
                         &["notifications_a", "notifications_b"],
                         "merged",
                     ),
                 ],
             )
-            .expect_err("unifier schema mismatch should fail");
+            .expect_err("junction schema mismatch should fail");
 
         assert!(matches!(
             err.current_context(),
@@ -10330,7 +10330,7 @@ mod tests {
                     relay("short_stream", "short_schema"),
                     relay("long_stream", "long_schema"),
                     relay("merged", "short_schema"),
-                    unifier("merge_windows", &["short_stream", "long_stream"], "merged"),
+                    junction("merge_windows", &["short_stream", "long_stream"], "merged"),
                 ],
             )
             .expect_err("array length mismatch should fail");
@@ -11401,7 +11401,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_unifier_without_explicit_upstream_parameterization() {
+    fn apply_batch_rejects_junction_without_explicit_upstream_parameterization() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11415,10 +11415,10 @@ mod tests {
                     relay("left", "event_schema"),
                     relay("right", "event_schema"),
                     relay("merged", "event_schema"),
-                    unifier("join_streams", &["left", "right"], "merged"),
+                    junction("join_streams", &["left", "right"], "merged"),
                 ],
             )
-            .expect_err("unifier without upstream parameterization should fail");
+            .expect_err("junction without upstream parameterization should fail");
 
         assert!(matches!(
             err.current_context(),
@@ -11426,7 +11426,7 @@ mod tests {
         ));
         assert!(
             format!("{err}")
-                .contains("unifier 'join_streams' requires relay 'left' to have parameterization"),
+                .contains("junction 'join_streams' requires relay 'left' to have parameterization"),
             "unexpected error: {err}"
         );
 

@@ -44,8 +44,8 @@ pub fn statement_parser<'src>()
             }),
             crate::codec::create_codec_parser()
                 .map(|create| Statement::Create(create.map_body(Model::Codec).map_body(Box::new))),
-            crate::unifier::create_unifier_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Unifier).map_body(Box::new))
+            crate::junction::create_junction_parser().map(|create| {
+                Statement::Create(create.map_body(Model::Junction).map_body(Box::new))
             }),
             crate::deduplicator::create_deduplicator_parser().map(|create| {
                 Statement::Create(create.map_body(Model::Deduplicator).map_body(Box::new))
@@ -234,8 +234,8 @@ mod tests {
         CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
-        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateUnifier, CreateWireSchema, CreateWireSchemaStmt,
+        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, CreateWireSchemaStmt,
         DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType,
         ErrorPolicies, Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry,
         KafkaIngestMode, KafkaOffsetMode, MessageErrorPolicy, Model, ModelKind, MqttIngestMode,
@@ -638,7 +638,7 @@ mod tests {
                     value: "mqtt://127.0.0.1:1883".to_string(),
                 }],
             }),
-            9 => Model::Unifier(CreateUnifier {
+            9 => Model::Junction(CreateJunction {
                 name: g.ident(),
                 from: ProcessorInputs::new(vec![g.ident(), g.ident(), g.ident()], Vec::new()),
                 output_routes: ProcessorOutputs::single(g.ident()),
@@ -1081,7 +1081,7 @@ mod tests {
         assert!(suggestions.contains(&"ENDPOINT".to_string()));
         assert!(suggestions.contains(&"INGESTOR".to_string()));
         assert!(suggestions.contains(&"RELAY".to_string()));
-        assert!(suggestions.contains(&"UNIFIER".to_string()));
+        assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1138,8 +1138,8 @@ mod tests {
     }
 
     #[test]
-    fn unifier_context_suggestions_do_not_leak_schema_keywords() {
-        let input = "CREATE UNIFIER merge FROM orders_a, orders_b ";
+    fn junction_context_suggestions_do_not_leak_schema_keywords() {
+        let input = "CREATE JUNCTION merge FROM orders_a, orders_b ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"TO".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1457,22 +1457,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_unifier_statement_with_implicit_attached_mode() {
+    fn parses_junction_statement_with_implicit_attached_mode() {
         let parsed = parse_statement(
-            "CREATE UNIFIER join_streams FROM notifications_a, notifications_b TO \
+            "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
              merged_notifications PARAMETERIZED BY tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
              MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
         let Statement::Create(parsed) = parsed else {
-            panic!("expected unifier statement");
+            panic!("expected junction statement");
         };
-        let Model::Unifier(unifier) = parsed.body.as_ref() else {
-            panic!("expected unifier statement");
+        let Model::Junction(junction) = parsed.body.as_ref() else {
+            panic!("expected junction statement");
         };
-        assert_eq!(unifier.mode, AckMode::Attached);
-        assert_eq!(unifier.from.from.len(), 2);
+        assert_eq!(junction.mode, AckMode::Attached);
+        assert_eq!(junction.from.from.len(), 2);
     }
 
     #[test]
@@ -1658,8 +1658,8 @@ mod tests {
                  TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB",
             ),
             (
-                "unifier",
-                "CREATE UNIFIER join_streams FROM notifications_a, notifications_b TO \
+                "junction",
+                "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
                  notifications_all PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE \
                  1MiB",
             ),
@@ -1738,7 +1738,7 @@ mod tests {
              raw.value MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE REORDERER reorder FROM raw TO projected UNPARAMETERIZED BY raw.value MAX TIME \
              10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
-            "CREATE UNIFIER join_streams FROM left, right TO joined UNPARAMETERIZED FLUSH EACH \
+            "CREATE JUNCTION join_streams FROM left, right TO joined UNPARAMETERIZED FLUSH EACH \
              100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE WINDOW PROCESSOR window_metrics FROM raw TO projected UNPARAMETERIZED WIDTH 2 \
              MESSAGES STEP 2 MESSAGES AGGREGATE projected.value = COUNT(raw.value) ON MESSAGE \
@@ -2070,9 +2070,9 @@ mod tests {
     }
 
     #[test]
-    fn canonical_roundtrip_unifier() {
+    fn canonical_roundtrip_junction() {
         let input = r#"
-            CREATE UNIFIER join_streams
+            CREATE JUNCTION join_streams
                 FROM ss1, ss2, ss3
                 TO ss10
                 PARAMETERIZED BY tenant

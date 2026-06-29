@@ -1196,11 +1196,15 @@ async fn handle_cluster_api_request(
             .await
             {
                 Ok(req) => match consensus.transfer_leader(req).await {
-                    Ok(()) => response_with_bytes(
-                        StatusCode::OK,
-                        Vec::<u8>::new(),
-                        RAFT_CONTENT_TYPE_CBOR,
-                    ),
+                    Ok(response) => match encode_cbor(&response) {
+                        Ok(body) => {
+                            response_with_bytes(StatusCode::OK, body, RAFT_CONTENT_TYPE_CBOR)
+                        }
+                        Err(error) => text_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("transfer_leader encode failed: {error}"),
+                        ),
+                    },
                     Err(error) => text_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         format!("transfer_leader failed: {error}"),
@@ -14591,7 +14595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_command_creates_unifier_model() {
+    async fn process_command_creates_junction_model() {
         let path = test_db_path();
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("test db directory should exist");
@@ -14714,7 +14718,7 @@ mod tests {
              UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA \
              kafka_main TOPIC notifications_b OFFSET BY CONSUMER GROUP notifications_b_group MODE \
              NO_ACK PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
-            "CREATE UNIFIER join_streams FROM notifications_a, notifications_b TO \
+            "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
              notifications_all UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
              ERROR LOG;",
         ] {
@@ -14735,24 +14739,24 @@ mod tests {
             );
         }
 
-        let unifier = registry
+        let junction = registry
             .get(
                 &Domain::parse("default").expect("valid domain"),
-                ModelKind::Unifier,
+                ModelKind::Junction,
                 &Identifier::parse("join_streams").expect("valid identifier"),
             )
             .expect("registry get should succeed")
-            .expect("unifier should exist");
-        let Model::Unifier(unifier) = unifier else {
-            panic!("stored model must be a unifier");
+            .expect("junction should exist");
+        let Model::Junction(junction) = junction else {
+            panic!("stored model must be a junction");
         };
-        assert_eq!(unifier.from.relays().len(), 2);
+        assert_eq!(junction.from.relays().len(), 2);
         assert_eq!(
-            unifier
+            junction
                 .output_routes
                 .relays()
                 .next()
-                .expect("unifier should declare an output")
+                .expect("junction should declare an output")
                 .as_str(),
             "notifications_all"
         );
@@ -15180,16 +15184,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_server_statement_accepts_unifier_from_application_crate() {
+    fn parse_server_statement_accepts_junction_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE UNIFIER join_streams FROM ss1, ss2 TO ss10 UNPARAMETERIZED FLUSH EACH 100ms \
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 UNPARAMETERIZED FLUSH EACH 100ms \
              MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
-        .expect("unifier statement should parse");
+        .expect("junction statement should parse");
         let Statement::Create(model) = parsed else {
             panic!("expected create statement");
         };
-        assert!(matches!(model.body.as_ref(), Model::Unifier(_)));
+        assert!(matches!(model.body.as_ref(), Model::Junction(_)));
     }
 
     #[test]

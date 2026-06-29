@@ -263,14 +263,14 @@ pub fn relay_name<'src>()
     parse_identifier_excluding_reserved("relay_name", &[Identifier::Message, Identifier::Branch])
 }
 
-pub fn unifier_ref<'src>()
+pub fn junction_ref<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:unifier")
+    parse_identifier("ref:junction")
 }
 
-pub fn unifier_name<'src>()
+pub fn junction_name<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("unifier_name")
+    parse_identifier("junction_name")
 }
 
 pub fn deduplicator_ref<'src>()

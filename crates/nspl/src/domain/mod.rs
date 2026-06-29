@@ -320,7 +320,7 @@ mod tests {
     fn suggests_unpaced_without_cross_branch_leakage() {
         let suggestions = suggest_statement("CREATE UNP", 10);
         assert!(suggestions.contains(&"UNPACED".to_string()));
-        assert!(!suggestions.contains(&"UNIFIER".to_string()));
+        assert!(!suggestions.contains(&"JUNCTION".to_string()));
     }
 
     #[test]

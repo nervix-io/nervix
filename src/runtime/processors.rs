@@ -97,7 +97,7 @@ pub(super) enum ParameterizedProcessorOperationSpec {
         max_batch_size: Option<String>,
         timeout_policy: CorrelationTimeoutPolicy,
     },
-    Unifier {
+    Junction {
         output_routes: ParameterizedProcessorOutputsSpec,
         flush_each: String,
         max_batch_size: Option<String>,
@@ -158,7 +158,7 @@ impl ParameterizedIngestorSpec {
                     | ParameterizedProcessorOperationSpec::WindowProcessor {
                         output_routes, ..
                     }
-                    | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
                     | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
                     | ParameterizedProcessorOperationSpec::WasmProcessor {
                         output_routes, ..
@@ -203,7 +203,7 @@ impl ParameterizedIngestorSpec {
                 | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
                 | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
                 | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
                 | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
                 | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
                     output_routes
@@ -284,7 +284,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         flush_each: RuntimeFlushPolicy,
         timeout_policy: CorrelationTimeoutPolicy,
     },
-    Unifier {
+    Junction {
         output_routes: RelayProcessorOutputsTemplate,
         flush_each: RuntimeFlushPolicy,
     },
@@ -375,7 +375,7 @@ pub(super) enum RelayProcessorOperationNode {
         compiled_output_program: Option<Box<CompiledCorrelatorOutputProgram>>,
         state: SharedCorrelatorBranchState,
     },
-    Unifier {
+    Junction {
         output_routes: RelayProcessorOutputsNode,
         flush_each: RuntimeFlushPolicy,
         pending: Vec<RelayRecordBatch>,
@@ -493,7 +493,7 @@ pub(super) struct WindowFlushContext<'a> {
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
 }
 
-pub(super) struct UnifierFlushContext<'a> {
+pub(super) struct JunctionFlushContext<'a> {
     pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: &'a str,

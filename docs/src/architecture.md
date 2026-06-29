@@ -16,7 +16,7 @@ The graph itself is built out of persisted NSPL models:
 - `VHOST`
 - `ENDPOINT`
 - `INGESTOR`
-- `UNIFIER`
+- `JUNCTION`
 - `DEDUPLICATOR`
 - `REINGESTOR`
 - `EMITTER`
@@ -29,7 +29,7 @@ The runtime then instantiates that schedule:
 
 - ingestors attach to external systems or local endpoints
 - relays buffer and route records
-- unifiers, deduplicators, reingestors, and materializers route or transform records between relays
+- junctions, deduplicators, reingestors, and materializers route or transform records between relays
 - emitters encode records and publish them externally
 
 Runtime execution has its own persistence boundary. Selected execution node state is persisted through periodic snapshots and replication, but in-flight message batches and ACK state are hot-path memory only.

@@ -143,8 +143,8 @@ pub enum ModelKind {
     Materializer,
     #[strum(props(completion_label = "ref:lookup"))]
     Lookup,
-    #[strum(props(completion_label = "ref:unifier"))]
-    Unifier,
+    #[strum(props(completion_label = "ref:junction"))]
+    Junction,
     #[strum(props(completion_label = "ref:deduplicator"))]
     Deduplicator,
     #[strum(props(completion_label = "ref:correlator"))]
@@ -459,7 +459,7 @@ pub enum Model {
     Relay(CreateRelay),
     Materializer(CreateMaterializer),
     Lookup(CreateLookup),
-    Unifier(CreateUnifier),
+    Junction(CreateJunction),
     Deduplicator(CreateDeduplicator),
     Correlator(CreateCorrelator),
     Reorderer(CreateReorderer),
@@ -504,7 +504,7 @@ impl Model {
             Self::Relay(_) => ModelKind::Relay,
             Self::Materializer(_) => ModelKind::Materializer,
             Self::Lookup(_) => ModelKind::Lookup,
-            Self::Unifier(_) => ModelKind::Unifier,
+            Self::Junction(_) => ModelKind::Junction,
             Self::Deduplicator(_) => ModelKind::Deduplicator,
             Self::Correlator(_) => ModelKind::Correlator,
             Self::Reorderer(_) => ModelKind::Reorderer,
@@ -553,7 +553,7 @@ impl Model {
             Self::Relay(v) => &v.name,
             Self::Materializer(v) => &v.relay,
             Self::Lookup(v) => &v.name,
-            Self::Unifier(v) => &v.name,
+            Self::Junction(v) => &v.name,
             Self::Deduplicator(v) => &v.name,
             Self::Correlator(v) => &v.name,
             Self::Reorderer(v) => &v.name,
@@ -1910,7 +1910,7 @@ pub struct CreateLookup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateUnifier {
+pub struct CreateJunction {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
@@ -2078,7 +2078,7 @@ mod tests {
         ErrorPolicies, KafkaPartitionSchedule, MessageErrorPolicy, Model, ModelKind, ScheduledNode,
     };
     use crate::{
-        CreateIngestor, CreateUnifier, Domain, EndpointIngestMode, Identifier, IngestSource,
+        CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Identifier, IngestSource,
         ParseAsType, ProcessorInputs, ProcessorOutputs, SchemaField,
     };
 
@@ -2108,7 +2108,7 @@ mod tests {
             (ModelKind::Ingestor, "ref:ingestor", "ingestor"),
             (ModelKind::Reingestor, "ref:reingestor", "reingestor"),
             (ModelKind::Relay, "ref:relay", "relay"),
-            (ModelKind::Unifier, "ref:unifier", "unifier"),
+            (ModelKind::Junction, "ref:junction", "junction"),
             (ModelKind::Deduplicator, "ref:deduplicator", "deduplicator"),
             (ModelKind::Emitter, "ref:emitter", "emitter"),
         ] {
@@ -2245,10 +2245,10 @@ mod tests {
 
     #[test]
     fn scheduled_node_execution_uses_primary_except_for_endpoint_ingestors() {
-        let replicated_unifier = ScheduledNode {
+        let replicated_junction = ScheduledNode {
             identifier: identifier("orders_merge"),
-            kind: ModelKind::Unifier,
-            config: Box::new(Model::Unifier(CreateUnifier {
+            kind: ModelKind::Junction,
+            config: Box::new(Model::Junction(CreateJunction {
                 name: identifier("orders_merge"),
                 from: ProcessorInputs::new(
                     vec![identifier("orders_in_a"), identifier("orders_in_b")],
@@ -2292,9 +2292,9 @@ mod tests {
             assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
         };
 
-        assert_eq!(replicated_unifier.execution_node(), Some("node-a"));
-        assert!(replicated_unifier.executes_on("node-a"));
-        assert!(!replicated_unifier.executes_on("node-b"));
+        assert_eq!(replicated_junction.execution_node(), Some("node-a"));
+        assert!(replicated_junction.executes_on("node-a"));
+        assert!(!replicated_junction.executes_on("node-b"));
 
         assert_eq!(endpoint_ingestor.execution_node(), None);
         assert!(endpoint_ingestor.executes_on("node-a"));

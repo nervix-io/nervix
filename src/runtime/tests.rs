@@ -16,10 +16,10 @@ use nervix_models::{
     AckMode, BranchParameterization, ClientConfigEntry, ClusterSchedule, CodecWireFormat,
     CreateClientHttp, CreateClientMqtt, CreateClientPrometheus, CreateClientWebsockets,
     CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSchema, CreateUnifier, CreateWasmProcessor, CreateWindowProcessor, Domain,
-    DomainConfig, DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink,
-    ErrorPolicies, GeneralErrorPolicy, Identifier, InferencerTensorMapping, IngestSource,
+    CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup,
+    CreateReingestor, CreateRelay, CreateSchema, CreateWasmProcessor, CreateWindowProcessor,
+    Domain, DomainConfig, DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick,
+    EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, JsonType, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos,
     MqttSession, ParameterValueMapping, ParseAsType, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput, ProcessorOutputs, RelayParameterization, RemoteAckOutcome,
@@ -1497,9 +1497,9 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             "deduplicator 'dedup_orders' is not attached to a branch root",
         ),
         (
-            ModelKind::Unifier,
+            ModelKind::Junction,
             identifier("join_orders"),
-            nervix_models::Model::Unifier(CreateUnifier {
+            nervix_models::Model::Junction(CreateJunction {
                 name: identifier("join_orders"),
                 from: ProcessorInputs::new(
                     vec![identifier("left_orders"), identifier("right_orders")],
@@ -1513,7 +1513,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             }),
-            "unifier 'join_orders' is not attached to a branch root",
+            "junction 'join_orders' is not attached to a branch root",
         ),
         (
             ModelKind::WindowProcessor,
@@ -4407,7 +4407,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
+fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
             (
@@ -4453,9 +4453,9 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                 Some(vec![identifier("tenant")]),
             ),
             (
-                ModelKind::Unifier,
+                ModelKind::Junction,
                 identifier("join_streams"),
-                nervix_models::Model::Unifier(CreateUnifier {
+                nervix_models::Model::Junction(CreateJunction {
                     name: identifier("join_streams"),
                     from: ProcessorInputs::new(
                         vec![identifier("left_stream"), identifier("right_stream")],
@@ -4502,23 +4502,24 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                 .count(),
             1
         );
-        let unifier = spec
+        let junction = spec
             .processors
             .iter()
             .find(|processor| processor.processor == identifier("join_streams"))
-            .expect("unifier should be reachable");
+            .expect("junction should be reachable");
         assert_eq!(
-            unifier.input_relays,
+            junction.input_relays,
             vec![identifier("left_stream"), identifier("right_stream")]
         );
-        let ParameterizedProcessorOperationSpec::Unifier { output_routes, .. } = &unifier.operation
+        let ParameterizedProcessorOperationSpec::Junction { output_routes, .. } =
+            &junction.operation
         else {
-            panic!("expected unifier processor");
+            panic!("expected junction processor");
         };
         let output = output_routes
             .routes
             .first()
-            .expect("unifier should have output route");
+            .expect("junction should have output route");
         assert_eq!(output.relay, identifier("joined_stream"));
         assert!(
             spec.processors
