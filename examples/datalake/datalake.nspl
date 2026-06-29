@@ -648,8 +648,8 @@ CREATE DEDUPLICATOR device_location_distance
 
 CREATE CORRELATOR device_edge_connect_correlator
   FROM device_connect_events, edge_connect_events
-  ON (device_connect_events.session_id, device_connect_events.edge_id),
-     (edge_connect_events.session_id, edge_connect_events.edge_id)
+  CORRELATE WHERE device_connect_events.session_id = edge_connect_events.session_id
+    AND device_connect_events.edge_id = edge_connect_events.edge_id
   MATCH EARLIEST
   TO device_edge_connect_events
   PARAMETERIZED BY device_branch
@@ -692,8 +692,8 @@ CREATE DEDUPLICATOR connect_distance_score
 
 CREATE CORRELATOR connected_session_correlator
   FROM device_edge_connect_scored_events, auth_authorized_events
-  ON (device_edge_connect_scored_events.session_id, device_edge_connect_scored_events.edge_id),
-     (auth_authorized_events.session_id, auth_authorized_events.edge_id)
+  CORRELATE WHERE device_edge_connect_scored_events.session_id = auth_authorized_events.session_id
+    AND device_edge_connect_scored_events.edge_id = auth_authorized_events.edge_id
   MATCH EARLIEST
   TO connected_sessions
   PARAMETERIZED BY device_branch
@@ -730,8 +730,8 @@ CREATE CORRELATOR connected_session_correlator
 
 CREATE CORRELATOR disconnect_correlator
   FROM device_disconnect_events, edge_disconnect_events
-  ON (device_disconnect_events.session_id, device_disconnect_events.edge_id),
-     (edge_disconnect_events.session_id, edge_disconnect_events.edge_id)
+  CORRELATE WHERE device_disconnect_events.session_id = edge_disconnect_events.session_id
+    AND device_disconnect_events.edge_id = edge_disconnect_events.edge_id
   MATCH EARLIEST
   TO disconnect_events_matched
   PARAMETERIZED BY device_branch

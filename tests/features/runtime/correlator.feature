@@ -83,7 +83,7 @@ Feature: Relay correlation
 
       CREATE CORRELATOR correlate_profiles
         FROM left_profiles, right_profiles
-        ON (lower(left_profiles.first_name)), (lower(right_profiles.first_name))
+        CORRELATE WHERE lower(left_profiles.first_name) = lower(right_profiles.first_name)
         MATCH <match_policy>
         TO correlated_profiles PARAMETERIZED BY tenant_branch
         FLUSH IMMEDIATE
