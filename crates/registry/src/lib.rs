@@ -876,17 +876,6 @@ impl DomainState {
                     )?;
                 }
                 Model::Inferencer(processor) => {
-                    let input = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &processor.from_relay,
-                        ModelKind::Relay,
-                    )?;
-                    graph.add_edge(input, source, EdgeKind::RequiredBy);
-                    graph.add_edge(input, source, EdgeKind::SendsTo);
-
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -897,27 +886,41 @@ impl DomainState {
                         &processor.output_routes,
                     )?;
 
-                    let producer_schema =
-                        schema_for_ack_model(domain, identifier, models, &processor.from_relay)?;
+                    let input_schemas = processor_input_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &mut graph,
+                        source,
+                        &processor.from,
+                        "inferencer input",
+                    )?;
+                    let first_input_relay = processor_first_input_relay(
+                        domain,
+                        identifier,
+                        &processor.from,
+                        "inferencer input",
+                    )?;
                     let branch_schema = relay_declared_branch_schema(
                         domain,
                         identifier,
                         models,
-                        &processor.from_relay,
+                        first_input_relay,
                     )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&processor.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
-                        &processor.from_where,
+                        &processor.from.r#where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&processor.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
                         processor.filter_where.as_deref(),
                     )?;
@@ -925,7 +928,7 @@ impl DomainState {
                         domain,
                         identifier,
                         processor,
-                        producer_schema,
+                        &input_schemas,
                     )?;
                     ensure_inferencer_output_targets_declared(domain, identifier, processor)?;
                     for output in processor.output_routes.outputs() {
@@ -935,7 +938,7 @@ impl DomainState {
                             domain,
                             identifier,
                             models,
-                            &[(&processor.from_relay, producer_schema)],
+                            &input_schemas,
                             output,
                             consumer_schema,
                             branch_schema,
@@ -966,17 +969,6 @@ impl DomainState {
                     )?;
                 }
                 Model::WasmProcessor(processor) => {
-                    let input = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &processor.from_relay,
-                        ModelKind::Relay,
-                    )?;
-                    graph.add_edge(input, source, EdgeKind::RequiredBy);
-                    graph.add_edge(input, source, EdgeKind::SendsTo);
-
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -986,31 +978,52 @@ impl DomainState {
                         source,
                         &processor.output_routes,
                     )?;
-                    let producer_schema =
-                        schema_for_ack_model(domain, identifier, models, &processor.from_relay)?;
+                    let input_schemas = processor_input_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &mut graph,
+                        source,
+                        &processor.from,
+                        "wasm processor input",
+                    )?;
+                    let first_input_relay = processor_first_input_relay(
+                        domain,
+                        identifier,
+                        &processor.from,
+                        "wasm processor input",
+                    )?;
                     let branch_schema = relay_declared_branch_schema(
                         domain,
                         identifier,
                         models,
-                        &processor.from_relay,
+                        first_input_relay,
                     )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&processor.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
-                        &processor.from_where,
+                        &processor.from.r#where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&processor.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
                         processor.filter_where.as_deref(),
                     )?;
-                    ensure_wasm_processor_output_schemas(domain, identifier, models, processor)?;
+                    ensure_wasm_processor_output_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        processor,
+                        &input_schemas,
+                        branch_schema,
+                    )?;
 
                     add_message_error_policy_edges(
                         domain,
@@ -1223,17 +1236,6 @@ impl DomainState {
                     }
                 }
                 Model::Reingestor(reingestor) => {
-                    let input = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &reingestor.from_relay,
-                        ModelKind::Relay,
-                    )?;
-                    graph.add_edge(input, source, EdgeKind::RequiredBy);
-                    graph.add_edge(input, source, EdgeKind::SendsTo);
-
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -1244,27 +1246,41 @@ impl DomainState {
                         &reingestor.output_routes,
                     )?;
 
-                    let producer_schema =
-                        schema_for_ack_model(domain, identifier, models, &reingestor.from_relay)?;
+                    let input_schemas = processor_input_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &mut graph,
+                        source,
+                        &reingestor.from,
+                        "reingestor input",
+                    )?;
+                    let first_input_relay = processor_first_input_relay(
+                        domain,
+                        identifier,
+                        &reingestor.from,
+                        "reingestor input",
+                    )?;
                     let branch_schema = relay_declared_branch_schema(
                         domain,
                         identifier,
                         models,
-                        &reingestor.from_relay,
+                        first_input_relay,
                     )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&reingestor.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
-                        &reingestor.from_where,
+                        &reingestor.from.r#where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&reingestor.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
                         reingestor.filter_where.as_deref(),
                     )?;
@@ -1275,7 +1291,7 @@ impl DomainState {
                             domain,
                             identifier,
                             models,
-                            &[(&reingestor.from_relay, producer_schema)],
+                            &input_schemas,
                             output,
                             consumer_schema,
                             branch_schema,
@@ -1294,6 +1310,7 @@ impl DomainState {
                             reingestor,
                             &effective_schema,
                             &output.relay,
+                            branch_schema,
                         )?;
                     }
                     validate_branch_ttl(domain, identifier, &reingestor.parameterized_by)?;
@@ -1360,17 +1377,6 @@ impl DomainState {
                     ensure_lookup_key_field_exists(domain, identifier, lookup, schema)?;
                 }
                 Model::Deduplicator(deduplicator) => {
-                    let input = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &deduplicator.from_relay,
-                        ModelKind::Relay,
-                    )?;
-                    graph.add_edge(input, source, EdgeKind::RequiredBy);
-                    graph.add_edge(input, source, EdgeKind::SendsTo);
-
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -1381,13 +1387,21 @@ impl DomainState {
                         &deduplicator.output_routes,
                     )?;
 
-                    let producer_schema =
-                        schema_for_ack_model(domain, identifier, models, &deduplicator.from_relay)?;
+                    let input_schemas = processor_input_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &mut graph,
+                        source,
+                        &deduplicator.from,
+                        "deduplicator input",
+                    )?;
                     ensure_deduplicator_key_compiles(
                         domain,
                         identifier,
                         deduplicator,
-                        producer_schema,
+                        &input_schemas,
                     )?;
                     humantime::parse_duration(&deduplicator.max_time).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
@@ -1399,25 +1413,31 @@ impl DomainState {
                             ),
                         })
                     })?;
+                    let first_input_relay = processor_first_input_relay(
+                        domain,
+                        identifier,
+                        &deduplicator.from,
+                        "deduplicator input",
+                    )?;
                     let branch_schema = relay_declared_branch_schema(
                         domain,
                         identifier,
                         models,
-                        &deduplicator.from_relay,
+                        first_input_relay,
                     )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&deduplicator.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
-                        &deduplicator.from_where,
+                        &deduplicator.from.r#where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&deduplicator.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
                         deduplicator.filter_where.as_deref(),
                     )?;
@@ -1426,7 +1446,7 @@ impl DomainState {
                         identifier,
                         models,
                         &deduplicator.output_routes,
-                        &[(&deduplicator.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
                         "deduplicator flow",
                         ProcessorOutputSchemaCompatibility::Compatible,
@@ -1566,17 +1586,6 @@ impl DomainState {
                     )?;
                 }
                 Model::Reorderer(reorderer) => {
-                    let input = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &reorderer.from_relay,
-                        ModelKind::Relay,
-                    )?;
-                    graph.add_edge(input, source, EdgeKind::RequiredBy);
-                    graph.add_edge(input, source, EdgeKind::SendsTo);
-
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -1616,27 +1625,41 @@ impl DomainState {
                             })
                         })?;
 
-                    let producer_schema =
-                        schema_for_ack_model(domain, identifier, models, &reorderer.from_relay)?;
+                    let input_schemas = processor_input_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &mut graph,
+                        source,
+                        &reorderer.from,
+                        "reorderer input",
+                    )?;
+                    let first_input_relay = processor_first_input_relay(
+                        domain,
+                        identifier,
+                        &reorderer.from,
+                        "reorderer input",
+                    )?;
                     let branch_schema = relay_declared_branch_schema(
                         domain,
                         identifier,
                         models,
-                        &reorderer.from_relay,
+                        first_input_relay,
                     )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&reorderer.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
-                        &reorderer.from_where,
+                        &reorderer.from.r#where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&reorderer.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
                         reorderer.filter_where.as_deref(),
                     )?;
@@ -1645,7 +1668,7 @@ impl DomainState {
                         identifier,
                         models,
                         &reorderer.output_routes,
-                        &[(&reorderer.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
                         "reorderer flow",
                         ProcessorOutputSchemaCompatibility::Compatible,
@@ -1671,55 +1694,35 @@ impl DomainState {
                         &unifier.output_routes,
                     )?;
 
-                    let mut input_schemas = Vec::new();
-                    let mut unified_input_schema = None;
-
-                    for from_relay in &unifier.from_relays {
-                        let input = expect_kind(
-                            domain,
-                            identifier,
-                            models,
-                            &indices,
-                            from_relay,
-                            ModelKind::Relay,
-                        )?;
-                        graph.add_edge(input, source, EdgeKind::RequiredBy);
-                        graph.add_edge(input, source, EdgeKind::SendsTo);
-
-                        let input_schema =
-                            schema_for_ack_model(domain, identifier, models, from_relay)?;
-                        if let Some(reference_schema) = unified_input_schema {
-                            ensure_equal_internal_schema(
-                                domain,
-                                identifier,
-                                input_schema,
-                                reference_schema,
-                                "unifier input",
-                            )?;
-                        } else {
-                            unified_input_schema = Some(input_schema);
-                        }
-                        input_schemas.push((from_relay, input_schema));
-                    }
-
-                    if unified_input_schema.is_none() {
-                        unreachable!("unifier parser requires at least one input relay");
-                    }
-                    let branch_schema = unifier
-                        .from_relays
-                        .first()
-                        .map(|relay| {
-                            relay_declared_branch_schema(domain, identifier, models, relay)
-                        })
-                        .transpose()?
-                        .flatten();
+                    let input_schemas = processor_input_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &mut graph,
+                        source,
+                        &unifier.from,
+                        "unifier input",
+                    )?;
+                    let first_input_relay = processor_first_input_relay(
+                        domain,
+                        identifier,
+                        &unifier.from,
+                        "unifier input",
+                    )?;
+                    let branch_schema = relay_declared_branch_schema(
+                        domain,
+                        identifier,
+                        models,
+                        first_input_relay,
+                    )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
                         &input_schemas,
                         branch_schema,
-                        &unifier.from_where,
+                        &unifier.from.r#where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
@@ -1750,17 +1753,6 @@ impl DomainState {
                     )?;
                 }
                 Model::WindowProcessor(window_processor) => {
-                    let input = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        &window_processor.from_relay,
-                        ModelKind::Relay,
-                    )?;
-                    graph.add_edge(input, source, EdgeKind::RequiredBy);
-                    graph.add_edge(input, source, EdgeKind::SendsTo);
-
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -1783,31 +1775,41 @@ impl DomainState {
                         "STEP",
                         window_processor.step.duration.as_deref(),
                     )?;
-                    let producer_schema = schema_for_ack_model(
+                    let input_schemas = processor_input_schemas(
                         domain,
                         identifier,
                         models,
-                        &window_processor.from_relay,
+                        &indices,
+                        &mut graph,
+                        source,
+                        &window_processor.from,
+                        "window processor input",
+                    )?;
+                    let first_input_relay = processor_first_input_relay(
+                        domain,
+                        identifier,
+                        &window_processor.from,
+                        "window processor input",
                     )?;
                     let branch_schema = relay_declared_branch_schema(
                         domain,
                         identifier,
                         models,
-                        &window_processor.from_relay,
+                        first_input_relay,
                     )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&window_processor.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
-                        &window_processor.from_where,
+                        &window_processor.from.r#where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[(&window_processor.from_relay, producer_schema)],
+                        &input_schemas,
                         branch_schema,
                         window_processor.filter_where.as_deref(),
                     )?;
@@ -1816,6 +1818,8 @@ impl DomainState {
                         identifier,
                         models,
                         window_processor,
+                        &input_schemas,
+                        branch_schema,
                     )?;
                     add_message_error_policy_edges(
                         domain,
@@ -2705,11 +2709,88 @@ fn processor_base_output(outputs: &ProcessorOutputs) -> Option<&ProcessorOutput>
     outputs.routes.first()
 }
 
+fn processor_input_schemas<'inputs, 'models>(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &'models HashMap<RegistryKey, Model>,
+    indices: &HashMap<RegistryKey, NodeIndex>,
+    graph: &mut DiGraph<ActiveNode, EdgeKind>,
+    source: NodeIndex,
+    inputs: &'inputs nervix_models::ProcessorInputs,
+    relation: &str,
+) -> Result<Vec<(&'inputs Identifier, &'models CreateSchema)>, Report<RegistryError>> {
+    if inputs.from.is_empty() {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("{relation} requires at least one input relay"),
+        }));
+    }
+
+    let mut seen = HashSet::new();
+    let mut input_schemas = Vec::new();
+    let mut reference_schema = None;
+    for from_relay in inputs.relays() {
+        if !seen.insert(from_relay.clone()) {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "{relation} input relay '{}' is declared more than once",
+                    from_relay.as_str()
+                ),
+            }));
+        }
+        let input = expect_kind(
+            domain,
+            identifier,
+            models,
+            indices,
+            from_relay,
+            ModelKind::Relay,
+        )?;
+        graph.add_edge(input, source, EdgeKind::RequiredBy);
+        graph.add_edge(input, source, EdgeKind::SendsTo);
+
+        let input_schema = schema_for_ack_model(domain, identifier, models, from_relay)?;
+        if let Some(reference_schema) = reference_schema {
+            ensure_equal_internal_schema(
+                domain,
+                identifier,
+                input_schema,
+                reference_schema,
+                relation,
+            )?;
+        } else {
+            reference_schema = Some(input_schema);
+        }
+        input_schemas.push((from_relay, input_schema));
+    }
+    Ok(input_schemas)
+}
+
+fn processor_first_input_relay<'a>(
+    domain: &Domain,
+    identifier: &Identifier,
+    inputs: &'a nervix_models::ProcessorInputs,
+    relation: &str,
+) -> Result<&'a Identifier, Report<RegistryError>> {
+    inputs.from.first().ok_or_else(|| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("{relation} requires at least one input relay"),
+        })
+    })
+}
+
 fn ensure_window_processor_output_schemas(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
     window_processor: &CreateWindowProcessor,
+    input_schemas: &[(&Identifier, &CreateSchema)],
+    branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_processor_outputs_declared(domain, identifier, &window_processor.output_routes)?;
     let Some(base_output) = processor_base_output(&window_processor.output_routes) else {
@@ -2721,12 +2802,11 @@ fn ensure_window_processor_output_schemas(
         domain,
         identifier,
         window_processor,
+        input_schemas,
         &base_output.relay,
         base_output_schema,
     )?;
 
-    let branch_schema =
-        relay_declared_branch_schema(domain, identifier, models, &base_output.relay)?;
     for output in window_processor.output_routes.outputs() {
         let output_schema = schema_for_ack_model(domain, identifier, models, &output.relay)?;
         let effective_schema = effective_processor_output_filter_map_schema(
@@ -2755,11 +2835,10 @@ fn ensure_wasm_processor_output_schemas(
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
     processor: &nervix_models::CreateWasmProcessor,
+    input_schemas: &[(&Identifier, &CreateSchema)],
+    branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_processor_outputs_declared(domain, identifier, &processor.output_routes)?;
-    let input_schema = schema_for_ack_model(domain, identifier, models, &processor.from_relay)?;
-    let branch_schema =
-        relay_declared_branch_schema(domain, identifier, models, &processor.from_relay)?;
     let mut output_relays = HashSet::new();
     for output in processor.output_routes.outputs() {
         if !output_relays.insert(output.relay.clone()) {
@@ -2777,8 +2856,7 @@ fn ensure_wasm_processor_output_schemas(
             domain,
             identifier,
             models,
-            &processor.from_relay,
-            input_schema,
+            input_schemas,
             output,
             output_schema,
             branch_schema,
@@ -2799,8 +2877,7 @@ fn effective_wasm_output_filter_map_schema(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
-    input_relay: &Identifier,
-    input_schema: &CreateSchema,
+    input_schemas: &[(&Identifier, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -2838,17 +2915,27 @@ fn effective_wasm_output_filter_map_schema(
         output.relay.as_str(),
         output_schema,
     )];
-    if input_relay != &output.relay {
-        bindings.push(readonly_binding_for_internal_schema(
-            input_relay.as_str(),
-            input_schema,
-        ));
+    for (input_relay, input_schema) in input_schemas {
+        if *input_relay != &output.relay {
+            bindings.push(readonly_binding_for_internal_schema(
+                input_relay.as_str(),
+                input_schema,
+            ));
+        }
     }
-    if input_relay.as_str() != WASM_INPUT_NAMESPACE && output.relay.as_str() != WASM_INPUT_NAMESPACE
+    let Some((first_input_relay, first_input_schema)) = input_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "wasm processor input requires at least one input relay".to_string(),
+        }));
+    };
+    if first_input_relay.as_str() != WASM_INPUT_NAMESPACE
+        && output.relay.as_str() != WASM_INPUT_NAMESPACE
     {
         bindings.push(readonly_binding_for_internal_schema(
             WASM_INPUT_NAMESPACE,
-            input_schema,
+            first_input_schema,
         ));
     }
     if let Some(branch_schema) = branch_schema {
@@ -2858,7 +2945,11 @@ fn effective_wasm_output_filter_map_schema(
         ));
     }
     let mut local_namespaces = HashSet::new();
-    local_namespaces.insert(input_relay.as_str().to_string());
+    local_namespaces.extend(
+        input_schemas
+            .iter()
+            .map(|(input_relay, _schema)| input_relay.as_str().to_string()),
+    );
     local_namespaces.insert(output.relay.as_str().to_string());
     local_namespaces.insert(WASM_INPUT_NAMESPACE.to_string());
     local_namespaces.insert(BRANCH_NAMESPACE.to_string());
@@ -2893,6 +2984,7 @@ fn validate_window_processor_aggregate(
     domain: &Domain,
     identifier: &Identifier,
     window_processor: &CreateWindowProcessor,
+    input_schemas: &[(&Identifier, &CreateSchema)],
     base_output_relay: &Identifier,
     base_output_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -2932,17 +3024,20 @@ fn validate_window_processor_aggregate(
         }));
     }
 
+    let input_relays = input_schemas
+        .iter()
+        .map(|(relay, _schema)| relay.as_str())
+        .collect::<HashSet<_>>();
     for assignment in &aggregate.assignments {
         for field_ref in referenced_field_refs(&assignment.value.inner) {
-            if field_ref.relay != window_processor.from_relay.as_str() {
+            if !input_relays.contains(field_ref.relay.as_str()) {
                 return Err(Report::new(RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
                     reason: format!(
-                        "window aggregate input field '{}.{}' must read from input relay '{}'",
-                        field_ref.relay,
-                        field_ref.field,
-                        window_processor.from_relay.as_str()
+                        "window aggregate input field '{}.{}' must read from one of the input \
+                         relays",
+                        field_ref.relay, field_ref.field
                     ),
                 }));
             }
@@ -5306,8 +5401,15 @@ fn ensure_deduplicator_key_compiles(
     domain: &Domain,
     identifier: &Identifier,
     deduplicator: &CreateDeduplicator,
-    schema: &CreateSchema,
+    input_schemas: &[(&Identifier, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
+    let Some((primary_relay, primary_schema)) = input_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "deduplicator input requires at least one input relay".to_string(),
+        }));
+    };
     let expressions = split_deduplicate_on_expressions(&deduplicator.deduplicate_on);
     if expressions.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
@@ -5322,7 +5424,7 @@ fn ensure_deduplicator_key_compiles(
         .map(|(index, expression)| {
             format!(
                 "{}.deduplicate_key_{} = {}",
-                deduplicator.from_relay.as_str(),
+                primary_relay.as_str(),
                 index,
                 expression
             )
@@ -5340,14 +5442,17 @@ fn ensure_deduplicator_key_compiles(
             ),
         })
     })?;
-    let key_types = infer_set_expr_types_for_bindings(
-        &parsed,
-        [writable_binding_for_internal_schema(
-            deduplicator.from_relay.as_str(),
-            schema,
-        )],
-    )
-    .map_err(|error| {
+    let mut bindings = vec![writable_binding_for_internal_schema(
+        primary_relay.as_str(),
+        primary_schema,
+    )];
+    bindings.extend(
+        input_schemas
+            .iter()
+            .skip(1)
+            .map(|(relay, schema)| readonly_binding_for_internal_schema(relay.as_str(), schema)),
+    );
+    let key_types = infer_set_expr_types_for_bindings(&parsed, bindings).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -5594,20 +5699,22 @@ fn ensure_inferencer_input_mappings(
     domain: &Domain,
     identifier: &Identifier,
     processor: &CreateInferencer,
-    input_schema: &CreateSchema,
+    input_schemas: &[(&Identifier, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     for mapping in &processor.inputs {
-        if mapping.relay != processor.from_relay {
+        let Some((_relay, input_schema)) = input_schemas
+            .iter()
+            .find(|(relay, _schema)| **relay == mapping.relay)
+        else {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "inference input '{}' must read from input relay '{}'",
-                    mapping.tensor,
-                    processor.from_relay.as_str()
+                    "inference input '{}' must read from one of the declared input relays",
+                    mapping.tensor
                 ),
             }));
-        }
+        };
         ensure_field_exists(
             domain,
             identifier,
@@ -5924,10 +6031,9 @@ fn ensure_reingestor_parameterization_target(
     reingestor: &CreateReingestor,
     schema: &CreateSchema,
     output_relay: &Identifier,
+    branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     if let Some(parameter_schema) = reingestor.parameterized_by.schema() {
-        let branch_schema =
-            relay_declared_branch_schema(domain, identifier, models, &reingestor.from_relay)?;
         ensure_parameter_values_match_schema(
             domain,
             identifier,
@@ -6423,33 +6529,45 @@ fn validate_processing_branch_parameterizations(
     // here must already have an inferred branch shape.
     for (key, model) in models {
         match model {
-            Model::Inferencer(processor) => ProcessorParameterizationCheck {
-                domain,
-                identifier: &key.identifier,
-                model_kind: "inferencer",
-                models,
-                indices,
-                graph,
+            Model::Inferencer(processor) => {
+                let check = ProcessorParameterizationCheck {
+                    domain,
+                    identifier: &key.identifier,
+                    model_kind: "inferencer",
+                    models,
+                    indices,
+                    graph,
+                };
+                for from_relay in processor.from.relays() {
+                    check.matches_relay(&processor.parameterized_by, from_relay)?;
+                }
             }
-            .matches_relay(&processor.parameterized_by, &processor.from_relay)?,
-            Model::WasmProcessor(processor) => ProcessorParameterizationCheck {
-                domain,
-                identifier: &key.identifier,
-                model_kind: "wasm processor",
-                models,
-                indices,
-                graph,
+            Model::WasmProcessor(processor) => {
+                let check = ProcessorParameterizationCheck {
+                    domain,
+                    identifier: &key.identifier,
+                    model_kind: "wasm processor",
+                    models,
+                    indices,
+                    graph,
+                };
+                for from_relay in processor.from.relays() {
+                    check.matches_relay(&processor.parameterized_by, from_relay)?;
+                }
             }
-            .matches_relay(&processor.parameterized_by, &processor.from_relay)?,
-            Model::Deduplicator(deduplicator) => ProcessorParameterizationCheck {
-                domain,
-                identifier: &key.identifier,
-                model_kind: "deduplicator",
-                models,
-                indices,
-                graph,
+            Model::Deduplicator(deduplicator) => {
+                let check = ProcessorParameterizationCheck {
+                    domain,
+                    identifier: &key.identifier,
+                    model_kind: "deduplicator",
+                    models,
+                    indices,
+                    graph,
+                };
+                for from_relay in deduplicator.from.relays() {
+                    check.matches_relay(&deduplicator.parameterized_by, from_relay)?;
+                }
             }
-            .matches_relay(&deduplicator.parameterized_by, &deduplicator.from_relay)?,
             Model::Correlator(correlator) => {
                 let check = ProcessorParameterizationCheck {
                     domain,
@@ -6470,35 +6588,44 @@ fn validate_processing_branch_parameterizations(
                     check.matches_relay(&correlator.parameterized_by, relay)?;
                 }
             }
-            Model::Reorderer(reorderer) => ProcessorParameterizationCheck {
-                domain,
-                identifier: &key.identifier,
-                model_kind: "reorderer",
-                models,
-                indices,
-                graph,
+            Model::Reorderer(reorderer) => {
+                let check = ProcessorParameterizationCheck {
+                    domain,
+                    identifier: &key.identifier,
+                    model_kind: "reorderer",
+                    models,
+                    indices,
+                    graph,
+                };
+                for from_relay in reorderer.from.relays() {
+                    check.matches_relay(&reorderer.parameterized_by, from_relay)?;
+                }
             }
-            .matches_relay(&reorderer.parameterized_by, &reorderer.from_relay)?,
-            Model::Reingestor(reingestor) => ensure_processing_source_parameterization(
-                domain,
-                &key.identifier,
-                "reingestor",
-                &reingestor.from_relay,
-                indices,
-                graph,
-            )?,
-            Model::WindowProcessor(window_processor) => ProcessorParameterizationCheck {
-                domain,
-                identifier: &key.identifier,
-                model_kind: "window processor",
-                models,
-                indices,
-                graph,
+            Model::Reingestor(reingestor) => {
+                for from_relay in reingestor.from.relays() {
+                    ensure_processing_source_parameterization(
+                        domain,
+                        &key.identifier,
+                        "reingestor",
+                        from_relay,
+                        indices,
+                        graph,
+                    )?;
+                }
             }
-            .matches_relay(
-                &window_processor.parameterized_by,
-                &window_processor.from_relay,
-            )?,
+            Model::WindowProcessor(window_processor) => {
+                let check = ProcessorParameterizationCheck {
+                    domain,
+                    identifier: &key.identifier,
+                    model_kind: "window processor",
+                    models,
+                    indices,
+                    graph,
+                };
+                for from_relay in window_processor.from.relays() {
+                    check.matches_relay(&window_processor.parameterized_by, from_relay)?;
+                }
+            }
             Model::Unifier(unifier) => {
                 let check = ProcessorParameterizationCheck {
                     domain,
@@ -6508,7 +6635,7 @@ fn validate_processing_branch_parameterizations(
                     indices,
                     graph,
                 };
-                for from_relay in &unifier.from_relays {
+                for from_relay in unifier.from.relays() {
                     check.matches_relay(&unifier.parameterized_by, from_relay)?;
                 }
             }
@@ -7322,7 +7449,7 @@ mod tests {
         ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource,
         JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
         MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession,
-        ParameterValueMapping, ParseAsType, ProcessorOutput, ProcessorOutputs,
+        ParameterValueMapping, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         RelayParameterization, RelayParameters, ScheduledNode, SchemaField, WindowBound,
         WireSchemaField,
     };
@@ -7695,8 +7822,7 @@ mod tests {
     fn wasm_processor(name: &str, from_relay: &str, into_relay: &str) -> Model {
         Model::WasmProcessor(CreateWasmProcessor {
             name: identifier(name),
-            from_relay: identifier(from_relay),
-            from_where: Vec::new(),
+            from: ProcessorInputs::single(identifier(from_relay)),
             output_routes: ProcessorOutputs::single(identifier(into_relay)),
             parameterized_by: BranchParameterization::unparameterized(),
             resource: identifier("wasm_filter"),
@@ -7741,8 +7867,7 @@ mod tests {
     fn window_processor(name: &str, from_relay: &str, into_relay: &str, aggregate: &str) -> Model {
         Model::WindowProcessor(CreateWindowProcessor {
             name: Identifier::parse(name).expect("valid identifier"),
-            from_relay: Identifier::parse(from_relay).expect("valid identifier"),
-            from_where: Vec::new(),
+            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
@@ -7765,11 +7890,13 @@ mod tests {
     fn unifier(name: &str, from_relays: &[&str], into_relay: &str) -> Model {
         Model::Unifier(CreateUnifier {
             name: Identifier::parse(name).expect("valid identifier"),
-            from_relays: from_relays
-                .iter()
-                .map(|stream| Identifier::parse(stream).expect("valid identifier"))
-                .collect(),
-            from_where: Vec::new(),
+            from: ProcessorInputs::new(
+                from_relays
+                    .iter()
+                    .map(|stream| Identifier::parse(stream).expect("valid identifier"))
+                    .collect(),
+                Vec::new(),
+            ),
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
@@ -7791,8 +7918,7 @@ mod tests {
     ) -> Model {
         Model::Deduplicator(CreateDeduplicator {
             name: Identifier::parse(name).expect("valid identifier"),
-            from_relay: Identifier::parse(from_relay).expect("valid identifier"),
-            from_where: Vec::new(),
+            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
@@ -7815,8 +7941,7 @@ mod tests {
         };
         Model::Reingestor(CreateReingestor {
             name: Identifier::parse(name).expect("valid identifier"),
-            from_relay: Identifier::parse(from_relay).expect("valid identifier"),
-            from_where: Vec::new(),
+            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
@@ -8612,8 +8737,7 @@ mod tests {
                     explicitly_unparameterized_relay("projected_events", "event_schema"),
                     Model::Deduplicator(CreateDeduplicator {
                         name: identifier("dedup_events"),
-                        from_relay: identifier("raw_events"),
-                        from_where: Vec::new(),
+                        from: ProcessorInputs::single(identifier("raw_events")),
                         output_routes: ProcessorOutputs::single(identifier("projected_events")),
                         parameterized_by: BranchParameterization::unparameterized(),
                         deduplicate_on: "raw_events.value".to_string(),
@@ -9992,6 +10116,66 @@ mod tests {
     }
 
     #[test]
+    fn apply_batch_rejects_multiple_deduplicator_inputs_with_different_schemas() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+
+        let err = registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    Model::Schema(CreateSchema {
+                        name: identifier("wide_schema"),
+                        fields: vec![
+                            SchemaField {
+                                name: identifier("value"),
+                                ty: ParseAsType::String,
+                                optional: false,
+                                sensitive: false,
+                            },
+                            SchemaField {
+                                name: identifier("extra"),
+                                ty: ParseAsType::String,
+                                optional: false,
+                                sensitive: false,
+                            },
+                        ],
+                    }),
+                    explicitly_unparameterized_relay("notifications_a", "event_schema"),
+                    explicitly_unparameterized_relay("notifications_b", "wide_schema"),
+                    explicitly_unparameterized_relay("deduped", "event_schema"),
+                    Model::Deduplicator(CreateDeduplicator {
+                        name: identifier("dedup_notifications"),
+                        from: ProcessorInputs::new(
+                            vec![identifier("notifications_a"), identifier("notifications_b")],
+                            Vec::new(),
+                        ),
+                        output_routes: ProcessorOutputs::single(identifier("deduped")),
+                        parameterized_by: BranchParameterization::unparameterized(),
+                        deduplicate_on: "notifications_a.value".to_string(),
+                        max_time: "10m".to_string(),
+                        flush_each: "IMMEDIATE".to_string(),
+                        max_batch_size: None,
+                        mode: AckMode::Attached,
+                        message_error_policy: MessageErrorPolicy::Log,
+                        filter_where: None,
+                    }),
+                ],
+            )
+            .expect_err("deduplicator input schema mismatch should fail");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("deduplicator input"),
+            "unexpected error: {message}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn apply_batch_rejects_sensitive_passthrough_to_non_sensitive_field() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
@@ -10039,8 +10223,7 @@ mod tests {
                     explicitly_unparameterized_relay("public_events", "public_event"),
                     Model::Reingestor(CreateReingestor {
                         name: identifier("leak_events"),
-                        from_relay: identifier("sensitive_events"),
-                        from_where: Vec::new(),
+                        from: ProcessorInputs::single(identifier("sensitive_events")),
                         output_routes: ProcessorOutputs::single(identifier("public_events")),
                         parameterized_by: BranchParameterization::unparameterized(),
                         flush_each: "IMMEDIATE".to_string(),
@@ -10717,8 +10900,7 @@ mod tests {
                     ),
                     Model::Reingestor(CreateReingestor {
                         name: identifier("route_logs"),
-                        from_relay: identifier("notifications"),
-                        from_where: Vec::new(),
+                        from: ProcessorInputs::single(identifier("notifications")),
                         output_routes: ProcessorOutputs::new(vec![
                             ProcessorOutput {
                                 relay: identifier("errors"),
@@ -10841,8 +11023,7 @@ mod tests {
                     ),
                     Model::Reingestor(CreateReingestor {
                         name: identifier("route_logs"),
-                        from_relay: identifier("notifications"),
-                        from_where: Vec::new(),
+                        from: ProcessorInputs::single(identifier("notifications")),
                         output_routes: ProcessorOutputs::new(vec![
                             ProcessorOutput {
                                 relay: identifier("errors"),

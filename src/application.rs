@@ -84,10 +84,10 @@ use nervix_models::{
     DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier,
     IngestSource, IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
     Model, ModelKind, MongoDbConflictAction, MySqlConflictAction, ParseAsType,
-    PostgresConflictAction, ProcessorOutputs, ResourceNodeState, ResourceNodeStatus,
-    ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement,
-    StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
-    UploadResource, VhostTlsResource,
+    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, ResourceNodeState,
+    ResourceNodeStatus, ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain,
+    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
+    Timestamp, UploadResource, VhostTlsResource,
 };
 use nervix_nspl::{
     Token, Word,
@@ -3444,12 +3444,13 @@ impl SessionServiceImpl {
         })??;
 
         for mapping in &processor.inputs {
-            if mapping.relay != processor.from_relay {
+            if !processor.from.relays().contains(&mapping.relay) {
+                let declared_sources = processor_input_names(&processor.from);
                 return Err(format!(
-                    "inferencer '{}' INPUTS tensor '{}' must map from relay '{}', got '{}'",
+                    "inferencer '{}' INPUTS tensor '{}' must map from one of [{}], got '{}'",
                     processor.name.as_str(),
                     mapping.tensor,
-                    processor.from_relay.as_str(),
+                    declared_sources,
                     mapping.relay.as_str()
                 ));
             }
@@ -9339,6 +9340,15 @@ fn format_processor_output_lines(outputs: &ProcessorOutputs) -> Vec<String> {
     lines
 }
 
+fn processor_input_names(inputs: &ProcessorInputs) -> String {
+    inputs
+        .relays()
+        .iter()
+        .map(Identifier::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn format_lookup_describe_output(
     name: &Identifier,
     scheduled_node: &ScheduledNode,
@@ -9374,7 +9384,7 @@ fn format_deduplicator_describe_output(
     ];
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
-        format!("from: {}", deduplicator.from_relay.as_str()),
+        format!("from: {}", processor_input_names(&deduplicator.from)),
         format!("mode: {}", deduplicator.mode.as_ref()),
         format!("deduplicate on: {}", deduplicator.deduplicate_on),
         format!("max time: {}", deduplicator.max_time),
@@ -9412,7 +9422,7 @@ fn format_reingestor_describe_output(
     ];
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
-        format!("from: {}", reingestor.from_relay.as_str()),
+        format!("from: {}", processor_input_names(&reingestor.from)),
         format!(
             "parameterized by: {}",
             reingestor
@@ -9511,7 +9521,7 @@ fn format_reorderer_describe_output(
     ];
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
-        format!("from: {}", reorderer.from_relay.as_str()),
+        format!("from: {}", processor_input_names(&reorderer.from)),
         format!("mode: {}", reorderer.mode.as_ref()),
         format!("order by: {}", reorderer.order_by),
         format!("max time: {}", reorderer.max_time),
@@ -9767,7 +9777,7 @@ fn format_window_processor_describe_output(
     ];
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
-        format!("from: {}", processor.from_relay.as_str()),
+        format!("from: {}", processor_input_names(&processor.from)),
         format!("mode: {:?}", processor.mode),
         format!("width: {}", processor.width.to_describe_string()),
         format!("step: {}", processor.step.to_describe_string()),
@@ -9806,7 +9816,7 @@ fn format_wasm_processor_describe_output(
         .map(|version| version.to_string())
         .unwrap_or_else(|| "latest".to_string());
     lines.extend([
-        format!("from: {}", processor.from_relay.as_str()),
+        format!("from: {}", processor_input_names(&processor.from)),
         format!("mode: {}", processor.mode.as_ref()),
         format!("resource: {}", processor.resource.as_str()),
         format!("resource version: {version}"),
@@ -14736,7 +14746,7 @@ mod tests {
         let Model::Unifier(unifier) = unifier else {
             panic!("stored model must be a unifier");
         };
-        assert_eq!(unifier.from_relays.len(), 2);
+        assert_eq!(unifier.from.relays().len(), 2);
         assert_eq!(
             unifier
                 .output_routes
@@ -14903,7 +14913,14 @@ mod tests {
         let Model::Deduplicator(deduplicator) = deduplicator else {
             panic!("stored model must be a deduplicator");
         };
-        assert_eq!(deduplicator.from_relay.as_str(), "inbound");
+        assert_eq!(
+            deduplicator
+                .from
+                .first()
+                .expect("deduplicator should declare an input")
+                .as_str(),
+            "inbound"
+        );
         assert_eq!(
             deduplicator
                 .output_routes

@@ -19,12 +19,12 @@ use crate::{
     KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry,
     MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
     MySqlConflictAction, NatsConfigEntry, NatsIngestMode, ParameterValueMapping, ParseAsType,
-    PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorOutputs,
-    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
-    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayParameterization,
-    RelayParameters, RetryPolicy, S3ConfigEntry, SchemaField, SqsConfigEntry, SqsIngestMode,
-    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry,
-    ZeroMqIngestMode,
+    PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
+    RelayParameterization, RelayParameters, RetryPolicy, S3ConfigEntry, SchemaField,
+    SqsConfigEntry, SqsIngestMode, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
+    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 fn parameter_values_to_nspl(values: &[ParameterValueMapping]) -> String {
@@ -890,11 +890,7 @@ impl CreateUnifier {
             "CREATE {} UNIFIER {} FROM {}{}{} {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            self.from_relays
-                .iter()
-                .map(|relay| from_relay_to_nspl(relay, &self.from_where))
-                .collect::<Vec<_>>()
-                .join(", "),
+            processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -910,7 +906,7 @@ impl CreateDeduplicator {
             "CREATE {} DEDUPLICATOR {} FROM {}{}{} {} DEDUPLICATE ON {} MAX TIME {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            from_relay_to_nspl(&self.from_relay, &self.from_where),
+            processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -959,7 +955,7 @@ impl CreateReorderer {
             "CREATE {} REORDERER {} FROM {}{}{} {} BY {} MAX TIME {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            from_relay_to_nspl(&self.from_relay, &self.from_where),
+            processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -977,7 +973,7 @@ impl CreateWindowProcessor {
             "CREATE {} WINDOW PROCESSOR {} FROM {}{}{} {} WIDTH {} STEP {} AGGREGATE {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            from_relay_to_nspl(&self.from_relay, &self.from_where),
+            processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -1036,7 +1032,7 @@ impl CreateReingestor {
             "CREATE {} REINGESTOR {} FROM {}{}{} {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            from_relay_to_nspl(&self.from_relay, &self.from_where),
+            processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             parameterization_to_nspl(&self.parameterized_by),
@@ -1057,7 +1053,7 @@ impl CreateInferencer {
              OUTPUTS {{ {} }} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            from_relay_to_nspl(&self.from_relay, &self.from_where),
+            processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -1085,7 +1081,7 @@ impl CreateWasmProcessor {
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
-            from_relay_to_nspl(&self.from_relay, &self.from_where),
+            processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -1144,6 +1140,15 @@ fn from_relay_to_nspl(relay: &Identifier, from_where: &[ProcessorInputWhere]) ->
         })
         .unwrap_or_default();
     format!("{}{where_suffix}", relay.as_str())
+}
+
+fn processor_inputs_to_nspl(inputs: &ProcessorInputs) -> String {
+    inputs
+        .from
+        .iter()
+        .map(|relay| from_relay_to_nspl(relay, &inputs.r#where))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> String {
@@ -1907,9 +1912,10 @@ mod tests {
         MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
         MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode,
         ParameterValueMapping, ParseAsType, PostgresConflictAction, PostgresValueMapping,
-        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RelayParameterization, RelayParameters, RetryPolicy, SchemaField,
-        SqsIngestMode, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
+        RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization, RelayParameters,
+        RetryPolicy, SchemaField, SqsIngestMode, WebsocketsIngestMode, WindowBound,
+        WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2429,8 +2435,10 @@ mod tests {
 
         let unifier = CreateUnifier {
             name: identifier("orders_unifier"),
-            from_relays: vec![identifier("orders_a"), identifier("orders_b")],
-            from_where: Vec::new(),
+            from: ProcessorInputs::new(
+                vec![identifier("orders_a"), identifier("orders_b")],
+                Vec::new(),
+            ),
             output_routes: ProcessorOutputs::single(identifier("orders_all")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
@@ -2449,8 +2457,7 @@ mod tests {
 
         let deduplicator = CreateDeduplicator {
             name: identifier("orders_dedup"),
-            from_relay: identifier("orders_in"),
-            from_where: Vec::new(),
+            from: ProcessorInputs::single(identifier("orders_in")),
             output_routes: ProcessorOutputs::single(identifier("orders_out")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             deduplicate_on: "ss1.transaction_id".to_string(),
@@ -2472,8 +2479,7 @@ mod tests {
 
         let window_processor = CreateWindowProcessor {
             name: identifier("latency_window"),
-            from_relay: identifier("orders_in"),
-            from_where: Vec::new(),
+            from: ProcessorInputs::single(identifier("orders_in")),
             output_routes: ProcessorOutputs::single(identifier("orders_p99")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             width: WindowBound {
@@ -2503,8 +2509,7 @@ mod tests {
 
         let reingestor = CreateReingestor {
             name: identifier("orders_repartition"),
-            from_relay: identifier("orders_in"),
-            from_where: Vec::new(),
+            from: ProcessorInputs::single(identifier("orders_in")),
             output_routes: ProcessorOutputs::single(identifier("orders_out")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
@@ -2524,8 +2529,7 @@ mod tests {
 
         let route_reingestor = CreateReingestor {
             name: identifier("orders_splitter"),
-            from_relay: identifier("orders_in"),
-            from_where: Vec::new(),
+            from: ProcessorInputs::single(identifier("orders_in")),
             output_routes: ProcessorOutputs::new(vec![
                 ProcessorOutput {
                     relay: identifier("orders_errors"),

@@ -35,13 +35,13 @@ Every flush-based runtime node must declare either `FLUSH EACH <duration> MAX BA
 Relay-consuming processors declare one or more destination outputs after their input and optional arrival filter:
 
 ```nspl
-FROM <input> [WHERE <expr>]
+FROM <input> [WHERE <expr>], ...
 [FILTER WHERE <expr>]
 TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]
 [TO <relay> ...]
 ```
 
-`FROM ... WHERE` is a source-level input filter. It runs first and may read fields from that source relay, for example `FROM notifications WHERE notifications.active`.
+`FROM ... WHERE` is a source-level input filter. It runs first and may read fields from that source relay, for example `FROM notifications WHERE notifications.active`. Non-correlator processors may declare multiple `FROM` relays separated by commas. Those input relays must have the same schema, and each source filter applies only to the relay it is attached to.
 
 `FILTER WHERE` is a node-level arrival filter. It runs after source filtering and before the processor accepts a row into its buffer or state. It replaces the old global processor-level `WHERE` form.
 
@@ -144,7 +144,7 @@ Use it when multiple sources should feed a common downstream path.
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
-  FROM <input> [WHERE <expr>]
+  FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
   PARAMETERIZED BY <schema>
@@ -164,7 +164,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
 
 An inferencer declares a branch-local ONNX model execution node. The model file is loaded from a versioned `RESOURCE`; if `VERSION` is omitted, Nervix resolves the latest uploaded resource version.
 
-The optional `FILTER WHERE` clause runs before tensor construction. `INPUTS` maps ONNX input tensor names to fields on the input relay after that arrival filter. `OUTPUTS` maps ONNX output tensor names to fields on the output relay. Inferencers do not pass input fields through automatically; every required output field must come from `OUTPUTS` or a route-level `SET`.
+The optional `FILTER WHERE` clause runs before tensor construction. `INPUTS` maps ONNX input tensor names to fields on one of the declared input relays after that arrival filter. `OUTPUTS` maps ONNX output tensor names to fields on the output relay. Inferencers do not pass input fields through automatically; every required output field must come from `OUTPUTS` or a route-level `SET`.
 
 Inferencers preserve the upstream parameter group exactly as received. Runtime ONNX execution is still under implementation; the control plane currently validates the resource/file reference and schema field mappings before accepting the model.
 
@@ -172,7 +172,7 @@ Inferencers preserve the upstream parameter group exactly as received. Runtime O
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] DEDUPLICATOR <name>
-  FROM <input> [WHERE <expr>]
+  FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema>
@@ -198,7 +198,7 @@ State-holding `DESCRIBE` commands expose the scheduled `owner` and `replicas` un
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REORDERER <name>
-  FROM <input> [WHERE <expr>]
+  FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema>
@@ -249,7 +249,8 @@ Correlators preserve the upstream parameter group. Each concrete branch gets sep
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
   USING RESOURCE <resource> [VERSION <n>]
   FILE '<path>'
-  FROM <input> [WHERE <expr>] [FILTER WHERE <expr>]
+  FROM <input> [WHERE <expr>], ...
+  [FILTER WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
   PARAMETERIZED BY <schema>
@@ -261,7 +262,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
 DESCRIBE WASM PROCESSOR <name>;
 ```
 
-A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix resource and runs one guest instance per concrete branch. Source `FROM ... WHERE` runs first, then `FILTER WHERE` runs before the guest receives a row. The guest receives Arrow IPC record batches plus an ACK sidecar, and it emits Arrow IPC batches that each name one declared `TO` relay and match that relay's schema. Nervix then applies that route's `SET` and `WHERE` clauses.
+A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix resource and runs one guest instance per concrete branch. Source `FROM ... WHERE` runs first, then `FILTER WHERE` runs before the guest receives a row. Multiple `FROM` relays are consumed as one same-schema stream; the guest still sees a single source schema. The guest receives Arrow IPC record batches plus an ACK sidecar, and it emits Arrow IPC batches that each name one declared `TO` relay and match that relay's schema. Nervix then applies that route's `SET` and `WHERE` clauses.
 
 See [WASM Processor Guests](wasm-processor-guests.md) for the guest ABI and Rust/Go authoring examples.
 
@@ -287,7 +288,7 @@ Flush is guest-controlled for WASM processors. Nervix calls the guest `process` 
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WINDOW PROCESSOR <name>
-  FROM <input> [WHERE <expr>]
+  FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
   PARAMETERIZED BY <schema>
@@ -303,7 +304,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WINDOW PROCESSOR <name>
 DESCRIBE WINDOW PROCESSOR <name>;
 ```
 
-A window processor consumes one branch-local input relay and emits aggregate records in the first declared output relay's schema before routing them to matching destinations. It does not inherit input fields automatically. The `AGGREGATE` block fully defines the emitted base record shape.
+A window processor consumes one or more same-schema branch-local input relays and emits aggregate records in the first declared output relay's schema before routing them to matching destinations. It does not inherit input fields automatically. The `AGGREGATE` block fully defines the emitted base record shape.
 
 Window processors preserve the upstream parameter group exactly as received. Each concrete branch gets its own independent window state, and each window contains records from one branch group.
 
@@ -393,7 +394,7 @@ ACK behavior follows branch mode. In `ATTACHED` mode, the aggregate output carri
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
-  FROM <relay> [WHERE <expr>]
+  FROM <relay> [WHERE <expr>], ...
   [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema> VALUES { <field> = <relay>.<field>, ... } TTL 5m
@@ -403,13 +404,14 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
 
 For reingestors, `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` declares when the processor flushes buffered output downstream. `FLUSH IMMEDIATE` republishes each received batch without waiting.
 
-A reingestor republishes records from one relay into another and starts downstream branches with a new parameter grouping.
+A reingestor republishes records from one or more same-schema relays into another and starts downstream branches with a new parameter grouping.
 
 This is the main tool for changing native branch grouping inside the Nervix graph.
 
 A reingestor is an explicit branch boundary:
 
-- it consumes across all concrete input branches of the source relay
+- it consumes across all concrete input branches of its source relays
+- it applies each source filter to its own input relay before repartitioning
 - it computes a new branch group for each outgoing record
 - it buffers rows under the new downstream branch group
 - it starts or resolves downstream branches in the target relay

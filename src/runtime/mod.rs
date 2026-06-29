@@ -2468,10 +2468,14 @@ impl RelayProcessorNode {
                 .get(&branch.domain)
                 .map(|execution| execution.lookups.clone())
                 .unwrap_or_default();
+            let filter_input_relays = match kind {
+                ProcessorInputFilterKind::FromWhere => vec![incoming_relay.clone()],
+                ProcessorInputFilterKind::FilterWhere => self.input_relays.clone(),
+            };
             match compile_filter_map_program(
                 &branch.domain,
                 &self.processor,
-                std::slice::from_ref(incoming_relay),
+                &filter_input_relays,
                 Some(&filter_where),
                 batch.arrow_schema(),
                 input_schema.vm_sensitivity(),
@@ -2650,7 +2654,7 @@ impl RelayProcessorNode {
                     if compiled_key_program.is_none() {
                         match compile_deduplicator_key_program(
                             &self.processor,
-                            &self.input_relay,
+                            &self.input_relays,
                             deduplicate_on,
                             input_arrow_schema.clone(),
                         ) {
@@ -3001,7 +3005,7 @@ impl RelayProcessorNode {
                     if compiled_program.is_none() {
                         match compile_reorderer_program(
                             &self.processor,
-                            &self.input_relay,
+                            &self.input_relays,
                             order_by,
                             batch.arrow_schema(),
                         ) {
@@ -3124,7 +3128,7 @@ impl RelayProcessorNode {
                                     processor: &self.processor,
                                     error_policies: &self.error_policies,
                                     output_routes,
-                                    input_relay: incoming_relay,
+                                    input_relays: &self.input_relays,
                                 },
                                 pending,
                                 next_flush,
@@ -3646,7 +3650,7 @@ impl RelayProcessorNode {
                             node_kind: self.kind.as_str(),
                             processor: &self.processor,
                             error_policies: &self.error_policies,
-                            input_relay: &self.input_relay,
+                            input_relays: &self.input_relays,
                             output_routes,
                             resource,
                             resource_version: *resource_version,
@@ -3776,7 +3780,7 @@ impl RelayProcessorNode {
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
-                                input_relay: &self.input_relay,
+                                input_relays: &self.input_relays,
                             },
                             pending,
                             next_flush,
@@ -3912,7 +3916,18 @@ impl RelayProcessorNode {
                     let input_schema = match relay_schema_for_runtime(
                         &branch.runtime,
                         &branch.domain,
-                        &self.input_relay,
+                        match self.input_relays.first() {
+                            Some(input_relay) => input_relay,
+                            None => {
+                                for (_, context) in std::mem::take(ack_map) {
+                                    context.acks.no_ack(format!(
+                                        "wasm processor '{}' has no input relays",
+                                        self.processor.as_str()
+                                    ));
+                                }
+                                return;
+                            }
+                        },
                     ) {
                         Ok(schema) => schema,
                         Err(error) => {
@@ -3968,7 +3983,7 @@ impl RelayProcessorNode {
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
-                                input_relay: &self.input_relay,
+                                input_relays: &self.input_relays,
                                 input_schema: &input_schema,
                                 output_schemas: &output_schemas,
                                 key: &output_key,
@@ -4091,7 +4106,6 @@ impl RelayProcessorTemplate {
         Ok(RelayProcessorNode {
             kind: self.kind,
             processor: self.processor.clone(),
-            input_relay: self.input_relay.clone(),
             input_relays: self.input_relays.clone(),
             mode: self.mode,
             error_policies: self.error_policies.clone(),
@@ -5968,7 +5982,7 @@ pub(crate) fn compile_processor_output_filter_map_program(
 fn compile_wasm_output_filter_map_program(
     domain: &Domain,
     identifier: &Identifier,
-    input_relay: &Identifier,
+    input_relays: &[Identifier],
     output_relay: &Identifier,
     filter_map: Option<&str>,
     input_schema: Arc<arrow_schema::Schema>,
@@ -6012,13 +6026,18 @@ fn compile_wasm_output_filter_map_program(
         VmCompileBinding::writable(output_relay.as_str(), output_schema.clone())
             .with_sensitivity(output_sensitivity.clone()),
     ];
-    if input_relay != output_relay {
-        bindings.push(
-            VmCompileBinding::readonly(input_relay.as_str(), input_schema.clone())
-                .with_sensitivity(input_sensitivity.clone()),
-        );
+    for input_relay in input_relays {
+        if input_relay != output_relay {
+            bindings.push(
+                VmCompileBinding::readonly(input_relay.as_str(), input_schema.clone())
+                    .with_sensitivity(input_sensitivity.clone()),
+            );
+        }
     }
-    if input_relay.as_str() != WASM_INPUT_NAMESPACE && output_relay.as_str() != WASM_INPUT_NAMESPACE
+    if input_relays
+        .iter()
+        .all(|relay| relay.as_str() != WASM_INPUT_NAMESPACE)
+        && output_relay.as_str() != WASM_INPUT_NAMESPACE
     {
         bindings.push(
             VmCompileBinding::readonly(WASM_INPUT_NAMESPACE, input_schema)
@@ -6028,14 +6047,13 @@ fn compile_wasm_output_filter_map_program(
     if let Some(binding) = context.branch_binding() {
         bindings.push(binding);
     }
-    let local_namespaces = [
-        input_relay.as_str().to_string(),
-        output_relay.as_str().to_string(),
-        WASM_INPUT_NAMESPACE.to_string(),
-        BRANCH_NAMESPACE.to_string(),
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
+    let mut local_namespaces = input_relays
+        .iter()
+        .map(|relay| relay.as_str().to_string())
+        .collect::<HashSet<_>>();
+    local_namespaces.insert(output_relay.as_str().to_string());
+    local_namespaces.insert(WASM_INPUT_NAMESPACE.to_string());
+    local_namespaces.insert(BRANCH_NAMESPACE.to_string());
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
         &original_parsed,
         &local_namespaces,
@@ -6569,14 +6587,22 @@ pub(super) fn compile_key_projection_program(
     processor_kind: &str,
     processor: &Identifier,
     clause: &str,
-    input_relay: &Identifier,
+    input_relays: &[Identifier],
     expressions: &[String],
     input_schema: Arc<arrow_schema::Schema>,
 ) -> Result<VmCompiledProgram, String> {
+    let Some(primary_input_relay) = input_relays.first() else {
+        return Err(format!(
+            "{} '{}' {} requires at least one input relay",
+            processor_kind,
+            processor.as_str(),
+            clause
+        ));
+    };
     let assignments = expressions
         .iter()
         .enumerate()
-        .map(|(index, expr)| format!("{}.key_{} = {}", input_relay.as_str(), index, expr))
+        .map(|(index, expr)| format!("{}.key_{} = {}", primary_input_relay.as_str(), index, expr))
         .collect::<Vec<_>>()
         .join(", ");
     let source = format!("SET {assignments}");
@@ -6589,10 +6615,16 @@ pub(super) fn compile_key_projection_program(
             Runtime::vm_program_error(error)
         )
     })?;
-    let bindings = [VmCompileBinding::writable(
-        input_relay.as_str(),
+    let mut bindings = vec![VmCompileBinding::writable(
+        primary_input_relay.as_str(),
         input_schema.clone(),
     )];
+    bindings.extend(
+        input_relays
+            .iter()
+            .skip(1)
+            .map(|relay| VmCompileBinding::readonly(relay.as_str(), input_schema.clone())),
+    );
     let key_types =
         infer_vm_set_expr_types_for_bindings(&parsed, bindings.clone()).map_err(|error| {
             format!(
@@ -6640,7 +6672,7 @@ pub(super) fn compile_key_projection_program(
 
 fn compile_reorderer_program(
     processor: &Identifier,
-    input_relay: &Identifier,
+    input_relays: &[Identifier],
     order_by: &str,
     input_schema: Arc<arrow_schema::Schema>,
 ) -> Result<CompiledReordererProgram, String> {
@@ -6655,7 +6687,7 @@ fn compile_reorderer_program(
         "reorderer",
         processor,
         "BY",
-        input_relay,
+        input_relays,
         &expressions,
         input_schema,
     )?;
@@ -6870,7 +6902,7 @@ struct ReordererFlushContext<'a> {
     processor: &'a Identifier,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
-    input_relay: &'a Identifier,
+    input_relays: &'a [Identifier],
 }
 
 async fn flush_branch_reorderer(
@@ -6883,13 +6915,17 @@ async fn flush_branch_reorderer(
     let processor = context.processor;
     let error_policies = context.error_policies;
     let output_routes = context.output_routes;
-    let input_relay = context.input_relay;
+    let input_relays = context.input_relays;
     let branch = context.branch;
 
     if pending.is_empty() {
         *next_flush = None;
         return;
     }
+    let Some(input_relay) = input_relays.first() else {
+        *next_flush = None;
+        return;
+    };
     pending.sort_by(|left, right| {
         left.key
             .cmp(&right.key)
@@ -6947,7 +6983,7 @@ async fn flush_branch_reorderer(
             source_kind: ModelKind::Reorderer,
             processor,
             error_policies,
-            input_relays: std::slice::from_ref(input_relay),
+            input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
         },
         output_routes,
@@ -11515,7 +11551,7 @@ async fn flush_branch_wasm_processor(
         node_kind,
         processor,
         error_policies,
-        input_relay,
+        input_relays,
         output_routes,
         resource,
         resource_version,
@@ -11561,21 +11597,35 @@ async fn flush_branch_wasm_processor(
         );
         return;
     }
-    let input_schema = match relay_schema_for_runtime(&branch.runtime, &branch.domain, input_relay)
-    {
-        Ok(schema) => schema,
-        Err(error) => {
-            branch.runtime.handle_internal_processor_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                forwarded.acks.iter(),
-                error,
-            );
-            return;
-        }
+    let Some(primary_input_relay) = input_relays.first() else {
+        branch.runtime.handle_internal_processor_error_for_acks(
+            &branch.domain,
+            node_kind,
+            processor,
+            error_policies,
+            forwarded.acks.iter(),
+            format!(
+                "wasm processor '{}' has no input relays",
+                processor.as_str()
+            ),
+        );
+        return;
     };
+    let input_schema =
+        match relay_schema_for_runtime(&branch.runtime, &branch.domain, primary_input_relay) {
+            Ok(schema) => schema,
+            Err(error) => {
+                branch.runtime.handle_internal_processor_error_for_acks(
+                    &branch.domain,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    forwarded.acks.iter(),
+                    error,
+                );
+                return;
+            }
+        };
     let mut output_schemas = Vec::with_capacity(output_routes.routes.len());
     for output in &output_routes.routes {
         match relay_schema_for_runtime(&branch.runtime, &branch.domain, &output.relay) {
@@ -11601,7 +11651,7 @@ async fn flush_branch_wasm_processor(
             resource,
             resource_version,
             file,
-            input_relay,
+            guest_input_relay: primary_input_relay,
             input_schema: &input_schema,
             output_schemas: &output_schemas,
             replicated_state,
@@ -11681,7 +11731,7 @@ async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             output_routes,
-            input_relay,
+            input_relays,
             input_schema: &input_schema,
             output_schemas: &output_schemas,
             key: &output_branch_key,
@@ -11722,7 +11772,7 @@ struct WasmInstanceContext<'a> {
     resource: &'a Identifier,
     resource_version: Option<u64>,
     file: &'a str,
-    input_relay: &'a Identifier,
+    guest_input_relay: &'a Identifier,
     input_schema: &'a Arc<CompiledSchema>,
     output_schemas: &'a [(Identifier, Arc<CompiledSchema>)],
     replicated_state: &'a ReplicatedWasmProcessorState,
@@ -11739,7 +11789,7 @@ async fn ensure_wasm_processor_instance(
         resource,
         resource_version,
         file,
-        input_relay,
+        guest_input_relay,
         input_schema,
         output_schemas,
         replicated_state,
@@ -11805,7 +11855,8 @@ async fn ensure_wasm_processor_instance(
                 .key
                 .as_ref()
                 .map(|key| key.as_str().as_bytes().to_vec()),
-            input_schema: input_schema.wasm_processor_schema(input_relay.as_str().to_string()),
+            input_schema: input_schema
+                .wasm_processor_schema(guest_input_relay.as_str().to_string()),
             output_schemas: output_schemas
                 .iter()
                 .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
@@ -11885,7 +11936,7 @@ struct WasmOutputContext<'a> {
     processor: &'a Identifier,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
-    input_relay: &'a Identifier,
+    input_relays: &'a [Identifier],
     input_schema: &'a Arc<CompiledSchema>,
     output_schemas: &'a [(Identifier, Arc<CompiledSchema>)],
     key: &'a Option<BranchKey>,
@@ -11909,7 +11960,7 @@ async fn dispatch_wasm_output_envelopes(
         processor,
         error_policies,
         output_routes,
-        input_relay,
+        input_relays,
         input_schema,
         output_schemas,
         key,
@@ -12038,7 +12089,7 @@ async fn dispatch_wasm_output_envelopes(
                 node_kind,
                 processor,
                 error_policies,
-                input_relay,
+                input_relays,
                 input_schema,
                 dispatch_error,
             },
@@ -12070,7 +12121,7 @@ struct WasmRouteDispatchContext<'a> {
     node_kind: &'a str,
     processor: &'a Identifier,
     error_policies: &'a ErrorPolicies,
-    input_relay: &'a Identifier,
+    input_relays: &'a [Identifier],
     input_schema: &'a Arc<CompiledSchema>,
     dispatch_error: &'static str,
 }
@@ -12081,6 +12132,23 @@ async fn dispatch_wasm_output_route(
     output: &mut RelayProcessorOutputNode,
 ) -> Option<Vec<AckSet>> {
     if output.compiled_program.is_none() && output.filter_map.is_some() {
+        let Some(primary_input_relay) = context.input_relays.first() else {
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    decoded.batch.acks.iter(),
+                    format!(
+                        "wasm processor '{}' has no input relays",
+                        context.processor.as_str()
+                    ),
+                );
+            return None;
+        };
         let materialized_stream_specs = materialized_stream_specs_for_graph(
             &context.branch.runtime,
             &context.branch.domain,
@@ -12094,14 +12162,14 @@ async fn dispatch_wasm_output_route(
             .and_then(|execution| {
                 execution
                     .relay_parameterizations
-                    .get(context.input_relay)
+                    .get(primary_input_relay)
                     .cloned()
             })
             .unwrap_or_default();
         let current_branch_schema = relay_branch_schema_for_runtime(
             &context.branch.runtime,
             &context.branch.domain,
-            context.input_relay,
+            primary_input_relay,
         );
         let available_lookups = context
             .branch
@@ -12134,7 +12202,7 @@ async fn dispatch_wasm_output_route(
         match compile_wasm_output_filter_map_program(
             &context.branch.domain,
             context.processor,
-            context.input_relay,
+            context.input_relays,
             &output.relay,
             output.filter_map.as_deref(),
             context.input_schema.arrow_schema(),
@@ -12250,7 +12318,7 @@ async fn dispatch_wasm_output_route(
     };
     let input_records = match wasm_filter_map_records(
         &output.relay,
-        context.input_relay,
+        context.input_relays,
         &decoded.batch.records,
         &decoded.input_records,
     ) {
@@ -12604,7 +12672,7 @@ fn wasm_output_token_use_counts(outputs: &[WasmBatchEnvelope]) -> HashMap<u64, u
 
 fn wasm_filter_map_records(
     output_relay: &Identifier,
-    input_relay: &Identifier,
+    input_relays: &[Identifier],
     output_records: &[RuntimeRecord],
     input_records: &[Option<RuntimeRecord>],
 ) -> Result<Vec<RuntimeRecord>, String> {
@@ -12623,13 +12691,17 @@ fn wasm_filter_map_records(
             let mut fields = HashMap::new();
             insert_wasm_filter_map_fields(&mut fields, output_relay.as_str(), output_record, true);
             if let Some(input_record) = input_record {
-                insert_wasm_filter_map_fields(
-                    &mut fields,
-                    input_relay.as_str(),
-                    input_record,
-                    false,
-                );
-                if input_relay.as_str() != WASM_INPUT_NAMESPACE
+                for input_relay in input_relays {
+                    insert_wasm_filter_map_fields(
+                        &mut fields,
+                        input_relay.as_str(),
+                        input_record,
+                        false,
+                    );
+                }
+                if input_relays
+                    .iter()
+                    .all(|relay| relay.as_str() != WASM_INPUT_NAMESPACE)
                     && output_relay.as_str() != WASM_INPUT_NAMESPACE
                 {
                     insert_wasm_filter_map_fields(

@@ -5,7 +5,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        filter_where_clause, flush_each, from_relay_clause, if_not_exists_clause, inferencer_name,
+        filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause, inferencer_name,
         into_parse_error, kw, lex_input, message_error_policy, processor_outputs, relay_ref,
         resource_ref, string_lit, suggestions_from_errors, tok, word_raw,
     },
@@ -58,7 +58,7 @@ pub fn create_inferencer_parser<'src>()
         .then_ignore(kw(Identifier::Inferencer))
         .then(inferencer_name())
         .then_ignore(kw(Identifier::From))
-        .then(from_relay_clause())
+        .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization())
@@ -85,13 +85,11 @@ pub fn create_inferencer_parser<'src>()
                 (((((if_not_exists, mode), name), from_input), filter_where), processor_outputs),
                 parameterized_by,
             ) = base;
-            let (from_relay, from_where) = from_input;
             let (flush_each, max_batch_size) = flush_each;
             CreateStatement::new(
                 CreateInferencer {
                     name,
-                    from_relay,
-                    from_where,
+                    from: from_input,
                     output_routes: processor_outputs,
                     parameterized_by,
                     resource,
@@ -181,7 +179,7 @@ mod tests {
         let parsed = parse_create_inferencer_tokens(&to_tokens(input)).expect("parse should work");
 
         assert_eq!(parsed.name.as_str(), "score_model");
-        assert_eq!(parsed.from_relay.as_str(), "features");
+        assert_eq!(parsed.from.from[0].as_str(), "features");
         assert_eq!(
             parsed
                 .output_routes

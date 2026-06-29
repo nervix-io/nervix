@@ -57,7 +57,6 @@ pub(super) enum ParametrizerAckBoundary {
 pub(super) struct ParameterizedProcessorSpec {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
-    pub(super) input_relay: Identifier,
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
@@ -245,7 +244,6 @@ pub(super) struct RelayProcessorRelayTemplate {
 pub(super) struct RelayProcessorTemplate {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
-    pub(super) input_relay: Identifier,
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
@@ -322,7 +320,6 @@ pub(super) struct RelayProcessorOutputTemplate {
 pub(super) struct RelayProcessorNode {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
-    pub(super) input_relay: Identifier,
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
@@ -525,7 +522,7 @@ pub(super) struct WasmFlushContext<'a> {
     pub(super) node_kind: &'a str,
     pub(super) processor: &'a Identifier,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) input_relay: &'a Identifier,
+    pub(super) input_relays: &'a [Identifier],
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     pub(super) resource: &'a Identifier,
     pub(super) resource_version: Option<u64>,

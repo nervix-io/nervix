@@ -116,7 +116,9 @@ Feature: Processor output routing
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY incoming_logs SCHEMA notification PARAMETERIZED BY id_branch;
+      CREATE RELAY incoming_logs_a SCHEMA notification PARAMETERIZED BY id_branch;
+      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+      CREATE RELAY incoming_logs_b SCHEMA notification PARAMETERIZED BY id_branch;
       CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
       CREATE RELAY errors_ss SCHEMA notification PARAMETERIZED BY id_branch;
       CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
@@ -126,26 +128,39 @@ Feature: Processor output routing
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE ENDPOINT ingress_a
         ON edge
-        PATH '/route'
+        PATH '/route-a'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE INGESTOR source_logs
-        TO incoming_logs
+      CREATE ENDPOINT ingress_b
+        ON edge
+        PATH '/route-b'
+        TYPE HTTP;
+
+      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE INGESTOR source_logs_a
+        TO incoming_logs_a
         DECODE USING notification_codec
-        PARAMETERIZED BY id_branch VALUES { id = incoming_logs.id } TTL 5m
+        PARAMETERIZED BY id_branch VALUES { id = incoming_logs_a.id } TTL 5m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE INGESTOR source_logs_b
+        TO incoming_logs_b
+        DECODE USING notification_codec
+        PARAMETERIZED BY id_branch VALUES { id = incoming_logs_b.id } TTL 5m
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR log_splitter
-        FROM incoming_logs WHERE incoming_logs.level != "skip"
-        FILTER WHERE incoming_logs.active
-        TO errors_ss WHERE incoming_logs.level = "error"
-        TO warnings_ss WHERE incoming_logs.urgent
+        FROM incoming_logs_a WHERE incoming_logs_a.level != "skip",
+             incoming_logs_b WHERE incoming_logs_b.level != "hold"
+        FILTER WHERE incoming_logs_a.active
+        TO errors_ss WHERE incoming_logs_a.level = "error"
+        TO warnings_ss WHERE incoming_logs_a.urgent
         TO info_ss
         PARAMETERIZED BY id_branch
-        DEDUPLICATE ON incoming_logs.id
+        DEDUPLICATE ON incoming_logs_a.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
@@ -155,21 +170,29 @@ Feature: Processor output routing
 
       START;
       """
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route-a"
       """
       {"id":"err-1","active":true,"level":"error","urgent":true}
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route"
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route-a"
       """
       {"id":"info-1","active":true,"level":"info","urgent":false}
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route"
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route-a"
       """
       {"id":"source-drop","active":true,"level":"skip","urgent":true}
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route"
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route-a"
       """
       {"id":"ignored","active":false,"level":"error","urgent":true}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route-b"
+      """
+      {"id":"warn-b","active":true,"level":"warn","urgent":true}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route-b"
+      """
+      {"id":"source-drop-b","active":true,"level":"hold","urgent":true}
       """
     Then within "5s" the relay subscription receives payloads
       """
@@ -177,6 +200,8 @@ Feature: Processor output routing
       "id":"err-1"
       "id":"err-1"
       "id":"info-1"
+      "id":"warn-b"
+      "id":"warn-b"
       """
     And the relay subscription does not receive a payload within "1s"
 

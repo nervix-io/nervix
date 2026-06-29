@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        filter_where_clause, flush_each, from_relay_clause, if_not_exists_clause, into_parse_error,
-        kw, lex_input, message_error_policy, processor_outputs, suggestions_from_errors, tok,
-        unifier_name,
+        filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause,
+        into_parse_error, kw, lex_input, message_error_policy, processor_outputs,
+        suggestions_from_errors, tok, unifier_name,
     },
 };
 
@@ -20,12 +20,7 @@ pub fn create_unifier_parser<'src>()
         .then_ignore(kw(Identifier::Unifier))
         .then(unifier_name())
         .then_ignore(kw(Identifier::From))
-        .then(
-            from_relay_clause()
-                .separated_by(tok(Token::Comma))
-                .at_least(2)
-                .collect::<Vec<_>>(),
-        )
+        .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization())
@@ -43,18 +38,11 @@ pub fn create_unifier_parser<'src>()
                 ),
                 message_error_policy,
             )| {
-                let mut from_relays = Vec::new();
-                let mut from_where = Vec::new();
-                for (relay, mut relay_where) in from_inputs {
-                    from_relays.push(relay);
-                    from_where.append(&mut relay_where);
-                }
                 let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateUnifier {
                         name,
-                        from_relays,
-                        from_where,
+                        from: from_inputs,
                         output_routes: outputs,
                         parameterized_by,
                         flush_each,
@@ -67,6 +55,16 @@ pub fn create_unifier_parser<'src>()
                 )
             },
         )
+        .try_map(|statement, span| {
+            if statement.from.from.len() < 2 {
+                Err(Rich::custom(
+                    span,
+                    "UNIFIER requires at least two input relays",
+                ))
+            } else {
+                Ok(statement)
+            }
+        })
 }
 
 pub fn parse_create_unifier_tokens(
@@ -138,7 +136,8 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "join_streams");
         assert_eq!(
             parsed
-                .from_relays
+                .from
+                .from
                 .iter()
                 .map(|relay| relay.as_str())
                 .collect::<Vec<_>>(),

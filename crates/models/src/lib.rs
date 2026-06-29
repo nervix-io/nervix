@@ -50,7 +50,7 @@ pub use statement::{
     MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos,
     MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping, NatsConfigEntry,
     NatsIngestMode, ParameterValueMapping, PostgresConfigEntry, PostgresConflictAction,
-    PostgresValueMapping, ProcessorInputWhere, ProcessorOutput, ProcessorOutputs,
+    PostgresValueMapping, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
     PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
     RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayParameterization,
     RelayParameters, RetryPolicy, S3ConfigEntry, ScheduledNode, ShowClusterStatus, ShowCreate,

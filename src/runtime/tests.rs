@@ -21,10 +21,10 @@ use nervix_models::{
     DomainConfig, DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink,
     ErrorPolicies, GeneralErrorPolicy, Identifier, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, JsonType, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos,
-    MqttSession, ParameterValueMapping, ParseAsType, ProcessorInputWhere, ProcessorOutput,
-    ProcessorOutputs, RelayParameterization, RemoteAckOutcome, RemoteAckResolution, ResourceId,
-    ResourceVersion, ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, Timestamp,
-    WindowBound, WireSchemaField, ZeroMqIngestMode,
+    MqttSession, ParameterValueMapping, ParseAsType, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, RelayParameterization, RemoteAckOutcome,
+    RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus, RetryPolicy,
+    ScheduledNode, SchemaField, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmBatchEnvelope, WasmMessageErrorSet, WasmNackSet,
@@ -1483,8 +1483,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             identifier("dedup_orders"),
             nervix_models::Model::Deduplicator(CreateDeduplicator {
                 name: identifier("dedup_orders"),
-                from_relay: identifier("orders"),
-                from_where: Vec::new(),
+                from: ProcessorInputs::single(identifier("orders")),
                 output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 deduplicate_on: "orders.order_id".to_string(),
@@ -1502,8 +1501,10 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             identifier("join_orders"),
             nervix_models::Model::Unifier(CreateUnifier {
                 name: identifier("join_orders"),
-                from_relays: vec![identifier("left_orders"), identifier("right_orders")],
-                from_where: Vec::new(),
+                from: ProcessorInputs::new(
+                    vec![identifier("left_orders"), identifier("right_orders")],
+                    Vec::new(),
+                ),
                 output_routes: ProcessorOutputs::single(identifier("joined_orders")),
                 parameterized_by: parameterized_by("tenant", "left_orders", &["tenant"]),
                 flush_each: "100ms".to_string(),
@@ -1519,8 +1520,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             identifier("orders_window"),
             nervix_models::Model::WindowProcessor(CreateWindowProcessor {
                 name: identifier("orders_window"),
-                from_relay: identifier("orders"),
-                from_where: Vec::new(),
+                from: ProcessorInputs::single(identifier("orders")),
                 output_routes: ProcessorOutputs::single(identifier("order_summaries")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 width: WindowBound {
@@ -1543,8 +1543,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             identifier("score_orders"),
             nervix_models::Model::Inferencer(CreateInferencer {
                 name: identifier("score_orders"),
-                from_relay: identifier("orders"),
-                from_where: Vec::new(),
+                from: ProcessorInputs::single(identifier("orders")),
                 output_routes: ProcessorOutputs::single(identifier("scores")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 resource: identifier("score_model"),
@@ -3957,8 +3956,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                 identifier("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
-                    from_relay: identifier("orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "projected_orders.order_id".to_string(),
@@ -3976,8 +3974,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                 identifier("dedup_projected_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_projected_orders"),
-                    from_relay: identifier("projected_orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("projected_orders")),
                     output_routes: ProcessorOutputs::single(identifier("aggregated_orders")),
                     parameterized_by: parameterized_by("tenant", "projected_orders", &["tenant"]),
                     deduplicate_on: "tenant_orders.order_id".to_string(),
@@ -4063,8 +4060,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                 identifier("metric_window"),
                 nervix_models::Model::WindowProcessor(CreateWindowProcessor {
                     name: identifier("metric_window"),
-                    from_relay: identifier("metrics"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("metrics")),
                     output_routes: ProcessorOutputs::single(identifier("metric_summary")),
                     parameterized_by: parameterized_by("host", "metrics", &["host"]),
                     width: WindowBound {
@@ -4087,8 +4083,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                 identifier("dedup_summary"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_summary"),
-                    from_relay: identifier("metric_summary"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("metric_summary")),
                     output_routes: ProcessorOutputs::single(identifier("projected_summary")),
                     parameterized_by: parameterized_by("host", "metric_summary", &["host"]),
                     deduplicate_on: "metric_summary.count".to_string(),
@@ -4160,8 +4155,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                 identifier("score_model"),
                 nervix_models::Model::Inferencer(CreateInferencer {
                     name: identifier("score_model"),
-                    from_relay: identifier("features"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("features")),
                     output_routes: ProcessorOutputs::single(identifier("scores")),
                     parameterized_by: parameterized_by("tenant", "features", &["tenant"]),
                     resource: identifier("fraud_model"),
@@ -4190,8 +4184,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                 identifier("dedup_scores"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_scores"),
-                    from_relay: identifier("scores"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("scores")),
                     output_routes: ProcessorOutputs::single(identifier("projected_scores")),
                     parameterized_by: parameterized_by("tenant", "scores", &["tenant"]),
                     deduplicate_on: "scores.score".to_string(),
@@ -4251,8 +4244,7 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
                 identifier("tenant_partition"),
                 nervix_models::Model::Reingestor(CreateReingestor {
                     name: identifier("tenant_partition"),
-                    from_relay: identifier("orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -4268,8 +4260,7 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
                 identifier("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
-                    from_relay: identifier("tenant_orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("tenant_orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: parameterized_by("tenant", "tenant_orders", &["tenant"]),
                     deduplicate_on: "urgent_orders.order_id".to_string(),
@@ -4324,8 +4315,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                 identifier("orders_splitter"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("orders_splitter"),
-                    from_relay: identifier("orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::new(vec![
                         ProcessorOutput {
                             relay: identifier("urgent_orders"),
@@ -4352,8 +4342,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                 identifier("dedup_urgent"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_urgent"),
-                    from_relay: identifier("urgent_orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("urgent_orders")),
                     output_routes: ProcessorOutputs::single(identifier("urgent_projected")),
                     parameterized_by: parameterized_by("tenant", "urgent_orders", &["tenant"]),
                     deduplicate_on: "default_orders.order_id".to_string(),
@@ -4371,8 +4360,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                 identifier("dedup_default"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_default"),
-                    from_relay: identifier("default_orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("default_orders")),
                     output_routes: ProcessorOutputs::single(identifier("default_projected")),
                     parameterized_by: parameterized_by("tenant", "default_orders", &["tenant"]),
                     deduplicate_on: "projected_orders.order_id".to_string(),
@@ -4469,8 +4457,10 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                 identifier("join_streams"),
                 nervix_models::Model::Unifier(CreateUnifier {
                     name: identifier("join_streams"),
-                    from_relays: vec![identifier("left_stream"), identifier("right_stream")],
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::new(
+                        vec![identifier("left_stream"), identifier("right_stream")],
+                        Vec::new(),
+                    ),
                     output_routes: ProcessorOutputs::single(identifier("joined_stream")),
                     parameterized_by: parameterized_by("tenant", "left_stream", &["tenant"]),
                     flush_each: "100ms".to_string(),
@@ -4486,8 +4476,7 @@ fn parameterized_ingestor_specs_capture_unifier_as_single_branch_processor() {
                 identifier("dedup_joined"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_joined"),
-                    from_relay: identifier("joined_stream"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("joined_stream")),
                     output_routes: ProcessorOutputs::single(identifier("projected_joined")),
                     parameterized_by: parameterized_by("tenant", "joined_stream", &["tenant"]),
                     deduplicate_on: "joined_stream.tenant".to_string(),
@@ -4569,11 +4558,13 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
                 identifier("orders_filter"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("orders_filter"),
-                    from_relay: identifier("orders"),
-                    from_where: vec![ProcessorInputWhere {
-                        relay: identifier("orders"),
-                        where_clause: "WHERE orders.active".to_string(),
-                    }],
+                    from: ProcessorInputs::new(
+                        vec![identifier("orders")],
+                        vec![ProcessorInputWhere {
+                            relay: identifier("orders"),
+                            where_clause: "WHERE orders.active".to_string(),
+                        }],
+                    ),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
@@ -4591,8 +4582,7 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
                 identifier("dedup_projected"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_projected"),
-                    from_relay: identifier("projected_orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("projected_orders")),
                     output_routes: ProcessorOutputs::single(identifier("aggregated_orders")),
                     parameterized_by: parameterized_by("tenant", "projected_orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
@@ -4665,8 +4655,7 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
                 identifier("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
-                    from_relay: identifier("orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: parameterized_by("root", "orders", &[]),
                     deduplicate_on: "orders.order_id".to_string(),
@@ -4711,8 +4700,7 @@ fn parameterized_ingestor_specs_use_explicit_unparameterized_relay_as_root() {
                 identifier("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
-                    from_relay: identifier("orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
                     parameterized_by: BranchParameterization::unparameterized(),
                     deduplicate_on: "orders.order_id".to_string(),
@@ -4758,8 +4746,7 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
                 identifier("filter_orders"),
                 nervix_models::Model::WasmProcessor(CreateWasmProcessor {
                     name: identifier("filter_orders"),
-                    from_relay: identifier("orders"),
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("filtered_orders")),
                     parameterized_by: BranchParameterization::unparameterized(),
                     resource: identifier("filter_resource"),
@@ -4796,8 +4783,7 @@ fn parameterized_ingestor_specs_include_reingestor_with_declared_parameterizatio
             identifier("tenant_partition"),
             nervix_models::Model::Reingestor(CreateReingestor {
                 name: identifier("tenant_partition"),
-                from_relay: identifier("notifications"),
-                from_where: Vec::new(),
+                from: ProcessorInputs::single(identifier("notifications")),
                 output_routes: ProcessorOutputs::single(identifier("tenant_notifications")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 flush_each: "100ms".to_string(),
@@ -5137,8 +5123,7 @@ async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
             &parameterized_entrypoint_senders,
             CreateReingestor {
                 name: identifier("tenant_partition"),
-                from_relay: identifier("orders"),
-                from_where: Vec::new(),
+                from: ProcessorInputs::single(identifier("orders")),
                 output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
                 parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
                 flush_each: "100ms".to_string(),
@@ -5147,6 +5132,7 @@ async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
                 message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             },
+            identifier("orders"),
             fan_in,
         )
         .expect("reingestor task should spawn");
@@ -5941,7 +5927,7 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
     ]);
     let program = super::compile_reorderer_program(
         &identifier("order_notifications"),
-        &identifier("incoming_notifications"),
+        &[identifier("incoming_notifications")],
         "incoming_notifications.sequence",
         input_schema.arrow_schema(),
     )
@@ -6006,7 +5992,7 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
     ]);
     let program = super::compile_reorderer_program(
         &identifier("order_notifications"),
-        &identifier("incoming_notifications"),
+        &[identifier("incoming_notifications")],
         "incoming_notifications.sequence",
         input_schema.arrow_schema(),
     )
@@ -6053,7 +6039,7 @@ fn processor_key_programs_reject_unqualified_fields() {
     ]);
     let reorderer_error = super::compile_reorderer_program(
         &identifier("order_notifications"),
-        &identifier("incoming_notifications"),
+        &[identifier("incoming_notifications")],
         "sequence",
         input_schema.arrow_schema(),
     )
@@ -6065,7 +6051,7 @@ fn processor_key_programs_reject_unqualified_fields() {
 
     let deduplicator_error = super::compile_deduplicator_key_program(
         &identifier("deduplicate_notifications"),
-        &identifier("incoming_notifications"),
+        &[identifier("incoming_notifications")],
         "sequence",
         input_schema.arrow_schema(),
     )

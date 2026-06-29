@@ -7,7 +7,7 @@ use chumsky::{
 use nervix_models::{
     AckMode, BranchParameterization, Domain, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy,
     Identifier as ModelIdentifier, MessageErrorPolicy, ParameterValueMapping, ProcessorInputWhere,
-    ProcessorOutput, ProcessorOutputs,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs,
 };
 use sorted_vec::SortedSet;
 
@@ -709,6 +709,23 @@ pub fn from_relay_clause<'src>() -> impl Parser<
                 .into_iter()
                 .collect();
             (relay, from_where)
+        })
+}
+
+pub fn from_relay_clauses<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorInputs, extra::Err<ParseError<'src>>> + Clone {
+    from_relay_clause()
+        .separated_by(tok(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(|inputs| {
+            let mut from_relays = Vec::with_capacity(inputs.len());
+            let mut from_where = Vec::new();
+            for (relay, mut relay_where) in inputs {
+                from_relays.push(relay);
+                from_where.append(&mut relay_where);
+            }
+            ProcessorInputs::new(from_relays, from_where)
         })
 }
 
