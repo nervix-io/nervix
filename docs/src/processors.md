@@ -218,7 +218,7 @@ Ordering is ascending. When two records have identical `BY` keys, arrival order 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] CORRELATOR <name>
   FROM <left_input>, <right_input>
-  ON (<left_expr>, ...), (<right_expr>, ...)
+  CORRELATE WHERE <left_right_predicate>
   MATCH EARLIEST | LATEST
   [TO <output> WHERE <expr>]
   [TO <output>]
@@ -232,13 +232,13 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] CORRELATOR <name>
   ON MESSAGE ERROR <policy>;
 ```
 
-A correlator stores unmatched records in a branch-local key map. The left and right key groups must contain the same number of expressions, and corresponding expressions must compile to exactly the same type. `MATCH EARLIEST` keeps the first pending record on a side for a key and acknowledges later same-side duplicates. `MATCH LATEST` replaces the pending same-side record and acknowledges the replaced one.
+A correlator stores unmatched records in branch-local pending state and matches a left/right pair when the `CORRELATE WHERE` predicate evaluates to true against both input records. The predicate must compile to `BOOLEAN`. `MATCH EARLIEST` keeps the first pending record on a side for a matching predicate and acknowledges later same-side duplicates. `MATCH LATEST` replaces the pending same-side record and acknowledges the replaced one.
 
-When both sides are present for a key, the pair is removed from the pending map and an output record is produced. Correlators do not implicitly copy any input fields into the output. The `OUTPUT` block must explicitly assign every required field on the output relay schema; optional output fields may be omitted.
+When a left/right pair matches, the pair is removed from pending state and an output record is produced. Correlators do not implicitly copy any input fields into the output. The `OUTPUT` block must explicitly assign every required field on the output relay schema; optional output fields may be omitted.
 
 `MAX TIME` is evaluated against the domain clock and bounds how long an unmatched record can remain pending. `ON CORRELATION TIMEOUT` has one action for the left input and one for the right input. `DROP` acknowledges and forgets the record. `SEND TO <relay>` forwards the original unmodified record to another schema-compatible relay and acknowledges it after the send succeeds.
 
-Correlators preserve the upstream parameter group. Each concrete branch gets a separate pending map and output buffer, even when the two inputs receive interleaved records with identical correlation keys.
+Correlators preserve the upstream parameter group. Each concrete branch gets separate pending input state and an output buffer, even when the two inputs receive interleaved records that would match the same predicate in other branches.
 
 ## WASM Processor
 

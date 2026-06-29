@@ -1464,6 +1464,12 @@ impl DomainState {
                         schema_for_ack_model(domain, identifier, models, &correlator.left_relay)?;
                     let right_schema =
                         schema_for_ack_model(domain, identifier, models, &correlator.right_relay)?;
+                    let branch_schema = relay_declared_branch_schema(
+                        domain,
+                        identifier,
+                        models,
+                        &correlator.left_relay,
+                    )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -1472,12 +1478,7 @@ impl DomainState {
                             (&correlator.left_relay, left_schema),
                             (&correlator.right_relay, right_schema),
                         ],
-                        relay_declared_branch_schema(
-                            domain,
-                            identifier,
-                            models,
-                            &correlator.left_relay,
-                        )?,
+                        branch_schema,
                         correlator.filter_where.as_deref(),
                     )?;
                     for output in correlator.output_routes.outputs() {
@@ -3639,12 +3640,32 @@ fn validate_filter_where_for_internal_schemas(
     let Some(filter_where) = filter_where else {
         return Ok(());
     };
-    let parsed = parse_program(filter_where).map_err(|error| {
+    validate_where_program_for_internal_schemas(
+        domain,
+        identifier,
+        models,
+        input_schemas,
+        branch_schema,
+        filter_where,
+        "FILTER WHERE",
+    )
+}
+
+fn validate_where_program_for_internal_schemas(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    input_schemas: &[(&Identifier, &CreateSchema)],
+    branch_schema: Option<&CreateSchema>,
+    where_program: &str,
+    clause_name: &str,
+) -> Result<(), Report<RegistryError>> {
+    let parsed = parse_program(where_program).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "FILTER WHERE parse failed: {}",
+                "{clause_name} parse failed: {}",
                 first_vm_program_error(error)
             ),
         })
@@ -3657,7 +3678,7 @@ fn validate_filter_where_for_internal_schemas(
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "FILTER WHERE must contain exactly one WHERE clause".to_string(),
+            reason: format!("{clause_name} must contain exactly one WHERE clause"),
         }));
     }
 
@@ -3699,7 +3720,7 @@ fn validate_filter_where_for_internal_schemas(
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "FILTER WHERE requires at least one input relay".to_string(),
+            reason: format!("{clause_name} requires at least one input relay"),
         }));
     };
     compile_program_for_bindings_with_sensitivity(
@@ -3712,7 +3733,7 @@ fn validate_filter_where_for_internal_schemas(
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER WHERE compile failed: {}", error.message),
+            reason: format!("{clause_name} compile failed: {}", error.message),
         })
     })?;
 
@@ -5230,24 +5251,6 @@ fn validate_correlator(
     output_relay: &Identifier,
     output_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    if correlator.left_on.is_empty() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "correlator ON requires at least one key expression".to_string(),
-        }));
-    }
-    if correlator.left_on.len() != correlator.right_on.len() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "correlator ON groups must have the same expression count, found {} and {}",
-                correlator.left_on.len(),
-                correlator.right_on.len()
-            ),
-        }));
-    }
     humantime::parse_duration(&correlator.max_time).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5277,36 +5280,13 @@ fn validate_correlator(
             })
         })?;
 
-    let left_key_types = correlator_key_output_types(
+    validate_correlate_where_for_internal_schemas(
         domain,
         identifier,
-        &correlator.left_relay,
-        &correlator.left_on,
+        correlator,
         left_schema,
-        "left",
-    )?;
-    let right_key_types = correlator_key_output_types(
-        domain,
-        identifier,
-        &correlator.right_relay,
-        &correlator.right_on,
         right_schema,
-        "right",
     )?;
-    for (index, (left, right)) in left_key_types.iter().zip(&right_key_types).enumerate() {
-        if left != right {
-            return Err(Report::new(RegistryError::IncompatibleSchema {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "correlator key expression {} type mismatch: left {:?}, right {:?}",
-                    index + 1,
-                    left,
-                    right
-                ),
-            }));
-        }
-    }
 
     validate_correlator_output(
         domain,
@@ -5335,59 +5315,53 @@ fn validate_correlator(
     )
 }
 
-fn correlator_key_output_types(
+fn validate_correlate_where_for_internal_schemas(
     domain: &Domain,
     identifier: &Identifier,
-    relay: &Identifier,
-    expressions: &[String],
-    schema: &CreateSchema,
-    side: &str,
-) -> Result<Vec<(ArrowDataType, bool)>, Report<RegistryError>> {
-    let assignments = expressions
-        .iter()
-        .enumerate()
-        .map(|(index, expression)| {
-            format!(
-                "{}.correlation_key_{} = {}",
-                relay.as_str(),
-                index,
-                expression
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let parsed = parse_program(&format!("SET {assignments}")).map_err(|error| {
+    correlator: &CreateCorrelator,
+    left_schema: &CreateSchema,
+    right_schema: &CreateSchema,
+) -> Result<(), Report<RegistryError>> {
+    let parsed = parse_program(&correlator.correlate_where).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "correlator {side} ON parse failed: {}",
+                "CORRELATE WHERE parse failed: {}",
                 first_vm_program_error(error)
             ),
         })
     })?;
-    let key_types = infer_set_expr_types_for_bindings(
+    if parsed.inner.filter.is_none()
+        || !parsed.inner.set.is_empty()
+        || !parsed.inner.unset.is_empty()
+        || !parsed.inner.branch_filters.is_empty()
+    {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "CORRELATE WHERE must contain exactly one WHERE clause".to_string(),
+        }));
+    }
+
+    compile_program_for_bindings_with_sensitivity(
         &parsed,
-        [writable_binding_for_internal_schema(relay.as_str(), schema)],
+        arrow_schema_for_internal_schema(left_schema),
+        schema_sensitivity_for_internal_schema(left_schema),
+        [
+            writable_binding_for_internal_schema(correlator.left_relay.as_str(), left_schema),
+            readonly_binding_for_internal_schema(correlator.right_relay.as_str(), right_schema),
+        ],
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("correlator {side} ON compile failed: {}", error.message),
+            reason: format!("CORRELATE WHERE compile failed: {}", error.message),
         })
     })?;
-    if key_types.len() != expressions.len() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("correlator {side} ON inferred a different number of key fields"),
-        }));
-    }
-    Ok(key_types
-        .into_iter()
-        .map(|(_field, data_type, nullable)| (data_type, nullable))
-        .collect())
+
+    Ok(())
 }
 
 fn validate_correlator_output(
@@ -7622,8 +7596,7 @@ mod tests {
             right_relay: identifier(right_relay),
             output_routes: ProcessorOutputs::single(identifier(into_relay)),
             parameterized_by: BranchParameterization::unparameterized(),
-            left_on: vec![format!("{left_relay}.value")],
-            right_on: vec![format!("{right_relay}.value")],
+            correlate_where: format!("WHERE {left_relay}.value = {right_relay}.value"),
             match_policy: CorrelatorMatchPolicy::Earliest,
             output: format!("{into_relay}.value = {left_relay}.value"),
             max_time: "5s".to_string(),
@@ -9973,6 +9946,108 @@ mod tests {
             RegistryError::InvalidModel { .. }
         ));
         assert!(format!("{err}").contains("DEDUPLICATE ON compile failed"));
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_correlate_where_non_boolean_predicate() {
+        let (domain, models) = example_graph_models(
+            "correlator non-boolean predicate",
+            r#"
+            CREATE SCHEMA event (
+              value STRING
+            );
+
+            CREATE SCHEMA correlated_event (
+              value STRING
+            );
+
+            CREATE RELAY left_events SCHEMA event UNPARAMETERIZED;
+            CREATE RELAY right_events SCHEMA event UNPARAMETERIZED;
+            CREATE RELAY correlated_events SCHEMA correlated_event UNPARAMETERIZED;
+
+            CREATE CORRELATOR correlate_events
+              FROM left_events, right_events
+              CORRELATE WHERE lower(left_events.value)
+              MATCH EARLIEST
+              TO correlated_events UNPARAMETERIZED
+              FLUSH IMMEDIATE
+              OUTPUT correlated_events.value = left_events.value
+              MAX TIME 5s
+              ON CORRELATION TIMEOUT DROP, DROP
+              ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let err = registry
+            .apply_batch(&domain, models)
+            .expect_err("non-boolean CORRELATE WHERE must fail");
+
+        assert!(matches!(
+            err.current_context(),
+            RegistryError::InvalidModel { .. }
+        ));
+        assert!(
+            format!("{err:#}").contains("CORRELATE WHERE compile failed"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_correlate_where_non_input_namespace() {
+        let (domain, models) = example_graph_models(
+            "correlator non-input namespace",
+            r#"
+            CREATE SCHEMA tenant_branch (
+              tenant STRING
+            );
+
+            CREATE SCHEMA event (
+              tenant STRING,
+              value STRING
+            );
+
+            CREATE SCHEMA correlated_event (
+              value STRING
+            );
+
+            CREATE RELAY left_events SCHEMA event PARAMETERIZED BY tenant_branch;
+            CREATE RELAY right_events SCHEMA event PARAMETERIZED BY tenant_branch;
+            CREATE RELAY correlated_events SCHEMA correlated_event PARAMETERIZED BY tenant_branch;
+
+            CREATE CORRELATOR correlate_events
+              FROM left_events, right_events
+              CORRELATE WHERE branch.tenant = left_events.tenant
+              MATCH EARLIEST
+              TO correlated_events PARAMETERIZED BY tenant_branch
+              FLUSH IMMEDIATE
+              OUTPUT correlated_events.value = left_events.value
+              MAX TIME 5s
+              ON CORRELATION TIMEOUT DROP, DROP
+              ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let err = registry
+            .apply_batch(&domain, models)
+            .expect_err("non-input CORRELATE WHERE namespace must fail");
+
+        assert!(matches!(
+            err.current_context(),
+            RegistryError::InvalidModel { .. }
+        ));
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("CORRELATE WHERE compile failed") && rendered.contains("branch"),
+            "unexpected error: {rendered}"
+        );
 
         let _ = fs::remove_dir_all(path);
     }

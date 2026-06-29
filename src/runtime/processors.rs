@@ -89,8 +89,7 @@ pub(super) enum ParameterizedProcessorOperationSpec {
         output_routes: ParameterizedProcessorOutputsSpec,
         left_relay: Identifier,
         right_relay: Identifier,
-        left_on: Vec<String>,
-        right_on: Vec<String>,
+        correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,
         max_time: String,
@@ -278,8 +277,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         output_routes: RelayProcessorOutputsTemplate,
         left_relay: Identifier,
         right_relay: Identifier,
-        left_on: Vec<String>,
-        right_on: Vec<String>,
+        correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,
         max_time: Duration,
@@ -366,15 +364,13 @@ pub(super) enum RelayProcessorOperationNode {
         output_routes: RelayProcessorOutputsNode,
         left_relay: Identifier,
         right_relay: Identifier,
-        left_on: Vec<String>,
-        right_on: Vec<String>,
+        correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,
         max_time: Duration,
         flush_each: RuntimeFlushPolicy,
         timeout_policy: CorrelationTimeoutPolicy,
-        compiled_left_key_program: Option<Box<CompiledCorrelatorKeyProgram>>,
-        compiled_right_key_program: Option<Box<CompiledCorrelatorKeyProgram>>,
+        compiled_where_program: Option<Box<CompiledCorrelatorWhereProgram>>,
         compiled_output_program: Option<Box<CompiledCorrelatorOutputProgram>>,
         state: SharedCorrelatorBranchState,
     },
@@ -435,10 +431,8 @@ pub(super) struct CompiledReordererProgram {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct CompiledCorrelatorKeyProgram {
+pub(super) struct CompiledCorrelatorWhereProgram {
     pub(super) program: VmCompiledProgram,
-    pub(super) key_column_offset: usize,
-    pub(super) key_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -469,21 +463,10 @@ pub(super) type SharedCorrelatorBranchState = Arc<parking_lot::Mutex<CorrelatorB
 
 #[derive(Debug, Default)]
 pub(super) struct CorrelatorBranchState {
-    pub(super) pending: HashMap<String, CorrelatorPendingSlot>,
+    pub(super) pending_left: Vec<CorrelatorPendingMessage>,
+    pub(super) pending_right: Vec<CorrelatorPendingMessage>,
     pub(super) output_pending: Vec<RelayMessage>,
     pub(super) next_flush: Option<Timestamp>,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct CorrelatorPendingSlot {
-    pub(super) left: Option<CorrelatorPendingMessage>,
-    pub(super) right: Option<CorrelatorPendingMessage>,
-}
-
-impl CorrelatorPendingSlot {
-    pub(super) fn is_empty(&self) -> bool {
-        self.left.is_none() && self.right.is_none()
-    }
 }
 
 #[derive(Debug)]

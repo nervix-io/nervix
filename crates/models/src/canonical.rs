@@ -924,14 +924,13 @@ impl CreateDeduplicator {
 impl CreateCorrelator {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} CORRELATOR {} FROM {}, {} ON ({}), ({}) MATCH {}{}{} {} {} OUTPUT {} MAX \
+            "CREATE {} CORRELATOR {} FROM {}, {} CORRELATE {} MATCH {}{}{} {} {} OUTPUT {} MAX \
              TIME {} ON CORRELATION TIMEOUT {}, {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.left_relay.as_str(),
             self.right_relay.as_str(),
-            self.left_on.join(", "),
-            self.right_on.join(", "),
+            self.correlate_where,
             self.match_policy.as_ref(),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),

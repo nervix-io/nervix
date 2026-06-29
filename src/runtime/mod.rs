@@ -151,7 +151,7 @@ use planning::{
     resolve_concrete_branch, resolve_concrete_branch_from_mappings,
 };
 use processors::{
-    CompiledCorrelatorKeyProgram, CompiledCorrelatorOutputProgram, CompiledReordererProgram,
+    CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram, CompiledReordererProgram,
     CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
     ParameterizedIngestorSpec, ParameterizedProcessorOperationSpec,
     ParameterizedProcessorOutputSpec, ParameterizedProcessorOutputsSpec,
@@ -3080,15 +3080,13 @@ impl RelayProcessorNode {
                     output_routes,
                     left_relay,
                     right_relay,
-                    left_on,
-                    right_on,
+                    correlate_where,
                     match_policy,
                     output_assignments,
                     max_time: _,
                     flush_each,
                     timeout_policy: _,
-                    compiled_left_key_program,
-                    compiled_right_key_program,
+                    compiled_where_program,
                     compiled_output_program,
                     state,
                 } => {
@@ -3117,22 +3115,52 @@ impl RelayProcessorNode {
                         .ok()
                         .flatten()
                         .unwrap_or_else(current_timestamp);
-                    let expressions = match side {
-                        CorrelatorSide::Left => left_on,
-                        CorrelatorSide::Right => right_on,
-                    };
-                    let compiled_key_program = match side {
-                        CorrelatorSide::Left => compiled_left_key_program,
-                        CorrelatorSide::Right => compiled_right_key_program,
-                    };
-                    if compiled_key_program.is_none() {
-                        match compile_correlator_key_program(
-                            &self.processor,
-                            incoming_relay,
-                            expressions,
-                            batch.arrow_schema(),
+                    if compiled_where_program.is_none() {
+                        let left_schema = match relay_schema_for_runtime(
+                            &branch.runtime,
+                            &branch.domain,
+                            left_relay,
                         ) {
-                            Ok(program) => *compiled_key_program = Some(Box::new(program)),
+                            Ok(schema) => schema,
+                            Err(error) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    batch.acks.iter(),
+                                    error.to_string(),
+                                );
+                                return;
+                            }
+                        };
+                        let right_schema = match relay_schema_for_runtime(
+                            &branch.runtime,
+                            &branch.domain,
+                            right_relay,
+                        ) {
+                            Ok(schema) => schema,
+                            Err(error) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    batch.acks.iter(),
+                                    error.to_string(),
+                                );
+                                return;
+                            }
+                        };
+                        match compile_correlator_where_program(
+                            &self.processor,
+                            correlate_where,
+                            left_relay,
+                            left_schema.arrow_schema(),
+                            right_relay,
+                            right_schema.arrow_schema(),
+                        ) {
+                            Ok(program) => *compiled_where_program = Some(Box::new(program)),
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
@@ -3146,7 +3174,7 @@ impl RelayProcessorNode {
                             }
                         }
                     }
-                    let Some(key_program) = compiled_key_program.as_ref() else {
+                    let Some(where_program) = compiled_where_program.as_ref() else {
                         return;
                     };
                     let messages = match batch.clone().try_into_messages() {
@@ -3168,116 +3196,38 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    let records = messages
-                        .iter()
-                        .map(|message| message.record.clone())
-                        .collect::<Vec<_>>();
-                    let vm_batch = match vm_typed_batch_from_runtime_records(
-                        &records,
-                        &key_program.program.input_schema,
-                    ) {
-                        Ok(batch) => batch,
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                messages.iter().map(|message| &message.acks),
-                                format!(
-                                    "correlator '{}' failed to build ON input batch: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
-                            );
-                            return;
-                        }
-                    };
-                    let key_result = execute_program_with_selection_in_context(
-                        &key_program.program,
-                        &vm_batch,
-                        &VmExecutionContext { now: execution_now },
-                    )
-                    .await;
-                    let key_result = match key_result {
-                        Ok(result) => result,
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                messages.iter().map(|message| &message.acks),
-                                format!(
-                                    "correlator '{}' failed to evaluate ON expressions: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
-                            );
-                            return;
-                        }
-                    };
 
                     let mut correlations =
                         Vec::<(CorrelatorPendingMessage, CorrelatorPendingMessage)>::new();
-                    {
-                        let mut state = state.lock();
-                        for (row, message) in messages.into_iter().enumerate() {
-                            let key = correlator_key_from_result(key_program, &key_result, row);
-                            let incoming = CorrelatorPendingMessage {
-                                received_at: execution_now,
-                                message,
-                            };
-                            let mut remove_slot = false;
-                            let slot = state.pending.entry(key.clone()).or_default();
-                            match side {
-                                CorrelatorSide::Left => {
-                                    if let Some(right) = slot.right.take() {
-                                        correlations.push((incoming, right));
-                                        remove_slot = slot.is_empty();
-                                    } else {
-                                        match match_policy {
-                                            CorrelatorMatchPolicy::Earliest => {
-                                                if slot.left.is_some() {
-                                                    incoming.message.acks.ack_success();
-                                                } else {
-                                                    slot.left = Some(incoming);
-                                                }
-                                            }
-                                            CorrelatorMatchPolicy::Latest => {
-                                                if let Some(previous) = slot.left.replace(incoming)
-                                                {
-                                                    previous.message.acks.ack_success();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                CorrelatorSide::Right => {
-                                    if let Some(left) = slot.left.take() {
-                                        correlations.push((left, incoming));
-                                        remove_slot = slot.is_empty();
-                                    } else {
-                                        match match_policy {
-                                            CorrelatorMatchPolicy::Earliest => {
-                                                if slot.right.is_some() {
-                                                    incoming.message.acks.ack_success();
-                                                } else {
-                                                    slot.right = Some(incoming);
-                                                }
-                                            }
-                                            CorrelatorMatchPolicy::Latest => {
-                                                if let Some(previous) = slot.right.replace(incoming)
-                                                {
-                                                    previous.message.acks.ack_success();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if remove_slot {
-                                state.pending.remove(&key);
+                    for message in messages {
+                        let incoming = CorrelatorPendingMessage {
+                            received_at: execution_now,
+                            message,
+                        };
+                        match correlate_incoming_message(
+                            &self.processor,
+                            left_relay,
+                            right_relay,
+                            where_program,
+                            side,
+                            *match_policy,
+                            state,
+                            incoming,
+                            execution_now,
+                        )
+                        .await
+                        {
+                            Ok(Some(pair)) => correlations.push(pair),
+                            Ok(None) => {}
+                            Err((reason, acks)) => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    acks.iter(),
+                                    reason,
+                                );
                             }
                         }
                     }
@@ -3777,30 +3727,32 @@ impl RelayProcessorNode {
                 } => {
                     let timed_out = {
                         let mut state = state.lock();
-                        let keys = state.pending.keys().cloned().collect::<Vec<_>>();
                         let mut timed_out = Vec::new();
-                        for key in keys {
-                            let Some(slot) = state.pending.get_mut(&key) else {
-                                continue;
-                            };
-                            if slot.left.as_ref().is_some_and(|entry| {
-                                checked_add_duration_to_timestamp(entry.received_at, *max_time)
-                                    <= now
-                            }) && let Some(entry) = slot.left.take()
+
+                        let mut left_remaining = Vec::new();
+                        for entry in std::mem::take(&mut state.pending_left) {
+                            if checked_add_duration_to_timestamp(entry.received_at, *max_time)
+                                <= now
                             {
                                 timed_out.push((timeout_policy.left.clone(), entry.message));
-                            }
-                            if slot.right.as_ref().is_some_and(|entry| {
-                                checked_add_duration_to_timestamp(entry.received_at, *max_time)
-                                    <= now
-                            }) && let Some(entry) = slot.right.take()
-                            {
-                                timed_out.push((timeout_policy.right.clone(), entry.message));
-                            }
-                            if slot.is_empty() {
-                                state.pending.remove(&key);
+                            } else {
+                                left_remaining.push(entry);
                             }
                         }
+                        state.pending_left = left_remaining;
+
+                        let mut right_remaining = Vec::new();
+                        for entry in std::mem::take(&mut state.pending_right) {
+                            if checked_add_duration_to_timestamp(entry.received_at, *max_time)
+                                <= now
+                            {
+                                timed_out.push((timeout_policy.right.clone(), entry.message));
+                            } else {
+                                right_remaining.push(entry);
+                            }
+                        }
+                        state.pending_right = right_remaining;
+
                         timed_out
                     };
                     for (action, message) in timed_out {
@@ -4011,10 +3963,9 @@ impl RelayProcessorNode {
             } => {
                 let state = state.lock();
                 state
-                    .pending
-                    .values()
-                    .flat_map(|slot| [slot.left.as_ref(), slot.right.as_ref()])
-                    .flatten()
+                    .pending_left
+                    .iter()
+                    .chain(state.pending_right.iter())
                     .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
                     .chain(state.next_flush)
                     .min()
@@ -4156,8 +4107,7 @@ impl RelayProcessorTemplate {
                     output_routes,
                     left_relay,
                     right_relay,
-                    left_on,
-                    right_on,
+                    correlate_where,
                     match_policy,
                     output_assignments,
                     max_time,
@@ -4167,15 +4117,13 @@ impl RelayProcessorTemplate {
                     output_routes: Self::instantiate_outputs(output_routes),
                     left_relay: left_relay.clone(),
                     right_relay: right_relay.clone(),
-                    left_on: left_on.clone(),
-                    right_on: right_on.clone(),
+                    correlate_where: correlate_where.clone(),
                     match_policy: *match_policy,
                     output_assignments: output_assignments.clone(),
                     max_time: *max_time,
                     flush_each: *flush_each,
                     timeout_policy: timeout_policy.clone(),
-                    compiled_left_key_program: None,
-                    compiled_right_key_program: None,
+                    compiled_where_program: None,
                     compiled_output_program: None,
                     state: runtime.correlator_state(RuntimeStatePlacement {
                         domain: domain.clone(),
@@ -6649,31 +6597,48 @@ fn compile_reorderer_program(
     })
 }
 
-fn compile_correlator_key_program(
+fn compile_correlator_where_program(
     processor: &Identifier,
-    input_relay: &Identifier,
-    expressions: &[String],
-    input_schema: Arc<arrow_schema::Schema>,
-) -> Result<CompiledCorrelatorKeyProgram, String> {
-    if expressions.is_empty() {
+    correlate_where: &str,
+    left_relay: &Identifier,
+    left_schema: Arc<arrow_schema::Schema>,
+    right_relay: &Identifier,
+    right_schema: Arc<arrow_schema::Schema>,
+) -> Result<CompiledCorrelatorWhereProgram, String> {
+    let parsed = parse_program(correlate_where).map_err(|error| {
+        format!(
+            "correlator '{}' CORRELATE WHERE parse failed: {}",
+            processor.as_str(),
+            Runtime::vm_program_error(error)
+        )
+    })?;
+    if parsed.inner.filter.is_none()
+        || !parsed.inner.branch_filters.is_empty()
+        || !parsed.inner.set.is_empty()
+        || !parsed.inner.unset.is_empty()
+    {
         return Err(format!(
-            "correlator '{}' requires at least one ON expression",
+            "correlator '{}' CORRELATE WHERE must contain exactly one WHERE clause",
             processor.as_str()
         ));
     }
-    let compiled = compile_key_projection_program(
-        "correlator",
-        processor,
-        "ON",
-        input_relay,
-        expressions,
-        input_schema,
-    )?;
-    Ok(CompiledCorrelatorKeyProgram {
-        key_column_offset: 0,
-        key_count: expressions.len(),
-        program: compiled,
-    })
+    let program = compile_vm_program_for_bindings_with_sensitivity(
+        &parsed,
+        left_schema.clone(),
+        VmSchemaSensitivity::default(),
+        [
+            VmCompileBinding::writable(left_relay.as_str(), left_schema),
+            VmCompileBinding::readonly(right_relay.as_str(), right_schema),
+        ],
+    )
+    .map_err(|error| {
+        format!(
+            "correlator '{}' CORRELATE WHERE compile failed: {}",
+            processor.as_str(),
+            error.message
+        )
+    })?;
+    Ok(CompiledCorrelatorWhereProgram { program })
 }
 
 struct CorrelatorOutputCompileContext<'a> {
@@ -6934,15 +6899,176 @@ enum CorrelatorSide {
     Right,
 }
 
-fn correlator_key_from_result(
-    program: &CompiledCorrelatorKeyProgram,
-    result: &nervix_vm::ExecutionResult,
-    row: usize,
-) -> String {
-    let key = (0..program.key_count)
-        .map(|index| reorder_key_part(result.batch.column(program.key_column_offset + index), row))
-        .collect::<Vec<_>>();
-    format!("{key:?}")
+fn take_correlator_opposite_pending(
+    state: &SharedCorrelatorBranchState,
+    incoming_side: CorrelatorSide,
+) -> Vec<CorrelatorPendingMessage> {
+    let mut state = state.lock();
+    match incoming_side {
+        CorrelatorSide::Left => std::mem::take(&mut state.pending_right),
+        CorrelatorSide::Right => std::mem::take(&mut state.pending_left),
+    }
+}
+
+fn restore_correlator_opposite_pending(
+    state: &SharedCorrelatorBranchState,
+    incoming_side: CorrelatorSide,
+    mut pending: Vec<CorrelatorPendingMessage>,
+) {
+    let mut state = state.lock();
+    match incoming_side {
+        CorrelatorSide::Left => {
+            pending.extend(std::mem::take(&mut state.pending_right));
+            state.pending_right = pending;
+        }
+        CorrelatorSide::Right => {
+            pending.extend(std::mem::take(&mut state.pending_left));
+            state.pending_left = pending;
+        }
+    }
+}
+
+fn store_correlator_unmatched_incoming(
+    state: &SharedCorrelatorBranchState,
+    incoming_side: CorrelatorSide,
+    incoming: CorrelatorPendingMessage,
+    mut opposite_pending: Vec<CorrelatorPendingMessage>,
+) {
+    let mut state = state.lock();
+    match incoming_side {
+        CorrelatorSide::Left => {
+            opposite_pending.extend(std::mem::take(&mut state.pending_right));
+            state.pending_right = opposite_pending;
+            state.pending_left.push(incoming);
+        }
+        CorrelatorSide::Right => {
+            opposite_pending.extend(std::mem::take(&mut state.pending_left));
+            state.pending_left = opposite_pending;
+            state.pending_right.push(incoming);
+        }
+    }
+}
+
+async fn correlate_incoming_message(
+    processor: &Identifier,
+    left_relay: &Identifier,
+    right_relay: &Identifier,
+    program: &CompiledCorrelatorWhereProgram,
+    incoming_side: CorrelatorSide,
+    match_policy: CorrelatorMatchPolicy,
+    state: &SharedCorrelatorBranchState,
+    incoming: CorrelatorPendingMessage,
+    execution_now: Timestamp,
+) -> Result<Option<(CorrelatorPendingMessage, CorrelatorPendingMessage)>, (String, Vec<AckSet>)> {
+    let opposite_pending = take_correlator_opposite_pending(state, incoming_side);
+    let mut evaluated = Vec::<(CorrelatorPendingMessage, bool)>::new();
+    let mut pending_iter = opposite_pending.into_iter();
+
+    while let Some(candidate) = pending_iter.next() {
+        let (left, right) = match incoming_side {
+            CorrelatorSide::Left => (&incoming, &candidate),
+            CorrelatorSide::Right => (&candidate, &incoming),
+        };
+        let matched = match evaluate_correlator_where_match(
+            processor,
+            left_relay,
+            right_relay,
+            program,
+            left,
+            right,
+            execution_now,
+        )
+        .await
+        {
+            Ok(matched) => matched,
+            Err(error) => {
+                let mut restore = evaluated
+                    .into_iter()
+                    .map(|(pending, _matched)| pending)
+                    .collect::<Vec<_>>();
+                restore.extend(pending_iter);
+                restore_correlator_opposite_pending(state, incoming_side, restore);
+                return Err(error);
+            }
+        };
+        evaluated.push((candidate, matched));
+    }
+
+    let mut matching = Vec::new();
+    let mut remaining = Vec::new();
+    for (pending, matched) in evaluated {
+        if matched {
+            matching.push(pending);
+        } else {
+            remaining.push(pending);
+        }
+    }
+
+    if matching.is_empty() {
+        store_correlator_unmatched_incoming(state, incoming_side, incoming, remaining);
+        return Ok(None);
+    }
+
+    let selected_index = match match_policy {
+        CorrelatorMatchPolicy::Earliest => 0,
+        CorrelatorMatchPolicy::Latest => matching.len() - 1,
+    };
+    let selected = matching.remove(selected_index);
+    for duplicate in matching {
+        duplicate.message.acks.ack_success();
+    }
+    restore_correlator_opposite_pending(state, incoming_side, remaining);
+
+    Ok(Some(match incoming_side {
+        CorrelatorSide::Left => (incoming, selected),
+        CorrelatorSide::Right => (selected, incoming),
+    }))
+}
+
+async fn evaluate_correlator_where_match(
+    processor: &Identifier,
+    left_relay: &Identifier,
+    right_relay: &Identifier,
+    program: &CompiledCorrelatorWhereProgram,
+    left: &CorrelatorPendingMessage,
+    right: &CorrelatorPendingMessage,
+    execution_now: Timestamp,
+) -> Result<bool, (String, Vec<AckSet>)> {
+    let acks = AckSet::merged([left.message.acks.attached(), right.message.acks.attached()]);
+    let combined = correlator_combined_record(
+        left_relay,
+        &left.message.record,
+        right_relay,
+        &right.message.record,
+    );
+    let input = vm_typed_batch_from_runtime_record(&combined, None, &program.program.input_schema)
+        .map_err(|error| {
+            (
+                format!(
+                    "correlator '{}' failed to build CORRELATE WHERE input batch: {}",
+                    processor.as_str(),
+                    error
+                ),
+                vec![acks.clone()],
+            )
+        })?;
+    let result = execute_program_with_selection_in_context(
+        &program.program,
+        &input,
+        &VmExecutionContext { now: execution_now },
+    )
+    .await
+    .map_err(|error| {
+        (
+            format!(
+                "correlator '{}' failed to evaluate CORRELATE WHERE: {}",
+                processor.as_str(),
+                error
+            ),
+            vec![acks.clone()],
+        )
+    })?;
+    Ok(!result.selected_rows.is_empty())
 }
 
 fn correlator_combined_record(

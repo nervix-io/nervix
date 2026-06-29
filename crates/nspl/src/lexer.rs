@@ -232,6 +232,7 @@ pub enum Identifier {
     False,
     Deduplicate,
     Match,
+    Correlate,
     First,
     All,
     Earliest,

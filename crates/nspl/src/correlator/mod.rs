@@ -15,71 +15,6 @@ use crate::{
     },
 };
 
-fn split_key_group_tokens(tokens: &[Token]) -> Result<Vec<String>, String> {
-    let mut parts = Vec::new();
-    let mut current = Vec::new();
-    let mut depth = 0usize;
-    for token in tokens {
-        match token {
-            Token::LParen | Token::LBracket | Token::LBrace => {
-                depth = depth.saturating_add(1);
-                current.push(token.clone());
-            }
-            Token::RParen | Token::RBracket | Token::RBrace => {
-                depth = depth.saturating_sub(1);
-                current.push(token.clone());
-            }
-            Token::Comma if depth == 0 => {
-                if current.is_empty() {
-                    return Err("correlator key group contains an empty expression".to_string());
-                }
-                parts.push(render_vm_program_tokens(&current));
-                current.clear();
-            }
-            _ => current.push(token.clone()),
-        }
-    }
-
-    if current.is_empty() {
-        return Err("correlator key group contains an empty expression".to_string());
-    }
-    parts.push(render_vm_program_tokens(&current));
-    Ok(parts)
-}
-
-fn balanced_group_body<'src>()
--> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    recursive(|body| {
-        let atom = any()
-            .filter(|token| !matches!(token, Token::LParen | Token::RParen))
-            .map(|token| vec![token]);
-        let nested = body
-            .delimited_by(tok(Token::LParen), tok(Token::RParen))
-            .map(|inner: Vec<Token>| {
-                let mut out = Vec::with_capacity(inner.len() + 2);
-                out.push(Token::LParen);
-                out.extend(inner);
-                out.push(Token::RParen);
-                out
-            });
-
-        choice((nested, atom))
-            .repeated()
-            .collect::<Vec<_>>()
-            .map(|chunks| chunks.into_iter().flatten().collect())
-    })
-}
-
-fn key_group<'src>()
--> impl Parser<'src, &'src [Token], Vec<String>, extra::Err<ParseError<'src>>> + Clone {
-    balanced_group_body()
-        .delimited_by(tok(Token::LParen), tok(Token::RParen))
-        .try_map(|tokens, span| {
-            split_key_group_tokens(&tokens).map_err(|error| Rich::custom(span, error))
-        })
-        .labelled("correlator_key_group")
-}
-
 fn output_boundary_token(token: &Token) -> bool {
     matches!(
         token,
@@ -108,6 +43,48 @@ fn output_assignments<'src>()
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
         .labelled("correlator_output")
+}
+
+fn correlate_where_boundary_token(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Word(Word::KnownWord {
+            iden: Identifier::Match,
+            ..
+        })
+    )
+}
+
+fn correlate_where_clause<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Correlate, Identifier::Where)
+        .ignore_then(
+            any()
+                .filter(|token: &Token| !correlate_where_boundary_token(token))
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .try_map(|tokens, span| {
+            let source = render_vm_program_tokens(&tokens);
+            let program = format!("WHERE {source}");
+            crate::vm_program::parse_program(&program)
+                .map(|parsed| {
+                    if parsed.inner.filter.is_some()
+                        && parsed.inner.set.is_empty()
+                        && parsed.inner.unset.is_empty()
+                        && parsed.inner.branch_filters.is_empty()
+                    {
+                        Ok(program)
+                    } else {
+                        Err(Rich::custom(
+                            span,
+                            "CORRELATE WHERE must contain exactly one WHERE clause",
+                        ))
+                    }
+                })
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))?
+        })
 }
 
 fn match_policy<'src>()
@@ -151,10 +128,7 @@ pub fn create_correlator_parser<'src>()
         .then(relay_ref())
         .then_ignore(tok(Token::Comma))
         .then(relay_ref())
-        .then_ignore(kw(Identifier::On))
-        .then(key_group())
-        .then_ignore(tok(Token::Comma))
-        .then(key_group())
+        .then(correlate_where_clause())
         .then(match_policy())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
@@ -167,7 +141,7 @@ pub fn create_correlator_parser<'src>()
         .then(timeout_policy())
         .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .try_map(|value, span| {
+        .try_map(|value, _span| {
             let (
                 (
                     (
@@ -175,7 +149,7 @@ pub fn create_correlator_parser<'src>()
                             (
                                 (
                                     (
-                                        ((((base, left_on), right_on), match_policy), filter_where),
+                                        (((base, correlate_where), match_policy), filter_where),
                                         output_routes,
                                     ),
                                     parameterized_by,
@@ -191,16 +165,6 @@ pub fn create_correlator_parser<'src>()
                 message_error_policy,
             ) = value;
             let ((((if_not_exists, mode), name), left_relay), right_relay) = base;
-            if left_on.len() != right_on.len() {
-                return Err(Rich::custom(
-                    span,
-                    format!(
-                        "correlator ON groups must have the same expression count, found {} and {}",
-                        left_on.len(),
-                        right_on.len()
-                    ),
-                ));
-            }
             let (flush_each, max_batch_size) = flush_each;
             Ok(CreateStatement::new(
                 CreateCorrelator {
@@ -209,8 +173,7 @@ pub fn create_correlator_parser<'src>()
                     right_relay,
                     output_routes,
                     parameterized_by,
-                    left_on,
-                    right_on,
+                    correlate_where,
                     match_policy,
                     output,
                     max_time,
@@ -283,8 +246,8 @@ mod tests {
     #[test]
     fn parses_correlator_with_earliest_match() {
         let tokens = to_tokens(
-            "CREATE CORRELATOR correlate FROM relay1, relay2 ON (lower(relay1.name)), \
-             (lower(relay2.first_name)) MATCH EARLIEST TO relay3 PARAMETERIZED BY tenant_branch \
+            "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE lower(relay1.name) = \
+             lower(relay2.first_name) MATCH EARLIEST TO relay3 PARAMETERIZED BY tenant_branch \
              FLUSH EACH 100ms MAX BATCH SIZE 1MiB OUTPUT relay3.name = lower(relay1.name), \
              relay3.surname = upper(relay2.surname) MAX TIME 1s ON CORRELATION TIMEOUT DROP, SEND \
              TO relay4 ON MESSAGE ERROR LOG;",
@@ -303,8 +266,10 @@ mod tests {
                 .as_str(),
             "relay3"
         );
-        assert_eq!(parsed.left_on, vec!["lower ( relay1.name )"]);
-        assert_eq!(parsed.right_on, vec!["lower ( relay2.first_name )"]);
+        assert_eq!(
+            parsed.correlate_where,
+            "WHERE lower ( relay1.name ) = lower ( relay2.first_name )"
+        );
         assert_eq!(parsed.match_policy, CorrelatorMatchPolicy::Earliest);
         assert!(
             parsed
@@ -315,30 +280,27 @@ mod tests {
     }
 
     #[test]
-    fn parses_compound_keys_and_latest_match() {
+    fn parses_compound_predicate_and_latest_match() {
         let tokens = to_tokens(
-            "CREATE DETACHED CORRELATOR correlate FROM relay1, relay2 ON (lower(relay1.name), \
-             relay1.tenant), (lower(relay2.first_name), relay2.tenant) MATCH LATEST TO relay3 \
-             UNPARAMETERIZED FLUSH IMMEDIATE OUTPUT relay3.name = lower(relay1.name), \
-             relay3.surname = upper(relay2.surname) MAX TIME 1s ON CORRELATION TIMEOUT DROP, DROP \
-             ON MESSAGE ERROR LOG;",
+            "CREATE DETACHED CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE \
+             lower(relay1.name) = lower(relay2.first_name) AND relay1.tenant = relay2.tenant \
+             MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE OUTPUT relay3.name = \
+             lower(relay1.name), relay3.surname = upper(relay2.surname) MAX TIME 1s ON \
+             CORRELATION TIMEOUT DROP, DROP ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_correlator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.mode, AckMode::Detached);
         assert_eq!(
-            parsed.left_on,
-            vec!["lower ( relay1.name )", "relay1.tenant"]
-        );
-        assert_eq!(
-            parsed.right_on,
-            vec!["lower ( relay2.first_name )", "relay2.tenant"]
+            parsed.correlate_where,
+            "WHERE lower ( relay1.name ) = lower ( relay2.first_name ) AND relay1.tenant = \
+             relay2.tenant"
         );
         assert_eq!(parsed.match_policy, CorrelatorMatchPolicy::Latest);
         assert_eq!(parsed.flush_each, "IMMEDIATE");
     }
 
     #[test]
-    fn rejects_mismatched_key_group_lengths() {
+    fn rejects_legacy_tuple_correlation_rule() {
         let tokens = to_tokens(
             "CREATE CORRELATOR correlate FROM relay1, relay2 ON (relay1.name, relay1.tenant), \
              (relay2.first_name) MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE OUTPUT \
@@ -349,9 +311,25 @@ mod tests {
     }
 
     #[test]
+    fn suggests_correlate_where_without_schema_keyword_leakage() {
+        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 ";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(suggestions.contains(&"CORRELATE WHERE".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+    }
+
+    #[test]
+    fn suggests_where_after_correlate() {
+        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE ";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(suggestions.contains(&"WHERE".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+    }
+
+    #[test]
     fn suggests_match_policy_without_schema_keyword_leakage() {
-        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 ON (relay1.name), \
-                     (relay2.first_name) MATCH ";
+        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE relay1.name \
+                     = relay2.first_name MATCH ";
         let suggestions = suggest_create_correlator(input, input.len());
         assert!(suggestions.contains(&"EARLIEST".to_string()));
         assert!(suggestions.contains(&"LATEST".to_string()));
@@ -360,8 +338,8 @@ mod tests {
 
     #[test]
     fn suggests_correlation_timeout_phrase() {
-        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 ON (relay1.name), \
-                     (relay2.first_name) MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE \
+        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE relay1.name \
+                     = relay2.first_name MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE \
                      OUTPUT relay3.name = relay1.name MAX TIME 1s ";
         let suggestions = suggest_create_correlator(input, input.len());
         assert!(suggestions.contains(&"ON CORRELATION TIMEOUT".to_string()));
