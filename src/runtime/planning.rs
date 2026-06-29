@@ -1,6 +1,6 @@
 use nervix_models::{
-    CorrelationTimeoutAction, ParameterValueMapping, ProcessorOutput as ModelProcessorOutput,
-    ProcessorOutputs as ModelProcessorOutputs,
+    CorrelationTimeoutAction, ParameterValueMapping, ProcessorInputWhere,
+    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
 };
 
 use super::*;
@@ -17,6 +17,20 @@ fn parameterized_outputs(outputs: &ModelProcessorOutputs) -> ParameterizedProces
     ParameterizedProcessorOutputsSpec {
         routes: outputs.routes.iter().map(parameterized_output).collect(),
     }
+}
+
+fn processor_input_where_by_relay(
+    from_where: &[ProcessorInputWhere],
+) -> HashMap<Identifier, String> {
+    from_where
+        .iter()
+        .map(|source_filter| {
+            (
+                source_filter.relay.clone(),
+                source_filter.where_clause.clone(),
+            )
+        })
+        .collect()
 }
 
 pub(in crate::runtime) fn parameterized_ingestor_specs_from_scheduled_nodes(
@@ -67,6 +81,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         error_policies: message_only_error_policies(
                             &deduplicator.message_error_policy,
                         ),
+                        from_where: processor_input_where_by_relay(&deduplicator.from_where),
                         filter_where: deduplicator.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::Deduplicator {
                             output_routes: parameterized_outputs(&deduplicator.output_routes),
@@ -88,6 +103,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         error_policies: message_only_error_policies(
                             &reorderer.message_error_policy,
                         ),
+                        from_where: processor_input_where_by_relay(&reorderer.from_where),
                         filter_where: reorderer.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::Reorderer {
                             output_routes: parameterized_outputs(&reorderer.output_routes),
@@ -109,6 +125,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     ],
                     mode: correlator.mode,
                     error_policies: message_only_error_policies(&correlator.message_error_policy),
+                    from_where: processor_input_where_by_relay(&correlator.from_where),
                     filter_where: correlator.filter_where.clone(),
                     operation: ParameterizedProcessorOperationSpec::Correlator {
                         output_routes: parameterized_outputs(&correlator.output_routes),
@@ -145,6 +162,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         error_policies: message_only_error_policies(
                             &window_processor.message_error_policy,
                         ),
+                        from_where: processor_input_where_by_relay(&window_processor.from_where),
                         filter_where: window_processor.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::WindowProcessor {
                             output_routes: parameterized_outputs(&window_processor.output_routes),
@@ -165,6 +183,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     input_relays: unifier.from_relays.clone(),
                     mode: unifier.mode,
                     error_policies: message_only_error_policies(&unifier.message_error_policy),
+                    from_where: processor_input_where_by_relay(&unifier.from_where),
                     filter_where: unifier.filter_where.clone(),
                     operation: ParameterizedProcessorOperationSpec::Unifier {
                         output_routes: parameterized_outputs(&unifier.output_routes),
@@ -192,6 +211,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         error_policies: message_only_error_policies(
                             &inferencer.message_error_policy,
                         ),
+                        from_where: processor_input_where_by_relay(&inferencer.from_where),
                         filter_where: inferencer.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::Inferencer {
                             output_routes: parameterized_outputs(&inferencer.output_routes),
@@ -219,6 +239,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                             &processor.message_error_policy,
                             &processor.global_error_policy,
                         ),
+                        from_where: processor_input_where_by_relay(&processor.from_where),
                         filter_where: processor.filter_where.clone(),
                         operation: ParameterizedProcessorOperationSpec::WasmProcessor {
                             output_routes: parameterized_outputs(&processor.output_routes),
@@ -513,6 +534,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                 input_relays: node.input_relays.clone(),
                 mode: node.mode,
                 error_policies: node.error_policies.clone(),
+                from_where: node.from_where.clone(),
                 filter_where: node.filter_where.clone(),
                 operation: match &node.operation {
                     ParameterizedProcessorOperationSpec::Deduplicator {

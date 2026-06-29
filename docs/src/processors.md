@@ -35,12 +35,15 @@ Every flush-based runtime node must declare either `FLUSH EACH <duration> MAX BA
 Relay-consuming processors declare one or more destination outputs after their input and optional arrival filter:
 
 ```nspl
+FROM <input> [WHERE <expr>]
 [FILTER WHERE <expr>]
 TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]
 [TO <relay> ...]
 ```
 
-`FILTER WHERE` is a node-level arrival filter. It runs before the processor accepts a row into its buffer or state. It replaces the old global processor-level `WHERE` form.
+`FROM ... WHERE` is a source-level input filter. It runs first and may read fields from that source relay, for example `FROM notifications WHERE notifications.active`.
+
+`FILTER WHERE` is a node-level arrival filter. It runs after source filtering and before the processor accepts a row into its buffer or state. It replaces the old global processor-level `WHERE` form.
 
 Each `TO` route may carry its own destination filter-map. `SET` and `UNSET` are destination-owned and therefore appear after the destination relay is known. `WHERE` is optional; a route without `WHERE` receives every row produced by the processor.
 
@@ -79,7 +82,7 @@ Example:
 
 ```nspl
 CREATE DEDUPLICATOR project_notifications
-  FROM notifications
+  FROM notifications WHERE notifications.active
   TO projected_notifications
     SET projected_notifications.normalized = lower(trim(notifications.raw)),
         projected_notifications.amount = notifications.amount + 1
@@ -92,7 +95,7 @@ CREATE DEDUPLICATOR project_notifications
   ON MESSAGE ERROR LOG;
 ```
 
-That example keeps the existing branch grouping, rewrites `normalized` and `amount`, removes `raw` and `active`, and forwards the surviving rows into `projected_notifications`.
+That example keeps the existing branch grouping, filters inactive rows at the source boundary, rewrites `normalized` and `amount`, removes `raw` and `active`, and forwards the surviving rows into `projected_notifications`.
 
 Branch-preserving processor output programs can also read the current parameter group through `branch.<key>`. For example, `SET projected_notifications.tenant = branch.tenant WHERE branch.tenant = notifications.tenant` copies and tests the branch key without requiring the key to be present in the message payload.
 
@@ -123,7 +126,7 @@ Generator rules:
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] UNIFIER <name>
-  FROM <input>, <input>, ...
+  FROM <input> [WHERE <expr>], <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
   PARAMETERIZED BY <schema>
@@ -141,7 +144,7 @@ Use it when multiple sources should feed a common downstream path.
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
-  FROM <input>
+  FROM <input> [WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
   PARAMETERIZED BY <schema>
@@ -169,7 +172,7 @@ Inferencers preserve the upstream parameter group exactly as received. Runtime O
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] DEDUPLICATOR <name>
-  FROM <input>
+  FROM <input> [WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema>
@@ -195,7 +198,7 @@ State-holding `DESCRIBE` commands expose the scheduled `owner` and `replicas` un
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REORDERER <name>
-  FROM <input>
+  FROM <input> [WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema>
@@ -246,7 +249,7 @@ Correlators preserve the upstream parameter group. Each concrete branch gets sep
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
   USING RESOURCE <resource> [VERSION <n>]
   FILE '<path>'
-  FROM <input> [FILTER WHERE <expr>]
+  FROM <input> [WHERE <expr>] [FILTER WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
   PARAMETERIZED BY <schema>
@@ -258,7 +261,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
 DESCRIBE WASM PROCESSOR <name>;
 ```
 
-A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix resource and runs one guest instance per concrete branch. `FILTER WHERE` runs before the guest receives a row. The guest receives Arrow IPC record batches plus an ACK sidecar, and it emits Arrow IPC batches that each name one declared `TO` relay and match that relay's schema. Nervix then applies that route's `SET` and `WHERE` clauses.
+A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix resource and runs one guest instance per concrete branch. Source `FROM ... WHERE` runs first, then `FILTER WHERE` runs before the guest receives a row. The guest receives Arrow IPC record batches plus an ACK sidecar, and it emits Arrow IPC batches that each name one declared `TO` relay and match that relay's schema. Nervix then applies that route's `SET` and `WHERE` clauses.
 
 See [WASM Processor Guests](wasm-processor-guests.md) for the guest ABI and Rust/Go authoring examples.
 
@@ -284,7 +287,7 @@ Flush is guest-controlled for WASM processors. Nervix calls the guest `process` 
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WINDOW PROCESSOR <name>
-  FROM <input>
+  FROM <input> [WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
   PARAMETERIZED BY <schema>
@@ -390,7 +393,7 @@ ACK behavior follows branch mode. In `ATTACHED` mode, the aggregate output carri
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
-  FROM <relay>
+  FROM <relay> [WHERE <expr>]
   [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
   PARAMETERIZED BY <schema> VALUES { <field> = <relay>.<field>, ... } TTL 5m

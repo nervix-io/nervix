@@ -84,15 +84,16 @@ The rest of the graph is built with:
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
-Ingestors, relay-consuming processors, and generated-output processors use optional node-level arrival filters and per-output route clauses. Emitters use the same row-level filter-map surface on their sink boundary:
+Ingestors, relay-consuming processors, and generated-output processors use optional node-level arrival filters and per-output route clauses. Relay-consuming processors may also attach a source-level filter to `FROM`. Emitters use the same row-level filter-map surface on their sink boundary:
 
 ```nspl
+FROM <relay> [WHERE <expr>]
 [FILTER WHERE <expr>]
 TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]
 [TO <relay> ...]
 ```
 
-`FILTER WHERE` runs before the node accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the node.
+On relay-consuming processors, `FROM ... WHERE` is a source-level input filter and runs first. `FILTER WHERE` runs after source filtering, before the node accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the node.
 
 Passthrough inheritance only applies to processors that naturally map one input row to one output row. Generated-output processors such as windows, inferencers, and WASM processors do not inherit input fields; their output routes operate on the aggregate record, ONNX output record, or WASM guest output record.
 

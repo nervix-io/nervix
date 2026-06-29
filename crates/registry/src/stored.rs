@@ -17,10 +17,11 @@ use nervix_models::{
     IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
     KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
     MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
-    ParameterValueMapping, ParseAsType, PostgresConflictAction, ProcessorOutput, ProcessorOutputs,
-    PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization,
-    RelayParameters, SchemaField, SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource,
-    WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    ParameterValueMapping, ParseAsType, PostgresConflictAction, ProcessorInputWhere,
+    ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode,
+    RelayParameterization, RelayParameters, SchemaField, SignalingProtocolOnConnect, SqsIngestMode,
+    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
+    ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -498,6 +499,7 @@ pub enum StoredIngestTimestampSource {
 pub struct StoredCreateReingestor {
     pub name: String,
     pub from_relay: String,
+    pub from_where: Vec<StoredProcessorInputWhere>,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub flush_each: String,
@@ -511,6 +513,7 @@ pub struct StoredCreateReingestor {
 pub struct StoredCreateInferencer {
     pub name: String,
     pub from_relay: String,
+    pub from_where: Vec<StoredProcessorInputWhere>,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub resource: String,
@@ -529,6 +532,7 @@ pub struct StoredCreateInferencer {
 pub struct StoredCreateWasmProcessor {
     pub name: String,
     pub from_relay: String,
+    pub from_where: Vec<StoredProcessorInputWhere>,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub resource: String,
@@ -781,6 +785,12 @@ pub struct StoredProcessorOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredProcessorInputWhere {
+    pub relay: String,
+    pub where_clause: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredProcessorOutputs {
     pub routes: Vec<StoredProcessorOutput>,
 }
@@ -803,6 +813,7 @@ pub struct StoredCreateLookup {
 pub struct StoredCreateUnifier {
     pub name: String,
     pub from_relays: Vec<String>,
+    pub from_where: Vec<StoredProcessorInputWhere>,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub flush_each: String,
@@ -816,6 +827,7 @@ pub struct StoredCreateUnifier {
 pub struct StoredCreateDeduplicator {
     pub name: String,
     pub from_relay: String,
+    pub from_where: Vec<StoredProcessorInputWhere>,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub deduplicate_on: String,
@@ -832,6 +844,7 @@ pub struct StoredCreateCorrelator {
     pub name: String,
     pub left_relay: String,
     pub right_relay: String,
+    pub from_where: Vec<StoredProcessorInputWhere>,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub correlate_where: String,
@@ -868,6 +881,7 @@ pub enum StoredCorrelationTimeoutAction {
 pub struct StoredCreateReorderer {
     pub name: String,
     pub from_relay: String,
+    pub from_where: Vec<StoredProcessorInputWhere>,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub order_by: String,
@@ -883,6 +897,7 @@ pub struct StoredCreateReorderer {
 pub struct StoredCreateWindowProcessor {
     pub name: String,
     pub from_relay: String,
+    pub from_where: Vec<StoredProcessorInputWhere>,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub width: StoredWindowBound,
@@ -2553,6 +2568,26 @@ impl TryFrom<StoredProcessorOutput> for ProcessorOutput {
     }
 }
 
+impl From<ProcessorInputWhere> for StoredProcessorInputWhere {
+    fn from(value: ProcessorInputWhere) -> Self {
+        Self {
+            relay: value.relay.to_string(),
+            where_clause: value.where_clause,
+        }
+    }
+}
+
+impl TryFrom<StoredProcessorInputWhere> for ProcessorInputWhere {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredProcessorInputWhere) -> Result<Self, Self::Error> {
+        Ok(Self {
+            relay: Identifier::parse(&value.relay)?,
+            where_clause: value.where_clause,
+        })
+    }
+}
+
 impl From<ProcessorOutputs> for StoredProcessorOutputs {
     fn from(value: ProcessorOutputs) -> Self {
         Self {
@@ -2619,6 +2654,7 @@ impl From<CreateReingestor> for StoredCreateReingestor {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
+            from_where: value.from_where.into_iter().map(Into::into).collect(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             flush_each: value.flush_each,
@@ -2637,6 +2673,11 @@ impl TryFrom<StoredCreateReingestor> for CreateReingestor {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
+            from_where: value
+                .from_where
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             flush_each: value.flush_each,
@@ -2653,6 +2694,7 @@ impl From<CreateInferencer> for StoredCreateInferencer {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
+            from_where: value.from_where.into_iter().map(Into::into).collect(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             resource: value.resource.to_string(),
@@ -2676,6 +2718,11 @@ impl TryFrom<StoredCreateInferencer> for CreateInferencer {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
+            from_where: value
+                .from_where
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             resource: Identifier::parse(&value.resource)?,
@@ -2705,6 +2752,7 @@ impl From<CreateWasmProcessor> for StoredCreateWasmProcessor {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
+            from_where: value.from_where.into_iter().map(Into::into).collect(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             resource: value.resource.to_string(),
@@ -2725,6 +2773,11 @@ impl TryFrom<StoredCreateWasmProcessor> for CreateWasmProcessor {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
+            from_where: value
+                .from_where
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             resource: Identifier::parse(&value.resource)?,
@@ -3504,6 +3557,7 @@ impl From<CreateDeduplicator> for StoredCreateDeduplicator {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
+            from_where: value.from_where.into_iter().map(Into::into).collect(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             deduplicate_on: value.deduplicate_on,
@@ -3524,6 +3578,11 @@ impl TryFrom<StoredCreateDeduplicator> for CreateDeduplicator {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
+            from_where: value
+                .from_where
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             deduplicate_on: value.deduplicate_on,
@@ -3543,6 +3602,7 @@ impl From<CreateCorrelator> for StoredCreateCorrelator {
             name: value.name.to_string(),
             left_relay: value.left_relay.to_string(),
             right_relay: value.right_relay.to_string(),
+            from_where: value.from_where.into_iter().map(Into::into).collect(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             correlate_where: value.correlate_where,
@@ -3567,6 +3627,11 @@ impl TryFrom<StoredCreateCorrelator> for CreateCorrelator {
             name: Identifier::parse(&value.name)?,
             left_relay: Identifier::parse(&value.left_relay)?,
             right_relay: Identifier::parse(&value.right_relay)?,
+            from_where: value
+                .from_where
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             correlate_where: value.correlate_where,
@@ -3650,6 +3715,7 @@ impl From<CreateReorderer> for StoredCreateReorderer {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
+            from_where: value.from_where.into_iter().map(Into::into).collect(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             order_by: value.order_by,
@@ -3670,6 +3736,11 @@ impl TryFrom<StoredCreateReorderer> for CreateReorderer {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
+            from_where: value
+                .from_where
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             order_by: value.order_by,
@@ -3688,6 +3759,7 @@ impl From<CreateWindowProcessor> for StoredCreateWindowProcessor {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
+            from_where: value.from_where.into_iter().map(Into::into).collect(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             width: value.width.into(),
@@ -3707,6 +3779,11 @@ impl TryFrom<StoredCreateWindowProcessor> for CreateWindowProcessor {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
+            from_where: value
+                .from_where
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             width: value.width.into(),
@@ -3746,6 +3823,7 @@ impl From<CreateUnifier> for StoredCreateUnifier {
                 .into_iter()
                 .map(|relay| relay.to_string())
                 .collect(),
+            from_where: value.from_where.into_iter().map(Into::into).collect(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             flush_each: value.flush_each,
@@ -3767,6 +3845,11 @@ impl TryFrom<StoredCreateUnifier> for CreateUnifier {
                 .from_relays
                 .into_iter()
                 .map(|stream| Identifier::parse(&stream))
+                .collect::<Result<Vec<_>, _>>()?,
+            from_where: value
+                .from_where
+                .into_iter()
+                .map(TryInto::try_into)
                 .collect::<Result<Vec<_>, _>>()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
@@ -4267,6 +4350,7 @@ mod tests {
             Model::Unifier(CreateUnifier {
                 name: identifier("events_unifier"),
                 from_relays: vec![identifier("events_a"), identifier("events_b")],
+                from_where: Vec::new(),
                 output_routes: ProcessorOutputs::single(identifier("events_stream")),
                 parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
@@ -4278,6 +4362,7 @@ mod tests {
             Model::Reingestor(CreateReingestor {
                 name: identifier("events_splitter"),
                 from_relay: identifier("events_stream"),
+                from_where: Vec::new(),
                 output_routes: ProcessorOutputs::new(vec![
                     ProcessorOutput {
                         relay: identifier("events_errors"),
@@ -4297,6 +4382,7 @@ mod tests {
             Model::Reingestor(CreateReingestor {
                 name: identifier("events_forwarder"),
                 from_relay: identifier("events_stream"),
+                from_where: Vec::new(),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: identifier("events_projected"),
                     filter_map: Some(
@@ -4313,6 +4399,7 @@ mod tests {
             Model::WindowProcessor(CreateWindowProcessor {
                 name: identifier("events_window"),
                 from_relay: identifier("events_stream"),
+                from_where: Vec::new(),
                 output_routes: ProcessorOutputs::single(identifier("events_summary")),
                 parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
                 width: WindowBound {

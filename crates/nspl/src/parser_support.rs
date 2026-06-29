@@ -6,8 +6,8 @@ use chumsky::{
 };
 use nervix_models::{
     AckMode, BranchParameterization, Domain, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy,
-    Identifier as ModelIdentifier, MessageErrorPolicy, ParameterValueMapping, ProcessorOutput,
-    ProcessorOutputs,
+    Identifier as ModelIdentifier, MessageErrorPolicy, ParameterValueMapping, ProcessorInputWhere,
+    ProcessorOutput, ProcessorOutputs,
 };
 use sorted_vec::SortedSet;
 
@@ -621,6 +621,18 @@ fn processor_output_boundary_token(token: &Token) -> bool {
     )
 }
 
+fn from_where_boundary_token(token: &Token) -> bool {
+    processor_output_boundary_token(token)
+        || matches!(
+            token,
+            Token::Comma
+                | Token::Word(Word::KnownWord {
+                    iden: Identifier::Filter,
+                    ..
+                })
+        )
+}
+
 fn validated_vm_program_until<'src>(
     stop: fn(&Token) -> bool,
 ) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
@@ -659,6 +671,45 @@ pub fn filter_map_program<'src>()
 pub fn output_filter_map_program<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     validated_vm_program_until(processor_output_boundary_token)
+}
+
+fn source_where_clause<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Where)
+        .ignore_then(
+            any()
+                .filter(|token: &Token| !from_where_boundary_token(token))
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .try_map(|tokens, span| {
+            let source = render_vm_program_tokens(&tokens);
+            let program = format!("WHERE {source}");
+            crate::vm_program::parse_program(&program)
+                .map(|_| program)
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
+}
+
+pub fn from_relay_clause<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    (ModelIdentifier, Vec<ProcessorInputWhere>),
+    extra::Err<ParseError<'src>>,
+> + Clone {
+    relay_ref()
+        .then(source_where_clause().or_not())
+        .map(|(relay, where_clause)| {
+            let from_where = where_clause
+                .map(|where_clause| ProcessorInputWhere {
+                    relay: relay.clone(),
+                    where_clause,
+                })
+                .into_iter()
+                .collect();
+            (relay, from_where)
+        })
 }
 
 fn ingestor_output_boundary_token(token: &Token) -> bool {

@@ -641,6 +641,7 @@ mod tests {
             9 => Model::Unifier(CreateUnifier {
                 name: g.ident(),
                 from_relays: vec![g.ident(), g.ident(), g.ident()],
+                from_where: Vec::new(),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 parameterized_by: processor_parameterized_by(g.ident()),
                 flush_each: "100ms".to_string(),
@@ -656,6 +657,7 @@ mod tests {
             10 => Model::Deduplicator(CreateDeduplicator {
                 name: g.ident(),
                 from_relay: g.ident(),
+                from_where: Vec::new(),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 parameterized_by: processor_parameterized_by(g.ident()),
                 deduplicate_on: g.ident().to_string(),
@@ -892,6 +894,7 @@ mod tests {
                 Model::Reingestor(nervix_models::CreateReingestor {
                     name: g.ident(),
                     from_relay,
+                    from_where: Vec::new(),
                     output_routes: ProcessorOutputs::new(vec![
                         nervix_models::ProcessorOutput {
                             relay: g.ident(),
@@ -1123,6 +1126,16 @@ mod tests {
                      DEDUPLICATE ON ss1.transaction_id MAX ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"TIME".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+        assert!(!suggestions.contains(&"AVRO".to_string()));
+    }
+
+    #[test]
+    fn from_relay_context_suggests_where_without_schema_keyword_leakage() {
+        let input = "CREATE DEDUPLICATOR dedup FROM ss1 ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"WHERE".to_string()));
+        assert!(suggestions.contains(&"TO".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }

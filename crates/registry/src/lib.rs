@@ -905,6 +905,14 @@ impl DomainState {
                         models,
                         &processor.from_relay,
                     )?;
+                    validate_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &[(&processor.from_relay, producer_schema)],
+                        branch_schema,
+                        &processor.from_where,
+                    )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -980,17 +988,26 @@ impl DomainState {
                     )?;
                     let producer_schema =
                         schema_for_ack_model(domain, identifier, models, &processor.from_relay)?;
+                    let branch_schema = relay_declared_branch_schema(
+                        domain,
+                        identifier,
+                        models,
+                        &processor.from_relay,
+                    )?;
+                    validate_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &[(&processor.from_relay, producer_schema)],
+                        branch_schema,
+                        &processor.from_where,
+                    )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
                         &[(&processor.from_relay, producer_schema)],
-                        relay_declared_branch_schema(
-                            domain,
-                            identifier,
-                            models,
-                            &processor.from_relay,
-                        )?,
+                        branch_schema,
                         processor.filter_where.as_deref(),
                     )?;
                     ensure_wasm_processor_output_schemas(domain, identifier, models, processor)?;
@@ -1235,6 +1252,14 @@ impl DomainState {
                         models,
                         &reingestor.from_relay,
                     )?;
+                    validate_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &[(&reingestor.from_relay, producer_schema)],
+                        branch_schema,
+                        &reingestor.from_where,
+                    )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -1380,6 +1405,14 @@ impl DomainState {
                         models,
                         &deduplicator.from_relay,
                     )?;
+                    validate_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &[(&deduplicator.from_relay, producer_schema)],
+                        branch_schema,
+                        &deduplicator.from_where,
+                    )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -1469,6 +1502,17 @@ impl DomainState {
                         identifier,
                         models,
                         &correlator.left_relay,
+                    )?;
+                    validate_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &[
+                            (&correlator.left_relay, left_schema),
+                            (&correlator.right_relay, right_schema),
+                        ],
+                        branch_schema,
+                        &correlator.from_where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
@@ -1580,6 +1624,14 @@ impl DomainState {
                         models,
                         &reorderer.from_relay,
                     )?;
+                    validate_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &[(&reorderer.from_relay, producer_schema)],
+                        branch_schema,
+                        &reorderer.from_where,
+                    )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -1661,6 +1713,14 @@ impl DomainState {
                         })
                         .transpose()?
                         .flatten();
+                    validate_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &input_schemas,
+                        branch_schema,
+                        &unifier.from_where,
+                    )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -1734,6 +1794,14 @@ impl DomainState {
                         identifier,
                         models,
                         &window_processor.from_relay,
+                    )?;
+                    validate_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &[(&window_processor.from_relay, producer_schema)],
+                        branch_schema,
+                        &window_processor.from_where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
@@ -2800,6 +2868,7 @@ fn effective_wasm_output_filter_map_schema(
         models,
         &original_parsed,
         &local_namespaces,
+        "FILTER-MAP",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
@@ -3651,6 +3720,53 @@ fn validate_filter_where_for_internal_schemas(
     )
 }
 
+fn validate_from_where_for_internal_schemas(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    input_schemas: &[(&Identifier, &CreateSchema)],
+    branch_schema: Option<&CreateSchema>,
+    from_where: &[nervix_models::ProcessorInputWhere],
+) -> Result<(), Report<RegistryError>> {
+    let mut seen_relays = HashSet::new();
+    for source_filter in from_where {
+        if !seen_relays.insert(source_filter.relay.clone()) {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "FROM WHERE declared more than once for input relay '{}'",
+                    source_filter.relay.as_str()
+                ),
+            }));
+        }
+        let Some((relay, schema)) = input_schemas
+            .iter()
+            .find(|(relay, _schema)| **relay == source_filter.relay)
+            .copied()
+        else {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "FROM WHERE references unknown input relay '{}'",
+                    source_filter.relay.as_str()
+                ),
+            }));
+        };
+        validate_where_program_for_internal_schemas(
+            domain,
+            identifier,
+            models,
+            &[(relay, schema)],
+            branch_schema,
+            &source_filter.where_clause,
+            "FROM WHERE",
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_where_program_for_internal_schemas(
     domain: &Domain,
     identifier: &Identifier,
@@ -3713,6 +3829,7 @@ fn validate_where_program_for_internal_schemas(
         models,
         &original_parsed,
         &input_relay_names,
+        clause_name,
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
@@ -3806,6 +3923,7 @@ fn effective_processor_output_filter_map_schema(
         models,
         &original_parsed,
         &input_relay_names,
+        "FILTER-MAP",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
@@ -3970,6 +4088,7 @@ fn effective_emitter_filter_map_schema(
         models,
         &original_parsed,
         &emitter_filter_map_local_namespaces(&emitter.from_relay),
+        "FILTER-MAP",
     )?);
     body_bindings.extend(lookup_hash_map_bindings(lookup_fields));
     compile_program_with_options_for_bindings_with_sensitivity(
@@ -4025,6 +4144,7 @@ fn effective_emitter_filter_map_schema(
             models,
             &original_parsed,
             &emitter_filter_map_local_namespaces(&emitter.from_relay),
+            "FILTER-MAP",
         )?);
         header_bindings.extend(lookup_hash_map_bindings(lookup_fields));
         compile_program_with_options_for_bindings(
@@ -4380,6 +4500,7 @@ fn referenced_materialized_stream_bindings(
     models: &HashMap<RegistryKey, Model>,
     parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     excluded_namespaces: &HashSet<String>,
+    program_label: &str,
 ) -> Result<Vec<CompileBinding>, Report<RegistryError>> {
     let mut fields_by_stream = HashMap::<Identifier, HashSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
@@ -4403,7 +4524,8 @@ fn referenced_materialized_stream_bindings(
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "FILTER-MAP source relay '{}' must declare materialized state",
+                    "{} source relay '{}' must declare materialized state",
+                    program_label,
                     relay.as_str()
                 ),
             }));
@@ -4746,6 +4868,7 @@ fn effective_ingestor_output_filter_map_schema(
         models,
         &original_parsed,
         &local_namespaces,
+        "FILTER-MAP",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
@@ -5617,6 +5740,7 @@ fn validate_inferencer_output_filter_map(
         models,
         &original_parsed,
         &local_namespaces,
+        "FILTER-MAP",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
@@ -7572,6 +7696,7 @@ mod tests {
         Model::WasmProcessor(CreateWasmProcessor {
             name: identifier(name),
             from_relay: identifier(from_relay),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(identifier(into_relay)),
             parameterized_by: BranchParameterization::unparameterized(),
             resource: identifier("wasm_filter"),
@@ -7594,6 +7719,7 @@ mod tests {
             name: identifier(name),
             left_relay: identifier(left_relay),
             right_relay: identifier(right_relay),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(identifier(into_relay)),
             parameterized_by: BranchParameterization::unparameterized(),
             correlate_where: format!("WHERE {left_relay}.value = {right_relay}.value"),
@@ -7616,6 +7742,7 @@ mod tests {
         Model::WindowProcessor(CreateWindowProcessor {
             name: Identifier::parse(name).expect("valid identifier"),
             from_relay: Identifier::parse(from_relay).expect("valid identifier"),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
@@ -7642,6 +7769,7 @@ mod tests {
                 .iter()
                 .map(|stream| Identifier::parse(stream).expect("valid identifier"))
                 .collect(),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
@@ -7664,6 +7792,7 @@ mod tests {
         Model::Deduplicator(CreateDeduplicator {
             name: Identifier::parse(name).expect("valid identifier"),
             from_relay: Identifier::parse(from_relay).expect("valid identifier"),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
@@ -7687,6 +7816,7 @@ mod tests {
         Model::Reingestor(CreateReingestor {
             name: Identifier::parse(name).expect("valid identifier"),
             from_relay: Identifier::parse(from_relay).expect("valid identifier"),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
@@ -8314,6 +8444,121 @@ mod tests {
     }
 
     #[test]
+    fn apply_batch_accepts_processor_from_where() {
+        let (domain, models) = example_graph_models(
+            "processor source where",
+            r#"
+            CREATE SCHEMA metric (
+              value I64,
+              source STRING
+            );
+
+            CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
+            CREATE RELAY deduped_metrics SCHEMA metric UNPARAMETERIZED;
+
+            CREATE DEDUPLICATOR dedup_metrics
+              FROM raw_metrics WHERE raw_metrics.value >= 0
+              TO deduped_metrics UNPARAMETERIZED
+              DEDUPLICATE ON raw_metrics.source
+              MAX TIME 10m
+              FLUSH IMMEDIATE
+              ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        registry
+            .apply_batch(&domain, models)
+            .expect("source WHERE should validate against the input relay");
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_non_boolean_processor_from_where() {
+        let (domain, models) = example_graph_models(
+            "processor non-boolean source where",
+            r#"
+            CREATE SCHEMA metric (
+              value I64,
+              source STRING
+            );
+
+            CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
+            CREATE RELAY deduped_metrics SCHEMA metric UNPARAMETERIZED;
+
+            CREATE DEDUPLICATOR dedup_metrics
+              FROM raw_metrics WHERE raw_metrics.value
+              TO deduped_metrics UNPARAMETERIZED
+              DEDUPLICATE ON raw_metrics.source
+              MAX TIME 10m
+              FLUSH IMMEDIATE
+              ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let err = registry
+            .apply_batch(&domain, models)
+            .expect_err("non-boolean source WHERE must fail");
+
+        assert!(matches!(
+            err.current_context(),
+            RegistryError::InvalidModel { .. }
+        ));
+        assert!(
+            format!("{err:#}").contains("FROM WHERE compile failed"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_processor_from_where_other_input_relay() {
+        let (domain, models) = example_graph_models(
+            "processor source where other relay",
+            r#"
+            CREATE SCHEMA metric (
+              value I64,
+              source STRING
+            );
+
+            CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
+            CREATE RELAY deduped_metrics SCHEMA metric UNPARAMETERIZED;
+
+            CREATE DEDUPLICATOR dedup_metrics
+              FROM raw_metrics WHERE deduped_metrics.value >= 0
+              TO deduped_metrics UNPARAMETERIZED
+              DEDUPLICATE ON raw_metrics.source
+              MAX TIME 10m
+              FLUSH IMMEDIATE
+              ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let err = registry
+            .apply_batch(&domain, models)
+            .expect_err("source WHERE cannot reference non-input relay");
+
+        assert!(matches!(
+            err.current_context(),
+            RegistryError::InvalidModel { .. }
+        ));
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("FROM WHERE") && rendered.contains("deduped_metrics"),
+            "unexpected error: {rendered}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn apply_batch_rejects_duplicate_wasm_output_route() {
         let (domain, models) = example_graph_models(
             "wasm processor duplicate output route",
@@ -8368,6 +8613,7 @@ mod tests {
                     Model::Deduplicator(CreateDeduplicator {
                         name: identifier("dedup_events"),
                         from_relay: identifier("raw_events"),
+                        from_where: Vec::new(),
                         output_routes: ProcessorOutputs::single(identifier("projected_events")),
                         parameterized_by: BranchParameterization::unparameterized(),
                         deduplicate_on: "raw_events.value".to_string(),
@@ -9794,6 +10040,7 @@ mod tests {
                     Model::Reingestor(CreateReingestor {
                         name: identifier("leak_events"),
                         from_relay: identifier("sensitive_events"),
+                        from_where: Vec::new(),
                         output_routes: ProcessorOutputs::single(identifier("public_events")),
                         parameterized_by: BranchParameterization::unparameterized(),
                         flush_each: "IMMEDIATE".to_string(),
@@ -10471,6 +10718,7 @@ mod tests {
                     Model::Reingestor(CreateReingestor {
                         name: identifier("route_logs"),
                         from_relay: identifier("notifications"),
+                        from_where: Vec::new(),
                         output_routes: ProcessorOutputs::new(vec![
                             ProcessorOutput {
                                 relay: identifier("errors"),
@@ -10594,6 +10842,7 @@ mod tests {
                     Model::Reingestor(CreateReingestor {
                         name: identifier("route_logs"),
                         from_relay: identifier("notifications"),
+                        from_where: Vec::new(),
                         output_routes: ProcessorOutputs::new(vec![
                             ProcessorOutput {
                                 relay: identifier("errors"),

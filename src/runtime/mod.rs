@@ -2336,6 +2336,21 @@ fn push_grouped_by_key<K, T>(
     groups[index].1.push(item);
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ProcessorInputFilterKind {
+    FromWhere,
+    FilterWhere,
+}
+
+impl ProcessorInputFilterKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::FromWhere => "FROM WHERE",
+            Self::FilterWhere => "FILTER WHERE",
+        }
+    }
+}
+
 impl RelayProcessorNode {
     fn refresh(&mut self, graph: Option<Arc<ActiveGraph>>) {
         let changed = match (&self.last_graph, &graph) {
@@ -2373,11 +2388,50 @@ impl RelayProcessorNode {
         incoming_relay: &Identifier,
         batch: RelayRecordBatch,
     ) -> Option<RelayRecordBatch> {
-        let Some(filter_where) = self.filter_where.as_deref() else {
+        let batch = self
+            .filter_input_batch_with_kind(
+                graph,
+                branch,
+                incoming_relay,
+                batch,
+                ProcessorInputFilterKind::FromWhere,
+            )
+            .await?;
+        self.filter_input_batch_with_kind(
+            graph,
+            branch,
+            incoming_relay,
+            batch,
+            ProcessorInputFilterKind::FilterWhere,
+        )
+        .await
+    }
+
+    async fn filter_input_batch_with_kind(
+        &mut self,
+        graph: &SharedActiveGraph,
+        branch: &mut BranchRuntime,
+        incoming_relay: &Identifier,
+        batch: RelayRecordBatch,
+        kind: ProcessorInputFilterKind,
+    ) -> Option<RelayRecordBatch> {
+        let Some(filter_where) = (match kind {
+            ProcessorInputFilterKind::FromWhere => self.from_where.get(incoming_relay),
+            ProcessorInputFilterKind::FilterWhere => self.filter_where.as_ref(),
+        }) else {
             return Some(batch);
         };
+        let filter_where = filter_where.clone();
 
-        if !self.compiled_filter_where.contains_key(incoming_relay) {
+        let needs_compile = match kind {
+            ProcessorInputFilterKind::FromWhere => {
+                !self.compiled_from_where.contains_key(incoming_relay)
+            }
+            ProcessorInputFilterKind::FilterWhere => {
+                !self.compiled_filter_where.contains_key(incoming_relay)
+            }
+        };
+        if needs_compile {
             let input_schema =
                 match relay_schema_for_runtime(&branch.runtime, &branch.domain, incoming_relay) {
                     Ok(schema) => schema,
@@ -2418,7 +2472,7 @@ impl RelayProcessorNode {
                 &branch.domain,
                 &self.processor,
                 std::slice::from_ref(incoming_relay),
-                Some(filter_where),
+                Some(&filter_where),
                 batch.arrow_schema(),
                 input_schema.vm_sensitivity(),
                 input_schema.arrow_schema(),
@@ -2431,10 +2485,16 @@ impl RelayProcessorNode {
                     current_branch_sensitivity: None,
                 },
             ) {
-                Ok(Some(program)) => {
-                    self.compiled_filter_where
-                        .insert(incoming_relay.clone(), program);
-                }
+                Ok(Some(program)) => match kind {
+                    ProcessorInputFilterKind::FromWhere => {
+                        self.compiled_from_where
+                            .insert(incoming_relay.clone(), program);
+                    }
+                    ProcessorInputFilterKind::FilterWhere => {
+                        self.compiled_filter_where
+                            .insert(incoming_relay.clone(), program);
+                    }
+                },
                 Ok(None) => {}
                 Err(error) => {
                     branch.runtime.handle_internal_processor_error_for_acks(
@@ -2443,14 +2503,19 @@ impl RelayProcessorNode {
                         &self.processor,
                         &self.error_policies,
                         batch.acks.iter(),
-                        error.to_string(),
+                        format!("{} compile failed: {}", kind.label(), error),
                     );
                     return None;
                 }
             }
         }
 
-        let Some(program) = self.compiled_filter_where.get(incoming_relay) else {
+        let program = match kind {
+            ProcessorInputFilterKind::FromWhere => self.compiled_from_where.get(incoming_relay),
+            ProcessorInputFilterKind::FilterWhere => self.compiled_filter_where.get(incoming_relay),
+        }
+        .cloned();
+        let Some(program) = program else {
             return Some(batch);
         };
         let owner_nodes = branch
@@ -2478,9 +2543,10 @@ impl RelayProcessorNode {
                     &self.error_policies,
                     batch.acks.iter(),
                     format!(
-                        "{} '{}' failed to load FILTER WHERE side inputs: {}",
+                        "{} '{}' failed to load {} side inputs: {}",
                         self.kind.as_str(),
                         self.processor.as_str(),
+                        kind.label(),
                         error
                     ),
                 );
@@ -2490,7 +2556,8 @@ impl RelayProcessorNode {
         let plan = match plan_filter_map_messages(
             self.kind.as_str(),
             &self.processor,
-            program,
+            kind.label(),
+            &program,
             batch,
             branch
                 .runtime
@@ -4028,6 +4095,8 @@ impl RelayProcessorTemplate {
             input_relays: self.input_relays.clone(),
             mode: self.mode,
             error_policies: self.error_policies.clone(),
+            from_where: self.from_where.clone(),
+            compiled_from_where: HashMap::default(),
             filter_where: self.filter_where.clone(),
             compiled_filter_where: HashMap::default(),
             operation: match &self.operation {
@@ -8281,6 +8350,7 @@ async fn dispatch_processor_outputs(
 async fn plan_filter_map_messages(
     processor_kind: &str,
     processor: &Identifier,
+    program_label: &str,
     program: &CompiledProgramWithMaterializedInterest,
     batch: RelayRecordBatch,
     execution_now: Timestamp,
@@ -8331,9 +8401,10 @@ async fn plan_filter_map_messages(
                 return Err(PlannedGeneralError {
                     acks,
                     reason: format!(
-                        "{} '{}' failed to prepare FILTER-MAP input batch: {}",
+                        "{} '{}' failed to prepare {} input batch: {}",
                         processor_kind,
                         processor.as_str(),
+                        program_label,
                         error
                     ),
                 });
@@ -8351,9 +8422,10 @@ async fn plan_filter_map_messages(
             return Err(PlannedGeneralError {
                 acks,
                 reason: format!(
-                    "{} '{}' FILTER-MAP execution failed: {}",
+                    "{} '{}' {} execution failed: {}",
                     processor_kind,
                     processor.as_str(),
+                    program_label,
                     error
                 ),
             });
@@ -8385,9 +8457,10 @@ async fn plan_filter_map_messages(
                     acks: std::mem::take(&mut acks[input_row]),
                 },
                 reason: format!(
-                    "{} '{}' FILTER-MAP side error {}: {} at {}",
+                    "{} '{}' {} side error {}: {} at {}",
                     processor_kind,
                     processor.as_str(),
+                    program_label,
                     side_error.code.as_str(),
                     side_error.message,
                     side_error.span
@@ -8405,9 +8478,10 @@ async fn plan_filter_map_messages(
                         acks: std::mem::take(&mut acks[input_row]),
                     },
                     reason: format!(
-                        "{} '{}' failed to materialize FILTER-MAP output row: {}",
+                        "{} '{}' failed to materialize {} output row: {}",
                         processor_kind,
                         processor.as_str(),
+                        program_label,
                         error
                     ),
                 });
@@ -8426,9 +8500,10 @@ async fn plan_filter_map_messages(
             PlannedGeneralError {
                 acks: acks.clone(),
                 reason: format!(
-                    "{} '{}' failed to materialize FILTER-MAP output batch: {}",
+                    "{} '{}' failed to materialize {} output batch: {}",
                     processor_kind,
                     processor.as_str(),
+                    program_label,
                     error
                 ),
             }
@@ -8445,9 +8520,10 @@ async fn plan_filter_map_messages(
                 .map_err(|error| PlannedGeneralError {
                     acks: acks.clone(),
                     reason: format!(
-                        "{} '{}' failed to filter FILTER-MAP output batch: {}",
+                        "{} '{}' failed to filter {} output batch: {}",
                         processor_kind,
                         processor.as_str(),
+                        program_label,
                         error
                     ),
                 })?
@@ -8472,9 +8548,10 @@ async fn plan_filter_map_messages(
             .map_err(|error| PlannedGeneralError {
                 acks: error_acks,
                 reason: format!(
-                    "{} '{}' failed to build FILTER-MAP output batch: {}",
+                    "{} '{}' failed to build {} output batch: {}",
                     processor_kind,
                     processor.as_str(),
+                    program_label,
                     error
                 ),
             })?,

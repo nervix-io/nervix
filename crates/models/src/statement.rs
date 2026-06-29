@@ -1224,6 +1224,12 @@ pub struct ProcessorOutput {
     pub filter_map: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessorInputWhere {
+    pub relay: Identifier,
+    pub where_clause: String,
+}
+
 impl ProcessorOutput {
     pub fn new(relay: Identifier) -> Self {
         Self {
@@ -1273,6 +1279,8 @@ pub enum IngestTimestampSource {
 pub struct CreateReingestor {
     pub name: Identifier,
     pub from_relay: Identifier,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_where: Vec<ProcessorInputWhere>,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub flush_each: String,
@@ -1288,6 +1296,8 @@ pub struct CreateReingestor {
 pub struct CreateInferencer {
     pub name: Identifier,
     pub from_relay: Identifier,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_where: Vec<ProcessorInputWhere>,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub resource: Identifier,
@@ -1310,6 +1320,8 @@ pub struct CreateInferencer {
 pub struct CreateWasmProcessor {
     pub name: Identifier,
     pub from_relay: Identifier,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_where: Vec<ProcessorInputWhere>,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub resource: Identifier,
@@ -1870,6 +1882,8 @@ pub struct CreateLookup {
 pub struct CreateUnifier {
     pub name: Identifier,
     pub from_relays: Vec<Identifier>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_where: Vec<ProcessorInputWhere>,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub flush_each: String,
@@ -1886,6 +1900,8 @@ pub struct CreateUnifier {
 pub struct CreateDeduplicator {
     pub name: Identifier,
     pub from_relay: Identifier,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_where: Vec<ProcessorInputWhere>,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub deduplicate_on: String,
@@ -1905,6 +1921,8 @@ pub struct CreateCorrelator {
     pub name: Identifier,
     pub left_relay: Identifier,
     pub right_relay: Identifier,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_where: Vec<ProcessorInputWhere>,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub correlate_where: String,
@@ -1947,6 +1965,8 @@ pub enum CorrelationTimeoutAction {
 pub struct CreateReorderer {
     pub name: Identifier,
     pub from_relay: Identifier,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_where: Vec<ProcessorInputWhere>,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub order_by: String,
@@ -1965,6 +1985,8 @@ pub struct CreateReorderer {
 pub struct CreateWindowProcessor {
     pub name: Identifier,
     pub from_relay: Identifier,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_where: Vec<ProcessorInputWhere>,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub width: WindowBound,
@@ -2206,6 +2228,7 @@ mod tests {
             config: Box::new(Model::Unifier(CreateUnifier {
                 name: identifier("orders_merge"),
                 from_relays: vec![identifier("orders_in_a"), identifier("orders_in_b")],
+                from_where: Vec::new(),
                 output_routes: ProcessorOutputs::single(identifier("orders_out")),
                 parameterized_by: BranchParameterization::unparameterized(),
                 flush_each: "100ms".to_string(),

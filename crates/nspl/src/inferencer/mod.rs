@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        filter_where_clause, flush_each, if_not_exists_clause, inferencer_name, into_parse_error,
-        kw, lex_input, message_error_policy, processor_outputs, relay_ref, resource_ref,
-        string_lit, suggestions_from_errors, tok, word_raw,
+        filter_where_clause, flush_each, from_relay_clause, if_not_exists_clause, inferencer_name,
+        into_parse_error, kw, lex_input, message_error_policy, processor_outputs, relay_ref,
+        resource_ref, string_lit, suggestions_from_errors, tok, word_raw,
     },
 };
 
@@ -58,7 +58,7 @@ pub fn create_inferencer_parser<'src>()
         .then_ignore(kw(Identifier::Inferencer))
         .then(inferencer_name())
         .then_ignore(kw(Identifier::From))
-        .then(relay_ref())
+        .then(from_relay_clause())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization())
@@ -82,14 +82,16 @@ pub fn create_inferencer_parser<'src>()
                 message_error_policy,
             ) = value;
             let (
-                (((((if_not_exists, mode), name), from_relay), filter_where), processor_outputs),
+                (((((if_not_exists, mode), name), from_input), filter_where), processor_outputs),
                 parameterized_by,
             ) = base;
+            let (from_relay, from_where) = from_input;
             let (flush_each, max_batch_size) = flush_each;
             CreateStatement::new(
                 CreateInferencer {
                     name,
                     from_relay,
+                    from_where,
                     output_routes: processor_outputs,
                     parameterized_by,
                     resource,
