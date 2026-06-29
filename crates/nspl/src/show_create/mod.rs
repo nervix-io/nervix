@@ -6,9 +6,9 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, client_ref, codec_ref, correlator_ref,
         current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref,
-        inferencer_ref, ingestor_ref, into_parse_error, kw, kw_phrase2, lex_input, lookup_ref,
-        reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggestions_from_errors, tok,
-        unifier_ref, vhost_ref, window_processor_ref, wire_schema_ref,
+        inferencer_ref, ingestor_ref, into_parse_error, junction_ref, kw, kw_phrase2, lex_input,
+        lookup_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggestions_from_errors,
+        tok, vhost_ref, window_processor_ref, wire_schema_ref,
     },
 };
 
@@ -94,10 +94,10 @@ pub fn show_create_parser<'src>()
                 kind: ModelKind::Lookup,
                 name,
             }),
-        kw(Identifier::Unifier)
-            .ignore_then(unifier_ref())
+        kw(Identifier::Junction)
+            .ignore_then(junction_ref())
             .map(|name| ShowCreate {
-                kind: ModelKind::Unifier,
+                kind: ModelKind::Junction,
                 name,
             }),
         kw(Identifier::Deduplicator)
@@ -199,10 +199,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_show_create_unifier() {
-        let tokens = to_tokens("SHOW CREATE UNIFIER merge;");
+    fn parses_show_create_junction() {
+        let tokens = to_tokens("SHOW CREATE JUNCTION merge;");
         let parsed = parse_show_create_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.kind, ModelKind::Unifier);
+        assert_eq!(parsed.kind, ModelKind::Junction);
         assert_eq!(parsed.name.as_str(), "merge");
     }
 
@@ -274,7 +274,7 @@ mod tests {
         assert!(suggestions.contains(&"INGESTOR".to_string()));
         assert!(suggestions.contains(&"RELAY".to_string()));
         assert!(suggestions.contains(&"HASH MAP".to_string()));
-        assert!(suggestions.contains(&"UNIFIER".to_string()));
+        assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
         assert!(suggestions.contains(&"WINDOW PROCESSOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));

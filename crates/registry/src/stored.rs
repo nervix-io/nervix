@@ -9,8 +9,8 @@ use nervix_models::{
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
     CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateSchema, CreateSignalingProtocol, CreateUnifier, CreateVhost, CreateWasmProcessor,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
     EndpointType, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, IcebergCatalog,
     IcebergStorageBackend, Identifier, InferencerTensorMapping, IngestSource,
@@ -63,7 +63,7 @@ pub enum StoredModelVersioned {
     Deduplicator(StoredCreateDeduplicator),
     Correlator(StoredCreateCorrelator),
     Reorderer(StoredCreateReorderer),
-    Unifier(StoredCreateUnifier),
+    Junction(StoredCreateJunction),
     WindowProcessor(StoredCreateWindowProcessor),
     Emitter(StoredCreateEmitter),
 }
@@ -813,7 +813,7 @@ pub struct StoredCreateLookup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredCreateUnifier {
+pub struct StoredCreateJunction {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
@@ -1091,7 +1091,7 @@ impl From<Model> for StoredModelVersioned {
             Model::Deduplicator(v) => Self::Deduplicator(v.into()),
             Model::Correlator(v) => Self::Correlator(v.into()),
             Model::Reorderer(v) => Self::Reorderer(v.into()),
-            Model::Unifier(v) => Self::Unifier(v.into()),
+            Model::Junction(v) => Self::Junction(v.into()),
             Model::WindowProcessor(v) => Self::WindowProcessor(v.into()),
             Model::Emitter(v) => Self::Emitter(v.into()),
             Model::Materializer(_) => {
@@ -1154,7 +1154,7 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Deduplicator(v) => Ok(Model::Deduplicator(v.try_into()?)),
             StoredModelVersioned::Correlator(v) => Ok(Model::Correlator(v.try_into()?)),
             StoredModelVersioned::Reorderer(v) => Ok(Model::Reorderer(v.try_into()?)),
-            StoredModelVersioned::Unifier(v) => Ok(Model::Unifier(v.try_into()?)),
+            StoredModelVersioned::Junction(v) => Ok(Model::Junction(v.try_into()?)),
             StoredModelVersioned::WindowProcessor(v) => Ok(Model::WindowProcessor(v.try_into()?)),
             StoredModelVersioned::Emitter(v) => Ok(Model::Emitter(v.try_into()?)),
         }
@@ -3809,8 +3809,8 @@ impl From<StoredWindowBound> for WindowBound {
     }
 }
 
-impl From<CreateUnifier> for StoredCreateUnifier {
-    fn from(value: CreateUnifier) -> Self {
+impl From<CreateJunction> for StoredCreateJunction {
+    fn from(value: CreateJunction) -> Self {
         Self {
             name: value.name.to_string(),
             from: value.from.into(),
@@ -3825,10 +3825,10 @@ impl From<CreateUnifier> for StoredCreateUnifier {
     }
 }
 
-impl TryFrom<StoredCreateUnifier> for CreateUnifier {
+impl TryFrom<StoredCreateJunction> for CreateJunction {
     type Error = Report<NameError>;
 
-    fn try_from(value: StoredCreateUnifier) -> Result<Self, Self::Error> {
+    fn try_from(value: StoredCreateJunction) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
@@ -4328,8 +4328,8 @@ mod tests {
 
                 filter_where: None,
             }),
-            Model::Unifier(CreateUnifier {
-                name: identifier("events_unifier"),
+            Model::Junction(CreateJunction {
+                name: identifier("events_junction"),
                 from: ProcessorInputs::new(
                     vec![identifier("events_a"), identifier("events_b")],
                     Vec::new(),

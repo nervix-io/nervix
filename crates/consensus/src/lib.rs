@@ -15,7 +15,7 @@ use nervix_models::{
 };
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, SnapshotResponse,
-    TransferLeaderRequest, VoteRequest, VoteResponse,
+    TransferLeaderRequest, TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::{
     BasicNode, Config, Entry, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta,
@@ -969,7 +969,7 @@ impl ConsensusHandle {
     pub async fn transfer_leader(
         &self,
         req: TransferLeaderRequest<TypeConfig>,
-    ) -> Result<(), openraft::error::Fatal<TypeConfig>> {
+    ) -> Result<TransferLeaderResponse<TypeConfig>, openraft::error::Fatal<TypeConfig>> {
         self.raft.handle_transfer_leader(req).await
     }
 
@@ -1205,7 +1205,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         &mut self,
         req: TransferLeaderRequest<TypeConfig>,
         option: RPCOption,
-    ) -> Result<(), RPCError<TypeConfig>> {
+    ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
         let rpc_timeout = option.hard_ttl();
         let body = encode(&req).map_err(unreachable_err)?;
         let response = self
@@ -1234,7 +1234,10 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
                 String::from_utf8_lossy(&body)
             )))));
         }
-        Ok(())
+        let body = read_response_bytes_with_timeout(response, "transfer_leader", rpc_timeout)
+            .await
+            .map_err(unreachable_err)?;
+        Ok(decode(&body).map_err(unreachable_err)?)
     }
 }
 

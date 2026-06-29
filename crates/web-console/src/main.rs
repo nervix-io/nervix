@@ -4434,7 +4434,7 @@ impl GraphViewNode {
                 "inferencer" => "INFERENCER",
                 "reingestor" => "REINGESTOR",
                 "reorderer" => "REORDERER",
-                "unifier" => "UNIFIER",
+                "junction" => "JUNCTION",
                 "wasm_processor" | "wasm processor" => "WASM PROCESSOR",
                 "window_processor" | "window processor" => "WINDOW PROCESSOR",
                 _ => "PROCESSOR",

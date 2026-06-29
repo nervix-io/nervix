@@ -143,7 +143,7 @@ pub enum Identifier {
     Relay,
     Processor,
     Window,
-    Unifier,
+    Junction,
     Deduplicator,
     Correlator,
     Decode,

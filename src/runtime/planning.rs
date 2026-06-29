@@ -186,25 +186,25 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         .push(spec.clone());
                 }
             }
-            Model::Unifier(unifier) => {
-                if unifier.from.first().is_none() {
+            Model::Junction(junction) => {
+                if junction.from.first().is_none() {
                     continue;
                 }
                 let spec = ParameterizedProcessorSpec {
                     kind,
                     processor: identifier,
-                    input_relays: unifier.from.relays().to_vec(),
-                    mode: unifier.mode,
-                    error_policies: message_only_error_policies(&unifier.message_error_policy),
-                    from_where: processor_input_where_by_inputs(&unifier.from),
-                    filter_where: unifier.filter_where.clone(),
-                    operation: ParameterizedProcessorOperationSpec::Unifier {
-                        output_routes: parameterized_outputs(&unifier.output_routes),
-                        flush_each: unifier.flush_each.clone(),
-                        max_batch_size: unifier.max_batch_size.clone(),
+                    input_relays: junction.from.relays().to_vec(),
+                    mode: junction.mode,
+                    error_policies: message_only_error_policies(&junction.message_error_policy),
+                    from_where: processor_input_where_by_inputs(&junction.from),
+                    filter_where: junction.filter_where.clone(),
+                    operation: ParameterizedProcessorOperationSpec::Junction {
+                        output_routes: parameterized_outputs(&junction.output_routes),
+                        flush_each: junction.flush_each.clone(),
+                        max_batch_size: junction.max_batch_size.clone(),
                     },
                 };
-                for from_relay in unifier.from.relays() {
+                for from_relay in junction.from.relays() {
                     processors_by_input
                         .entry(from_relay.clone())
                         .or_default()
@@ -324,7 +324,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     }
                     | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
                     | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+                    | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
                     | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
                     | ParameterizedProcessorOperationSpec::WasmProcessor {
                         output_routes, ..
@@ -421,7 +421,7 @@ pub(in crate::runtime) fn collect_reachable_processors(
                 | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
                 | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
                 | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+                | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
                 | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
                 | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
                     for output in output_routes.outputs() {
@@ -660,14 +660,14 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                         )?,
                         timeout_policy: timeout_policy.clone(),
                     },
-                    ParameterizedProcessorOperationSpec::Unifier {
+                    ParameterizedProcessorOperationSpec::Junction {
                         output_routes,
                         flush_each,
                         max_batch_size,
-                    } => RelayProcessorOperationTemplate::Unifier {
+                    } => RelayProcessorOperationTemplate::Junction {
                         output_routes: materialize_outputs(output_routes)?,
                         flush_each: parse_branch_flush_policy(
-                            "unifier",
+                            "junction",
                             &node.processor,
                             flush_each,
                             max_batch_size.as_deref(),
@@ -721,7 +721,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
             ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
             | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
             | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-            | ParameterizedProcessorOperationSpec::Unifier { output_routes, .. }
+            | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
             | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
             | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
                 branch_relay_ids.extend(output_routes.outputs().map(|output| output.relay.clone()));

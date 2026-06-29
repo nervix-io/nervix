@@ -1,5 +1,5 @@
-Feature: Relay unification
-  Scenario Outline: Unifier fans multiple aligned relays into one relay
+Feature: Relay junction
+  Scenario Outline: Junction routes multiple aligned relays into multiple destinations
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -10,12 +10,20 @@ Feature: Relay unification
       """
       CREATE SCHEMA notification (
         user_id I64,
-        source STRING
+        source STRING,
+        raw STRING
+      );
+
+      CREATE SCHEMA notification_projection (
+        user_id I64,
+        source STRING,
+        lane STRING
       );
 
       CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
-        source string
+        source string,
+        raw string
       );
 
       CREATE CODEC notification_codec
@@ -27,7 +35,9 @@ Feature: Relay unification
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE RELAY ss2 SCHEMA notification PARAMETERIZED BY user_id_branch;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss10 SCHEMA notification PARAMETERIZED BY user_id_branch;
+      CREATE RELAY ss10 SCHEMA notification_projection PARAMETERIZED BY user_id_branch;
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+      CREATE RELAY ss20 SCHEMA notification_projection PARAMETERIZED BY user_id_branch;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -55,27 +65,37 @@ Feature: Relay unification
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE UNIFIER join_streams
-        FROM ss1, ss2
-        TO ss10 PARAMETERIZED BY user_id_branch
+      CREATE JUNCTION join_streams
+        FROM ss1 WHERE ss1.source != "drop-left",
+             ss2 WHERE ss2.source != "drop-right"
+        FILTER WHERE ss1.user_id > 0
+        TO ss10 SET ss10.lane = "left" UNSET ss10.raw WHERE ss1.source = "left"
+        TO ss20 SET ss20.lane = "right" UNSET ss20.raw WHERE ss1.source = "right"
+        PARAMETERIZED BY user_id_branch
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO ss10;
+      SUBSCRIBE SESSION TO ss20;
       START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-a"
       """
-      {"user_id":11,"source":"left"}
+      {"user_id":11,"source":"left","raw":"left-raw"}
       """
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-b"
       """
-      {"user_id":22,"source":"right"}
+      {"user_id":22,"source":"right","raw":"right-raw"}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-a"
+      """
+      {"user_id":33,"source":"drop-left","raw":"dropped"}
       """
     Then within "5s" the relay subscription receives payloads
       """
-      "source":"left"
-      "source":"right"
+      "lane":"left","source":"left","user_id":11
+      "lane":"right","source":"right","user_id":22
       """
+    And the relay subscription does not receive a payload within "1s"
 
     Examples:
       | cluster_size | replica_count |
@@ -83,7 +103,7 @@ Feature: Relay unification
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Unifier preserves branch keys for interleaved concrete branches
+  Scenario Outline: Junction preserves branch keys for interleaved concrete branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -139,7 +159,7 @@ Feature: Relay unification
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE UNIFIER join_streams
+      CREATE JUNCTION join_streams
         FROM ss1, ss2
         TO ss10
         PARAMETERIZED BY tenant_branch
@@ -179,7 +199,7 @@ Feature: Relay unification
       | 1            | 0             | FLUSH IMMEDIATE                      |
       | 3            | 0             | FLUSH IMMEDIATE                      |
 
-  Scenario Outline: Unifier filter-map reads materialized relay state
+  Scenario Outline: Junction filter-map reads materialized relay state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -251,7 +271,7 @@ Feature: Relay unification
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE UNIFIER join_streams
+      CREATE JUNCTION join_streams
         FROM ss1, ss2
         TO ss10 SET ss10.source = state_notifications.source PARAMETERIZED BY user_id_branch
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -282,7 +302,7 @@ Feature: Relay unification
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Unifier creation rejects mismatched schemas
+  Scenario Outline: Junction creation rejects mismatched schemas
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -309,7 +329,7 @@ Feature: Relay unification
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE RELAY ss10 SCHEMA notification PARAMETERIZED BY user_id_branch;
 
-      CREATE UNIFIER join_streams
+      CREATE JUNCTION join_streams
         FROM ss1, ss2
         TO ss10 PARAMETERIZED BY user_id_branch
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

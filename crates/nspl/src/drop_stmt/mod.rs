@@ -6,8 +6,8 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, client_ref, codec_ref, correlator_ref,
         current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref,
-        ingestor_ref, into_parse_error, kw, lex_input, node_id, reingestor_ref, relay_ref,
-        reorderer_ref, schema_ref, suggestions_from_errors, tok, unifier_ref, vhost_ref,
+        ingestor_ref, into_parse_error, junction_ref, kw, lex_input, node_id, reingestor_ref,
+        relay_ref, reorderer_ref, schema_ref, suggestions_from_errors, tok, vhost_ref,
         wire_schema_ref,
     },
 };
@@ -82,10 +82,10 @@ pub fn drop_parser<'src>()
                 kind: ModelKind::Relay,
                 name,
             }),
-        kw(Identifier::Unifier)
-            .ignore_then(unifier_ref())
+        kw(Identifier::Junction)
+            .ignore_then(junction_ref())
             .map(|name| DropModel {
-                kind: ModelKind::Unifier,
+                kind: ModelKind::Junction,
                 name,
             }),
         kw(Identifier::Deduplicator)
@@ -187,10 +187,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_drop_unifier() {
-        let tokens = to_tokens("DROP UNIFIER merge;");
+    fn parses_drop_junction() {
+        let tokens = to_tokens("DROP JUNCTION merge;");
         let parsed = parse_drop_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.kind, ModelKind::Unifier);
+        assert_eq!(parsed.kind, ModelKind::Junction);
         assert_eq!(parsed.name.as_str(), "merge");
     }
 
@@ -233,7 +233,7 @@ mod tests {
         assert!(suggestions.contains(&"ENDPOINT".to_string()));
         assert!(suggestions.contains(&"INGESTOR".to_string()));
         assert!(suggestions.contains(&"RELAY".to_string()));
-        assert!(suggestions.contains(&"UNIFIER".to_string()));
+        assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
     }

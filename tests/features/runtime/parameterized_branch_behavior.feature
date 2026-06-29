@@ -230,7 +230,7 @@ Feature: Parameterized branch behavior
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Unifier preserves aligned parameterized relays without mixing them
+  Scenario Outline: Junction preserves aligned parameterized relays without mixing them
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -284,7 +284,7 @@ Feature: Parameterized branch behavior
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE UNIFIER join_streams
+      CREATE JUNCTION join_streams
         FROM ss1, ss2
         TO ss10 PARAMETERIZED BY tenant_branch
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

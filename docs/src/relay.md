@@ -59,7 +59,7 @@ Apache Arrow is used here for two practical reasons:
 Operationally that means:
 
 - ingestors and reingestors batch decoded rows before writing into a relay
-- deduplicators still apply row-level state semantics inside the node, while unifiers stay Arrow-native and concatenate compatible branch-local batches before forwarding
+- deduplicators still apply row-level state semantics inside the node, while junctions stay Arrow-native and concatenate compatible branch-local batches before forwarding
 - window processors keep branch-local online aggregate state and emit Arrow batches containing only the fields declared by their `AGGREGATE` block
 - batches remain branch-local until a `REINGESTOR` or `EMITTER` boundary changes the routing behavior
 - inter-node relay transport serializes those batches with Arrow IPC, so the batch stays Arrow-native over the network too

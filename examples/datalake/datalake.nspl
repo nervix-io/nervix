@@ -879,7 +879,7 @@ CREATE DEDUPLICATOR connect_without_auth_security_mapper
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
-CREATE UNIFIER security_event_unifier
+CREATE JUNCTION security_event_junction
   FROM security_auth_denied_events, security_uncorrelated_auth_events, security_connect_without_auth_events
   TO security_events
   PARAMETERIZED BY device_branch
@@ -955,7 +955,7 @@ CREATE DEDUPLICATOR connection_distance_alert_mapper
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 
-CREATE UNIFIER distance_alert_unifier
+CREATE JUNCTION distance_alert_junction
   FROM location_distance_alerts, connection_distance_alerts
   TO distance_alerts
   PARAMETERIZED BY device_branch
