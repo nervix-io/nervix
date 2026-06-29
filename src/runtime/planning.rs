@@ -1,5 +1,5 @@
 use nervix_models::{
-    CorrelationTimeoutAction, ParameterValueMapping, ProcessorInputWhere,
+    CorrelationTimeoutAction, ParameterValueMapping, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
 };
 
@@ -31,6 +31,10 @@ fn processor_input_where_by_relay(
             )
         })
         .collect()
+}
+
+fn processor_input_where_by_inputs(inputs: &ProcessorInputs) -> HashMap<Identifier, String> {
+    processor_input_where_by_relay(inputs.where_clauses())
 }
 
 pub(in crate::runtime) fn parameterized_ingestor_specs_from_scheduled_nodes(
@@ -69,56 +73,61 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
     for (kind, identifier, model, effective_parameterization) in nodes {
         match &model {
             Model::Deduplicator(deduplicator) => {
-                processors_by_input
-                    .entry(deduplicator.from_relay.clone())
-                    .or_default()
-                    .push(ParameterizedProcessorSpec {
-                        kind,
-                        processor: identifier,
-                        input_relay: deduplicator.from_relay.clone(),
-                        input_relays: vec![deduplicator.from_relay.clone()],
-                        mode: deduplicator.mode,
-                        error_policies: message_only_error_policies(
-                            &deduplicator.message_error_policy,
-                        ),
-                        from_where: processor_input_where_by_relay(&deduplicator.from_where),
-                        filter_where: deduplicator.filter_where.clone(),
-                        operation: ParameterizedProcessorOperationSpec::Deduplicator {
-                            output_routes: parameterized_outputs(&deduplicator.output_routes),
-                            deduplicate_on: deduplicator.deduplicate_on.clone(),
-                            max_time: deduplicator.max_time.clone(),
-                        },
-                    });
+                if deduplicator.from.first().is_none() {
+                    continue;
+                }
+                let spec = ParameterizedProcessorSpec {
+                    kind,
+                    processor: identifier,
+                    input_relays: deduplicator.from.relays().to_vec(),
+                    mode: deduplicator.mode,
+                    error_policies: message_only_error_policies(&deduplicator.message_error_policy),
+                    from_where: processor_input_where_by_inputs(&deduplicator.from),
+                    filter_where: deduplicator.filter_where.clone(),
+                    operation: ParameterizedProcessorOperationSpec::Deduplicator {
+                        output_routes: parameterized_outputs(&deduplicator.output_routes),
+                        deduplicate_on: deduplicator.deduplicate_on.clone(),
+                        max_time: deduplicator.max_time.clone(),
+                    },
+                };
+                for from_relay in deduplicator.from.relays() {
+                    processors_by_input
+                        .entry(from_relay.clone())
+                        .or_default()
+                        .push(spec.clone());
+                }
             }
             Model::Reorderer(reorderer) => {
-                processors_by_input
-                    .entry(reorderer.from_relay.clone())
-                    .or_default()
-                    .push(ParameterizedProcessorSpec {
-                        kind,
-                        processor: identifier,
-                        input_relay: reorderer.from_relay.clone(),
-                        input_relays: vec![reorderer.from_relay.clone()],
-                        mode: reorderer.mode,
-                        error_policies: message_only_error_policies(
-                            &reorderer.message_error_policy,
-                        ),
-                        from_where: processor_input_where_by_relay(&reorderer.from_where),
-                        filter_where: reorderer.filter_where.clone(),
-                        operation: ParameterizedProcessorOperationSpec::Reorderer {
-                            output_routes: parameterized_outputs(&reorderer.output_routes),
-                            order_by: reorderer.order_by.clone(),
-                            max_time: reorderer.max_time.clone(),
-                            flush_each: reorderer.flush_each.clone(),
-                            max_batch_size: reorderer.max_batch_size.clone(),
-                        },
-                    });
+                if reorderer.from.first().is_none() {
+                    continue;
+                }
+                let spec = ParameterizedProcessorSpec {
+                    kind,
+                    processor: identifier,
+                    input_relays: reorderer.from.relays().to_vec(),
+                    mode: reorderer.mode,
+                    error_policies: message_only_error_policies(&reorderer.message_error_policy),
+                    from_where: processor_input_where_by_inputs(&reorderer.from),
+                    filter_where: reorderer.filter_where.clone(),
+                    operation: ParameterizedProcessorOperationSpec::Reorderer {
+                        output_routes: parameterized_outputs(&reorderer.output_routes),
+                        order_by: reorderer.order_by.clone(),
+                        max_time: reorderer.max_time.clone(),
+                        flush_each: reorderer.flush_each.clone(),
+                        max_batch_size: reorderer.max_batch_size.clone(),
+                    },
+                };
+                for from_relay in reorderer.from.relays() {
+                    processors_by_input
+                        .entry(from_relay.clone())
+                        .or_default()
+                        .push(spec.clone());
+                }
             }
             Model::Correlator(correlator) => {
                 let spec = ParameterizedProcessorSpec {
                     kind,
                     processor: identifier,
-                    input_relay: correlator.left_relay.clone(),
                     input_relays: vec![
                         correlator.left_relay.clone(),
                         correlator.right_relay.clone(),
@@ -150,40 +159,44 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     .push(spec);
             }
             Model::WindowProcessor(window_processor) => {
-                processors_by_input
-                    .entry(window_processor.from_relay.clone())
-                    .or_default()
-                    .push(ParameterizedProcessorSpec {
-                        kind,
-                        processor: identifier,
-                        input_relay: window_processor.from_relay.clone(),
-                        input_relays: vec![window_processor.from_relay.clone()],
-                        mode: window_processor.mode,
-                        error_policies: message_only_error_policies(
-                            &window_processor.message_error_policy,
-                        ),
-                        from_where: processor_input_where_by_relay(&window_processor.from_where),
-                        filter_where: window_processor.filter_where.clone(),
-                        operation: ParameterizedProcessorOperationSpec::WindowProcessor {
-                            output_routes: parameterized_outputs(&window_processor.output_routes),
-                            width: window_processor.width.clone(),
-                            step: window_processor.step.clone(),
-                            aggregate: window_processor.aggregate.clone(),
-                        },
-                    });
-            }
-            Model::Unifier(unifier) => {
-                let Some(input_relay) = unifier.from_relays.first().cloned() else {
+                if window_processor.from.first().is_none() {
                     continue;
-                };
+                }
                 let spec = ParameterizedProcessorSpec {
                     kind,
                     processor: identifier,
-                    input_relay,
-                    input_relays: unifier.from_relays.clone(),
+                    input_relays: window_processor.from.relays().to_vec(),
+                    mode: window_processor.mode,
+                    error_policies: message_only_error_policies(
+                        &window_processor.message_error_policy,
+                    ),
+                    from_where: processor_input_where_by_inputs(&window_processor.from),
+                    filter_where: window_processor.filter_where.clone(),
+                    operation: ParameterizedProcessorOperationSpec::WindowProcessor {
+                        output_routes: parameterized_outputs(&window_processor.output_routes),
+                        width: window_processor.width.clone(),
+                        step: window_processor.step.clone(),
+                        aggregate: window_processor.aggregate.clone(),
+                    },
+                };
+                for from_relay in window_processor.from.relays() {
+                    processors_by_input
+                        .entry(from_relay.clone())
+                        .or_default()
+                        .push(spec.clone());
+                }
+            }
+            Model::Unifier(unifier) => {
+                if unifier.from.first().is_none() {
+                    continue;
+                }
+                let spec = ParameterizedProcessorSpec {
+                    kind,
+                    processor: identifier,
+                    input_relays: unifier.from.relays().to_vec(),
                     mode: unifier.mode,
                     error_policies: message_only_error_policies(&unifier.message_error_policy),
-                    from_where: processor_input_where_by_relay(&unifier.from_where),
+                    from_where: processor_input_where_by_inputs(&unifier.from),
                     filter_where: unifier.filter_where.clone(),
                     operation: ParameterizedProcessorOperationSpec::Unifier {
                         output_routes: parameterized_outputs(&unifier.output_routes),
@@ -191,7 +204,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         max_batch_size: unifier.max_batch_size.clone(),
                     },
                 };
-                for from_relay in &unifier.from_relays {
+                for from_relay in unifier.from.relays() {
                     processors_by_input
                         .entry(from_relay.clone())
                         .or_default()
@@ -199,55 +212,63 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 }
             }
             Model::Inferencer(inferencer) => {
-                processors_by_input
-                    .entry(inferencer.from_relay.clone())
-                    .or_default()
-                    .push(ParameterizedProcessorSpec {
-                        kind,
-                        processor: identifier,
-                        input_relay: inferencer.from_relay.clone(),
-                        input_relays: vec![inferencer.from_relay.clone()],
-                        mode: inferencer.mode,
-                        error_policies: message_only_error_policies(
-                            &inferencer.message_error_policy,
-                        ),
-                        from_where: processor_input_where_by_relay(&inferencer.from_where),
-                        filter_where: inferencer.filter_where.clone(),
-                        operation: ParameterizedProcessorOperationSpec::Inferencer {
-                            output_routes: parameterized_outputs(&inferencer.output_routes),
-                            resource: inferencer.resource.clone(),
-                            resource_version: inferencer.resource_version,
-                            file: inferencer.file.clone(),
-                            inputs: inferencer.inputs.clone(),
-                            outputs: inferencer.outputs.clone(),
-                            flush_each: inferencer.flush_each.clone(),
-                            max_batch_size: inferencer.max_batch_size.clone(),
-                        },
-                    });
+                if inferencer.from.first().is_none() {
+                    continue;
+                }
+                let spec = ParameterizedProcessorSpec {
+                    kind,
+                    processor: identifier,
+                    input_relays: inferencer.from.relays().to_vec(),
+                    mode: inferencer.mode,
+                    error_policies: message_only_error_policies(&inferencer.message_error_policy),
+                    from_where: processor_input_where_by_inputs(&inferencer.from),
+                    filter_where: inferencer.filter_where.clone(),
+                    operation: ParameterizedProcessorOperationSpec::Inferencer {
+                        output_routes: parameterized_outputs(&inferencer.output_routes),
+                        resource: inferencer.resource.clone(),
+                        resource_version: inferencer.resource_version,
+                        file: inferencer.file.clone(),
+                        inputs: inferencer.inputs.clone(),
+                        outputs: inferencer.outputs.clone(),
+                        flush_each: inferencer.flush_each.clone(),
+                        max_batch_size: inferencer.max_batch_size.clone(),
+                    },
+                };
+                for from_relay in inferencer.from.relays() {
+                    processors_by_input
+                        .entry(from_relay.clone())
+                        .or_default()
+                        .push(spec.clone());
+                }
             }
             Model::WasmProcessor(processor) => {
-                processors_by_input
-                    .entry(processor.from_relay.clone())
-                    .or_default()
-                    .push(ParameterizedProcessorSpec {
-                        kind,
-                        processor: identifier,
-                        input_relay: processor.from_relay.clone(),
-                        input_relays: vec![processor.from_relay.clone()],
-                        mode: processor.mode,
-                        error_policies: super::wasm_error_policies(
-                            &processor.message_error_policy,
-                            &processor.global_error_policy,
-                        ),
-                        from_where: processor_input_where_by_relay(&processor.from_where),
-                        filter_where: processor.filter_where.clone(),
-                        operation: ParameterizedProcessorOperationSpec::WasmProcessor {
-                            output_routes: parameterized_outputs(&processor.output_routes),
-                            resource: processor.resource.clone(),
-                            resource_version: processor.resource_version,
-                            file: processor.file.clone(),
-                        },
-                    });
+                if processor.from.first().is_none() {
+                    continue;
+                }
+                let spec = ParameterizedProcessorSpec {
+                    kind,
+                    processor: identifier,
+                    input_relays: processor.from.relays().to_vec(),
+                    mode: processor.mode,
+                    error_policies: super::wasm_error_policies(
+                        &processor.message_error_policy,
+                        &processor.global_error_policy,
+                    ),
+                    from_where: processor_input_where_by_inputs(&processor.from),
+                    filter_where: processor.filter_where.clone(),
+                    operation: ParameterizedProcessorOperationSpec::WasmProcessor {
+                        output_routes: parameterized_outputs(&processor.output_routes),
+                        resource: processor.resource.clone(),
+                        resource_version: processor.resource_version,
+                        file: processor.file.clone(),
+                    },
+                };
+                for from_relay in processor.from.relays() {
+                    processors_by_input
+                        .entry(from_relay.clone())
+                        .or_default()
+                        .push(spec.clone());
+                }
             }
             Model::Ingestor(ingestor) => {
                 for output in ingestor.output_routes.outputs() {
@@ -530,7 +551,6 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
             out.push(RelayProcessorTemplate {
                 kind: node.kind,
                 processor: node.processor.clone(),
-                input_relay: node.input_relay.clone(),
                 input_relays: node.input_relays.clone(),
                 mode: node.mode,
                 error_policies: node.error_policies.clone(),
@@ -779,7 +799,12 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
         })
         .transpose()?;
     let entrypoint_schema_relay = match model_index.get(&(spec.kind, spec.identifier.clone())) {
-        Some(Model::Reingestor(reingestor)) => &reingestor.from_relay,
+        Some(Model::Reingestor(reingestor)) => reingestor.from.first().ok_or_else(|| {
+            format!(
+                "reingestor '{}' requires at least one input relay",
+                reingestor.name.as_str()
+            )
+        })?,
         _ => &spec.root_relay,
     };
     let entrypoint_schema = relay_schemas

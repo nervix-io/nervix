@@ -53,7 +53,7 @@ struct DeduplicatorEntrySnapshot {
 
 pub(super) fn compile_deduplicator_key_program(
     processor: &Identifier,
-    input_relay: &Identifier,
+    input_relays: &[Identifier],
     deduplicate_on: &str,
     input_schema: Arc<arrow_schema::Schema>,
 ) -> Result<CompiledDeduplicatorKeyProgram, String> {
@@ -68,7 +68,7 @@ pub(super) fn compile_deduplicator_key_program(
         "deduplicator",
         processor,
         "DEDUPLICATE ON",
-        input_relay,
+        input_relays,
         &expressions,
         input_schema,
     )?;

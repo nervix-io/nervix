@@ -7,7 +7,7 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        duration_lit, filter_where_clause, from_relay_clause, if_not_exists_clause,
+        duration_lit, filter_where_clause, from_relay_clauses, if_not_exists_clause,
         into_parse_error, kw, lex_input, message_error_policy, processor_outputs,
         suggestions_from_errors, tok, window_processor_name,
     },
@@ -206,7 +206,7 @@ pub fn create_window_processor_parser<'src>()
         .then_ignore(kw(Identifier::Processor))
         .then(window_processor_name())
         .then_ignore(kw(Identifier::From))
-        .then(from_relay_clause())
+        .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization())
@@ -239,12 +239,10 @@ pub fn create_window_processor_parser<'src>()
             ),
              span| {
                 validate_step(&width, &step, span)?;
-                let (from_relay, from_where) = from_input;
                 Ok(CreateStatement::new(
                     CreateWindowProcessor {
                         name,
-                        from_relay,
-                        from_where,
+                        from: from_input,
                         output_routes: outputs,
                         parameterized_by,
                         width,
@@ -335,7 +333,7 @@ mod tests {
         let parsed =
             parse_create_window_processor_tokens(&to_tokens(input)).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "latency_window");
-        assert_eq!(parsed.from_relay.as_str(), "s1");
+        assert_eq!(parsed.from.from[0].as_str(), "s1");
         assert_eq!(
             parsed
                 .output_routes

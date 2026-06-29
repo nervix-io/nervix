@@ -5,7 +5,7 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        duration_lit, filter_where_clause, flush_each, from_relay_clause, if_not_exists_clause,
+        duration_lit, filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause,
         into_parse_error, kw, lex_input, message_error_policy, processor_outputs, reorderer_name,
         suggestions_from_errors, tok,
     },
@@ -100,7 +100,7 @@ pub fn create_reorderer_parser<'src>()
         .then_ignore(kw(Identifier::Reorderer))
         .then(reorderer_name())
         .then_ignore(kw(Identifier::From))
-        .then(from_relay_clause())
+        .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization())
@@ -131,13 +131,11 @@ pub fn create_reorderer_parser<'src>()
                 ),
                 message_error_policy,
             )| {
-                let (from_relay, from_where) = from_input;
                 let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateReorderer {
                         name,
-                        from_relay,
-                        from_where,
+                        from: from_input,
                         output_routes: outputs,
                         parameterized_by,
                         order_by,
@@ -215,7 +213,7 @@ mod tests {
         );
         let parsed = parse_create_reorderer_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "order_notifications");
-        assert_eq!(parsed.from_relay.as_str(), "s1");
+        assert_eq!(parsed.from.from[0].as_str(), "s1");
         assert_eq!(parsed.output_routes.routes[0].relay.as_str(), "s2");
         assert_eq!(
             parsed.order_by,

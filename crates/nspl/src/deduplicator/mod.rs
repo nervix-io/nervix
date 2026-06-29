@@ -5,7 +5,7 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        deduplicator_name, duration_lit, filter_where_clause, flush_each, from_relay_clause,
+        deduplicator_name, duration_lit, filter_where_clause, flush_each, from_relay_clauses,
         if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, message_error_policy,
         processor_outputs, suggestions_from_errors, tok,
     },
@@ -100,7 +100,7 @@ pub fn create_deduplicator_parser<'src>()
         .then_ignore(kw(Identifier::Deduplicator))
         .then(deduplicator_name())
         .then_ignore(kw(Identifier::From))
-        .then(from_relay_clause())
+        .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization())
@@ -131,13 +131,11 @@ pub fn create_deduplicator_parser<'src>()
                 ),
                 message_error_policy,
             )| {
-                let (from_relay, from_where) = from_input;
                 let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateDeduplicator {
                         name,
-                        from_relay,
-                        from_where,
+                        from: from_input,
                         output_routes: outputs,
                         parameterized_by,
                         deduplicate_on,
@@ -224,7 +222,7 @@ mod tests {
         let tokens = to_tokens(input);
         let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "dedup_txns");
-        assert_eq!(parsed.from_relay.as_str(), "ss1");
+        assert_eq!(parsed.from.from[0].as_str(), "ss1");
         assert_eq!(
             parsed
                 .output_routes
@@ -248,10 +246,34 @@ mod tests {
              SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.from_relay.as_str(), "ss1");
-        assert_eq!(parsed.from_where.len(), 1);
-        assert_eq!(parsed.from_where[0].relay.as_str(), "ss1");
-        assert_eq!(parsed.from_where[0].where_clause, "WHERE ss1.value = 1");
+        assert_eq!(parsed.from.from[0].as_str(), "ss1");
+        assert_eq!(parsed.from.r#where.len(), 1);
+        assert_eq!(parsed.from.r#where[0].relay.as_str(), "ss1");
+        assert_eq!(parsed.from.r#where[0].where_clause, "WHERE ss1.value = 1");
+    }
+
+    #[test]
+    fn parses_multiple_from_relays_with_source_where() {
+        let tokens = to_tokens(
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE ss1.value = 1, ss2 WHERE ss2.value != \
+             2 TO ss3 PARAMETERIZED BY tenant DEDUPLICATE ON ss1.transaction_id MAX TIME 10m \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+        );
+        let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
+        assert_eq!(
+            parsed
+                .from
+                .from
+                .iter()
+                .map(|relay| relay.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ss1", "ss2"]
+        );
+        assert_eq!(parsed.from.r#where.len(), 2);
+        assert_eq!(parsed.from.r#where[0].relay.as_str(), "ss1");
+        assert_eq!(parsed.from.r#where[0].where_clause, "WHERE ss1.value = 1");
+        assert_eq!(parsed.from.r#where[1].relay.as_str(), "ss2");
+        assert_eq!(parsed.from.r#where[1].where_clause, "WHERE ss2.value != 2");
     }
 
     #[test]
@@ -319,6 +341,15 @@ mod tests {
         let suggestions = suggest_create_deduplicator(input, input.len());
         assert!(suggestions.contains(&"WHERE".to_string()));
         assert!(suggestions.contains(&"TO".to_string()));
+    }
+
+    #[test]
+    fn suggests_relay_after_from_comma_without_schema_keyword_leakage() {
+        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1, ";
+        let suggestions = suggest_create_deduplicator(input, input.len());
+        assert!(suggestions.contains(&"ref:relay".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+        assert!(!suggestions.contains(&"AVRO".to_string()));
     }
 
     #[test]

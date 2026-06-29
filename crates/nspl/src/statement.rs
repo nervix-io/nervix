@@ -239,9 +239,9 @@ mod tests {
         DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType,
         ErrorPolicies, Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry,
         KafkaIngestMode, KafkaOffsetMode, MessageErrorPolicy, Model, ModelKind, MqttIngestMode,
-        MqttQos, MqttSession, NatsIngestMode, ParameterValueMapping, ParseAsType, ProcessorOutputs,
-        PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SchemaField,
-        SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
+        MqttQos, MqttSession, NatsIngestMode, ParameterValueMapping, ParseAsType, ProcessorInputs,
+        ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
+        SchemaField, SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
         SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
     };
 
@@ -640,8 +640,7 @@ mod tests {
             }),
             9 => Model::Unifier(CreateUnifier {
                 name: g.ident(),
-                from_relays: vec![g.ident(), g.ident(), g.ident()],
-                from_where: Vec::new(),
+                from: ProcessorInputs::new(vec![g.ident(), g.ident(), g.ident()], Vec::new()),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 parameterized_by: processor_parameterized_by(g.ident()),
                 flush_each: "100ms".to_string(),
@@ -656,8 +655,7 @@ mod tests {
             }),
             10 => Model::Deduplicator(CreateDeduplicator {
                 name: g.ident(),
-                from_relay: g.ident(),
-                from_where: Vec::new(),
+                from: ProcessorInputs::single(g.ident()),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 parameterized_by: processor_parameterized_by(g.ident()),
                 deduplicate_on: g.ident().to_string(),
@@ -893,8 +891,7 @@ mod tests {
                 let warn_condition = format!(r#"{}.level = "warn""#, from_relay.as_str());
                 Model::Reingestor(nervix_models::CreateReingestor {
                     name: g.ident(),
-                    from_relay,
-                    from_where: Vec::new(),
+                    from: ProcessorInputs::single(from_relay),
                     output_routes: ProcessorOutputs::new(vec![
                         nervix_models::ProcessorOutput {
                             relay: g.ident(),
@@ -1475,7 +1472,7 @@ mod tests {
             panic!("expected unifier statement");
         };
         assert_eq!(unifier.mode, AckMode::Attached);
-        assert_eq!(unifier.from_relays.len(), 2);
+        assert_eq!(unifier.from.from.len(), 2);
     }
 
     #[test]
@@ -1582,7 +1579,7 @@ mod tests {
             panic!("expected reingestor statement");
         };
         assert_eq!(reingestor.mode, AckMode::Attached);
-        assert_eq!(reingestor.from_relay.as_str(), "ss1");
+        assert_eq!(reingestor.from.from[0].as_str(), "ss1");
         assert_eq!(reingestor.output_routes.routes.len(), 1);
         let output = reingestor
             .output_routes

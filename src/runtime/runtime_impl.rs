@@ -3963,25 +3963,31 @@ impl Runtime {
                     });
                 }
                 Model::Reingestor(reingestor) => {
-                    let Some(relay) = relay_builders.get_mut(&reingestor.from_relay) else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing reingestor input relay '{}'",
-                                reingestor.from_relay.as_str()
-                            ),
-                        });
-                    };
-                    if node.executes_on(local_node_id) {
-                        let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
-                        reingestor_specs.push((reingestor.clone(), receiver));
-                    } else if let Some(assigned_node) = node.execution_node() {
-                        push_remote_runtime_consumer(
-                            &mut relay.remote_runtime_consumers,
-                            assigned_node,
-                            &reingestor.from_relay,
-                            reingestor.mode,
-                        );
+                    for from_relay in reingestor.from.relays() {
+                        let Some(relay) = relay_builders.get_mut(from_relay) else {
+                            return Err(RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing reingestor input relay '{}'",
+                                    from_relay.as_str()
+                                ),
+                            });
+                        };
+                        if node.executes_on(local_node_id) {
+                            let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
+                            reingestor_specs.push((
+                                reingestor.clone(),
+                                from_relay.clone(),
+                                receiver,
+                            ));
+                        } else if let Some(assigned_node) = node.execution_node() {
+                            push_remote_runtime_consumer(
+                                &mut relay.remote_runtime_consumers,
+                                assigned_node,
+                                from_relay,
+                                reingestor.mode,
+                            );
+                        }
                     }
                 }
                 Model::Ingestor(ingestor) => {
@@ -4273,12 +4279,13 @@ impl Runtime {
             )?);
         }
 
-        for (reingestor, receiver) in reingestor_specs {
+        for (reingestor, from_relay, receiver) in reingestor_specs {
             tasks.push(self.spawn_reingestor_task(
                 domain,
                 &shutdown_tx,
                 &parameterized_entrypoint_senders,
                 reingestor,
+                from_relay,
                 receiver,
             )?);
         }
@@ -5604,17 +5611,19 @@ impl Runtime {
                     });
                 }
                 Model::Reingestor(reingestor) => {
-                    let Some(relay) = relay_builders.get_mut(&reingestor.from_relay) else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing reingestor input relay '{}'",
-                                reingestor.from_relay.as_str()
-                            ),
-                        });
-                    };
-                    let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
-                    reingestor_specs.push((reingestor.clone(), receiver));
+                    for from_relay in reingestor.from.relays() {
+                        let Some(relay) = relay_builders.get_mut(from_relay) else {
+                            return Err(RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing reingestor input relay '{}'",
+                                    from_relay.as_str()
+                                ),
+                            });
+                        };
+                        let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
+                        reingestor_specs.push((reingestor.clone(), from_relay.clone(), receiver));
+                    }
                 }
                 _ => {}
             }
@@ -5739,12 +5748,13 @@ impl Runtime {
             )?);
         }
 
-        for (reingestor, receiver) in reingestor_specs {
+        for (reingestor, from_relay, receiver) in reingestor_specs {
             tasks.push(self.spawn_reingestor_task(
                 domain,
                 &shutdown_tx,
                 &parameterized_entrypoint_senders,
                 reingestor,
+                from_relay,
                 receiver,
             )?);
         }
@@ -7077,6 +7087,7 @@ impl Runtime {
             mpsc::Sender<ParameterizedEntrypointInput>,
         >,
         reingestor: CreateReingestor,
+        from_relay: Identifier,
         receiver: RelayRuntimeFanIn,
     ) -> Result<JoinHandle<()>, RuntimeError> {
         let mut task_output_routes = RelayProcessorOutputsNode {
@@ -7106,9 +7117,10 @@ impl Runtime {
         }
         let task_domain = domain.clone();
         let task_reingestor = reingestor.name.clone();
-        let task_from_relay = reingestor.from_relay.clone();
+        let task_from_relay = from_relay;
         let task_from_where = reingestor
-            .from_where
+            .from
+            .where_clauses()
             .iter()
             .find(|source_filter| source_filter.relay == task_from_relay)
             .map(|source_filter| source_filter.where_clause.clone());

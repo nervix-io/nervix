@@ -8,7 +8,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        filter_where_clause, from_relay_clause, if_not_exists_clause, into_parse_error, kw,
+        filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
         lex_input, message_error_policy, output_filter_map_program, relay_ref, resource_ref,
         string_lit, suggestions_from_errors, tok, wasm_processor_name,
     },
@@ -86,7 +86,7 @@ pub fn create_wasm_processor_parser<'src>()
         .then_ignore(kw(Identifier::File))
         .then(string_lit())
         .then_ignore(kw(Identifier::From))
-        .then(from_relay_clause())
+        .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(wasm_processor_outputs())
         .then(branch_parameterization())
@@ -119,12 +119,10 @@ pub fn create_wasm_processor_parser<'src>()
                 ),
                 global_error_policy,
             )| {
-                let (from_relay, from_where) = from_input;
                 CreateStatement::new(
                     CreateWasmProcessor {
                         name,
-                        from_relay,
-                        from_where,
+                        from: from_input,
                         output_routes: outputs,
                         parameterized_by,
                         resource,
@@ -212,7 +210,7 @@ mod tests {
         assert_eq!(parsed.resource.as_str(), "wasm_filters");
         assert_eq!(parsed.resource_version, Some(2));
         assert_eq!(parsed.file, "processors/filter_even.wasm");
-        assert_eq!(parsed.from_relay.as_str(), "raw_orders");
+        assert_eq!(parsed.from.from[0].as_str(), "raw_orders");
         assert_eq!(
             parsed
                 .output_routes

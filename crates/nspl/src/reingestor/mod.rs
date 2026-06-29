@@ -5,7 +5,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization_with_values,
-        current_word_prefix, filter_where_clause, flush_each, from_relay_clause,
+        current_word_prefix, filter_where_clause, flush_each, from_relay_clauses,
         if_not_exists_clause, into_parse_error, kw, lex_input, message_error_policy,
         processor_outputs, reingestor_name, suggestions_from_errors, tok,
     },
@@ -20,7 +20,7 @@ pub fn create_reingestor_parser<'src>()
         .then_ignore(kw(Identifier::Reingestor))
         .then(reingestor_name())
         .then_ignore(kw(Identifier::From))
-        .then(from_relay_clause())
+        .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization_with_values())
@@ -38,13 +38,11 @@ pub fn create_reingestor_parser<'src>()
                 ),
                 message_error_policy,
             )| {
-                let (from_relay, from_where) = from_input;
                 let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateReingestor {
                         name,
-                        from_relay,
-                        from_where,
+                        from: from_input,
                         output_routes: outputs,
                         parameterized_by,
                         flush_each,
@@ -123,7 +121,7 @@ mod tests {
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "repartition");
-        assert_eq!(parsed.from_relay.as_str(), "notifications");
+        assert_eq!(parsed.from.from[0].as_str(), "notifications");
         assert_eq!(
             parsed
                 .output_routes
