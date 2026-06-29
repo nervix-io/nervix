@@ -8,9 +8,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        filter_where_clause, if_not_exists_clause, into_parse_error, kw, lex_input,
-        message_error_policy, output_filter_map_program, relay_ref, resource_ref, string_lit,
-        suggestions_from_errors, tok, wasm_processor_name,
+        filter_where_clause, from_relay_clause, if_not_exists_clause, into_parse_error, kw,
+        lex_input, message_error_policy, output_filter_map_program, relay_ref, resource_ref,
+        string_lit, suggestions_from_errors, tok, wasm_processor_name,
     },
 };
 
@@ -86,7 +86,7 @@ pub fn create_wasm_processor_parser<'src>()
         .then_ignore(kw(Identifier::File))
         .then(string_lit())
         .then_ignore(kw(Identifier::From))
-        .then(relay_ref())
+        .then(from_relay_clause())
         .then(filter_where_clause().or_not())
         .then(wasm_processor_outputs())
         .then(branch_parameterization())
@@ -107,7 +107,7 @@ pub fn create_wasm_processor_parser<'src>()
                                         ),
                                         file,
                                     ),
-                                    from_relay,
+                                    from_input,
                                 ),
                                 filter_where,
                             ),
@@ -119,10 +119,12 @@ pub fn create_wasm_processor_parser<'src>()
                 ),
                 global_error_policy,
             )| {
+                let (from_relay, from_where) = from_input;
                 CreateStatement::new(
                     CreateWasmProcessor {
                         name,
                         from_relay,
+                        from_where,
                         output_routes: outputs,
                         parameterized_by,
                         resource,

@@ -7,9 +7,9 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        duration_lit, filter_where_clause, if_not_exists_clause, into_parse_error, kw, lex_input,
-        message_error_policy, processor_outputs, relay_ref, suggestions_from_errors, tok,
-        window_processor_name,
+        duration_lit, filter_where_clause, from_relay_clause, if_not_exists_clause,
+        into_parse_error, kw, lex_input, message_error_policy, processor_outputs,
+        suggestions_from_errors, tok, window_processor_name,
     },
 };
 
@@ -206,7 +206,7 @@ pub fn create_window_processor_parser<'src>()
         .then_ignore(kw(Identifier::Processor))
         .then(window_processor_name())
         .then_ignore(kw(Identifier::From))
-        .then(relay_ref())
+        .then(from_relay_clause())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization())
@@ -224,7 +224,7 @@ pub fn create_window_processor_parser<'src>()
                         (
                             (
                                 (
-                                    ((((if_not_exists, mode), name), from_relay), filter_where),
+                                    ((((if_not_exists, mode), name), from_input), filter_where),
                                     outputs,
                                 ),
                                 parameterized_by,
@@ -239,10 +239,12 @@ pub fn create_window_processor_parser<'src>()
             ),
              span| {
                 validate_step(&width, &step, span)?;
+                let (from_relay, from_where) = from_input;
                 Ok(CreateStatement::new(
                     CreateWindowProcessor {
                         name,
                         from_relay,
+                        from_where,
                         output_routes: outputs,
                         parameterized_by,
                         width,

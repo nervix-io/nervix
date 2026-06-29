@@ -139,7 +139,7 @@ Feature: Processor output routing
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR log_splitter
-        FROM incoming_logs
+        FROM incoming_logs WHERE incoming_logs.level != "skip"
         FILTER WHERE incoming_logs.active
         TO errors_ss WHERE incoming_logs.level = "error"
         TO warnings_ss WHERE incoming_logs.urgent
@@ -162,6 +162,10 @@ Feature: Processor output routing
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route"
       """
       {"id":"info-1","active":true,"level":"info","urgent":false}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route"
+      """
+      {"id":"source-drop","active":true,"level":"skip","urgent":true}
       """
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route"
       """

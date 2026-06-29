@@ -19,11 +19,12 @@ use crate::{
     KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry,
     MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
     MySqlConflictAction, NatsConfigEntry, NatsIngestMode, ParameterValueMapping, ParseAsType,
-    PostgresConfigEntry, PostgresConflictAction, ProcessorOutputs, PrometheusConfigEntry,
-    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
-    RedisPubSubIngestMode, RelayParameterization, RelayParameters, RetryPolicy, S3ConfigEntry,
-    SchemaField, SqsConfigEntry, SqsIngestMode, WebsocketsConfigEntry, WebsocketsIngestMode,
-    WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorOutputs,
+    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
+    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayParameterization,
+    RelayParameters, RetryPolicy, S3ConfigEntry, SchemaField, SqsConfigEntry, SqsIngestMode,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry,
+    ZeroMqIngestMode,
 };
 
 fn parameter_values_to_nspl(values: &[ParameterValueMapping]) -> String {
@@ -891,7 +892,7 @@ impl CreateUnifier {
             self.name.as_str(),
             self.from_relays
                 .iter()
-                .map(Identifier::as_str)
+                .map(|relay| from_relay_to_nspl(relay, &self.from_where))
                 .collect::<Vec<_>>()
                 .join(", "),
             filter_where_suffix(&self.filter_where),
@@ -909,7 +910,7 @@ impl CreateDeduplicator {
             "CREATE {} DEDUPLICATOR {} FROM {}{}{} {} DEDUPLICATE ON {} MAX TIME {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            self.from_relay.as_str(),
+            from_relay_to_nspl(&self.from_relay, &self.from_where),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -928,8 +929,8 @@ impl CreateCorrelator {
              TIME {} ON CORRELATION TIMEOUT {}, {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            self.left_relay.as_str(),
-            self.right_relay.as_str(),
+            from_relay_to_nspl(&self.left_relay, &self.from_where),
+            from_relay_to_nspl(&self.right_relay, &self.from_where),
             self.correlate_where,
             self.match_policy.as_ref(),
             filter_where_suffix(&self.filter_where),
@@ -958,7 +959,7 @@ impl CreateReorderer {
             "CREATE {} REORDERER {} FROM {}{}{} {} BY {} MAX TIME {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            self.from_relay.as_str(),
+            from_relay_to_nspl(&self.from_relay, &self.from_where),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -976,7 +977,7 @@ impl CreateWindowProcessor {
             "CREATE {} WINDOW PROCESSOR {} FROM {}{}{} {} WIDTH {} STEP {} AGGREGATE {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            self.from_relay.as_str(),
+            from_relay_to_nspl(&self.from_relay, &self.from_where),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -1035,7 +1036,7 @@ impl CreateReingestor {
             "CREATE {} REINGESTOR {} FROM {}{}{} {} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            self.from_relay.as_str(),
+            from_relay_to_nspl(&self.from_relay, &self.from_where),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             parameterization_to_nspl(&self.parameterized_by),
@@ -1056,7 +1057,7 @@ impl CreateInferencer {
              OUTPUTS {{ {} }} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            self.from_relay.as_str(),
+            from_relay_to_nspl(&self.from_relay, &self.from_where),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -1084,7 +1085,7 @@ impl CreateWasmProcessor {
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
-            self.from_relay.as_str(),
+            from_relay_to_nspl(&self.from_relay, &self.from_where),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             processor_parameterization_to_nspl(&self.parameterized_by),
@@ -1128,6 +1129,21 @@ fn filter_where_suffix(filter_where: &Option<String>) -> String {
             format!(" FILTER WHERE {condition}")
         })
         .unwrap_or_default()
+}
+
+fn from_relay_to_nspl(relay: &Identifier, from_where: &[ProcessorInputWhere]) -> String {
+    let where_suffix = from_where
+        .iter()
+        .find(|item| item.relay == *relay)
+        .map(|item| {
+            let condition = item
+                .where_clause
+                .strip_prefix("WHERE ")
+                .unwrap_or(&item.where_clause);
+            format!(" WHERE {condition}")
+        })
+        .unwrap_or_default();
+    format!("{}{where_suffix}", relay.as_str())
 }
 
 fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> String {
@@ -2414,6 +2430,7 @@ mod tests {
         let unifier = CreateUnifier {
             name: identifier("orders_unifier"),
             from_relays: vec![identifier("orders_a"), identifier("orders_b")],
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(identifier("orders_all")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
@@ -2433,6 +2450,7 @@ mod tests {
         let deduplicator = CreateDeduplicator {
             name: identifier("orders_dedup"),
             from_relay: identifier("orders_in"),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(identifier("orders_out")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             deduplicate_on: "ss1.transaction_id".to_string(),
@@ -2455,6 +2473,7 @@ mod tests {
         let window_processor = CreateWindowProcessor {
             name: identifier("latency_window"),
             from_relay: identifier("orders_in"),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(identifier("orders_p99")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             width: WindowBound {
@@ -2485,6 +2504,7 @@ mod tests {
         let reingestor = CreateReingestor {
             name: identifier("orders_repartition"),
             from_relay: identifier("orders_in"),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::single(identifier("orders_out")),
             parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
@@ -2505,6 +2525,7 @@ mod tests {
         let route_reingestor = CreateReingestor {
             name: identifier("orders_splitter"),
             from_relay: identifier("orders_in"),
+            from_where: Vec::new(),
             output_routes: ProcessorOutputs::new(vec![
                 ProcessorOutput {
                     relay: identifier("orders_errors"),

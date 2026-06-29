@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        deduplicator_name, duration_lit, filter_where_clause, flush_each, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, message_error_policy, processor_outputs,
-        relay_ref, suggestions_from_errors, tok,
+        deduplicator_name, duration_lit, filter_where_clause, flush_each, from_relay_clause,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, message_error_policy,
+        processor_outputs, suggestions_from_errors, tok,
     },
 };
 
@@ -100,7 +100,7 @@ pub fn create_deduplicator_parser<'src>()
         .then_ignore(kw(Identifier::Deduplicator))
         .then(deduplicator_name())
         .then_ignore(kw(Identifier::From))
-        .then(relay_ref())
+        .then(from_relay_clause())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
         .then(branch_parameterization())
@@ -118,7 +118,7 @@ pub fn create_deduplicator_parser<'src>()
                         (
                             (
                                 (
-                                    ((((if_not_exists, mode), name), from_relay), filter_where),
+                                    ((((if_not_exists, mode), name), from_input), filter_where),
                                     outputs,
                                 ),
                                 parameterized_by,
@@ -131,11 +131,13 @@ pub fn create_deduplicator_parser<'src>()
                 ),
                 message_error_policy,
             )| {
+                let (from_relay, from_where) = from_input;
                 let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateDeduplicator {
                         name,
                         from_relay,
+                        from_where,
                         output_routes: outputs,
                         parameterized_by,
                         deduplicate_on,
@@ -239,6 +241,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_source_where_after_from_relay() {
+        let tokens = to_tokens(
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE ss1.value = 1 TO ss2 PARAMETERIZED BY \
+             tenant DEDUPLICATE ON ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH \
+             SIZE 1MiB ON MESSAGE ERROR LOG;",
+        );
+        let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
+        assert_eq!(parsed.from_relay.as_str(), "ss1");
+        assert_eq!(parsed.from_where.len(), 1);
+        assert_eq!(parsed.from_where[0].relay.as_str(), "ss1");
+        assert_eq!(parsed.from_where[0].where_clause, "WHERE ss1.value = 1");
+    }
+
+    #[test]
     fn parses_deduplicator_expression_list() {
         let tokens = to_tokens(
             "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 PARAMETERIZED BY tenant DEDUPLICATE \
@@ -283,6 +299,35 @@ mod tests {
         let errors = parse_create_deduplicator_tokens(&tokens).expect_err("parse must fail");
         let debug = format!("{errors:?}");
         assert!(debug.contains("TIME"));
+    }
+
+    #[test]
+    fn rejects_empty_source_where() {
+        let tokens = to_tokens(
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE TO ss2 PARAMETERIZED BY tenant \
+             DEDUPLICATE ON ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
+             ON MESSAGE ERROR LOG;",
+        );
+        let errors = parse_create_deduplicator_tokens(&tokens).expect_err("parse must fail");
+        let debug = format!("{errors:?}");
+        assert!(debug.contains("WHERE") || debug.contains("TO"));
+    }
+
+    #[test]
+    fn suggests_where_after_from_relay() {
+        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 ";
+        let suggestions = suggest_create_deduplicator(input, input.len());
+        assert!(suggestions.contains(&"WHERE".to_string()));
+        assert!(suggestions.contains(&"TO".to_string()));
+    }
+
+    #[test]
+    fn suggests_to_after_source_where_without_cross_branch_leakage() {
+        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE ss1.active ";
+        let suggestions = suggest_create_deduplicator(input, input.len());
+        assert!(suggestions.contains(&"TO".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+        assert!(!suggestions.contains(&"AVRO".to_string()));
     }
 
     #[test]

@@ -8,10 +8,10 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, correlator_name,
-        current_word_prefix, duration_lit, filter_where_clause, flush_each, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, message_error_policy,
-        processor_outputs, relay_ref, render_vm_program_tokens, suggestions_from_errors, tok,
-        vm_program_error_message,
+        current_word_prefix, duration_lit, filter_where_clause, flush_each, from_relay_clause,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input,
+        message_error_policy, processor_outputs, relay_ref, render_vm_program_tokens,
+        suggestions_from_errors, tok, vm_program_error_message,
     },
 };
 
@@ -125,9 +125,9 @@ pub fn create_correlator_parser<'src>()
         .then_ignore(kw(Identifier::Correlator))
         .then(correlator_name())
         .then_ignore(kw(Identifier::From))
-        .then(relay_ref())
+        .then(from_relay_clause())
         .then_ignore(tok(Token::Comma))
-        .then(relay_ref())
+        .then(from_relay_clause())
         .then(correlate_where_clause())
         .then(match_policy())
         .then(filter_where_clause().or_not())
@@ -164,13 +164,17 @@ pub fn create_correlator_parser<'src>()
                 ),
                 message_error_policy,
             ) = value;
-            let ((((if_not_exists, mode), name), left_relay), right_relay) = base;
+            let ((((if_not_exists, mode), name), left_input), right_input) = base;
+            let (left_relay, mut left_where) = left_input;
+            let (right_relay, mut right_where) = right_input;
+            left_where.append(&mut right_where);
             let (flush_each, max_batch_size) = flush_each;
             Ok(CreateStatement::new(
                 CreateCorrelator {
                     name,
                     left_relay,
                     right_relay,
+                    from_where: left_where,
                     output_routes,
                     parameterized_by,
                     correlate_where,

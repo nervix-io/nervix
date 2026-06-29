@@ -5,8 +5,8 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
-        filter_where_clause, flush_each, if_not_exists_clause, into_parse_error, kw, lex_input,
-        message_error_policy, processor_outputs, relay_ref, suggestions_from_errors, tok,
+        filter_where_clause, flush_each, from_relay_clause, if_not_exists_clause, into_parse_error,
+        kw, lex_input, message_error_policy, processor_outputs, suggestions_from_errors, tok,
         unifier_name,
     },
 };
@@ -21,7 +21,7 @@ pub fn create_unifier_parser<'src>()
         .then(unifier_name())
         .then_ignore(kw(Identifier::From))
         .then(
-            relay_ref()
+            from_relay_clause()
                 .separated_by(tok(Token::Comma))
                 .at_least(2)
                 .collect::<Vec<_>>(),
@@ -36,18 +36,25 @@ pub fn create_unifier_parser<'src>()
             |(
                 (
                     (
-                        (((((if_not_exists, mode), name), from_relays), filter_where), outputs),
+                        (((((if_not_exists, mode), name), from_inputs), filter_where), outputs),
                         parameterized_by,
                     ),
                     flush_each,
                 ),
                 message_error_policy,
             )| {
+                let mut from_relays = Vec::new();
+                let mut from_where = Vec::new();
+                for (relay, mut relay_where) in from_inputs {
+                    from_relays.push(relay);
+                    from_where.append(&mut relay_where);
+                }
                 let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateUnifier {
                         name,
                         from_relays,
+                        from_where,
                         output_routes: outputs,
                         parameterized_by,
                         flush_each,

@@ -6589,12 +6589,31 @@ impl Runtime {
         domain: &Domain,
         reingestor: &Identifier,
         from_relay: &Identifier,
+        from_where: Option<&str>,
+        compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
         mode: AckMode,
         error_policies: &ErrorPolicies,
         output_routes: &mut RelayProcessorOutputsNode,
         parameterized_senders: &HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
         batch: RelayRecordBatch,
     ) {
+        if batch.message_count() == 0 {
+            return;
+        }
+        let Some(batch) = self
+            .filter_reingestor_from_batch(
+                domain,
+                reingestor,
+                from_relay,
+                from_where,
+                compiled_from_where,
+                error_policies,
+                batch,
+            )
+            .await
+        else {
+            return;
+        };
         if batch.message_count() == 0 {
             return;
         }
@@ -6876,6 +6895,179 @@ impl Runtime {
         }
     }
 
+    async fn filter_reingestor_from_batch(
+        &self,
+        domain: &Domain,
+        reingestor: &Identifier,
+        from_relay: &Identifier,
+        from_where: Option<&str>,
+        compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
+        error_policies: &ErrorPolicies,
+        batch: RelayRecordBatch,
+    ) -> Option<RelayRecordBatch> {
+        let Some(from_where) = from_where else {
+            return Some(batch);
+        };
+
+        if compiled_from_where.is_none() {
+            let (
+                input_schema,
+                materialized_stream_specs,
+                available_lookups,
+                current_parameterization,
+                current_branch_schema,
+            ) = {
+                let Some(execution) = self.executions.get(domain) else {
+                    self.handle_internal_processor_error_for_acks(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        batch.acks.iter(),
+                        format!("domain '{}' is not instantiated", domain.as_str()),
+                    );
+                    return None;
+                };
+                let input_schema = match execution.relay_schemas.get(from_relay).cloned() {
+                    Some(schema) => schema,
+                    None => {
+                        self.handle_internal_processor_error_for_acks(
+                            domain,
+                            "reingestor",
+                            reingestor,
+                            error_policies,
+                            batch.acks.iter(),
+                            format!(
+                                "stream '{}' schema is not instantiated in domain '{}'",
+                                from_relay.as_str(),
+                                domain.as_str()
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                (
+                    input_schema,
+                    execution.materialized_stream_specs.clone(),
+                    execution.lookups.clone(),
+                    execution
+                        .relay_parameterizations
+                        .get(from_relay)
+                        .cloned()
+                        .unwrap_or_default(),
+                    execution
+                        .relay_parameterization_schemas
+                        .get(from_relay)
+                        .cloned()
+                        .flatten(),
+                )
+            };
+            match compile_filter_map_program(
+                domain,
+                reingestor,
+                std::slice::from_ref(from_relay),
+                Some(from_where),
+                batch.arrow_schema(),
+                input_schema.vm_sensitivity(),
+                input_schema.arrow_schema(),
+                input_schema.vm_sensitivity(),
+                RuntimeVmCompileContext {
+                    available_materialized_streams: &materialized_stream_specs,
+                    available_lookups: &available_lookups,
+                    current_parameterization: &current_parameterization,
+                    current_branch_schema: current_branch_schema.as_ref(),
+                    current_branch_sensitivity: None,
+                },
+            ) {
+                Ok(program) => *compiled_from_where = program,
+                Err(error) => {
+                    self.handle_internal_processor_error_for_acks(
+                        domain,
+                        "reingestor",
+                        reingestor,
+                        error_policies,
+                        batch.acks.iter(),
+                        format!("FROM WHERE compile failed: {}", error),
+                    );
+                    return None;
+                }
+            }
+        }
+
+        let Some(program) = compiled_from_where.clone() else {
+            return Some(batch);
+        };
+        let owner_nodes = self
+            .executions
+            .get(domain)
+            .map(|execution| execution.materialized_stream_owner_nodes.clone())
+            .unwrap_or_default();
+        let side_inputs = match self
+            .load_materialized_side_inputs(
+                domain,
+                &batch.key,
+                &program.materialized_interest,
+                &owner_nodes,
+            )
+            .await
+        {
+            Ok(values) => values,
+            Err(error) => {
+                self.handle_internal_processor_error_for_acks(
+                    domain,
+                    "reingestor",
+                    reingestor,
+                    error_policies,
+                    batch.acks.iter(),
+                    format!(
+                        "reingestor '{}' failed to load FROM WHERE side inputs: {}",
+                        reingestor.as_str(),
+                        error
+                    ),
+                );
+                return None;
+            }
+        };
+        let execution_now = self
+            .current_stream_expiration_time(domain)
+            .ok()
+            .flatten()
+            .unwrap_or_else(current_timestamp);
+        let plan = match plan_filter_map_messages(
+            "reingestor",
+            reingestor,
+            "FROM WHERE",
+            &program,
+            batch,
+            execution_now,
+            &side_inputs,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.handle_internal_processor_error_for_acks(
+                    domain,
+                    "reingestor",
+                    reingestor,
+                    error_policies,
+                    error.acks.iter(),
+                    error.reason,
+                );
+                return None;
+            }
+        };
+        self.handle_planned_message_errors(
+            domain,
+            "reingestor",
+            reingestor,
+            error_policies,
+            plan.message_errors,
+        )
+        .await;
+        plan.batch
+    }
+
     pub(in crate::runtime) fn spawn_reingestor_task(
         &self,
         domain: &Domain,
@@ -6915,6 +7107,11 @@ impl Runtime {
         let task_domain = domain.clone();
         let task_reingestor = reingestor.name.clone();
         let task_from_relay = reingestor.from_relay.clone();
+        let task_from_where = reingestor
+            .from_where
+            .iter()
+            .find(|source_filter| source_filter.relay == task_from_relay)
+            .map(|source_filter| source_filter.where_clause.clone());
         let task_mode = reingestor.mode;
         let task_error_policies = message_only_error_policies(&reingestor.message_error_policy);
         let runtime = self.clone();
@@ -6922,7 +7119,9 @@ impl Runtime {
 
         Ok(tokio::spawn(async move {
             let mut input = receiver;
+            let mut compiled_from_where = None;
             loop {
+                tokio::task::consume_budget().await;
                 match Self::recv_runtime_consumer_batch(
                     &mut input,
                     &mut shutdown_rx,
@@ -6976,6 +7175,8 @@ impl Runtime {
                                 &task_domain,
                                 &task_reingestor,
                                 &task_from_relay,
+                                task_from_where.as_deref(),
+                                &mut compiled_from_where,
                                 task_mode,
                                 &task_error_policies,
                                 &mut task_output_routes,

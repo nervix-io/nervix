@@ -61,6 +61,7 @@ pub(super) struct ParameterizedProcessorSpec {
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
+    pub(super) from_where: HashMap<Identifier, String>,
     pub(super) filter_where: Option<String>,
     pub(super) operation: ParameterizedProcessorOperationSpec,
 }
@@ -248,6 +249,7 @@ pub(super) struct RelayProcessorTemplate {
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
+    pub(super) from_where: HashMap<Identifier, String>,
     pub(super) filter_where: Option<String>,
     pub(super) operation: RelayProcessorOperationTemplate,
 }
@@ -324,6 +326,8 @@ pub(super) struct RelayProcessorNode {
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
+    pub(super) from_where: HashMap<Identifier, String>,
+    pub(super) compiled_from_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) filter_where: Option<String>,
     pub(super) compiled_filter_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,

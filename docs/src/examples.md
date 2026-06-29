@@ -284,7 +284,7 @@ CREATE RELAY notifications SCHEMA notification_in PARAMETERIZED BY user_branch;
 CREATE RELAY projected_notifications SCHEMA notification_out PARAMETERIZED BY user_branch;
 
 CREATE DEDUPLICATOR project_notifications
-  FROM notifications
+  FROM notifications WHERE notifications.active
   TO projected_notifications
     SET projected_notifications.normalized = lower(trim(notifications.raw)),
         projected_notifications.amount = notifications.amount + 1
@@ -296,7 +296,7 @@ CREATE DEDUPLICATOR project_notifications
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 ```
 
-This keeps the existing branch grouping, rewrites the record shape, drops rows with empty raw text, and forwards the surviving rows into a second relay without changing native grouping.
+This keeps the existing branch grouping, drops inactive rows at the source boundary, rewrites the record shape, drops rows with empty raw text, and forwards the surviving rows into a second relay without changing native grouping.
 
 ## Generate From Materialized State
 
