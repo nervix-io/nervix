@@ -9465,8 +9465,8 @@ fn format_correlator_describe_output(
     ];
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
-        format!("left: {}", correlator.left_relay.as_str()),
-        format!("right: {}", correlator.right_relay.as_str()),
+        format!("left: {}", processor_input_names(&correlator.left)),
+        format!("right: {}", processor_input_names(&correlator.right)),
         format!(
             "parameterized by: {}",
             correlator

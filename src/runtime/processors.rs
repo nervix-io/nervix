@@ -87,8 +87,8 @@ pub(super) enum ParameterizedProcessorOperationSpec {
     },
     Correlator {
         output_routes: ParameterizedProcessorOutputsSpec,
-        left_relay: Identifier,
-        right_relay: Identifier,
+        left_relays: Vec<Identifier>,
+        right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,
@@ -275,8 +275,8 @@ pub(super) enum RelayProcessorOperationTemplate {
     },
     Correlator {
         output_routes: RelayProcessorOutputsTemplate,
-        left_relay: Identifier,
-        right_relay: Identifier,
+        left_relays: Vec<Identifier>,
+        right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,
@@ -363,8 +363,8 @@ pub(super) enum RelayProcessorOperationNode {
     },
     Correlator {
         output_routes: RelayProcessorOutputsNode,
-        left_relay: Identifier,
-        right_relay: Identifier,
+        left_relays: Vec<Identifier>,
+        right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,

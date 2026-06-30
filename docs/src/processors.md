@@ -41,7 +41,7 @@ TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHE
 [TO <relay> ...]
 ```
 
-`FROM ... WHERE` is a source-level input filter. It runs first and may read fields from that source relay, for example `FROM notifications WHERE notifications.active`. Non-correlator processors may declare multiple `FROM` relays separated by commas. Those input relays must have the same schema, and each source filter applies only to the relay it is attached to.
+`FROM ... WHERE` is a source-level input filter. It runs first and may read fields from that source relay, for example `FROM notifications WHERE notifications.active`. Most processors may declare multiple `FROM` relays separated by commas. Those input relays must have the same schema, and each source filter applies only to the relay it is attached to. Correlators use side-specific `LEFT FROM` and `RIGHT FROM` clauses instead.
 
 `FILTER WHERE` is a node-level arrival filter. It runs after source filtering and before the processor accepts a row into its buffer or state. It replaces the old global processor-level `WHERE` form.
 
@@ -220,7 +220,10 @@ Ordering is ascending. When two records have identical `BY` keys, arrival order 
 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] CORRELATOR <name>
-  FROM <left_input>, <right_input>
+  LEFT FROM <left_input> [WHERE <expr>]
+  [LEFT FROM <left_input> [WHERE <expr>] ...]
+  RIGHT FROM <right_input> [WHERE <expr>]
+  [RIGHT FROM <right_input> [WHERE <expr>] ...]
   CORRELATE WHERE <left_right_predicate>
   MATCH EARLIEST | LATEST
   [TO <output> WHERE <expr>]
@@ -235,7 +238,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] CORRELATOR <name>
   ON MESSAGE ERROR <policy>;
 ```
 
-A correlator stores unmatched records in branch-local pending state and matches a left/right pair when the `CORRELATE WHERE` predicate evaluates to true against both input records. The predicate must compile to `BOOLEAN`. `MATCH EARLIEST` keeps the first pending record on a side for a matching predicate and acknowledges later same-side duplicates. `MATCH LATEST` replaces the pending same-side record and acknowledges the replaced one.
+A correlator stores unmatched records in branch-local pending state and matches a left/right pair when the `CORRELATE WHERE` predicate evaluates to true against both input records. Relays declared on the same side must share that side's schema; the left and right sides may use different schemas. Source-level `WHERE` clauses apply only to the relay they follow. The predicate must compile to `BOOLEAN`. `MATCH EARLIEST` keeps the first pending record on a side for a matching predicate and acknowledges later same-side duplicates. `MATCH LATEST` replaces the pending same-side record and acknowledges the replaced one.
 
 When a left/right pair matches, the pair is removed from pending state and an output record is produced. Correlators do not implicitly copy any input fields into the output. The `OUTPUT` block must explicitly assign every required field on the output relay schema; optional output fields may be omitted.
 

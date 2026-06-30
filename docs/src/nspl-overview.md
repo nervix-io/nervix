@@ -93,7 +93,7 @@ TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHE
 [TO <relay> ...]
 ```
 
-On relay-consuming processors, `FROM ... WHERE` is a source-level input filter and runs first. Non-correlator processors may declare multiple comma-separated `FROM` relays, and those relays must share the same schema. `FILTER WHERE` runs after source filtering, before the node accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the node.
+On relay-consuming processors, `FROM ... WHERE` is a source-level input filter and runs first. Most processors may declare multiple comma-separated `FROM` relays, and those relays must share the same schema. Correlators use repeated `LEFT FROM` and `RIGHT FROM` clauses instead; relays within each side must share that side's schema. `FILTER WHERE` runs after source filtering, before the node accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the node.
 
 Passthrough inheritance only applies to processors that naturally map one input row to one output row. Generated-output processors such as windows, inferencers, and WASM processors do not inherit input fields; their output routes operate on the aggregate record, ONNX output record, or WASM guest output record.
 

@@ -149,6 +149,8 @@ pub enum Identifier {
     Decode,
     Using,
     From,
+    Left,
+    Right,
     Rfc3339,
     File,
     Inputs,

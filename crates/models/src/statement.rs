@@ -1946,10 +1946,8 @@ pub struct CreateDeduplicator {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateCorrelator {
     pub name: Identifier,
-    pub left_relay: Identifier,
-    pub right_relay: Identifier,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub from_where: Vec<ProcessorInputWhere>,
+    pub left: ProcessorInputs,
+    pub right: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub parameterized_by: BranchParameterization,
     pub correlate_where: String,
