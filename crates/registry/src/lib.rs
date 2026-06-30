@@ -1462,27 +1462,27 @@ impl DomainState {
                     )?;
                 }
                 Model::Correlator(correlator) => {
-                    let left = expect_kind(
+                    let left_schemas = processor_input_schemas(
                         domain,
                         identifier,
                         models,
                         &indices,
-                        &correlator.left_relay,
-                        ModelKind::Relay,
+                        &mut graph,
+                        source,
+                        &correlator.left,
+                        "correlator left input",
                     )?;
-                    graph.add_edge(left, source, EdgeKind::RequiredBy);
-                    graph.add_edge(left, source, EdgeKind::SendsTo);
-
-                    let right = expect_kind(
+                    let right_schemas = processor_input_schemas(
                         domain,
                         identifier,
                         models,
                         &indices,
-                        &correlator.right_relay,
-                        ModelKind::Relay,
+                        &mut graph,
+                        source,
+                        &correlator.right,
+                        "correlator right input",
                     )?;
-                    graph.add_edge(right, source, EdgeKind::RequiredBy);
-                    graph.add_edge(right, source, EdgeKind::SendsTo);
+                    validate_correlator_input_sides_do_not_overlap(domain, identifier, correlator)?;
 
                     add_processor_output_edges(
                         domain,
@@ -1513,35 +1513,44 @@ impl DomainState {
                         &correlator.timeout_policy.right,
                     )?;
 
-                    let left_schema =
-                        schema_for_ack_model(domain, identifier, models, &correlator.left_relay)?;
-                    let right_schema =
-                        schema_for_ack_model(domain, identifier, models, &correlator.right_relay)?;
-                    let branch_schema = relay_declared_branch_schema(
-                        domain,
-                        identifier,
-                        models,
-                        &correlator.left_relay,
-                    )?;
+                    let Some((left_relay, _left_schema)) = left_schemas.first().copied() else {
+                        return Err(Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: "correlator left input requires at least one input relay"
+                                .to_string(),
+                        }));
+                    };
+                    let Some((_right_relay, _right_schema)) = right_schemas.first().copied() else {
+                        return Err(Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: "correlator right input requires at least one input relay"
+                                .to_string(),
+                        }));
+                    };
+                    let branch_schema =
+                        relay_declared_branch_schema(domain, identifier, models, left_relay)?;
+                    let mut input_schemas =
+                        Vec::with_capacity(left_schemas.len() + right_schemas.len());
+                    input_schemas.extend(left_schemas.iter().copied());
+                    input_schemas.extend(right_schemas.iter().copied());
+                    let mut from_where = Vec::new();
+                    from_where.extend_from_slice(correlator.left.where_clauses());
+                    from_where.extend_from_slice(correlator.right.where_clauses());
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[
-                            (&correlator.left_relay, left_schema),
-                            (&correlator.right_relay, right_schema),
-                        ],
+                        &input_schemas,
                         branch_schema,
-                        &correlator.from_where,
+                        &from_where,
                     )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &[
-                            (&correlator.left_relay, left_schema),
-                            (&correlator.right_relay, right_schema),
-                        ],
+                        &input_schemas,
                         branch_schema,
                         correlator.filter_where.as_deref(),
                     )?;
@@ -1553,8 +1562,8 @@ impl DomainState {
                             identifier,
                             models,
                             correlator,
-                            left_schema,
-                            right_schema,
+                            &left_schemas,
+                            &right_schemas,
                             &output.relay,
                             output_schema,
                         )?;
@@ -2767,6 +2776,30 @@ fn processor_input_schemas<'inputs, 'models>(
         input_schemas.push((from_relay, input_schema));
     }
     Ok(input_schemas)
+}
+
+fn validate_correlator_input_sides_do_not_overlap(
+    domain: &Domain,
+    identifier: &Identifier,
+    correlator: &CreateCorrelator,
+) -> Result<(), Report<RegistryError>> {
+    let mut left = HashSet::new();
+    for relay in correlator.left.relays() {
+        left.insert(relay.clone());
+    }
+    for relay in correlator.right.relays() {
+        if left.contains(relay) {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "correlator input relay '{}' is declared on both LEFT and RIGHT",
+                    relay.as_str()
+                ),
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn processor_first_input_relay<'a>(
@@ -5474,8 +5507,8 @@ fn validate_correlator(
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
     correlator: &CreateCorrelator,
-    left_schema: &CreateSchema,
-    right_schema: &CreateSchema,
+    left_schemas: &[(&Identifier, &CreateSchema)],
+    right_schemas: &[(&Identifier, &CreateSchema)],
     output_relay: &Identifier,
     output_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -5512,19 +5545,33 @@ fn validate_correlator(
         domain,
         identifier,
         correlator,
-        left_schema,
-        right_schema,
+        left_schemas,
+        right_schemas,
     )?;
 
     validate_correlator_output(
         domain,
         identifier,
         correlator,
-        left_schema,
-        right_schema,
+        left_schemas,
+        right_schemas,
         output_relay,
         output_schema,
     )?;
+    let Some((_left_relay, left_schema)) = left_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "correlator left timeout requires at least one input relay".to_string(),
+        }));
+    };
+    let Some((_right_relay, right_schema)) = right_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "correlator right timeout requires at least one input relay".to_string(),
+        }));
+    };
     validate_correlator_timeout_action(
         domain,
         identifier,
@@ -5547,8 +5594,8 @@ fn validate_correlate_where_for_internal_schemas(
     domain: &Domain,
     identifier: &Identifier,
     correlator: &CreateCorrelator,
-    left_schema: &CreateSchema,
-    right_schema: &CreateSchema,
+    left_schemas: &[(&Identifier, &CreateSchema)],
+    right_schemas: &[(&Identifier, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
     let parsed = parse_program(&correlator.correlate_where).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -5572,14 +5619,33 @@ fn validate_correlate_where_for_internal_schemas(
         }));
     }
 
+    let mut bindings = Vec::with_capacity(left_schemas.len() + right_schemas.len());
+    for (index, (relay, schema)) in left_schemas.iter().enumerate() {
+        if index == 0 {
+            bindings.push(
+                CompileBinding::writable(relay.as_str(), arrow_schema_for_internal_schema(schema))
+                    .with_sensitivity(schema_sensitivity_for_internal_schema(schema)),
+            );
+        } else {
+            bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
+        }
+    }
+    for (relay, schema) in right_schemas {
+        bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
+    }
+    let Some((_first_relay, first_schema)) = left_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "correlator left input requires at least one input relay".to_string(),
+        }));
+    };
+
     compile_program_for_bindings_with_sensitivity(
         &parsed,
-        arrow_schema_for_internal_schema(left_schema),
-        schema_sensitivity_for_internal_schema(left_schema),
-        [
-            writable_binding_for_internal_schema(correlator.left_relay.as_str(), left_schema),
-            readonly_binding_for_internal_schema(correlator.right_relay.as_str(), right_schema),
-        ],
+        arrow_schema_for_internal_schema(first_schema),
+        schema_sensitivity_for_internal_schema(first_schema),
+        bindings,
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -5596,8 +5662,8 @@ fn validate_correlator_output(
     domain: &Domain,
     identifier: &Identifier,
     correlator: &CreateCorrelator,
-    left_schema: &CreateSchema,
-    right_schema: &CreateSchema,
+    left_schemas: &[(&Identifier, &CreateSchema)],
+    right_schemas: &[(&Identifier, &CreateSchema)],
     output_relay: &Identifier,
     output_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
@@ -5625,15 +5691,22 @@ fn validate_correlator_output(
     }
 
     let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
+    let mut bindings = Vec::with_capacity(left_schemas.len() + right_schemas.len() + 1);
+    for (relay, schema) in left_schemas {
+        bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
+    }
+    for (relay, schema) in right_schemas {
+        bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
+    }
+    bindings.push(writeonly_binding_for_internal_schema(
+        output_relay.as_str(),
+        output_schema,
+    ));
     let compiled = compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_arrow_schema.clone(),
         schema_sensitivity_for_internal_schema(output_schema),
-        [
-            readonly_binding_for_internal_schema(correlator.left_relay.as_str(), left_schema),
-            readonly_binding_for_internal_schema(correlator.right_relay.as_str(), right_schema),
-            writeonly_binding_for_internal_schema(output_relay.as_str(), output_schema),
-        ],
+        bindings,
         CompileOptions {
             output_mode: OutputMode::ExplicitOnly,
             ..CompileOptions::default()
@@ -6577,8 +6650,12 @@ fn validate_processing_branch_parameterizations(
                     indices,
                     graph,
                 };
-                check.matches_relay(&correlator.parameterized_by, &correlator.left_relay)?;
-                check.matches_relay(&correlator.parameterized_by, &correlator.right_relay)?;
+                for relay in correlator.left.relays() {
+                    check.matches_relay(&correlator.parameterized_by, relay)?;
+                }
+                for relay in correlator.right.relays() {
+                    check.matches_relay(&correlator.parameterized_by, relay)?;
+                }
                 if let CorrelationTimeoutAction::SendTo { relay } = &correlator.timeout_policy.left
                 {
                     check.matches_relay(&correlator.parameterized_by, relay)?;
@@ -7843,9 +7920,8 @@ mod tests {
     ) -> Model {
         Model::Correlator(CreateCorrelator {
             name: identifier(name),
-            left_relay: identifier(left_relay),
-            right_relay: identifier(right_relay),
-            from_where: Vec::new(),
+            left: ProcessorInputs::single(identifier(left_relay)),
+            right: ProcessorInputs::single(identifier(right_relay)),
             output_routes: ProcessorOutputs::single(identifier(into_relay)),
             parameterized_by: BranchParameterization::unparameterized(),
             correlate_where: format!("WHERE {left_relay}.value = {right_relay}.value"),
@@ -10398,7 +10474,8 @@ mod tests {
             CREATE RELAY correlated_events SCHEMA correlated_event UNPARAMETERIZED;
 
             CREATE CORRELATOR correlate_events
-              FROM left_events, right_events
+              LEFT FROM left_events
+              RIGHT FROM right_events
               CORRELATE WHERE lower(left_events.value)
               MATCH EARLIEST
               TO correlated_events UNPARAMETERIZED
@@ -10451,7 +10528,8 @@ mod tests {
             CREATE RELAY correlated_events SCHEMA correlated_event PARAMETERIZED BY tenant_branch;
 
             CREATE CORRELATOR correlate_events
-              FROM left_events, right_events
+              LEFT FROM left_events
+              RIGHT FROM right_events
               CORRELATE WHERE branch.tenant = left_events.tenant
               MATCH EARLIEST
               TO correlated_events PARAMETERIZED BY tenant_branch
@@ -10477,6 +10555,65 @@ mod tests {
         assert!(
             rendered.contains("CORRELATE WHERE compile failed") && rendered.contains("branch"),
             "unexpected error: {rendered}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_correlator_left_side_schema_mismatch() {
+        let (domain, models) = example_graph_models(
+            "correlator left schema mismatch",
+            r#"
+            CREATE SCHEMA left_event (
+              value STRING
+            );
+
+            CREATE SCHEMA other_left_event (
+              value I64
+            );
+
+            CREATE SCHEMA right_event (
+              value STRING
+            );
+
+            CREATE SCHEMA correlated_event (
+              value STRING
+            );
+
+            CREATE RELAY left_events SCHEMA left_event UNPARAMETERIZED;
+            CREATE RELAY other_left_events SCHEMA other_left_event UNPARAMETERIZED;
+            CREATE RELAY right_events SCHEMA right_event UNPARAMETERIZED;
+            CREATE RELAY correlated_events SCHEMA correlated_event UNPARAMETERIZED;
+
+            CREATE CORRELATOR correlate_events
+              LEFT FROM left_events
+              LEFT FROM other_left_events
+              RIGHT FROM right_events
+              CORRELATE WHERE left_events.value = right_events.value
+              MATCH EARLIEST
+              TO correlated_events UNPARAMETERIZED
+              FLUSH IMMEDIATE
+              OUTPUT correlated_events.value = left_events.value
+              MAX TIME 5s
+              ON CORRELATION TIMEOUT DROP, DROP
+              ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let err = registry
+            .apply_batch(&domain, models)
+            .expect_err("same-side correlator schema mismatch must fail");
+
+        assert!(matches!(
+            err.current_context(),
+            RegistryError::IncompatibleSchema { .. }
+        ));
+        assert!(
+            format!("{err:#}").contains("correlator left input requires equal internal schemas"),
+            "unexpected error: {err:#}"
         );
 
         let _ = fs::remove_dir_all(path);

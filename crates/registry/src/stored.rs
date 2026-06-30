@@ -843,9 +843,8 @@ pub struct StoredCreateDeduplicator {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateCorrelator {
     pub name: String,
-    pub left_relay: String,
-    pub right_relay: String,
-    pub from_where: Vec<StoredProcessorInputWhere>,
+    pub left: StoredProcessorInputs,
+    pub right: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
     pub parameterized_by: StoredBranchParameterization,
     pub correlate_where: String,
@@ -3607,9 +3606,8 @@ impl From<CreateCorrelator> for StoredCreateCorrelator {
     fn from(value: CreateCorrelator) -> Self {
         Self {
             name: value.name.to_string(),
-            left_relay: value.left_relay.to_string(),
-            right_relay: value.right_relay.to_string(),
-            from_where: value.from_where.into_iter().map(Into::into).collect(),
+            left: value.left.into(),
+            right: value.right.into(),
             output_routes: value.output_routes.into(),
             parameterized_by: value.parameterized_by.into(),
             correlate_where: value.correlate_where,
@@ -3632,13 +3630,8 @@ impl TryFrom<StoredCreateCorrelator> for CreateCorrelator {
     fn try_from(value: StoredCreateCorrelator) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
-            left_relay: Identifier::parse(&value.left_relay)?,
-            right_relay: Identifier::parse(&value.right_relay)?,
-            from_where: value
-                .from_where
-                .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+            left: value.left.try_into()?,
+            right: value.right.try_into()?,
             output_routes: value.output_routes.try_into()?,
             parameterized_by: value.parameterized_by.try_into()?,
             correlate_where: value.correlate_where,

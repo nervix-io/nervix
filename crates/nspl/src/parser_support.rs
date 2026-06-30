@@ -621,7 +621,7 @@ fn processor_output_boundary_token(token: &Token) -> bool {
     )
 }
 
-fn from_where_boundary_token(token: &Token) -> bool {
+pub(crate) fn from_where_boundary_token(token: &Token) -> bool {
     processor_output_boundary_token(token)
         || matches!(
             token,
@@ -673,12 +673,13 @@ pub fn output_filter_map_program<'src>()
     validated_vm_program_until(processor_output_boundary_token)
 }
 
-fn source_where_clause<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+fn source_where_clause_with_boundary<'src>(
+    boundary: fn(&Token) -> bool,
+) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Where)
         .ignore_then(
             any()
-                .filter(|token: &Token| !from_where_boundary_token(token))
+                .filter(move |token: &Token| !boundary(token))
                 .repeated()
                 .at_least(1)
                 .collect::<Vec<_>>(),
@@ -692,14 +693,16 @@ fn source_where_clause<'src>()
         })
 }
 
-pub fn from_relay_clause<'src>() -> impl Parser<
+pub fn from_relay_clause_with_boundary<'src>(
+    boundary: fn(&Token) -> bool,
+) -> impl Parser<
     'src,
     &'src [Token],
     (ModelIdentifier, Vec<ProcessorInputWhere>),
     extra::Err<ParseError<'src>>,
 > + Clone {
     relay_ref()
-        .then(source_where_clause().or_not())
+        .then(source_where_clause_with_boundary(boundary).or_not())
         .map(|(relay, where_clause)| {
             let from_where = where_clause
                 .map(|where_clause| ProcessorInputWhere {
@@ -710,6 +713,15 @@ pub fn from_relay_clause<'src>() -> impl Parser<
                 .collect();
             (relay, from_where)
         })
+}
+
+pub fn from_relay_clause<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    (ModelIdentifier, Vec<ProcessorInputWhere>),
+    extra::Err<ParseError<'src>>,
+> + Clone {
+    from_relay_clause_with_boundary(from_where_boundary_token)
 }
 
 pub fn from_relay_clauses<'src>()

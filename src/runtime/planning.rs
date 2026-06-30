@@ -125,21 +125,25 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 }
             }
             Model::Correlator(correlator) => {
+                let mut input_relays = Vec::with_capacity(
+                    correlator.left.relays().len() + correlator.right.relays().len(),
+                );
+                input_relays.extend(correlator.left.relays().iter().cloned());
+                input_relays.extend(correlator.right.relays().iter().cloned());
+                let mut from_where = processor_input_where_by_inputs(&correlator.left);
+                from_where.extend(processor_input_where_by_inputs(&correlator.right));
                 let spec = ParameterizedProcessorSpec {
                     kind,
                     processor: identifier,
-                    input_relays: vec![
-                        correlator.left_relay.clone(),
-                        correlator.right_relay.clone(),
-                    ],
+                    input_relays: input_relays.clone(),
                     mode: correlator.mode,
                     error_policies: message_only_error_policies(&correlator.message_error_policy),
-                    from_where: processor_input_where_by_relay(&correlator.from_where),
+                    from_where,
                     filter_where: correlator.filter_where.clone(),
                     operation: ParameterizedProcessorOperationSpec::Correlator {
                         output_routes: parameterized_outputs(&correlator.output_routes),
-                        left_relay: correlator.left_relay.clone(),
-                        right_relay: correlator.right_relay.clone(),
+                        left_relays: correlator.left.relays().to_vec(),
+                        right_relays: correlator.right.relays().to_vec(),
                         correlate_where: correlator.correlate_where.clone(),
                         match_policy: correlator.match_policy,
                         output_assignments: correlator.output.clone(),
@@ -149,14 +153,12 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                         timeout_policy: correlator.timeout_policy.clone(),
                     },
                 };
-                processors_by_input
-                    .entry(correlator.left_relay.clone())
-                    .or_default()
-                    .push(spec.clone());
-                processors_by_input
-                    .entry(correlator.right_relay.clone())
-                    .or_default()
-                    .push(spec);
+                for input_relay in input_relays {
+                    processors_by_input
+                        .entry(input_relay)
+                        .or_default()
+                        .push(spec.clone());
+                }
             }
             Model::WindowProcessor(window_processor) => {
                 if window_processor.from.first().is_none() {
@@ -628,8 +630,8 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                     },
                     ParameterizedProcessorOperationSpec::Correlator {
                         output_routes,
-                        left_relay,
-                        right_relay,
+                        left_relays,
+                        right_relays,
                         correlate_where,
                         match_policy,
                         output_assignments,
@@ -639,8 +641,8 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                         timeout_policy,
                     } => RelayProcessorOperationTemplate::Correlator {
                         output_routes: materialize_outputs(output_routes)?,
-                        left_relay: left_relay.clone(),
-                        right_relay: right_relay.clone(),
+                        left_relays: left_relays.clone(),
+                        right_relays: right_relays.clone(),
                         correlate_where: correlate_where.clone(),
                         match_policy: *match_policy,
                         output_assignments: output_assignments.clone(),

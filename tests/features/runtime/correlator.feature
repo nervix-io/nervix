@@ -51,7 +51,11 @@ Feature: Relay correlation
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE RELAY left_profiles SCHEMA left_profile PARAMETERIZED BY tenant_branch;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+      CREATE RELAY left_profile_aliases SCHEMA left_profile PARAMETERIZED BY tenant_branch;
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE RELAY right_profiles SCHEMA right_profile PARAMETERIZED BY tenant_branch;
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+      CREATE RELAY right_profile_aliases SCHEMA right_profile PARAMETERIZED BY tenant_branch;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE RELAY correlated_profiles SCHEMA correlated_profile PARAMETERIZED BY tenant_branch;
 
@@ -62,9 +66,19 @@ Feature: Relay correlation
         PATH '/left'
         TYPE HTTP;
 
+      CREATE ENDPOINT left_alias_ingress
+        ON edge
+        PATH '/left-alias'
+        TYPE HTTP;
+
       CREATE ENDPOINT right_ingress
         ON edge
         PATH '/right'
+        TYPE HTTP;
+
+      CREATE ENDPOINT right_alias_ingress
+        ON edge
+        PATH '/right-alias'
         TYPE HTTP;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR left_profile_ingestor
@@ -74,6 +88,13 @@ Feature: Relay correlation
         FLUSH IMMEDIATE
         FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR left_profile_alias_ingestor
+        TO left_profile_aliases
+        DECODE USING left_profile_codec
+        PARAMETERIZED BY tenant_branch VALUES { tenant = left_profile_aliases.tenant } TTL 5m
+        FLUSH IMMEDIATE
+        FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR right_profile_ingestor
         TO right_profiles
         DECODE USING right_profile_codec
@@ -81,17 +102,27 @@ Feature: Relay correlation
         FLUSH IMMEDIATE
         FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR right_profile_alias_ingestor
+        TO right_profile_aliases
+        DECODE USING right_profile_codec
+        PARAMETERIZED BY tenant_branch VALUES { tenant = right_profile_aliases.tenant } TTL 5m
+        FLUSH IMMEDIATE
+        FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
       CREATE CORRELATOR correlate_profiles
-        FROM left_profiles, right_profiles
-        CORRELATE WHERE lower(left_profiles.first_name) = lower(right_profiles.first_name)
+        LEFT FROM left_profiles WHERE left_profiles.marker > 0
+        LEFT FROM left_profile_aliases WHERE left_profile_aliases.marker > 0
+        RIGHT FROM right_profiles WHERE right_profiles.tenant = 'acme'
+        RIGHT FROM right_profile_aliases WHERE right_profile_aliases.tenant = 'acme'
+        CORRELATE WHERE lower(left_profile_aliases.first_name) = lower(right_profile_aliases.first_name)
         MATCH <match_policy>
         TO correlated_profiles PARAMETERIZED BY tenant_branch
         FLUSH IMMEDIATE
         OUTPUT
-          correlated_profiles.tenant = left_profiles.tenant,
-          correlated_profiles.normalized_name = lower(left_profiles.first_name),
-          correlated_profiles.left_marker = left_profiles.marker,
-          correlated_profiles.surname = upper(right_profiles.surname),
+          correlated_profiles.tenant = left_profile_aliases.tenant,
+          correlated_profiles.normalized_name = lower(left_profile_aliases.first_name),
+          correlated_profiles.left_marker = left_profile_aliases.marker,
+          correlated_profiles.surname = upper(right_profile_aliases.surname),
           correlated_profiles.memo = NULL
         MAX TIME 5s
         ON CORRELATION TIMEOUT DROP, DROP
@@ -104,7 +135,7 @@ Feature: Relay correlation
       """
       {"tenant":"acme","first_name":"John","marker":1}
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left-alias"
       """
       {"tenant":"acme","first_name":"JOHN","marker":2}
       """
@@ -113,7 +144,7 @@ Feature: Relay correlation
       {"tenant":"beta","first_name":"john","surname":"wrong"}
       """
     Then the relay subscription does not receive a payload within "500ms"
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/right-alias"
       """
       {"tenant":"acme","first_name":"john","surname":"smith"}
       """

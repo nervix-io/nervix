@@ -3149,8 +3149,8 @@ impl RelayProcessorNode {
                 }
                 RelayProcessorOperationNode::Correlator {
                     output_routes,
-                    left_relay,
-                    right_relay,
+                    left_relays,
+                    right_relays,
                     correlate_where,
                     match_policy,
                     output_assignments,
@@ -3161,9 +3161,9 @@ impl RelayProcessorNode {
                     compiled_output_program,
                     state,
                 } => {
-                    let side = if incoming_relay == left_relay {
+                    let side = if left_relays.contains(incoming_relay) {
                         CorrelatorSide::Left
-                    } else if incoming_relay == right_relay {
+                    } else if right_relays.contains(incoming_relay) {
                         CorrelatorSide::Right
                     } else {
                         branch.runtime.handle_internal_processor_error_for_acks(
@@ -3187,6 +3187,34 @@ impl RelayProcessorNode {
                         .flatten()
                         .unwrap_or_else(current_timestamp);
                     if compiled_where_program.is_none() {
+                        let Some(left_relay) = left_relays.first() else {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
+                                &self.processor,
+                                &self.error_policies,
+                                batch.acks.iter(),
+                                format!(
+                                    "correlator '{}' has no LEFT input relays",
+                                    self.processor.as_str()
+                                ),
+                            );
+                            return;
+                        };
+                        let Some(right_relay) = right_relays.first() else {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
+                                &self.processor,
+                                &self.error_policies,
+                                batch.acks.iter(),
+                                format!(
+                                    "correlator '{}' has no RIGHT input relays",
+                                    self.processor.as_str()
+                                ),
+                            );
+                            return;
+                        };
                         let left_schema = match relay_schema_for_runtime(
                             &branch.runtime,
                             &branch.domain,
@@ -3226,9 +3254,9 @@ impl RelayProcessorNode {
                         match compile_correlator_where_program(
                             &self.processor,
                             correlate_where,
-                            left_relay,
+                            left_relays,
                             left_schema.arrow_schema(),
-                            right_relay,
+                            right_relays,
                             right_schema.arrow_schema(),
                         ) {
                             Ok(program) => *compiled_where_program = Some(Box::new(program)),
@@ -3277,8 +3305,8 @@ impl RelayProcessorNode {
                         };
                         match correlate_incoming_message(
                             &self.processor,
-                            left_relay,
-                            right_relay,
+                            left_relays,
+                            right_relays,
                             where_program,
                             side,
                             *match_policy,
@@ -3322,6 +3350,38 @@ impl RelayProcessorNode {
                                 }),
                                 format!(
                                     "correlator '{}' has no output destinations",
+                                    self.processor.as_str()
+                                ),
+                            );
+                            return;
+                        };
+                        let Some(left_relay) = left_relays.first() else {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
+                                &self.processor,
+                                &self.error_policies,
+                                correlations.iter().flat_map(|(left, right)| {
+                                    [&left.message.acks, &right.message.acks]
+                                }),
+                                format!(
+                                    "correlator '{}' has no LEFT input relays",
+                                    self.processor.as_str()
+                                ),
+                            );
+                            return;
+                        };
+                        let Some(right_relay) = right_relays.first() else {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
+                                &self.processor,
+                                &self.error_policies,
+                                correlations.iter().flat_map(|(left, right)| {
+                                    [&left.message.acks, &right.message.acks]
+                                }),
+                                format!(
+                                    "correlator '{}' has no RIGHT input relays",
                                     self.processor.as_str()
                                 ),
                             );
@@ -3389,9 +3449,9 @@ impl RelayProcessorNode {
                         };
                         match (CorrelatorOutputCompileContext {
                             processor: &self.processor,
-                            left_relay,
+                            left_relays,
                             left_schema: left_schema.arrow_schema(),
-                            right_relay,
+                            right_relays,
                             right_schema: right_schema.arrow_schema(),
                             output_relay: &base_output_relay,
                             output_schema: output_schema.arrow_schema(),
@@ -3422,8 +3482,8 @@ impl RelayProcessorNode {
                     for (left, right) in correlations {
                         match evaluate_correlator_output_message(
                             &self.processor,
-                            left_relay,
-                            right_relay,
+                            left_relays,
+                            right_relays,
                             output_program,
                             left,
                             right,
@@ -4188,8 +4248,8 @@ impl RelayProcessorTemplate {
                 },
                 RelayProcessorOperationTemplate::Correlator {
                     output_routes,
-                    left_relay,
-                    right_relay,
+                    left_relays,
+                    right_relays,
                     correlate_where,
                     match_policy,
                     output_assignments,
@@ -4198,8 +4258,8 @@ impl RelayProcessorTemplate {
                     timeout_policy,
                 } => RelayProcessorOperationNode::Correlator {
                     output_routes: Self::instantiate_outputs(output_routes),
-                    left_relay: left_relay.clone(),
-                    right_relay: right_relay.clone(),
+                    left_relays: left_relays.clone(),
+                    right_relays: right_relays.clone(),
                     correlate_where: correlate_where.clone(),
                     match_policy: *match_policy,
                     output_assignments: output_assignments.clone(),
@@ -6701,9 +6761,9 @@ fn compile_reorderer_program(
 fn compile_correlator_where_program(
     processor: &Identifier,
     correlate_where: &str,
-    left_relay: &Identifier,
+    left_relays: &[Identifier],
     left_schema: Arc<arrow_schema::Schema>,
-    right_relay: &Identifier,
+    right_relays: &[Identifier],
     right_schema: Arc<arrow_schema::Schema>,
 ) -> Result<CompiledCorrelatorWhereProgram, String> {
     let parsed = parse_program(correlate_where).map_err(|error| {
@@ -6723,14 +6783,31 @@ fn compile_correlator_where_program(
             processor.as_str()
         ));
     }
+    let mut bindings = Vec::with_capacity(left_relays.len() + right_relays.len());
+    for (index, relay) in left_relays.iter().enumerate() {
+        if index == 0 {
+            bindings.push(VmCompileBinding::writable(
+                relay.as_str(),
+                left_schema.clone(),
+            ));
+        } else {
+            bindings.push(VmCompileBinding::readonly(
+                relay.as_str(),
+                left_schema.clone(),
+            ));
+        }
+    }
+    for relay in right_relays {
+        bindings.push(VmCompileBinding::readonly(
+            relay.as_str(),
+            right_schema.clone(),
+        ));
+    }
     let program = compile_vm_program_for_bindings_with_sensitivity(
         &parsed,
         left_schema.clone(),
         VmSchemaSensitivity::default(),
-        [
-            VmCompileBinding::writable(left_relay.as_str(), left_schema),
-            VmCompileBinding::readonly(right_relay.as_str(), right_schema),
-        ],
+        bindings,
     )
     .map_err(|error| {
         format!(
@@ -6744,9 +6821,9 @@ fn compile_correlator_where_program(
 
 struct CorrelatorOutputCompileContext<'a> {
     processor: &'a Identifier,
-    left_relay: &'a Identifier,
+    left_relays: &'a [Identifier],
     left_schema: Arc<arrow_schema::Schema>,
-    right_relay: &'a Identifier,
+    right_relays: &'a [Identifier],
     right_schema: Arc<arrow_schema::Schema>,
     output_relay: &'a Identifier,
     output_schema: Arc<arrow_schema::Schema>,
@@ -6773,15 +6850,28 @@ impl CorrelatorOutputCompileContext<'_> {
                 self.processor.as_str()
             ));
         }
+        let mut bindings = Vec::with_capacity(self.left_relays.len() + self.right_relays.len() + 1);
+        for relay in self.left_relays {
+            bindings.push(VmCompileBinding::readonly(
+                relay.as_str(),
+                self.left_schema.clone(),
+            ));
+        }
+        for relay in self.right_relays {
+            bindings.push(VmCompileBinding::readonly(
+                relay.as_str(),
+                self.right_schema.clone(),
+            ));
+        }
+        bindings.push(VmCompileBinding::writeonly(
+            self.output_relay.as_str(),
+            self.output_schema.clone(),
+        ));
         let program = compile_vm_program_with_options_for_bindings_with_sensitivity(
             &parsed,
             self.output_schema.clone(),
             VmSchemaSensitivity::default(),
-            [
-                VmCompileBinding::readonly(self.left_relay.as_str(), self.left_schema),
-                VmCompileBinding::readonly(self.right_relay.as_str(), self.right_schema),
-                VmCompileBinding::writeonly(self.output_relay.as_str(), self.output_schema),
-            ],
+            bindings,
             VmCompileOptions {
                 output_mode: VmOutputMode::ExplicitOnly,
                 ..VmCompileOptions::default()
@@ -7056,8 +7146,8 @@ fn store_correlator_unmatched_incoming(
 
 async fn correlate_incoming_message(
     processor: &Identifier,
-    left_relay: &Identifier,
-    right_relay: &Identifier,
+    left_relays: &[Identifier],
+    right_relays: &[Identifier],
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     match_policy: CorrelatorMatchPolicy,
@@ -7076,8 +7166,8 @@ async fn correlate_incoming_message(
         };
         let matched = match evaluate_correlator_where_match(
             processor,
-            left_relay,
-            right_relay,
+            left_relays,
+            right_relays,
             program,
             left,
             right,
@@ -7132,8 +7222,8 @@ async fn correlate_incoming_message(
 
 async fn evaluate_correlator_where_match(
     processor: &Identifier,
-    left_relay: &Identifier,
-    right_relay: &Identifier,
+    left_relays: &[Identifier],
+    right_relays: &[Identifier],
     program: &CompiledCorrelatorWhereProgram,
     left: &CorrelatorPendingMessage,
     right: &CorrelatorPendingMessage,
@@ -7141,9 +7231,9 @@ async fn evaluate_correlator_where_match(
 ) -> Result<bool, (String, Vec<AckSet>)> {
     let acks = AckSet::merged([left.message.acks.attached(), right.message.acks.attached()]);
     let combined = correlator_combined_record(
-        left_relay,
+        left_relays,
         &left.message.record,
-        right_relay,
+        right_relays,
         &right.message.record,
     );
     let input = vm_typed_batch_from_runtime_record(&combined, None, &program.program.input_schema)
@@ -7177,21 +7267,25 @@ async fn evaluate_correlator_where_match(
 }
 
 fn correlator_combined_record(
-    left_relay: &Identifier,
+    left_relays: &[Identifier],
     left: &RuntimeRecord,
-    right_relay: &Identifier,
+    right_relays: &[Identifier],
     right: &RuntimeRecord,
 ) -> RuntimeRecord {
     let mut fields = Vec::new();
-    fields.extend(
-        left.fields()
-            .map(|(name, value)| (format!("{}.{}", left_relay.as_str(), name), value.clone())),
-    );
-    fields.extend(
-        right
-            .fields()
-            .map(|(name, value)| (format!("{}.{}", right_relay.as_str(), name), value.clone())),
-    );
+    for relay in left_relays {
+        fields.extend(
+            left.fields()
+                .map(|(name, value)| (format!("{}.{}", relay.as_str(), name), value.clone())),
+        );
+    }
+    for relay in right_relays {
+        fields.extend(
+            right
+                .fields()
+                .map(|(name, value)| (format!("{}.{}", relay.as_str(), name), value.clone())),
+        );
+    }
     RuntimeRecord::from_fields_with_metadata(
         fields,
         correlator_output_metadata(left.metadata(), right.metadata()),
@@ -7212,8 +7306,8 @@ fn correlator_output_metadata(
 
 async fn evaluate_correlator_output_message(
     processor: &Identifier,
-    left_relay: &Identifier,
-    right_relay: &Identifier,
+    left_relays: &[Identifier],
+    right_relays: &[Identifier],
     program: &CompiledCorrelatorOutputProgram,
     left: CorrelatorPendingMessage,
     right: CorrelatorPendingMessage,
@@ -7222,9 +7316,9 @@ async fn evaluate_correlator_output_message(
     let key = left.message.key.clone();
     let acks = AckSet::merged([left.message.acks.attached(), right.message.acks.attached()]);
     let combined = correlator_combined_record(
-        left_relay,
+        left_relays,
         &left.message.record,
-        right_relay,
+        right_relays,
         &right.message.record,
     );
     let input = vm_typed_batch_from_runtime_record(&combined, None, &program.program.input_schema)

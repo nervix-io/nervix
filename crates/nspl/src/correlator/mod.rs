@@ -1,17 +1,18 @@
 use chumsky::prelude::*;
 use nervix_models::{
     AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    CreateCorrelator, CreateStatement,
+    CreateCorrelator, CreateStatement, ProcessorInputs,
 };
 
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_parameterization, correlator_name,
-        current_word_prefix, duration_lit, filter_where_clause, flush_each, from_relay_clause,
-        if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input,
-        message_error_policy, processor_outputs, relay_ref, render_vm_program_tokens,
-        suggestions_from_errors, tok, vm_program_error_message,
+        current_word_prefix, duration_lit, filter_where_clause, flush_each,
+        from_relay_clause_with_boundary, from_where_boundary_token, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, message_error_policy,
+        processor_outputs, relay_ref, render_vm_program_tokens, suggestions_from_errors, tok,
+        vm_program_error_message,
     },
 };
 
@@ -95,6 +96,39 @@ fn match_policy<'src>()
     )))
 }
 
+fn correlator_from_where_boundary_token(token: &Token) -> bool {
+    from_where_boundary_token(token)
+        || matches!(
+            token,
+            Token::Word(Word::KnownWord {
+                iden: Identifier::Left | Identifier::Right | Identifier::Correlate,
+                ..
+            })
+        )
+}
+
+fn side_from_clauses<'src>(
+    side: Identifier,
+) -> impl Parser<'src, &'src [Token], ProcessorInputs, extra::Err<ParseError<'src>>> + Clone {
+    kw(side)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(from_relay_clause_with_boundary(
+            correlator_from_where_boundary_token,
+        ))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(|inputs| {
+            let mut from = Vec::with_capacity(inputs.len());
+            let mut r#where = Vec::new();
+            for (relay, mut relay_where) in inputs {
+                from.push(relay);
+                r#where.append(&mut relay_where);
+            }
+            ProcessorInputs::new(from, r#where)
+        })
+}
+
 fn timeout_action<'src>()
 -> impl Parser<'src, &'src [Token], CorrelationTimeoutAction, extra::Err<ParseError<'src>>> + Clone
 {
@@ -124,10 +158,8 @@ pub fn create_correlator_parser<'src>()
         .then(ack_mode().or_not())
         .then_ignore(kw(Identifier::Correlator))
         .then(correlator_name())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clause())
-        .then_ignore(tok(Token::Comma))
-        .then(from_relay_clause())
+        .then(side_from_clauses(Identifier::Left))
+        .then(side_from_clauses(Identifier::Right))
         .then(correlate_where_clause())
         .then(match_policy())
         .then(filter_where_clause().or_not())
@@ -164,17 +196,13 @@ pub fn create_correlator_parser<'src>()
                 ),
                 message_error_policy,
             ) = value;
-            let ((((if_not_exists, mode), name), left_input), right_input) = base;
-            let (left_relay, mut left_where) = left_input;
-            let (right_relay, mut right_where) = right_input;
-            left_where.append(&mut right_where);
+            let ((((if_not_exists, mode), name), left), right) = base;
             let (flush_each, max_batch_size) = flush_each;
             Ok(CreateStatement::new(
                 CreateCorrelator {
                     name,
-                    left_relay,
-                    right_relay,
-                    from_where: left_where,
+                    left,
+                    right,
                     output_routes,
                     parameterized_by,
                     correlate_where,
@@ -250,16 +278,35 @@ mod tests {
     #[test]
     fn parses_correlator_with_earliest_match() {
         let tokens = to_tokens(
-            "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE lower(relay1.name) = \
-             lower(relay2.first_name) MATCH EARLIEST TO relay3 PARAMETERIZED BY tenant_branch \
-             FLUSH EACH 100ms MAX BATCH SIZE 1MiB OUTPUT relay3.name = lower(relay1.name), \
-             relay3.surname = upper(relay2.surname) MAX TIME 1s ON CORRELATION TIMEOUT DROP, SEND \
-             TO relay4 ON MESSAGE ERROR LOG;",
+            "CREATE CORRELATOR correlate LEFT FROM relay1 WHERE relay1.name != '' LEFT FROM \
+             relay1_extra RIGHT FROM relay2 WHERE relay2.first_name != '' RIGHT FROM relay2_extra \
+             CORRELATE WHERE lower(relay1.name) = lower(relay2.first_name) MATCH EARLIEST TO \
+             relay3 PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB OUTPUT \
+             relay3.name = lower(relay1.name), relay3.surname = upper(relay2.surname) MAX TIME 1s \
+             ON CORRELATION TIMEOUT DROP, SEND TO relay4 ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_correlator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "correlate");
-        assert_eq!(parsed.left_relay.as_str(), "relay1");
-        assert_eq!(parsed.right_relay.as_str(), "relay2");
+        assert_eq!(
+            parsed
+                .left
+                .relays()
+                .iter()
+                .map(|relay| relay.as_str())
+                .collect::<Vec<_>>(),
+            vec!["relay1", "relay1_extra"]
+        );
+        assert_eq!(
+            parsed
+                .right
+                .relays()
+                .iter()
+                .map(|relay| relay.as_str())
+                .collect::<Vec<_>>(),
+            vec!["relay2", "relay2_extra"]
+        );
+        assert_eq!(parsed.left.where_clauses().len(), 1);
+        assert_eq!(parsed.right.where_clauses().len(), 1);
         assert_eq!(
             parsed
                 .output_routes
@@ -286,11 +333,11 @@ mod tests {
     #[test]
     fn parses_compound_predicate_and_latest_match() {
         let tokens = to_tokens(
-            "CREATE DETACHED CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE \
-             lower(relay1.name) = lower(relay2.first_name) AND relay1.tenant = relay2.tenant \
-             MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE OUTPUT relay3.name = \
-             lower(relay1.name), relay3.surname = upper(relay2.surname) MAX TIME 1s ON \
-             CORRELATION TIMEOUT DROP, DROP ON MESSAGE ERROR LOG;",
+            "CREATE DETACHED CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
+             WHERE lower(relay1.name) = lower(relay2.first_name) AND relay1.tenant = \
+             relay2.tenant MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE OUTPUT \
+             relay3.name = lower(relay1.name), relay3.surname = upper(relay2.surname) MAX TIME 1s \
+             ON CORRELATION TIMEOUT DROP, DROP ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_correlator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.mode, AckMode::Detached);
@@ -304,10 +351,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_legacy_tuple_correlation_rule() {
+    fn rejects_legacy_comma_separated_inputs() {
         let tokens = to_tokens(
-            "CREATE CORRELATOR correlate FROM relay1, relay2 ON (relay1.name, relay1.tenant), \
-             (relay2.first_name) MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE OUTPUT \
+            "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE relay1.name = \
+             relay2.first_name MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE OUTPUT \
              relay3.name = relay1.name MAX TIME 1s ON CORRELATION TIMEOUT DROP, DROP ON MESSAGE \
              ERROR LOG;",
         );
@@ -315,16 +362,43 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_right_inputs() {
+        let tokens = to_tokens(
+            "CREATE CORRELATOR correlate LEFT FROM relay1 CORRELATE WHERE relay1.name = \
+             relay2.first_name MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE OUTPUT \
+             relay3.name = relay1.name MAX TIME 1s ON CORRELATION TIMEOUT DROP, DROP ON MESSAGE \
+             ERROR LOG;",
+        );
+        assert!(parse_create_correlator_tokens(&tokens).is_err());
+    }
+
+    #[test]
+    fn suggests_left_after_correlator_name() {
+        let input = "CREATE CORRELATOR correlate ";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(suggestions.contains(&"LEFT".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+    }
+
+    #[test]
     fn suggests_correlate_where_without_schema_keyword_leakage() {
-        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 ";
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 ";
         let suggestions = suggest_create_correlator(input, input.len());
         assert!(suggestions.contains(&"CORRELATE WHERE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
     }
 
     #[test]
+    fn suggests_right_after_left_input() {
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 ";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(suggestions.contains(&"RIGHT".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+    }
+
+    #[test]
     fn suggests_where_after_correlate() {
-        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE ";
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE ";
         let suggestions = suggest_create_correlator(input, input.len());
         assert!(suggestions.contains(&"WHERE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -332,8 +406,8 @@ mod tests {
 
     #[test]
     fn suggests_match_policy_without_schema_keyword_leakage() {
-        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE relay1.name \
-                     = relay2.first_name MATCH ";
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
+                     WHERE relay1.name = relay2.first_name MATCH ";
         let suggestions = suggest_create_correlator(input, input.len());
         assert!(suggestions.contains(&"EARLIEST".to_string()));
         assert!(suggestions.contains(&"LATEST".to_string()));
@@ -342,9 +416,9 @@ mod tests {
 
     #[test]
     fn suggests_correlation_timeout_phrase() {
-        let input = "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE relay1.name \
-                     = relay2.first_name MATCH LATEST TO relay3 UNPARAMETERIZED FLUSH IMMEDIATE \
-                     OUTPUT relay3.name = relay1.name MAX TIME 1s ";
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
+                     WHERE relay1.name = relay2.first_name MATCH LATEST TO relay3 UNPARAMETERIZED \
+                     FLUSH IMMEDIATE OUTPUT relay3.name = relay1.name MAX TIME 1s ";
         let suggestions = suggest_create_correlator(input, input.len());
         assert!(suggestions.contains(&"ON CORRELATION TIMEOUT".to_string()));
         assert!(!suggestions.contains(&"ON MESSAGE ERROR".to_string()));

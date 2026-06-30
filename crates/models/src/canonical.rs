@@ -921,12 +921,12 @@ impl CreateDeduplicator {
 impl CreateCorrelator {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} CORRELATOR {} FROM {}, {} CORRELATE {} MATCH {}{}{} {} {} OUTPUT {} MAX \
-             TIME {} ON CORRELATION TIMEOUT {}, {} {};",
+            "CREATE {} CORRELATOR {} {} {} CORRELATE {} MATCH {}{}{} {} {} OUTPUT {} MAX TIME {} \
+             ON CORRELATION TIMEOUT {}, {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            from_relay_to_nspl(&self.left_relay, &self.from_where),
-            from_relay_to_nspl(&self.right_relay, &self.from_where),
+            prefixed_processor_inputs_to_nspl("LEFT", &self.left),
+            prefixed_processor_inputs_to_nspl("RIGHT", &self.right),
             self.correlate_where,
             self.match_policy.as_ref(),
             filter_where_suffix(&self.filter_where),
@@ -1149,6 +1149,20 @@ fn processor_inputs_to_nspl(inputs: &ProcessorInputs) -> String {
         .map(|relay| from_relay_to_nspl(relay, &inputs.r#where))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn prefixed_processor_inputs_to_nspl(prefix: &str, inputs: &ProcessorInputs) -> String {
+    inputs
+        .from
+        .iter()
+        .map(|relay| {
+            format!(
+                "{prefix} FROM {}",
+                from_relay_to_nspl(relay, &inputs.r#where)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> String {

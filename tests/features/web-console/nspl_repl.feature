@@ -360,7 +360,8 @@ Feature: Web console NSPL REPL
       CREATE INGESTOR left_profile_ingestor TO left_profiles DECODE USING left_profile_codec PARAMETERIZED BY tenant_branch VALUES { tenant = left_profiles.tenant } TTL 5m FLUSH IMMEDIATE FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INGESTOR right_profile_ingestor TO right_profiles DECODE USING right_profile_codec PARAMETERIZED BY tenant_branch VALUES { tenant = right_profiles.tenant } TTL 5m FLUSH IMMEDIATE FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CORRELATOR correlate_profiles
-        FROM left_profiles, right_profiles
+        LEFT FROM left_profiles
+        RIGHT FROM right_profiles
         CORRELATE WHERE lower(left_profiles.first_name) = lower(right_profiles.first_name)
         MATCH EARLIEST
         TO correlated_profiles PARAMETERIZED BY tenant_branch

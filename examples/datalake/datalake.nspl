@@ -647,7 +647,8 @@ CREATE DEDUPLICATOR device_location_distance
   ON MESSAGE ERROR LOG;
 
 CREATE CORRELATOR device_edge_connect_correlator
-  FROM device_connect_events, edge_connect_events
+  LEFT FROM device_connect_events
+  RIGHT FROM edge_connect_events
   CORRELATE WHERE device_connect_events.session_id = edge_connect_events.session_id
     AND device_connect_events.edge_id = edge_connect_events.edge_id
   MATCH EARLIEST
@@ -691,7 +692,8 @@ CREATE DEDUPLICATOR connect_distance_score
   ON MESSAGE ERROR LOG;
 
 CREATE CORRELATOR connected_session_correlator
-  FROM device_edge_connect_scored_events, auth_authorized_events
+  LEFT FROM device_edge_connect_scored_events
+  RIGHT FROM auth_authorized_events
   CORRELATE WHERE device_edge_connect_scored_events.session_id = auth_authorized_events.session_id
     AND device_edge_connect_scored_events.edge_id = auth_authorized_events.edge_id
   MATCH EARLIEST
@@ -729,7 +731,8 @@ CREATE CORRELATOR connected_session_correlator
   ON MESSAGE ERROR LOG;
 
 CREATE CORRELATOR disconnect_correlator
-  FROM device_disconnect_events, edge_disconnect_events
+  LEFT FROM device_disconnect_events
+  RIGHT FROM edge_disconnect_events
   CORRELATE WHERE device_disconnect_events.session_id = edge_disconnect_events.session_id
     AND device_disconnect_events.edge_id = edge_disconnect_events.edge_id
   MATCH EARLIEST
