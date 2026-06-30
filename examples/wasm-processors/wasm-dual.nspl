@@ -47,11 +47,11 @@ CREATE CODEC metric_codec
   FROM WIRE JSON SCHEMA metric_wire
   TO SCHEMA metric;
 
-CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-CREATE RELAY rust_filtered_metrics SCHEMA metric UNPARAMETERIZED;
-CREATE RELAY rust_positive_metrics SCHEMA metric UNPARAMETERIZED;
-CREATE RELAY go_filtered_metrics SCHEMA metric UNPARAMETERIZED;
-CREATE RELAY go_positive_metrics SCHEMA metric UNPARAMETERIZED;
+CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
+CREATE RELAY rust_positive_metrics SCHEMA metric UNBRANCHED;
+CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
+CREATE RELAY go_positive_metrics SCHEMA metric UNBRANCHED;
 
 CREATE VHOST edge http-wasm-dual.example.com;
 
@@ -63,7 +63,7 @@ CREATE ENDPOINT wasm_metrics_ingress
 CREATE INGESTOR metric_source
   TO raw_metrics
   DECODE USING metric_codec
-  UNPARAMETERIZED
+  UNBRANCHED
   FLUSH EACH 100ms MAX BATCH SIZE 100kb
   FROM ENDPOINT wasm_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -73,7 +73,7 @@ CREATE WASM PROCESSOR rust_filter_even_rows
   FROM raw_metrics
   TO rust_filtered_metrics
   TO rust_positive_metrics WHERE rust_positive_metrics.value > 0 AS I32
-  UNPARAMETERIZED
+  UNBRANCHED
   ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
 CREATE WASM PROCESSOR go_filter_even_rows
@@ -82,7 +82,7 @@ CREATE WASM PROCESSOR go_filter_even_rows
   FROM rust_filtered_metrics
   TO go_filtered_metrics
   TO go_positive_metrics WHERE go_positive_metrics.value > 0 AS I32
-  UNPARAMETERIZED
+  UNBRANCHED
   ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
 SUBSCRIBE SESSION TO rust_filtered_metrics;

@@ -182,7 +182,7 @@ impl MqttIngestor {
                 filter_where: filter_where.clone(),
                 codec: codec.clone(),
                 parameterization: parameterization.clone(),
-                parameter_value_mappings: ingestor.parameterized_by.values().to_vec(),
+                parameter_value_mappings: dependencies.parameter_value_mappings.clone(),
                 parameterized_senders: parameterized_senders.clone(),
                 events: runtime.events.clone(),
             };

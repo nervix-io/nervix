@@ -29,10 +29,10 @@ Feature: ZeroMQ ingestion
           'bind' = 'true'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR zeromq_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_zeromq_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR zeromq_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_zeromq_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ZEROMQ zeromq_main
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -88,10 +88,10 @@ Feature: ZeroMQ ingestion
         };
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE INGESTOR zeromq_notifications
+      CREATE IF NOT EXISTS BRANCH by_zeromq_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR zeromq_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_zeromq_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ZEROMQ zeromq_main
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

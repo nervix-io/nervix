@@ -198,7 +198,7 @@ pub enum StoredRelayParameterization {
     Parameterized {
         parameters: StoredRelayParameters,
     },
-    Unparameterized,
+    Unbranched,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -779,7 +779,7 @@ impl From<CreateRelay> for StoredCreateRelay {
                 };
                 StoredRelayParameterization::Parameterized { parameters }
             }
-            RelayParameterization::Unparameterized => StoredRelayParameterization::Unparameterized,
+            RelayParameterization::Unbranched => StoredRelayParameterization::Unbranched,
         };
         Self {
             name: value.name.to_string(),
@@ -805,9 +805,7 @@ impl TryFrom<StoredCreateRelay> for CreateRelay {
                 };
                 RelayParameterization::parameterized(parameters)
             }
-            StoredRelayParameterization::Unparameterized => {
-                RelayParameterization::unparameterized()
-            }
+            StoredRelayParameterization::Unbranched => RelayParameterization::unbranched(),
         };
         Ok(Self {
             name: Identifier::parse(&value.name)?,

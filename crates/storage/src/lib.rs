@@ -262,7 +262,7 @@ mod tests {
             decode_using_codec: Identifier::parse("notification_kafka_message")
                 .expect("valid identifier"),
             timestamp_source: None,
-            parameterized_by: BranchParameterization::unparameterized(),
+            parameterized_by: BranchParameterization::unbranched(),
             source: nervix_models::IngestSource::Kafka {
                 client: transport_id,
                 topic: Identifier::parse("notifications").expect("valid identifier"),

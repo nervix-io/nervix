@@ -32,15 +32,15 @@ Feature: Domain metrics
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR domain_metrics_source
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_domain_metrics_source PARAMETERIZED BY tenant_branch VALUES { tenant = domain_metrics_raw.tenant } TTL 5m; CREATE INGESTOR domain_metrics_source
         TO domain_metrics_raw
         DECODE USING transaction_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = domain_metrics_raw.tenant } TTL 5m
+        BRANCHED BY by_domain_metrics_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT domain_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR domain_metrics_dedup
-        FROM domain_metrics_raw TO domain_metrics_deduped PARAMETERIZED BY tenant_branch
+        FROM domain_metrics_raw TO domain_metrics_deduped BRANCHED BY by_domain_metrics_source
         DEDUPLICATE ON domain_metrics_raw.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

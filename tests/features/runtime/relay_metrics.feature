@@ -29,10 +29,10 @@ Feature: Relay metrics
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT relay_metrics_ingress ON edge PATH '/relay-metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR relay_metrics_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_relay_metrics_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR relay_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_relay_metrics_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT relay_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -157,17 +157,17 @@ Feature: Relay metrics
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
       CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP;
 
-      CREATE INGESTOR relay_buffer_source
+      CREATE IF NOT EXISTS BRANCH by_relay_buffer_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR relay_buffer_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_relay_buffer_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR relay_buffer_forwarder
         FROM notifications
         TO forwarded_notifications
-        PARAMETERIZED BY user_id_branch
+        BRANCHED BY by_relay_buffer_source
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -225,10 +225,10 @@ Feature: Relay metrics
       CREATE VHOST edge http-{{test_id}}-drain.example.com;
       CREATE ENDPOINT relay_metrics_drain_ingress ON edge PATH '/relay-metrics-drain' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR relay_metrics_drain_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_relay_metrics_drain_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR relay_metrics_drain_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_relay_metrics_drain_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT relay_metrics_drain_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -299,10 +299,10 @@ Feature: Relay metrics
       CREATE VHOST edge http-{{test_id}}-restart.example.com;
       CREATE ENDPOINT relay_metrics_restart_ingress ON edge PATH '/relay-metrics-restart' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR relay_metrics_restart_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_relay_metrics_restart_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR relay_metrics_restart_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_relay_metrics_restart_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT relay_metrics_restart_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

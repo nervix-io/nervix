@@ -27,10 +27,10 @@ Feature: Emitter metrics
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR emitter_metrics_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_emitter_metrics_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR emitter_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_emitter_metrics_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT emitter_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 

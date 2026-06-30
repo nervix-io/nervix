@@ -29,10 +29,10 @@ Feature: Runtime persistence
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

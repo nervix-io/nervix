@@ -36,15 +36,15 @@ Feature: Deduplicator state replication
         PATH '/dedup'
         TYPE HTTP;
 
-      CREATE INGESTOR source_txns
+      CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m; CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

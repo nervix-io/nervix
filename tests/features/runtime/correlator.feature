@@ -81,31 +81,31 @@ Feature: Relay correlation
         PATH '/right-alias'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR left_profile_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = left_profiles.tenant } TTL 5m; CREATE INGESTOR left_profile_ingestor
         TO left_profiles
         DECODE USING left_profile_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = left_profiles.tenant } TTL 5m
+        BRANCHED BY by_left_profile_ingestor
         FLUSH IMMEDIATE
         FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR left_profile_alias_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_left_profile_alias_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = left_profile_aliases.tenant } TTL 5m; CREATE INGESTOR left_profile_alias_ingestor
         TO left_profile_aliases
         DECODE USING left_profile_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = left_profile_aliases.tenant } TTL 5m
+        BRANCHED BY by_left_profile_alias_ingestor
         FLUSH IMMEDIATE
         FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR right_profile_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_right_profile_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = right_profiles.tenant } TTL 5m; CREATE INGESTOR right_profile_ingestor
         TO right_profiles
         DECODE USING right_profile_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = right_profiles.tenant } TTL 5m
+        BRANCHED BY by_right_profile_ingestor
         FLUSH IMMEDIATE
         FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR right_profile_alias_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_right_profile_alias_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = right_profile_aliases.tenant } TTL 5m; CREATE INGESTOR right_profile_alias_ingestor
         TO right_profile_aliases
         DECODE USING right_profile_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = right_profile_aliases.tenant } TTL 5m
+        BRANCHED BY by_right_profile_alias_ingestor
         FLUSH IMMEDIATE
         FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -116,7 +116,7 @@ Feature: Relay correlation
         RIGHT FROM right_profile_aliases WHERE right_profile_aliases.tenant = 'acme'
         CORRELATE WHERE lower(left_profile_aliases.first_name) = lower(right_profile_aliases.first_name)
         MATCH <match_policy>
-        TO correlated_profiles PARAMETERIZED BY tenant_branch
+        TO correlated_profiles BRANCHED BY by_left_profile_ingestor
         FLUSH IMMEDIATE
         OUTPUT
           correlated_profiles.tenant = left_profile_aliases.tenant,

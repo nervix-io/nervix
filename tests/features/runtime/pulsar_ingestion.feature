@@ -28,10 +28,10 @@ Feature: Pulsar ingestion
           'addr' = 'pulsar://127.0.0.1:6650'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR pulsar_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_pulsar_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR pulsar_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_pulsar_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM PULSAR pulsar_main
         TOPIC notifications_{{test_id}}
@@ -92,10 +92,10 @@ Feature: Pulsar ingestion
         };
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE INGESTOR pulsar_notifications
+      CREATE IF NOT EXISTS BRANCH by_pulsar_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR pulsar_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_pulsar_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM PULSAR pulsar_main
         TOPIC notifications_reconnect_{{test_id}}

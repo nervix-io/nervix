@@ -28,10 +28,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM KAFKA kafka_main
@@ -86,10 +86,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM KAFKA kafka_main
@@ -151,10 +151,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM KAFKA kafka_main
@@ -212,10 +212,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM KAFKA kafka_main
@@ -274,10 +274,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM KAFKA kafka_main
@@ -350,10 +350,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM KAFKA kafka_main
@@ -430,10 +430,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM KAFKA kafka_main
@@ -515,10 +515,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM KAFKA kafka_main
@@ -602,10 +602,10 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM KAFKA kafka_main

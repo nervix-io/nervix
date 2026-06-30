@@ -27,10 +27,10 @@ Feature: JAQ transformation
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -80,10 +80,10 @@ Feature: JAQ transformation
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
@@ -138,10 +138,10 @@ Feature: JAQ transformation
           'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR rabbit_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_rabbit_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR rabbit_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_rabbit_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM RABBITMQ rabbit_main
         QUEUE notifications_{{test_id}}
@@ -194,10 +194,10 @@ Feature: JAQ transformation
           'addr' = 'redis://127.0.0.1:6379/'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR redis_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_redis_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR redis_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_redis_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_{{test_id}}
@@ -250,10 +250,10 @@ Feature: JAQ transformation
           'client_id' = 'nervix-cucumber-jaq-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
@@ -305,10 +305,10 @@ Feature: JAQ transformation
           'addr' = 'nats://127.0.0.1:4222'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR nats_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_nats_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR nats_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_nats_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM NATS nats_main
         SUBJECT notifications_{{test_id}}
@@ -363,10 +363,10 @@ Feature: JAQ transformation
           'bind' = 'true'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR zeromq_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_zeromq_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR zeromq_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_zeromq_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ZEROMQ zeromq_main
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -419,10 +419,10 @@ Feature: JAQ transformation
           'region' = 'us-east-1'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR sqs_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_sqs_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR sqs_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_sqs_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM SQS sqs_main
         QUEUE notifications_{{test_id}}
@@ -475,10 +475,10 @@ Feature: JAQ transformation
         PATH '/ws'
         TYPE WEBSOCKETS;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ws_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ws_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -530,10 +530,10 @@ Feature: JAQ transformation
           'timeout_ms' = 5000
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM HTTP http_main EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -579,10 +579,10 @@ Feature: JAQ transformation
           'endpoint' = 'ws://127.0.0.1:18080/ws/{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ws_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ws_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -630,10 +630,10 @@ Feature: JAQ transformation
           'timeout_ms' = 5000
         };
 
-      CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING ); CREATE INGESTOR prom_samples
+      CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING ); CREATE IF NOT EXISTS BRANCH by_prom_samples PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m; CREATE INGESTOR prom_samples
         TO samples
         DECODE USING sample_codec
-        PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m
+        BRANCHED BY by_prom_samples
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(42.5), "source", "local", "", "")'

@@ -145,8 +145,9 @@ fn parameterized_by_phrase<'src>()
     ))
 }
 
-fn explicit_branch_parameterized_with_values<'src>()
--> impl Parser<'src, &'src [Token], BranchParameterization, extra::Err<ParseError<'src>>> + Clone {
+pub fn parameter_value_mappings<'src>()
+-> impl Parser<'src, &'src [Token], Vec<ParameterValueMapping>, extra::Err<ParseError<'src>>> + Clone
+{
     let ident = parse_identifier("field_name");
     let source = parse_identifier("relay_ref")
         .then_ignore(tok(Token::Dot))
@@ -161,46 +162,42 @@ fn explicit_branch_parameterized_with_values<'src>()
                 relay,
                 relay_field,
             });
-    let values = kw(Identifier::Values).ignore_then(
+    kw(Identifier::Values).ignore_then(
         value
             .separated_by(tok(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
-    );
-
-    parameterized_by_phrase()
-        .ignore_then(schema_ref())
-        .then(values)
-        .then_ignore(kw(Identifier::Ttl))
-        .then(duration_lit())
-        .map(|((schema, values), ttl)| {
-            BranchParameterization::parameterized_with_ttl(schema, values, ttl)
-        })
+    )
 }
 
-pub fn explicit_branch_parameterization<'src>()
--> impl Parser<'src, &'src [Token], BranchParameterization, extra::Err<ParseError<'src>>> + Clone {
+pub fn branch_definition_header<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    (ModelIdentifier, Vec<ParameterValueMapping>, String),
+    extra::Err<ParseError<'src>>,
+> + Clone {
     parameterized_by_phrase()
         .ignore_then(schema_ref())
-        .map(|schema| BranchParameterization::parameterized(schema, Vec::new()))
+        .then(parameter_value_mappings())
+        .then_ignore(kw(Identifier::Ttl))
+        .then(duration_lit())
+        .map(|((schema, values), ttl)| (schema, values, ttl))
 }
 
 pub fn branch_parameterization<'src>()
 -> impl Parser<'src, &'src [Token], BranchParameterization, extra::Err<ParseError<'src>>> + Clone {
-    let unparameterized =
-        kw(Identifier::Unparameterized).to(BranchParameterization::unparameterized());
+    let branched = kw_phrase2(Identifier::Branched, Identifier::By)
+        .ignore_then(branch_ref())
+        .map(BranchParameterization::branched_by);
+    let unbranched = kw(Identifier::Unbranched).to(BranchParameterization::unbranched());
 
-    choice((explicit_branch_parameterization(), unparameterized))
+    choice((branched, unbranched))
 }
 
 pub fn branch_parameterization_with_values<'src>()
 -> impl Parser<'src, &'src [Token], BranchParameterization, extra::Err<ParseError<'src>>> + Clone {
-    let parameterized = explicit_branch_parameterized_with_values();
-    let unparameterized =
-        kw(Identifier::Unparameterized).to(BranchParameterization::unparameterized());
-
-    choice((parameterized, unparameterized))
+    branch_parameterization()
 }
 
 pub fn domain_name<'src>()
@@ -321,6 +318,16 @@ pub fn vhost_ref<'src>()
 pub fn vhost_name<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
     parse_identifier("vhost_name")
+}
+
+pub fn branch_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:branch")
+}
+
+pub fn branch_name<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("branch_name")
 }
 
 pub fn endpoint_ref<'src>()
@@ -602,7 +609,8 @@ fn processor_output_boundary_token(token: &Token) -> bool {
                 iden: Identifier::To
                     | Identifier::Parameterized
                     | Identifier::Parametrized
-                    | Identifier::Unparameterized
+                    | Identifier::Branched
+                    | Identifier::Unbranched
                     | Identifier::Flush
                     | Identifier::On
                     | Identifier::Using

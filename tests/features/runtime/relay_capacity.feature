@@ -68,10 +68,10 @@ Feature: Relay capacity
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity' TYPE HTTP;
 
-      CREATE INGESTOR relay_capacity_source
+      CREATE IF NOT EXISTS BRANCH by_relay_capacity_source PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR relay_capacity_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_relay_capacity_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT relay_capacity_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -147,7 +147,7 @@ Feature: Relay capacity
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED CAPACITY 3;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;
 
       CREATE CLIENT zeromq_capacity_shrink
         TYPE ZEROMQ
@@ -162,7 +162,7 @@ Feature: Relay capacity
       CREATE INGESTOR relay_capacity_shrink_source
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT relay_capacity_shrink_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 

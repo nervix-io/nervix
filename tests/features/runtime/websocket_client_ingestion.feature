@@ -44,10 +44,10 @@ Feature: Websocket client ingestion
     And these NSPL commands are executed
       """
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ws_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ws_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -94,10 +94,10 @@ Feature: Websocket client ingestion
         };
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE INGESTOR ws_notifications
+      CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ws_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 

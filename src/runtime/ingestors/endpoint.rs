@@ -50,7 +50,7 @@ impl EndpointIngestor {
             filter_where: dependencies.filter_where,
             codec: dependencies.codec,
             parameterization: dependencies.parameterization,
-            parameter_value_mappings: ingestor.parameterized_by.values().to_vec(),
+            parameter_value_mappings: dependencies.parameter_value_mappings.clone(),
             parameterized_senders: parameterized_runtime.senders.clone(),
         };
 

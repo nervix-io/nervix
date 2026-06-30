@@ -31,10 +31,10 @@ Feature: Parameterized session subscriptions
           'client_id' = 'nervix-cucumber-parameterized-subscription-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_tenant_branch VALUES { user_id = notifications.user_id, tenant = notifications.tenant } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_tenant_branch VALUES { user_id = notifications.user_id, tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
@@ -101,10 +101,10 @@ Feature: Parameterized session subscriptions
           'client_id' = 'nervix-cucumber-parameterized-subscription-filter-map-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_tenant_branch VALUES { user_id = notifications.user_id, tenant = notifications.tenant } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_tenant_branch VALUES { user_id = notifications.user_id, tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}

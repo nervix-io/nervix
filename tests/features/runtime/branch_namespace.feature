@@ -44,10 +44,10 @@ Feature: Branch namespace
           'client_id' = 'nervix-cucumber-branch-namespace-{{test_id}}'
         };
 
-      CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC branch_namespace_{{test_id}}
@@ -60,7 +60,7 @@ Feature: Branch namespace
               projected_notifications.amount = notifications.amount + 1
           UNSET notifications.active
           WHERE branch.tenant = notifications.tenant
-        PARAMETERIZED BY tenant_branch
+        BRANCHED BY by_mqtt_notifications
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -123,17 +123,17 @@ Feature: Branch namespace
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE REINGESTOR copy_notifications
+      CREATE IF NOT EXISTS BRANCH by_copy_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = branch.tenant } TTL 5m; CREATE REINGESTOR copy_notifications
         FROM notifications
         TO copied_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = branch.tenant } TTL 5m
+        BRANCHED BY by_copy_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO copied_notifications;

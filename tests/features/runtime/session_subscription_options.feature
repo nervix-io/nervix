@@ -33,10 +33,10 @@ Feature: Session subscription delivery options
         PATH '/telemetry'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE INGESTOR telemetry_http
+      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE IF NOT EXISTS BRANCH by_telemetry_http PARAMETERIZED BY device_branch VALUES { device = telemetry.device } TTL 5m; CREATE INGESTOR telemetry_http
         TO telemetry
         DECODE USING telemetry_codec
-        PARAMETERIZED BY device_branch VALUES { device = telemetry.device } TTL 5m
+        BRANCHED BY by_telemetry_http
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -90,10 +90,10 @@ Feature: Session subscription delivery options
         PATH '/telemetry'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE INGESTOR telemetry_http
+      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE IF NOT EXISTS BRANCH by_telemetry_http PARAMETERIZED BY device_branch VALUES { device = telemetry.device } TTL 5m; CREATE INGESTOR telemetry_http
         TO telemetry
         DECODE USING telemetry_codec
-        PARAMETERIZED BY device_branch VALUES { device = telemetry.device } TTL 5m
+        BRANCHED BY by_telemetry_http
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

@@ -81,7 +81,7 @@ impl HttpIngestor {
         let task_domain = domain.clone();
         let task_ingestor = ingestor.name.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_parameter_value_mappings = ingestor.parameterized_by.values().to_vec();
+        let task_parameter_value_mappings = dependencies.parameter_value_mappings.clone();
         let task_events = runtime.events.clone();
         let task_client_mounts = resolved_client.mounts.clone();
         let task = tokio::spawn(async move {

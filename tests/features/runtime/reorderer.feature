@@ -36,16 +36,16 @@ Feature: Reorderer
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_notifications.tenant } TTL 5m; CREATE INGESTOR http_notifications
         TO incoming_notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_notifications.tenant } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications PARAMETERIZED BY tenant_branch
+        TO ordered_notifications BRANCHED BY by_http_notifications
         BY incoming_notifications.sequence
         MAX TIME 10s
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
@@ -127,16 +127,16 @@ Feature: Reorderer
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_notifications.tenant } TTL 5m; CREATE INGESTOR http_notifications
         TO incoming_notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_notifications.tenant } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications PARAMETERIZED BY tenant_branch
+        TO ordered_notifications BRANCHED BY by_http_notifications
         BY lower(trim(incoming_notifications.category)), abs(incoming_notifications.priority)
         MAX TIME 10s
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
@@ -205,9 +205,11 @@ Feature: Reorderer
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE RELAY ordered_notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
 
+      CREATE IF NOT EXISTS BRANCH by_order_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_notifications.tenant } TTL 5m;
+
       CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications PARAMETERIZED BY tenant_branch
+        TO ordered_notifications BRANCHED BY by_order_notifications
         BY incoming_notifications.sequence
         MAX TIME 10s
         FLUSH EACH 2s MAX BATCH SIZE 1MiB

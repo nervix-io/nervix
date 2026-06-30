@@ -117,7 +117,7 @@ mod tests {
             CREATE JUNCTION join_streams
                 FROM ss1, ss2, ss3
                 TO ss10
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
         "#;
 
@@ -149,8 +149,8 @@ mod tests {
     #[test]
     fn parses_create_detached_junction() {
         let tokens = to_tokens(
-            "CREATE DETACHED JUNCTION join_streams FROM ss1, ss2 TO ss10 PARAMETERIZED BY tenant \
-             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE DETACHED JUNCTION join_streams FROM ss1, ss2 TO ss10 BRANCHED BY tenant FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.mode, AckMode::Detached);
@@ -159,8 +159,8 @@ mod tests {
     #[test]
     fn parses_junction_flush_each() {
         let tokens = to_tokens(
-            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 PARAMETERIZED BY tenant FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 BRANCHED BY tenant FLUSH EACH \
+             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.flush_each, "100ms");
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn parses_junction_flush_immediate() {
         let tokens = to_tokens(
-            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 PARAMETERIZED BY tenant FLUSH \
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 BRANCHED BY tenant FLUSH \
              IMMEDIATE ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
@@ -179,8 +179,8 @@ mod tests {
     #[test]
     fn parses_single_source_junction() {
         let tokens = to_tokens(
-            "CREATE JUNCTION join_streams FROM ss1 TO ss10 UNPARAMETERIZED FLUSH IMMEDIATE ON \
-             MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM ss1 TO ss10 UNBRANCHED FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.from.from.len(), 1);
@@ -206,8 +206,7 @@ mod tests {
 
     #[test]
     fn suggests_flush_after_target_without_schema_leakage() {
-        let input = "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 PARAMETERIZED BY tenant \
-                     VALUES { tenant = ss1.tenant } FL";
+        let input = "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 BRANCHED BY tenant FL";
         let suggestions = suggest_create_junction(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));

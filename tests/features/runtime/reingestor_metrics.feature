@@ -32,25 +32,25 @@ Feature: Reingestor metrics
 
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
 
-      CREATE INGESTOR reingestor_metrics_source
+      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_source PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR reingestor_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_reingestor_metrics_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE REINGESTOR reingestor_metrics_node
+      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_node PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m; CREATE REINGESTOR reingestor_metrics_node
         FROM notifications
         TO tenant_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m
+        BRANCHED BY by_reingestor_metrics_node
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
-      CREATE REINGESTOR audit_reingestor_metrics_node
+      CREATE IF NOT EXISTS BRANCH by_audit_reingestor_metrics_node PARAMETERIZED BY tenant_branch VALUES { tenant = audit_notifications.tenant } TTL 5m; CREATE REINGESTOR audit_reingestor_metrics_node
         FROM notifications
         TO audit_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = audit_notifications.tenant } TTL 5m
+        BRANCHED BY by_audit_reingestor_metrics_node
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO tenant_notifications;

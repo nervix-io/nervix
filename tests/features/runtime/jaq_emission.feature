@@ -27,10 +27,10 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_in_{{test_id}}
@@ -92,10 +92,10 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_in_{{test_id}}
@@ -157,10 +157,10 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_in_{{test_id}}
@@ -222,10 +222,10 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_in_{{test_id}}
@@ -288,10 +288,10 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_in_{{test_id}}
@@ -353,10 +353,10 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_in_{{test_id}}
@@ -419,10 +419,10 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_in_{{test_id}}

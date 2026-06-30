@@ -29,10 +29,10 @@ Feature: Websocket endpoint ingestion
         PATH '/ws'
         TYPE WEBSOCKETS;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ws_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ws_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -97,10 +97,10 @@ Feature: Websocket endpoint ingestion
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE INGESTOR ws_notifications
+      CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ws_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint
         MODE NO_ACK SEQUENTIAL
@@ -165,7 +165,7 @@ Feature: Websocket endpoint ingestion
       CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint
         MODE NO_ACK SEQUENTIAL

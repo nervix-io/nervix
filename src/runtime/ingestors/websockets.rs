@@ -80,7 +80,7 @@ impl WebsocketsIngestor {
         let task_ingestor = ingestor.name.clone();
         let task_signaling_protocol = signaling_protocol.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_parameter_value_mappings = ingestor.parameterized_by.values().to_vec();
+        let task_parameter_value_mappings = dependencies.parameter_value_mappings.clone();
         let task_events = runtime.events.clone();
         let task_endpoint_requires_tls =
             match ServiceUrl::new(endpoint.as_str(), "WebSockets endpoint")

@@ -35,10 +35,10 @@ Feature: Optional fields
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -102,10 +102,10 @@ Feature: Optional fields
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
@@ -175,10 +175,10 @@ Feature: Optional fields
         PATH '/ws'
         TYPE WEBSOCKETS;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR ws_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_ws_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -243,10 +243,10 @@ Feature: Optional fields
           'bind' = 'true'
         };
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR zeromq_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_zeromq_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR zeromq_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_zeromq_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ZEROMQ zeromq_main
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

@@ -207,9 +207,8 @@ mod tests {
     fn parses_create_reorderer() {
         let tokens = to_tokens(
             "CREATE REORDERER order_notifications FROM s1 TO s2 SET s2.id = trim(s1.id) WHERE \
-             s1.active PARAMETERIZED BY tenant BY s1.tenant, concat(lower(s1.id), '-', \
-             trim(s1.kind)) MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-             LOG;",
+             s1.active BRANCHED BY tenant BY s1.tenant, concat(lower(s1.id), '-', trim(s1.kind)) \
+             MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reorderer_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "order_notifications");
@@ -234,17 +233,17 @@ mod tests {
     #[test]
     fn rejects_reorderer_global_error_policy() {
         let tokens = to_tokens(
-            "CREATE REORDERER order_notifications FROM s1 TO s2 PARAMETERIZED BY tenant BY s1.id \
-             MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
-             ERROR LOG;",
+            "CREATE REORDERER order_notifications FROM s1 TO s2 BRANCHED BY tenant BY s1.id MAX \
+             TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR \
+             LOG;",
         );
         assert!(parse_create_reorderer_tokens(&tokens).is_err());
     }
 
     #[test]
     fn suggests_flush_after_max_time_without_cross_branch_leakage() {
-        let input = "CREATE REORDERER order_notifications FROM s1 TO s2 PARAMETERIZED BY tenant \
-                     BY s1.id MAX TIME 10s FL";
+        let input = "CREATE REORDERER order_notifications FROM s1 TO s2 BRANCHED BY tenant BY \
+                     s1.id MAX TIME 10s FL";
         let suggestions = suggest_create_reorderer(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(suggestions.contains(&"FLUSH IMMEDIATE".to_string()));

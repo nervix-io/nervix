@@ -123,6 +123,8 @@ pub enum ModelKind {
     Client,
     #[strum(props(completion_label = "ref:vhost"))]
     Vhost,
+    #[strum(props(completion_label = "ref:branch"))]
+    Branch,
     #[strum(props(completion_label = "ref:endpoint"))]
     Endpoint,
     #[strum(props(completion_label = "ref:signaling_protocol"))]
@@ -449,6 +451,7 @@ pub enum Model {
     ClientAzureBlob(CreateClientAzureBlob),
     ClientIcebergRest(CreateClientIcebergRest),
     Vhost(CreateVhost),
+    Branch(CreateBranch),
     Endpoint(CreateEndpoint),
     SignalingProtocol(CreateSignalingProtocol),
     Generator(CreateGenerator),
@@ -494,6 +497,7 @@ impl Model {
             | Self::ClientAzureBlob(_)
             | Self::ClientIcebergRest(_) => ModelKind::Client,
             Self::Vhost(_) => ModelKind::Vhost,
+            Self::Branch(_) => ModelKind::Branch,
             Self::Endpoint(_) => ModelKind::Endpoint,
             Self::SignalingProtocol(_) => ModelKind::SignalingProtocol,
             Self::Generator(_) => ModelKind::Generator,
@@ -543,6 +547,7 @@ impl Model {
             Self::ClientAzureBlob(v) => &v.name,
             Self::ClientIcebergRest(v) => &v.name,
             Self::Vhost(v) => &v.name,
+            Self::Branch(v) => &v.name,
             Self::Endpoint(v) => &v.name,
             Self::SignalingProtocol(v) => &v.name,
             Self::Generator(v) => &v.name,
@@ -1136,67 +1141,54 @@ pub struct ParameterValueMapping {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateBranch {
+    pub name: Identifier,
+    pub parameterized_by: Identifier,
+    pub values: Vec<ParameterValueMapping>,
+    pub ttl: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eviction: Option<BranchEviction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BranchEviction {
+    Lru { max_instances: u64 },
+}
+
+impl BranchEviction {
+    pub const fn max_instances(&self) -> u64 {
+        match self {
+            Self::Lru { max_instances } => *max_instances,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BranchParameterization {
-    Parameterized {
-        schema: Identifier,
-        #[serde(default)]
-        values: Vec<ParameterValueMapping>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ttl: Option<String>,
-    },
-    Unparameterized,
+    BranchedBy { branch: Identifier },
+    Unbranched,
 }
 
 impl BranchParameterization {
-    pub fn parameterized(schema: Identifier, values: Vec<ParameterValueMapping>) -> Self {
-        Self::Parameterized {
-            schema,
-            values,
-            ttl: None,
-        }
+    pub fn branched_by(branch: Identifier) -> Self {
+        Self::BranchedBy { branch }
     }
 
-    pub fn parameterized_with_ttl(
-        schema: Identifier,
-        values: Vec<ParameterValueMapping>,
-        ttl: String,
-    ) -> Self {
-        Self::Parameterized {
-            schema,
-            values,
-            ttl: Some(ttl),
-        }
+    pub fn unbranched() -> Self {
+        Self::Unbranched
     }
 
-    pub fn unparameterized() -> Self {
-        Self::Unparameterized
-    }
-
-    pub fn schema(&self) -> Option<&Identifier> {
+    pub fn branch(&self) -> Option<&Identifier> {
         match self {
-            Self::Parameterized { schema, .. } => Some(schema),
-            Self::Unparameterized => None,
+            Self::BranchedBy { branch } => Some(branch),
+            Self::Unbranched => None,
         }
     }
 
-    pub fn values(&self) -> &[ParameterValueMapping] {
+    pub fn is_unbranched(&self) -> bool {
         match self {
-            Self::Parameterized { values, .. } => values,
-            Self::Unparameterized => &[],
-        }
-    }
-
-    pub fn into_values(self) -> Vec<ParameterValueMapping> {
-        match self {
-            Self::Parameterized { values, .. } => values,
-            Self::Unparameterized => Vec::new(),
-        }
-    }
-
-    pub fn ttl(&self) -> Option<&str> {
-        match self {
-            Self::Parameterized { ttl, .. } => ttl.as_deref(),
-            Self::Unparameterized => None,
+            Self::BranchedBy { .. } => false,
+            Self::Unbranched => true,
         }
     }
 }
@@ -1720,7 +1712,7 @@ pub const fn default_relay_buffer() -> usize {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelayParameterization {
     Parameterized { parameters: RelayParameters },
-    Unparameterized,
+    Unbranched,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1751,20 +1743,20 @@ impl RelayParameterization {
         Self::Parameterized { parameters }
     }
 
-    pub fn unparameterized() -> Self {
-        Self::Unparameterized
+    pub fn unbranched() -> Self {
+        Self::Unbranched
     }
 
     pub fn parameterized_by(&self) -> Option<&Identifier> {
         match self {
             Self::Parameterized { parameters } => parameters.declared_schema(),
-            Self::Unparameterized => None,
+            Self::Unbranched => None,
         }
     }
 
-    pub fn is_unparameterized(&self) -> bool {
+    pub fn is_unbranched(&self) -> bool {
         match self {
-            Self::Unparameterized => true,
+            Self::Unbranched => true,
             Self::Parameterized { .. } => false,
         }
     }
@@ -2253,7 +2245,7 @@ mod tests {
                     Vec::new(),
                 ),
                 output_routes: ProcessorOutputs::single(identifier("orders_out")),
-                parameterized_by: BranchParameterization::unparameterized(),
+                parameterized_by: BranchParameterization::unbranched(),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
@@ -2272,7 +2264,7 @@ mod tests {
                 name: identifier("orders_http"),
                 output_routes: ProcessorOutputs::single(identifier("orders_out")),
                 decode_using_codec: identifier("codec"),
-                parameterized_by: BranchParameterization::unparameterized(),
+                parameterized_by: BranchParameterization::unbranched(),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,

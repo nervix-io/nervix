@@ -8,6 +8,7 @@ where
     K: Clone + Eq + Hash,
 {
     entries: IndexMap<K, ParametrizerEntry<V>, ahash::RandomState>,
+    version: u64,
 }
 
 struct ParametrizerEntry<V> {
@@ -27,6 +28,7 @@ where
     pub(super) fn new() -> Self {
         Self {
             entries: IndexMap::default(),
+            version: 0,
         }
     }
 
@@ -41,6 +43,38 @@ where
             .values()
             .map(|entry| entry.state.clone())
             .collect()
+    }
+
+    pub(super) fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub(super) fn set_version(&mut self, version: u64) {
+        self.version = version;
+    }
+
+    pub(super) fn snapshot_entries(&self) -> Vec<(K, Timestamp)> {
+        self.entries
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry.last_ingestion))
+            .collect()
+    }
+
+    pub(super) fn insert_restored(
+        &mut self,
+        key: K,
+        last_ingestion: Timestamp,
+        state: V,
+    ) -> Arc<V> {
+        let state = Arc::new(state);
+        self.entries.insert(
+            key,
+            ParametrizerEntry {
+                last_ingestion,
+                state: state.clone(),
+            },
+        );
+        state
     }
 
     #[cfg(test)]
@@ -72,6 +106,7 @@ where
                 entry.last_ingestion = now;
                 entry.state.clone()
             };
+            self.bump_version();
             let last_index = self.entries.len().saturating_sub(1);
             if index != last_index {
                 self.entries.move_index(index, last_index);
@@ -90,13 +125,14 @@ where
                 state: state.clone(),
             },
         );
+        self.bump_version();
         Ok(GetOrCreateParametrizer {
             state,
             created: true,
         })
     }
 
-    pub(super) fn expire(&mut self, now: Timestamp, max_idle: Duration) -> Vec<K> {
+    pub(super) fn expire(&mut self, now: Timestamp, max_idle: Duration) -> Vec<(K, Arc<V>)> {
         let mut expired = Vec::new();
         loop {
             let Some((key, entry)) = self.entries.get_index(0) else {
@@ -113,16 +149,54 @@ where
                 break;
             }
             let key = key.clone();
-            self.entries
+            let (_, entry) = self
+                .entries
                 .shift_remove_index(0)
                 .expect("front entry must be removable");
-            expired.push(key);
+            expired.push((key, entry.state));
+        }
+        if !expired.is_empty() {
+            self.bump_version();
         }
         expired
     }
 
+    pub(super) fn evict_lru_to_capacity(&mut self, max_entries: usize) -> Vec<(K, Arc<V>)> {
+        let mut evicted = Vec::new();
+        while self.entries.len() > max_entries {
+            let (key, entry) = self
+                .entries
+                .shift_remove_index(0)
+                .expect("front entry must be removable while over capacity");
+            evicted.push((key, entry.state));
+        }
+        if !evicted.is_empty() {
+            self.bump_version();
+        }
+        evicted
+    }
+
+    #[cfg(test)]
     pub(super) fn clear(&mut self) {
+        if !self.entries.is_empty() {
+            self.bump_version();
+        }
         self.entries.clear();
+    }
+
+    pub(super) fn drain(&mut self) -> Vec<(K, Arc<V>)> {
+        let entries = std::mem::take(&mut self.entries);
+        if !entries.is_empty() {
+            self.bump_version();
+        }
+        entries
+            .into_iter()
+            .map(|(key, entry)| (key, entry.state))
+            .collect()
+    }
+
+    fn bump_version(&mut self) {
+        self.version = self.version.saturating_add(1);
     }
 }
 
@@ -196,11 +270,57 @@ mod tests {
 
         let expired = registry.expire(base, Duration::from_secs(30));
 
-        assert_eq!(expired, vec!["acme".to_string()]);
+        assert_eq!(
+            expired
+                .into_iter()
+                .map(|(key, state)| (key, *state))
+                .collect::<Vec<_>>(),
+            vec![("acme".to_string(), 1)]
+        );
         assert_eq!(
             registry.ordered_keys(),
             vec!["globex".to_string(), "initech".to_string()]
         );
+    }
+
+    #[test]
+    fn evict_lru_to_capacity_removes_front_entries() {
+        let mut registry = ParametrizerRegistry::<String, usize>::new();
+
+        registry.get_or_create_with("acme".to_string(), timestamp(1, 0), |_| 1);
+        registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
+        registry.get_or_create_with("initech".to_string(), timestamp(3, 0), |_| 3);
+
+        let evicted = registry.evict_lru_to_capacity(1);
+
+        assert_eq!(
+            evicted
+                .into_iter()
+                .map(|(key, state)| (key, *state))
+                .collect::<Vec<_>>(),
+            vec![("acme".to_string(), 1), ("globex".to_string(), 2)]
+        );
+        assert_eq!(registry.ordered_keys(), vec!["initech".to_string()]);
+    }
+
+    #[test]
+    fn evict_lru_to_capacity_keeps_recently_touched_entries() {
+        let mut registry = ParametrizerRegistry::<String, usize>::new();
+
+        registry.get_or_create_with("acme".to_string(), timestamp(1, 0), |_| 1);
+        registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
+        registry.get_or_create_with("acme".to_string(), timestamp(3, 0), |_| 1);
+
+        let evicted = registry.evict_lru_to_capacity(1);
+
+        assert_eq!(
+            evicted
+                .into_iter()
+                .map(|(key, state)| (key, *state))
+                .collect::<Vec<_>>(),
+            vec![("globex".to_string(), 2)]
+        );
+        assert_eq!(registry.ordered_keys(), vec!["acme".to_string()]);
     }
 
     #[test]

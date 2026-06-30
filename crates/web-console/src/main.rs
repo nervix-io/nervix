@@ -6093,7 +6093,7 @@ mod tests {
                     260,
                     100,
                 ),
-                unparameterized_node(
+                unbranched_node(
                     "processor:anomaly_splitter",
                     "anomaly_splitter",
                     DataflowNodeKind::Processor,
@@ -6224,7 +6224,7 @@ mod tests {
                     520,
                     100,
                 ),
-                unparameterized_node(
+                unbranched_node(
                     "client:redis_alerts",
                     "redis_alerts",
                     DataflowNodeKind::Client,
@@ -6338,7 +6338,7 @@ mod tests {
                     1220,
                     120,
                 ),
-                unparameterized_node(
+                unbranched_node(
                     "client:redis_alerts",
                     "redis_alerts",
                     DataflowNodeKind::Client,
@@ -6579,7 +6579,7 @@ mod tests {
         let graph = GraphView::from_dataflow_graph(DataflowGraph {
             domain: "datalake_demo".to_string(),
             statistics: DataflowStatistics::default(),
-            nodes: vec![unparameterized_node(
+            nodes: vec![unbranched_node(
                 "emitter:iceberg_connected_sessions",
                 "iceberg_connected_sessions",
                 DataflowNodeKind::Emitter,
@@ -6763,7 +6763,7 @@ mod tests {
             domain: "layout_demo".to_string(),
             statistics: DataflowStatistics::default(),
             nodes: vec![
-                unparameterized_node(
+                unbranched_node(
                     "ingestor:http_notifications",
                     "http_notifications",
                     DataflowNodeKind::Ingestor,
@@ -6771,7 +6771,7 @@ mod tests {
                     0,
                     100,
                 ),
-                unparameterized_node(
+                unbranched_node(
                     "relay:notifications",
                     "notifications",
                     DataflowNodeKind::Relay,
@@ -6786,7 +6786,7 @@ mod tests {
             domain: "layout_demo".to_string(),
             statistics: DataflowStatistics::default(),
             nodes: vec![
-                unparameterized_node(
+                unbranched_node(
                     "ingestor:http_notifications",
                     "http_notifications",
                     DataflowNodeKind::Ingestor,
@@ -6794,7 +6794,7 @@ mod tests {
                     0,
                     100,
                 ),
-                unparameterized_node(
+                unbranched_node(
                     "relay:notifications",
                     "notifications",
                     DataflowNodeKind::Relay,
@@ -7468,7 +7468,7 @@ mod tests {
         node
     }
 
-    fn unparameterized_node(
+    fn unbranched_node(
         id: &str,
         label: &str,
         kind: DataflowNodeKind,

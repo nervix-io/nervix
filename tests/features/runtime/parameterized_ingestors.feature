@@ -46,24 +46,24 @@ Feature: Ingestor parameterization consistency
           'addr' = 'redis://127.0.0.1:6379/'
         };
 
-      CREATE INGESTOR mqtt_notifications
-        TO notifications
-        DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_branch VALUES {
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY tenant_user_branch VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
-        } TTL 5m
+        } TTL 5m; CREATE INGESTOR mqtt_notifications
+        TO notifications
+        DECODE USING notification_codec
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR redis_notifications
+      CREATE IF NOT EXISTS BRANCH by_redis_notifications PARAMETERIZED BY user_branch VALUES {
+          user_id = notifications.user_id
+        } TTL 5m; CREATE INGESTOR redis_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_branch VALUES {
-          user_id = notifications.user_id
-        } TTL 5m
+        BRANCHED BY by_redis_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_{{test_id}}
@@ -120,25 +120,25 @@ Feature: Ingestor parameterization consistency
           'client_id' = 'nervix-cucumber-parameterized-mqtt-b-{{test_id}}'
         };
 
-      CREATE INGESTOR mqtt_notifications
-        TO notifications
-        DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_branch VALUES {
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY tenant_user_branch VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
-        } TTL 5m
+        } TTL 5m; CREATE INGESTOR mqtt_notifications
+        TO notifications
+        DECODE USING notification_codec
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_a_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR mqtt_notifications_secondary
-        TO notifications
-        DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_branch VALUES {
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications_secondary PARAMETERIZED BY tenant_user_branch VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
-        } TTL 5m
+        } TTL 5m; CREATE INGESTOR mqtt_notifications_secondary
+        TO notifications
+        DECODE USING notification_codec
+        BRANCHED BY by_mqtt_notifications_secondary
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_secondary
         TOPIC notifications_b_{{test_id}}

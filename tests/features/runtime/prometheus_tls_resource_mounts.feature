@@ -43,10 +43,10 @@ Feature: Prometheus TLS resource mounts
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
 
-      CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING ); CREATE INGESTOR prom_samples
+      CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING ); CREATE IF NOT EXISTS BRANCH by_prom_samples PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m; CREATE INGESTOR prom_samples
         TO samples
         DECODE USING sample_codec
-        PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m
+        BRANCHED BY by_prom_samples
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM PROMETHEUS prom_tls
         QUERY 'label_replace(vector(42.5), "source", "prometheus", "", "")'

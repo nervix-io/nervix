@@ -79,10 +79,10 @@ Feature: Cluster scheduling
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
@@ -91,7 +91,7 @@ Feature: Cluster scheduling
 
       CREATE DEDUPLICATOR passthrough
         FROM notifications
-        TO forwarded_notifications PARAMETERIZED BY user_id_branch
+        TO forwarded_notifications BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -143,10 +143,10 @@ Feature: Cluster scheduling
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -206,10 +206,10 @@ Feature: Cluster scheduling
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE INGESTOR source_logs
+      CREATE IF NOT EXISTS BRANCH by_source_logs PARAMETERIZED BY id_branch VALUES { id = incoming_logs.id } TTL 5m; CREATE INGESTOR source_logs
         TO incoming_logs
         DECODE USING notification_codec
-        PARAMETERIZED BY id_branch VALUES { id = incoming_logs.id } TTL 5m
+        BRANCHED BY by_source_logs
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC deduplicator_describe_{{test_id}}
@@ -220,7 +220,7 @@ Feature: Cluster scheduling
         FROM incoming_logs
         TO routed_logs WHERE incoming_logs.level = "error"
         TO routed_logs
-        PARAMETERIZED BY id_branch
+        BRANCHED BY by_source_logs
         DEDUPLICATE ON incoming_logs.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -291,10 +291,10 @@ Feature: Cluster scheduling
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -363,10 +363,10 @@ Feature: Cluster scheduling
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
@@ -432,10 +432,10 @@ Feature: Cluster scheduling
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}

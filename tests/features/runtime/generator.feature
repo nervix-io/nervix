@@ -39,14 +39,14 @@ Feature: Generator node
       CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE GENERATOR synth_notifications
         TO generated_notifications
-        UNPARAMETERIZED
+        UNBRANCHED
         EACH 100ms
         FLUSH IMMEDIATE
         SET generated_notifications.user_id = notifications.user_id,
@@ -110,14 +110,14 @@ Feature: Generator node
       CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE GENERATOR synth_notifications
         TO generated_notifications
-        UNPARAMETERIZED
+        UNBRANCHED
         EACH 100ms
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         SET generated_notifications.user_id = notifications.user_id,
@@ -181,14 +181,14 @@ Feature: Generator node
       CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE GENERATOR synth_notifications
         TO generated_notifications
-        UNPARAMETERIZED
+        UNBRANCHED
         EACH 2s
         FLUSH IMMEDIATE
         SET generated_notifications.user_id = notifications.user_id,

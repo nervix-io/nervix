@@ -33,15 +33,15 @@ Feature: Drain node
         PATH '/dedup'
         TYPE HTTP;
 
-      CREATE INGESTOR source_txns
+      CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = inbound.transaction_id } TTL 5m; CREATE INGESTOR source_txns
         TO inbound
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = inbound.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM inbound TO deduped PARAMETERIZED BY transaction_id_branch
+        FROM inbound TO deduped BRANCHED BY by_source_txns
         DEDUPLICATE ON inbound.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -86,7 +86,7 @@ Feature: Drain node
       CREATE INGESTOR kafka_a
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_a_{{test_id}}
@@ -96,7 +96,7 @@ Feature: Drain node
       CREATE INGESTOR kafka_b
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_b_{{test_id}}
@@ -106,7 +106,7 @@ Feature: Drain node
       CREATE INGESTOR kafka_c
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_c_{{test_id}}

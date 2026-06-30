@@ -75,15 +75,15 @@ use nervix_interconnect::{
     TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint,
-    CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor, CreateReorderer,
-    CreateResource, CreateStatement, CreateUser, CreateWindowProcessor, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
-    DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier,
-    IngestSource, IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
-    Model, ModelKind, MongoDbConflictAction, MySqlConflictAction, ParseAsType,
+    BranchParameterization, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter,
+    CreateEndpoint, CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor,
+    CreateReorderer, CreateResource, CreateStatement, CreateUser, CreateWindowProcessor,
+    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
+    DescribeIngestor, DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig,
+    DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog,
+    Identifier, IngestSource, IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule,
+    LookupQuery, Model, ModelKind, MongoDbConflictAction, MySqlConflictAction, ParseAsType,
     PostgresConflictAction, ProcessorInputs, ProcessorOutputs, ResourceNodeState,
     ResourceNodeStatus, ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain,
     Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
@@ -9148,8 +9148,8 @@ fn format_ingestor_describe_output(
             format_timestamp_source(ingestor.timestamp_source.as_ref())
         ),
         format!(
-            "branch ttl: {}",
-            ingestor.parameterized_by.ttl().unwrap_or("-")
+            "branch: {}",
+            format_branch_selection(&ingestor.parameterized_by)
         ),
         format!(
             "status: {}",
@@ -9243,6 +9243,13 @@ fn format_ingestor_describe_output(
     lines.join("\n")
 }
 
+fn format_branch_selection(parameterized_by: &BranchParameterization) -> &str {
+    parameterized_by
+        .branch()
+        .map(Identifier::as_str)
+        .unwrap_or("UNBRANCHED")
+}
+
 fn append_metrics_lines(mut output: String, metrics: Vec<String>) -> String {
     if metrics.is_empty() {
         return output;
@@ -9267,8 +9274,8 @@ fn format_relay_describe_output(
                 .parameterized_by()
                 .map(Identifier::as_str)
                 .unwrap_or_else(|| {
-                    if relay.parameterization.is_unparameterized() {
-                        "UNPARAMETERIZED"
+                    if relay.parameterization.is_unbranched() {
+                        "UNBRANCHED"
                     } else {
                         "-"
                     }
@@ -9428,16 +9435,8 @@ fn format_reingestor_describe_output(
     lines.extend([
         format!("from: {}", processor_input_names(&reingestor.from)),
         format!(
-            "parameterized by: {}",
-            reingestor
-                .parameterized_by
-                .schema()
-                .map(Identifier::as_str)
-                .unwrap_or("UNPARAMETERIZED")
-        ),
-        format!(
-            "branch ttl: {}",
-            reingestor.parameterized_by.ttl().unwrap_or("-")
+            "branch: {}",
+            format_branch_selection(&reingestor.parameterized_by)
         ),
         format!("mode: {}", reingestor.mode.as_ref()),
         format!("flush each: {}", reingestor.flush_each),
@@ -9468,12 +9467,8 @@ fn format_correlator_describe_output(
         format!("left: {}", processor_input_names(&correlator.left)),
         format!("right: {}", processor_input_names(&correlator.right)),
         format!(
-            "parameterized by: {}",
-            correlator
-                .parameterized_by
-                .schema()
-                .map(Identifier::as_str)
-                .unwrap_or("UNPARAMETERIZED")
+            "branch: {}",
+            format_branch_selection(&correlator.parameterized_by)
         ),
         format!("mode: {}", correlator.mode.as_ref()),
         format!("match: {}", correlator.match_policy.as_ref()),
@@ -14529,18 +14524,18 @@ mod tests {
             "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
             "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
              notification;",
-            "CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;",
-            "CREATE RELAY forwarded_notifications SCHEMA notification UNPARAMETERIZED;",
+            "CREATE RELAY notifications SCHEMA notification UNBRANCHED;",
+            "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR notifications_ingestor TO notifications DECODE USING \
-             notification_codec UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP \
-             NOW FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP \
+             notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW \
+             FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP \
              notifications_group MODE NO_ACK PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR \
              LOG;",
             "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications TO \
-             forwarded_notifications UNPARAMETERIZED DEDUPLICATE ON notifications.user_id MAX \
-             TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             forwarded_notifications UNBRANCHED DEDUPLICATE ON notifications.user_id MAX TIME 10m \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE DETACHED EMITTER kafka_forward FROM notifications ENCODE USING \
              notification_codec TO KAFKA kafka_main TOPIC notifications_out ON MESSAGE ERROR LOG \
              ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;",
@@ -14705,22 +14700,22 @@ mod tests {
             "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
             "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
              notification;",
-            "CREATE RELAY notifications_a SCHEMA notification UNPARAMETERIZED;",
-            "CREATE RELAY notifications_b SCHEMA notification UNPARAMETERIZED;",
-            "CREATE RELAY notifications_all SCHEMA notification UNPARAMETERIZED;",
+            "CREATE RELAY notifications_a SCHEMA notification UNBRANCHED;",
+            "CREATE RELAY notifications_b SCHEMA notification UNBRANCHED;",
+            "CREATE RELAY notifications_all SCHEMA notification UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR ingest_a TO notifications_a DECODE USING notification_codec \
-             UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA \
-             kafka_main TOPIC notifications_a OFFSET BY CONSUMER GROUP notifications_a_group MODE \
-             NO_ACK PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
+             TOPIC notifications_a OFFSET BY CONSUMER GROUP notifications_a_group MODE NO_ACK \
+             PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE INGESTOR ingest_b TO notifications_b DECODE USING notification_codec \
-             UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA \
-             kafka_main TOPIC notifications_b OFFSET BY CONSUMER GROUP notifications_b_group MODE \
-             NO_ACK PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
+             TOPIC notifications_b OFFSET BY CONSUMER GROUP notifications_b_group MODE NO_ACK \
+             PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
-             notifications_all UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
-             ERROR LOG;",
+             notifications_all UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
+             LOG;",
         ] {
             let result = service
                 .process_command(
@@ -14877,17 +14872,17 @@ mod tests {
              integer );",
             "CREATE CODEC transaction_codec FROM WIRE JSON SCHEMA transaction_wire TO SCHEMA \
              transaction;",
-            "CREATE RELAY inbound SCHEMA transaction UNPARAMETERIZED;",
-            "CREATE RELAY deduped SCHEMA transaction UNPARAMETERIZED;",
+            "CREATE RELAY inbound SCHEMA transaction UNBRANCHED;",
+            "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR inbound_ingestor TO inbound DECODE USING transaction_codec \
-             UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA \
-             kafka_main TOPIC inbound OFFSET BY CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL \
-             MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
-            "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped UNPARAMETERIZED DEDUPLICATE \
-             ON inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-             MESSAGE ERROR LOG;",
+             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
+             TOPIC inbound OFFSET BY CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL MAX 1 ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped UNBRANCHED DEDUPLICATE ON \
+             inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
+             ERROR LOG;",
         ] {
             let result = service
                 .process_command(
@@ -15186,8 +15181,8 @@ mod tests {
     #[test]
     fn parse_server_statement_accepts_junction_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 UNPARAMETERIZED FLUSH EACH 100ms \
-             MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 UNBRANCHED FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("junction statement should parse");
         let Statement::Create(model) = parsed else {
@@ -15199,7 +15194,7 @@ mod tests {
     #[test]
     fn parse_server_statement_accepts_deduplicator_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 UNPARAMETERIZED DEDUPLICATE ON \
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 UNBRANCHED DEDUPLICATE ON \
              ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
              ERROR LOG;",
         )

@@ -106,6 +106,7 @@ use crate::{
 };
 
 mod branch_aggregated_state;
+mod branch_lru_state;
 mod client_config;
 mod deduplicator;
 mod emitters;
@@ -132,6 +133,7 @@ use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, encode_branch_aggregated_snapshot,
 };
 use branch_aggregated_state::{ReplicatedBranchAggregatedState, decode_branch_aggregated_snapshot};
+use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use client_config::{client_tls_paths, read_tls_file, render_client_config_template};
 use deduplicator::{
     CompiledDeduplicatorKeyProgram, ReplicatedDeduplicatorState, compile_deduplicator_key_program,
@@ -435,7 +437,6 @@ pub(crate) struct LookupRuntime {
 
 #[derive(Debug)]
 struct RelayPresence {
-    key: Option<BranchKey>,
     last_seen_at: parking_lot::Mutex<Timestamp>,
 }
 
@@ -459,7 +460,6 @@ impl RelayRegistry {
         self.presences.insert(
             key.clone(),
             Arc::new(RelayPresence {
-                key: key.clone(),
                 last_seen_at: parking_lot::Mutex::new(now),
             }),
         );
@@ -467,6 +467,10 @@ impl RelayRegistry {
 
     fn contains_key(&self, key: &Option<BranchKey>) -> bool {
         self.presences.contains_key(key)
+    }
+
+    fn remove(&self, key: &Option<BranchKey>) {
+        self.presences.remove(key);
     }
 
     fn keys(&self) -> Vec<String> {
@@ -477,26 +481,6 @@ impl RelayRegistry {
             .collect::<Vec<_>>();
         keys.sort();
         keys
-    }
-
-    fn expire(&self, ttl: Duration, now: Timestamp) -> Vec<Option<BranchKey>> {
-        let expired = self
-            .presences
-            .iter()
-            .filter_map(|entry| {
-                let last_seen_at = *entry.value().last_seen_at.lock();
-                now.into_datetime()
-                    .signed_duration_since(last_seen_at.into_datetime())
-                    .to_std()
-                    .ok()
-                    .filter(|elapsed| *elapsed >= ttl)
-                    .map(|_| entry.value().key.clone())
-            })
-            .collect::<Vec<_>>();
-        for key in &expired {
-            self.presences.remove(key);
-        }
-        expired
     }
 }
 
@@ -604,6 +588,7 @@ struct IngestorDependencies {
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
     parameterization: Vec<Identifier>,
+    parameter_value_mappings: Vec<ParameterValueMapping>,
     parameterized_templates: HashMap<Identifier, (SharedActiveGraph, ParametrizerTemplate)>,
 }
 
@@ -1602,7 +1587,6 @@ async fn parameterized_branch_filter_blocking(
 
 #[derive(Debug)]
 struct ExpiringRelayState {
-    ttl: Duration,
     registry: RelayRegistry,
 }
 
@@ -1778,9 +1762,8 @@ struct RuntimeVmSchemaPair {
 }
 
 impl ExpiringRelayState {
-    fn new(ttl: Duration) -> Self {
+    fn new() -> Self {
         Self {
-            ttl,
             registry: RelayRegistry::new(),
         }
     }
@@ -1793,8 +1776,8 @@ impl ExpiringRelayState {
         self.registry.contains_key(key)
     }
 
-    fn expire(&self, now: Timestamp) -> Vec<Option<BranchKey>> {
-        self.registry.expire(self.ttl, now)
+    fn remove(&self, key: &Option<BranchKey>) {
+        self.registry.remove(key);
     }
 }
 
@@ -4411,6 +4394,43 @@ impl ParametrizerTemplate {
 }
 
 impl BranchRuntime {
+    fn detach(&self) {
+        for relay in self.relays.values() {
+            relay.registry.remove(&self.key);
+            self.runtime
+                .remove_stream_key_presence(&self.domain, &relay.relay, &self.key);
+        }
+    }
+
+    async fn evict(&mut self) {
+        self.detach();
+        for (relay, materialized_state) in &self.materializers {
+            let local_node_id = self.runtime.local_node_id.read().clone();
+            let is_primary = match (
+                materialized_state.primary_node.as_deref(),
+                local_node_id.as_deref(),
+            ) {
+                (Some(primary_node), Some(local_node_id)) => primary_node == local_node_id,
+                (None, _) => true,
+                _ => false,
+            };
+            if is_primary
+                && let Err(error) = self
+                    .runtime
+                    .delete_materialized_stream_key(materialized_state, &self.key)
+                    .await
+            {
+                warn!(
+                    domain = self.domain.as_str(),
+                    relay = relay.as_str(),
+                    key = branch_key_display(&self.key),
+                    error = %error,
+                    "failed to delete evicted materialized relay key"
+                );
+            }
+        }
+    }
+
     async fn materialize_stream_batch(&self, relay: &Identifier, batch: &RelayRecordBatch) {
         let Some(state) = self.materializers.get(relay) else {
             return;
@@ -4865,6 +4885,15 @@ impl ParameterizedIngestorRuntime {
                             "created parameterized branch runtime"
                         );
                     }
+                    if let Some(max_instances) = template.branch_max_instances {
+                        evict_parametrizer_instances_to_capacity(
+                            domain,
+                            ingestor,
+                            max_instances,
+                            instances,
+                        )
+                        .await;
+                    }
                     let state = instance.state.clone();
                     let graph = graph.clone();
                     let dispatch_key = key.clone();
@@ -4933,10 +4962,43 @@ impl ParameterizedIngestorRuntime {
         let task = tokio::spawn(async move {
             let mut instances =
                 ParametrizerRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
+            let mut last_persisted_lru_lsm = match restore_parametrizer_lru_snapshot(
+                &runtime_handle,
+                &domain,
+                &template,
+                &mut instances,
+            ) {
+                Ok(lsm) => lsm,
+                Err(error) => {
+                    warn!(
+                        domain = domain.as_str(),
+                        ingestor = ingestor.as_str(),
+                        error = %error,
+                        "failed to restore branch lru snapshot"
+                    );
+                    0
+                }
+            };
+            if let Some(max_instances) = template.branch_max_instances {
+                evict_parametrizer_instances_to_capacity(
+                    &domain,
+                    &ingestor,
+                    max_instances,
+                    &mut instances,
+                )
+                .await;
+            }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
+            let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
             let mut pending_inputs = Vec::<ParameterizedEntrypointInput>::new();
             let mut pending_flush_at = None::<Instant>;
-            let mut next_branch_deadline = None::<Timestamp>;
+            let now = runtime_handle
+                .current_stream_expiration_time(&domain)
+                .ok()
+                .flatten()
+                .unwrap_or_else(current_timestamp);
+            let mut next_branch_deadline =
+                tick_due_parametrizer_branches(&graph, now, &instances).await;
 
             loop {
                 tokio::task::consume_budget().await;
@@ -4977,9 +5039,28 @@ impl ParameterizedIngestorRuntime {
                             now,
                             branch_ttl,
                             &mut instances,
-                        );
+                        )
+                        .await;
                     }
                     next_expiration_scan = Instant::now() + expiration_scan_interval;
+                    did_scheduled_work = true;
+                }
+                if Instant::now() >= next_lru_snapshot {
+                    if let Err(error) = persist_parametrizer_lru_snapshot(
+                        &runtime_handle,
+                        &domain,
+                        &template,
+                        &instances,
+                        &mut last_persisted_lru_lsm,
+                    ) {
+                        warn!(
+                            domain = domain.as_str(),
+                            ingestor = ingestor.as_str(),
+                            error = %error,
+                            "failed to persist branch lru snapshot"
+                        );
+                    }
+                    next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
                     did_scheduled_work = true;
                 }
                 if next_branch_deadline.is_some_and(|deadline| deadline <= now) {
@@ -5001,6 +5082,11 @@ impl ParameterizedIngestorRuntime {
                     branch_sleep
                         .map(|branch_sleep| expiration_sleep.min(branch_sleep))
                         .unwrap_or(expiration_sleep)
+                        .min(
+                            next_lru_snapshot
+                                .checked_duration_since(Instant::now())
+                                .unwrap_or(Duration::ZERO),
+                        )
                         .min(
                             pending_flush_at
                                 .and_then(|deadline| {
@@ -5110,7 +5196,21 @@ impl ParameterizedIngestorRuntime {
                 }
             }
 
-            instances.clear();
+            if let Err(error) = persist_parametrizer_lru_snapshot(
+                &runtime_handle,
+                &domain,
+                &template,
+                &instances,
+                &mut last_persisted_lru_lsm,
+            ) {
+                warn!(
+                    domain = domain.as_str(),
+                    ingestor = ingestor.as_str(),
+                    error = %error,
+                    "failed to persist final branch lru snapshot"
+                );
+            }
+            shutdown_all_parametrizer_instances(&domain, &ingestor, &mut instances).await;
         });
         *runtime.task.lock() = Some(task);
         runtime
@@ -5169,14 +5269,16 @@ impl ParameterizedIngestorRuntime {
     }
 }
 
-fn expire_parametrizer_instances(
+async fn expire_parametrizer_instances(
     domain: &Domain,
     ingestor: &Identifier,
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
-    for key in instances.expire(now, expiration_after) {
+    for (key, state) in instances.expire(now, expiration_after) {
+        let mut branch = state.lock().await;
+        branch.evict().await;
         debug!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
@@ -5184,6 +5286,99 @@ fn expire_parametrizer_instances(
             "expired parameterized processor root"
         );
     }
+}
+
+async fn evict_parametrizer_instances_to_capacity(
+    domain: &Domain,
+    ingestor: &Identifier,
+    max_instances: usize,
+    instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+) {
+    for (key, state) in instances.evict_lru_to_capacity(max_instances) {
+        let mut branch = state.lock().await;
+        branch.evict().await;
+        debug!(
+            domain = domain.as_str(),
+            ingestor = ingestor.as_str(),
+            key = branch_key_display(&key),
+            max_instances,
+            "evicted parameterized branch runtime by lru"
+        );
+    }
+}
+
+async fn shutdown_all_parametrizer_instances(
+    domain: &Domain,
+    ingestor: &Identifier,
+    instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+) {
+    for (key, state) in instances.drain() {
+        let branch = state.lock().await;
+        branch.detach();
+        debug!(
+            domain = domain.as_str(),
+            ingestor = ingestor.as_str(),
+            key = branch_key_display(&key),
+            "stopped parameterized branch runtime"
+        );
+    }
+}
+
+fn branch_lru_placement(domain: &Domain, template: &ParametrizerTemplate) -> RuntimeStatePlacement {
+    RuntimeStatePlacement {
+        domain: domain.clone(),
+        state: RuntimeStateKind::BranchLru,
+        kind: template.source_kind,
+        identifier: template.source.clone(),
+        branch_key: None,
+    }
+}
+
+fn restore_parametrizer_lru_snapshot(
+    runtime: &Runtime,
+    domain: &Domain,
+    template: &ParametrizerTemplate,
+    instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+) -> Result<u64, String> {
+    let Some(store) = &runtime.state_store else {
+        return Ok(0);
+    };
+    let placement = branch_lru_placement(domain, template);
+    let Some(snapshot) = store
+        .latest_snapshot(&placement)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(0);
+    };
+    for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
+        let state = template.instantiate(runtime, domain, key.clone())?;
+        instances.insert_restored(key, last_ingestion, state);
+    }
+    instances.set_version(snapshot.lsm);
+    Ok(snapshot.lsm)
+}
+
+fn persist_parametrizer_lru_snapshot(
+    runtime: &Runtime,
+    domain: &Domain,
+    template: &ParametrizerTemplate,
+    instances: &ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    last_persisted_lsm: &mut u64,
+) -> Result<(), String> {
+    let Some(store) = &runtime.state_store else {
+        return Ok(());
+    };
+    let lsm = instances.version();
+    if lsm <= *last_persisted_lsm {
+        return Ok(());
+    }
+    let placement = branch_lru_placement(domain, template);
+    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
+    store
+        .persist_latest_snapshot(&placement, lsm, &payload)
+        .map_err(|error| error.to_string())?;
+    *last_persisted_lsm = lsm;
+    Ok(())
 }
 
 async fn tick_due_parametrizer_branches(

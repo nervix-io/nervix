@@ -164,13 +164,16 @@ General filter-map rules:
 Example:
 
 ```nspl
+CREATE BRANCH by_tenant
+  PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m;
+
 CREATE INGESTOR notifications_in
   FILTER WHERE message.active
   TO notifications
     SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
     UNSET notifications.raw
   DECODE USING notification_codec
-  PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+  BRANCHED BY by_tenant
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

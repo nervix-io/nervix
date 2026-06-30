@@ -35,16 +35,16 @@ Feature: Window processor metrics
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT window_metrics_ingress ON edge PATH '/window-metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR window_metrics_source
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_window_metrics_source PARAMETERIZED BY tenant_branch VALUES { tenant = metrics_input.tenant } TTL 5m; CREATE INGESTOR window_metrics_source
         TO metrics_input
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics_input.tenant } TTL 5m
+        BRANCHED BY by_window_metrics_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT window_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR window_metrics_node
         FROM metrics_input
-        TO metrics_summary PARAMETERIZED BY tenant_branch
+        TO metrics_summary BRANCHED BY by_window_metrics_source
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE

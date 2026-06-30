@@ -31,10 +31,10 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -94,10 +94,10 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE INGESTOR metrics_ingestor
+      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE IF NOT EXISTS BRANCH by_metrics_ingestor PARAMETERIZED BY device_branch VALUES { device = metrics_stream.device } TTL 5m; CREATE INGESTOR metrics_ingestor
         TO metrics_stream
         DECODE USING metrics_codec
-        PARAMETERIZED BY device_branch VALUES { device = metrics_stream.device } TTL 5m
+        BRANCHED BY by_metrics_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -171,14 +171,14 @@ Feature: HTTP codec ingestion
       CREATE INGESTOR strict_notifications_source
         TO strict_notifications
         DECODE USING strict_notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT strict_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE INGESTOR loose_notifications_source
         TO loose_notifications
         DECODE USING loose_notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -237,10 +237,10 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE INGESTOR metrics_ingestor
+      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE IF NOT EXISTS BRANCH by_metrics_ingestor PARAMETERIZED BY device_branch VALUES { device = metrics_stream.device } TTL 5m; CREATE INGESTOR metrics_ingestor
         TO metrics_stream
         DECODE USING metrics_codec
-        PARAMETERIZED BY device_branch VALUES { device = metrics_stream.device } TTL 5m
+        BRANCHED BY by_metrics_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -290,10 +290,10 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 

@@ -33,10 +33,10 @@ Feature: Parameterized branch inheritance
           'client_id' = 'nervix-cucumber-parameterized-processor-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
@@ -44,7 +44,7 @@ Feature: Parameterized branch inheritance
 
       CREATE DEDUPLICATOR passthrough
         FROM notifications
-        TO projected_notifications PARAMETERIZED BY tenant_user_id_branch
+        TO projected_notifications BRANCHED BY by_mqtt_notifications
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

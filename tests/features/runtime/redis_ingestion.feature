@@ -29,10 +29,10 @@ Feature: Redis ingestion
         };
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE INGESTOR redis_notifications
+      CREATE IF NOT EXISTS BRANCH by_redis_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR redis_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_redis_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_{{test_id}}
@@ -88,10 +88,10 @@ Feature: Redis ingestion
         };
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE INGESTOR redis_notifications
+      CREATE IF NOT EXISTS BRANCH by_redis_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR redis_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_redis_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_reconnect_{{test_id}}

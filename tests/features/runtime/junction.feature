@@ -51,17 +51,17 @@ Feature: Relay junction
         PATH '/ingest-b'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR source_one
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_source_one PARAMETERIZED BY user_id_branch VALUES { user_id = ss1.user_id } TTL 5m; CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = ss1.user_id } TTL 5m
+        BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR source_two
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_source_two PARAMETERIZED BY user_id_branch VALUES { user_id = ss2.user_id } TTL 5m; CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = ss2.user_id } TTL 5m
+        BRANCHED BY by_source_two
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -71,7 +71,7 @@ Feature: Relay junction
         FILTER WHERE ss1.user_id > 0
         TO ss10 SET ss10.lane = "left" UNSET ss10.raw WHERE ss1.source = "left"
         TO ss20 SET ss20.lane = "right" UNSET ss20.raw WHERE ss1.source = "right"
-        PARAMETERIZED BY user_id_branch
+        BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO ss10;
@@ -145,24 +145,24 @@ Feature: Relay junction
         PATH '/branch-b'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_one
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_source_one PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m; CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_one
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_two
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_source_two PARAMETERIZED BY tenant_branch VALUES { tenant = ss2.tenant } TTL 5m; CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss2.tenant } TTL 5m
+        BRANCHED BY by_source_two
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE JUNCTION join_streams
         FROM ss1, ss2
         TO ss10
-        PARAMETERIZED BY tenant_branch
+        BRANCHED BY by_source_one
         <flush_policy> ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO ss10;
@@ -250,30 +250,30 @@ Feature: Relay junction
         PATH '/ingest-b'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR state_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_state_source PARAMETERIZED BY user_id_branch VALUES { user_id = state_notifications.user_id } TTL 5m; CREATE INGESTOR state_source
         TO state_notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = state_notifications.user_id } TTL 5m
+        BRANCHED BY by_state_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR source_one
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_source_one PARAMETERIZED BY user_id_branch VALUES { user_id = ss1.user_id } TTL 5m; CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = ss1.user_id } TTL 5m
+        BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR source_two
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_source_two PARAMETERIZED BY user_id_branch VALUES { user_id = ss2.user_id } TTL 5m; CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = ss2.user_id } TTL 5m
+        BRANCHED BY by_source_two
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 SET ss10.source = state_notifications.source PARAMETERIZED BY user_id_branch
+        TO ss10 SET ss10.source = state_notifications.source BRANCHED BY by_state_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO ss10;
@@ -329,9 +329,11 @@ Feature: Relay junction
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE RELAY ss10 SCHEMA notification PARAMETERIZED BY user_id_branch;
 
+      CREATE IF NOT EXISTS BRANCH by_join_streams PARAMETERIZED BY user_id_branch VALUES { user_id = ss1.user_id } TTL 5m;
+
       CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 PARAMETERIZED BY user_id_branch
+        TO ss10 BRANCHED BY by_join_streams
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
 

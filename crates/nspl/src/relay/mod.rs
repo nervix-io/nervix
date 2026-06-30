@@ -53,9 +53,9 @@ pub fn create_relay_parser<'src>()
             )
         });
 
-    let unparameterized_tail = kw(Identifier::Unparameterized)
+    let unbranched_tail = kw(Identifier::Unbranched)
         .ignore_then(capacity.clone().or_not())
-        .map(|buffer| (RelayParameterization::unparameterized(), buffer));
+        .map(|buffer| (RelayParameterization::unbranched(), buffer));
 
     let default_tail = capacity.map(|buffer| {
         (
@@ -63,7 +63,7 @@ pub fn create_relay_parser<'src>()
             Some(buffer),
         )
     });
-    let tail = choice((parameterized_tail, unparameterized_tail, default_tail)).or_not();
+    let tail = choice((parameterized_tail, unbranched_tail, default_tail)).or_not();
 
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -290,11 +290,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_unparameterized_without_ttl() {
-        let tokens = to_tokens("CREATE RELAY notifications SCHEMA event_schema UNPARAMETERIZED;");
+    fn parses_unbranched_without_ttl() {
+        let tokens = to_tokens("CREATE RELAY notifications SCHEMA event_schema UNBRANCHED;");
         let parsed = parse_create_stream_tokens(&tokens).expect("parse should succeed");
 
-        assert!(parsed.parameterization.is_unparameterized());
+        assert!(parsed.parameterization.is_unbranched());
     }
 
     #[test]
@@ -311,8 +311,8 @@ mod tests {
     #[test]
     fn rejects_branch_as_relay_reference() {
         let error = crate::statement::parse_statement(
-            "CREATE REINGESTOR fw FROM branch TO projected PARAMETERIZED BY tenant_branch VALUES \
-             { tenant = branch.tenant } TTL 5m FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR fw FROM branch TO projected BRANCHED BY tenant_branch FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
         )
         .expect_err("reserved branch namespace must not be accepted as relay reference");
 
@@ -323,9 +323,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unparameterized_with_ttl() {
+    fn rejects_unbranched_with_ttl() {
         let error = parse_create_stream(
-            "CREATE RELAY notifications SCHEMA event_schema UNPARAMETERIZED TTL 5m;",
+            "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED TTL 5m;",
         )
         .expect_err("parse should fail");
 
@@ -386,8 +386,8 @@ mod tests {
     }
 
     #[test]
-    fn does_not_suggest_ttl_after_unparameterized() {
-        let input = "CREATE RELAY notifications SCHEMA event_schema UNPARAMETERIZED ";
+    fn does_not_suggest_ttl_after_unbranched() {
+        let input = "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED ";
         let suggestions = suggest_create_stream(input, input.len());
         assert!(!suggestions.contains(&"TTL".to_string()));
     }

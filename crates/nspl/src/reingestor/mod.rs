@@ -114,10 +114,8 @@ mod tests {
     #[test]
     fn parses_create_reingestor() {
         let tokens = to_tokens(
-            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-             PARAMETERIZED BY tenant_user VALUES { tenant = tenant_notifications.tenant, user_id \
-             = tenant_notifications.user_id } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-             MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
+             tenant_user FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "repartition");
@@ -135,68 +133,66 @@ mod tests {
         assert_eq!(
             parsed
                 .parameterized_by
-                .schema()
-                .map(|schema| schema.as_str()),
+                .branch()
+                .map(|branch| branch.as_str()),
             Some("tenant_user")
         );
-        assert_eq!(parsed.parameterized_by.values().len(), 2);
-        assert_eq!(parsed.parameterized_by.ttl(), Some("5m"));
         assert_eq!(parsed.mode, AckMode::Attached);
     }
 
     #[test]
-    fn parses_branch_namespace_parameter_mapping() {
+    fn parses_branched_by() {
         let tokens = to_tokens(
-            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-             PARAMETERIZED BY tenant_branch VALUES { tenant = branch.tenant } TTL 5m FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
+             tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
-        let values = parsed.parameterized_by.values();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0].field.as_str(), "tenant");
-        assert_eq!(values[0].relay.as_str(), "branch");
-        assert_eq!(values[0].relay_field.as_str(), "tenant");
+        assert_eq!(
+            parsed
+                .parameterized_by
+                .branch()
+                .map(|branch| branch.as_str()),
+            Some("tenant_branch")
+        );
     }
 
     #[test]
-    fn parses_create_reingestor_unparameterized() {
+    fn parses_create_reingestor_unbranched() {
         let tokens = to_tokens(
-            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-             UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications UNBRANCHED \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(
             parsed.parameterized_by,
-            nervix_models::BranchParameterization::unparameterized()
+            nervix_models::BranchParameterization::unbranched()
         );
     }
 
     #[test]
-    fn rejects_parameterized_without_ttl() {
+    fn rejects_branched_by_with_values_block() {
         let input = "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-                     PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant \
-                     } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;";
+                     BRANCHED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } \
+                     FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;";
 
-        parse_create_reingestor_tokens(&to_tokens(input)).expect_err("TTL is required");
+        parse_create_reingestor_tokens(&to_tokens(input))
+            .expect_err("VALUES belongs to CREATE BRANCH");
     }
 
     #[test]
-    fn rejects_unparameterized_with_ttl() {
+    fn rejects_unbranched_with_ttl() {
         let input = "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-                     UNPARAMETERIZED TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-                     LOG;";
+                     UNBRANCHED TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;";
 
         parse_create_reingestor_tokens(&to_tokens(input))
-            .expect_err("TTL must not follow UNPARAMETERIZED");
+            .expect_err("TTL must not follow UNBRANCHED");
     }
 
     #[test]
     fn parses_create_reingestor_detached() {
         let tokens = to_tokens(
             "CREATE DETACHED REINGESTOR repartition FROM notifications TO tenant_notifications \
-             PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL \
-             5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             BRANCHED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.mode, AckMode::Detached);
@@ -205,9 +201,8 @@ mod tests {
     #[test]
     fn parses_reingestor_flush_each() {
         let tokens = to_tokens(
-            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-             PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL \
-             5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
+             tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.flush_each, "100ms");
@@ -223,26 +218,25 @@ mod tests {
     }
 
     #[test]
-    fn suggests_parameterized_by_as_compound_keyword() {
-        let input = "CREATE REINGESTOR r FROM a TO b PAR";
+    fn suggests_branched_by_as_compound_keyword() {
+        let input = "CREATE REINGESTOR r FROM a TO b BR";
         let suggestions = suggest_create_reingestor(input, input.len());
-        assert!(suggestions.contains(&"PARAMETERIZED BY".to_string()));
+        assert!(suggestions.contains(&"BRANCHED BY".to_string()));
     }
 
     #[test]
-    fn suggests_unparameterized_as_parameterization_choice() {
+    fn suggests_unbranched_as_parameterization_choice() {
         let input = "CREATE REINGESTOR r FROM a TO b ";
         let suggestions = suggest_create_reingestor(input, input.len());
-        assert!(suggestions.contains(&"UNPARAMETERIZED".to_string()));
+        assert!(suggestions.contains(&"UNBRANCHED".to_string()));
     }
 
     #[test]
-    fn suggests_ttl_after_parameterized_values() {
-        let input = "CREATE REINGESTOR r FROM input TO output PARAMETERIZED BY tenant_branch \
-                     VALUES { tenant = output.tenant } ";
+    fn suggests_flush_after_branched_by() {
+        let input = "CREATE REINGESTOR r FROM input TO output BRANCHED BY tenant_branch ";
         let suggestions = suggest_create_reingestor(input, input.len());
-        assert!(suggestions.contains(&"TTL".to_string()));
-        assert!(!suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(!suggestions.contains(&"TTL".to_string()));
     }
 
     #[test]
@@ -254,8 +248,7 @@ mod tests {
 
     #[test]
     fn suggests_flush_after_parameterized_by() {
-        let input = "CREATE REINGESTOR r FROM input TO output PARAMETERIZED BY tenant_branch \
-                     VALUES { tenant = output.tenant } TTL 5m FL";
+        let input = "CREATE REINGESTOR r FROM input TO output BRANCHED BY tenant_branch FL";
         let suggestions = suggest_create_reingestor(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
     }

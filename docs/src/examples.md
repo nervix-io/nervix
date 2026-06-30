@@ -53,10 +53,12 @@ CREATE CLIENT kafka_main
     'group.id' = 'nervix-dev'
   };
 
+CREATE BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m;
+
 CREATE INGESTOR kafka_notifications
   TO notifications
   DECODE USING notification_codec
-  PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+  BRANCHED BY by_kafka_notifications
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM KAFKA kafka_main
   TOPIC notifications
@@ -79,10 +81,12 @@ CREATE CLIENT kafka_tls
     'ssl.ca.location' = '{{ dev_tls }}/ca.pem'
   };
 
+CREATE BRANCH by_kafka_notifications_tls PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m;
+
 CREATE INGESTOR kafka_notifications_tls
   TO notifications
   DECODE USING notification_codec
-  PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+  BRANCHED BY by_kafka_notifications_tls
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM KAFKA kafka_tls
   TOPIC notifications_tls
@@ -99,10 +103,12 @@ CREATE CLIENT pulsar_main
     'addr' = 'pulsar://127.0.0.1:6650'
   };
 
+CREATE BRANCH by_pulsar_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m;
+
 CREATE INGESTOR pulsar_notifications
   TO notifications
   DECODE USING notification_codec
-  PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+  BRANCHED BY by_pulsar_notifications
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM PULSAR pulsar_main
   TOPIC notifications
@@ -140,10 +146,12 @@ CREATE CLIENT pulsar_tls
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'
   };
 
+CREATE BRANCH by_pulsar_notifications_tls PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m;
+
 CREATE INGESTOR pulsar_notifications_tls
   TO notifications
   DECODE USING notification_codec
-  PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+  BRANCHED BY by_pulsar_notifications_tls
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM PULSAR pulsar_tls
   TOPIC notifications_tls
@@ -243,10 +251,12 @@ CREATE CLIENT prom_main
     'addr' = 'http://127.0.0.1:9090'
   };
 
+CREATE BRANCH by_prom_samples PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m;
+
 CREATE INGESTOR prom_samples
   TO samples
   DECODE USING sample_codec
-  PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m
+  BRANCHED BY by_prom_samples
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM PROMETHEUS prom_main
   QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
@@ -283,6 +293,12 @@ CREATE SCHEMA user_branch (
 CREATE RELAY notifications SCHEMA notification_in PARAMETERIZED BY user_branch;
 CREATE RELAY projected_notifications SCHEMA notification_out PARAMETERIZED BY user_branch;
 
+CREATE BRANCH by_user
+  PARAMETERIZED BY user_branch VALUES {
+    tenant = branch.tenant,
+    user_id = branch.user_id
+  } TTL 5m;
+
 CREATE DEDUPLICATOR project_notifications
   FROM notifications WHERE notifications.active
   TO projected_notifications
@@ -290,7 +306,7 @@ CREATE DEDUPLICATOR project_notifications
         projected_notifications.amount = notifications.amount + 1
     UNSET notifications.raw, notifications.active
     WHERE trim(notifications.raw) != ''
-  PARAMETERIZED BY user_branch
+  BRANCHED BY by_user
   DEDUPLICATE ON notifications.tenant, notifications.user_id
   MAX TIME 10m
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

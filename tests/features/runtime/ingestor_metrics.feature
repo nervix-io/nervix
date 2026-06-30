@@ -26,10 +26,10 @@ Feature: Ingestor metrics
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ingestor_metrics_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ingestor_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ingestor_metrics_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -180,10 +180,10 @@ Feature: Ingestor metrics
           'addr' = 'redis://127.0.0.1:6379/'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ingestor_metrics_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ingestor_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ingestor_metrics_source
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         FROM <source_clause>
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -248,10 +248,10 @@ Feature: Ingestor metrics
       CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
       CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ingestor_metrics_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ingestor_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ingestor_metrics_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingestor_metrics_restart_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -319,10 +319,10 @@ Feature: Ingestor metrics
           'addr' = 'redis://127.0.0.1:6379/'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR remote_owner_metrics_source
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_remote_owner_metrics_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR remote_owner_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_remote_owner_metrics_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM REDIS PUBSUB redis_main CHANNEL remote_owner_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

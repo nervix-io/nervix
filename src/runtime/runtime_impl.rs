@@ -9,38 +9,14 @@ struct ScheduledIngestorStartSpec {
     kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
 }
 
-fn branch_relay_ttls_from_parameterized_specs(
+fn branch_relays_from_parameterized_specs(
     specs: &[ParameterizedIngestorSpec],
-) -> Result<HashMap<Identifier, Duration>, String> {
-    let mut ttls = HashMap::default();
-    for spec in specs {
-        let Some(raw_ttl) = spec.branch_ttl.as_deref() else {
-            continue;
-        };
-        let ttl = humantime::parse_duration(raw_ttl).map_err(|error| {
-            format!(
-                "invalid branch ttl '{}' for {} '{}': {}",
-                raw_ttl,
-                spec.kind.as_str(),
-                spec.identifier.as_str(),
-                error
-            )
-        })?;
-        for relay in spec.relay_ids() {
-            if let Some(existing) = ttls.get(&relay) {
-                if *existing != ttl {
-                    return Err(format!(
-                        "relay '{}' belongs to multiple parameterized branch roots with \
-                         conflicting TTLs",
-                        relay.as_str()
-                    ));
-                }
-            } else {
-                ttls.insert(relay, ttl);
-            }
-        }
-    }
-    Ok(ttls)
+) -> HashSet<Identifier> {
+    specs
+        .iter()
+        .filter(|spec| spec.branch_ttl.is_some())
+        .flat_map(ParameterizedIngestorSpec::relay_ids)
+        .collect()
 }
 
 fn relay_parameterization_schema_for_runtime(
@@ -1536,96 +1512,6 @@ impl Runtime {
         }))
     }
 
-    pub(in crate::runtime) fn spawn_stream_expiration_task(
-        &self,
-        shutdown_tx: &watch::Sender<bool>,
-        domain: &Domain,
-        relay: &Identifier,
-        state: Arc<ExpiringRelayState>,
-    ) -> JoinHandle<()> {
-        let runtime = self.clone();
-        let task_domain = domain.clone();
-        let task_relay = relay.clone();
-        let scan_interval = self.parametrizer_expiration_scan_interval;
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                    _ = sleep(scan_interval) => {
-                        let now = match runtime.current_stream_expiration_time(&task_domain) {
-                            Ok(Some(now)) => now,
-                            Ok(None) => continue,
-                            Err(error) => {
-                                warn!(
-                                    domain = task_domain.as_str(),
-                                    relay = task_relay.as_str(),
-                                    error = %error,
-                                    "failed to evaluate relay expiration clock"
-                                );
-                                continue;
-                            }
-                        };
-                        for key in state.expire(now) {
-                            let Some(key) = key else {
-                                continue;
-                            };
-                            debug!(
-                                domain = task_domain.as_str(),
-                                relay = task_relay.as_str(),
-                                key = key.as_str(),
-                                "expired concrete relay"
-                            );
-                            let placement = RuntimeStatePlacement {
-                                domain: task_domain.clone(),
-                                state: RuntimeStateKind::MaterializedRelay,
-                                kind: ModelKind::Materializer,
-                                identifier: task_relay.clone(),
-                                branch_key: Some(key.clone()),
-                            };
-                            if let Some(materialized_state) =
-                                runtime.replicated_materialized_stream_states.get(&placement)
-                            {
-                                let local_node_id = runtime.local_node_id.read().clone();
-                                let is_primary = match (
-                                    materialized_state.primary_node.as_deref(),
-                                    local_node_id.as_deref(),
-                                ) {
-                                    (Some(primary_node), Some(local_node_id)) => {
-                                        primary_node == local_node_id
-                                    }
-                                    (None, _) => true,
-                                    _ => false,
-                                };
-                                if is_primary
-                                    && let Err(error) = runtime
-                                        .delete_materialized_stream_key(
-                                            &materialized_state,
-                                            &Some(key.clone()),
-                                        )
-                                        .await
-                                {
-                                    warn!(
-                                        domain = task_domain.as_str(),
-                                        relay = task_relay.as_str(),
-                                        key = key.as_str(),
-                                        error = %error,
-                                        "failed to delete expired materialized relay key"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })
-    }
-
     pub(in crate::runtime) fn spawn_kafka_offset_replica_poll_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
@@ -1837,6 +1723,18 @@ impl Runtime {
         }
     }
 
+    pub(in crate::runtime) fn remove_stream_key_presence(
+        &self,
+        domain: &Domain,
+        relay: &Identifier,
+        key: &Option<BranchKey>,
+    ) {
+        let runtime_key = RuntimeKey::new(domain.clone(), relay.clone());
+        if let Some(state) = self.expiring_stream_states.get(&runtime_key) {
+            state.remove(key);
+        }
+    }
+
     pub(in crate::runtime) async fn ingest_stream_boundary_message(
         &self,
         domain: &Domain,
@@ -1913,13 +1811,12 @@ impl Runtime {
         &self,
         domain: &Domain,
         relay: &Identifier,
-        ttl: Duration,
     ) -> Arc<ExpiringRelayState> {
         let runtime_key = RuntimeKey::new(domain.clone(), relay.clone());
         if let Some(existing) = self.expiring_stream_states.get(&runtime_key) {
             return existing.clone();
         }
-        let state = Arc::new(ExpiringRelayState::new(ttl));
+        let state = Arc::new(ExpiringRelayState::new());
         self.expiring_stream_states
             .insert(runtime_key, state.clone());
         state
@@ -3575,13 +3472,7 @@ impl Runtime {
             .collect::<HashMap<_, _>>();
         let all_parameterized_specs =
             parameterized_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
-        let branch_relay_ttls = branch_relay_ttls_from_parameterized_specs(
-            &all_parameterized_specs,
-        )
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason,
-        })?;
+        let branch_relays = branch_relays_from_parameterized_specs(&all_parameterized_specs);
         let handled_processors = parameterized_processor_ids(&all_parameterized_specs);
         let parameterized_specs = all_parameterized_specs
             .into_iter()
@@ -3717,15 +3608,15 @@ impl Runtime {
                         ),
                     });
                 };
-                let expiring_state = branch_relay_ttls
-                    .get(&node.identifier)
-                    .map(|ttl| self.expiring_stream_state(domain, &node.identifier, *ttl));
+                let expiring_state = branch_relays
+                    .contains(&node.identifier)
+                    .then(|| self.expiring_stream_state(domain, &node.identifier));
                 let capacity = Self::relay_capacity(domain, &node.identifier, relay.buffer)?;
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
                         domain,
                         &node.identifier,
-                        !relay.parameterization.is_unparameterized(),
+                        !relay.parameterization.is_unbranched(),
                         capacity,
                     )
                     .await;
@@ -3776,14 +3667,6 @@ impl Runtime {
                         },
                     );
                     materialized_stream_owner_nodes.insert(node.identifier.clone(), None);
-                }
-                if let Some(expiring_state) = expiring_state {
-                    tasks.push(self.spawn_stream_expiration_task(
-                        &shutdown_tx,
-                        domain,
-                        &node.identifier,
-                        expiring_state,
-                    ));
                 }
             }
         }
@@ -5247,11 +5130,7 @@ impl Runtime {
         let mut reingestor_specs = Vec::new();
         let mut tasks = Vec::new();
         let parameterized_specs = parameterized_ingestor_specs_from_active_graph(&graph);
-        let branch_relay_ttls = branch_relay_ttls_from_parameterized_specs(&parameterized_specs)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason,
-            })?;
+        let branch_relays = branch_relays_from_parameterized_specs(&parameterized_specs);
         let model_index = graph
             .nodes()
             .into_iter()
@@ -5381,15 +5260,15 @@ impl Runtime {
                         ),
                     });
                 };
-                let expiring_state = branch_relay_ttls
-                    .get(&node.identifier)
-                    .map(|ttl| self.expiring_stream_state(domain, &node.identifier, *ttl));
+                let expiring_state = branch_relays
+                    .contains(&node.identifier)
+                    .then(|| self.expiring_stream_state(domain, &node.identifier));
                 let capacity = Self::relay_capacity(domain, &node.identifier, relay.buffer)?;
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
                         domain,
                         &node.identifier,
-                        !relay.parameterization.is_unparameterized(),
+                        !relay.parameterization.is_unbranched(),
                         capacity,
                     )
                     .await;
@@ -5440,14 +5319,6 @@ impl Runtime {
                         },
                     );
                     materialized_stream_owner_nodes.insert(node.identifier.clone(), None);
-                }
-                if let Some(expiring_state) = expiring_state {
-                    tasks.push(self.spawn_stream_expiration_task(
-                        &shutdown_tx,
-                        domain,
-                        &node.identifier,
-                        expiring_state,
-                    ));
                 }
             }
         }
@@ -5835,7 +5706,7 @@ impl Runtime {
                         .relay_boundary_fanout_with_capacity(
                             domain,
                             &node.identifier,
-                            !relay.parameterization.is_unparameterized(),
+                            !relay.parameterization.is_unbranched(),
                             capacity,
                         )
                         .await;
@@ -8046,6 +7917,28 @@ impl Runtime {
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
+        let parameter_value_mappings = match ingestor.parameterized_by.branch() {
+            Some(branch_ref) => match model_index.get(&(ModelKind::Branch, branch_ref.clone())) {
+                Some(Model::Branch(branch)) => branch.values.clone(),
+                Some(model) => {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "expected branch model for '{}', found '{}'",
+                            branch_ref.as_str(),
+                            model.kind().as_str()
+                        ),
+                    });
+                }
+                None => {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!("missing branch model '{}'", branch_ref.as_str()),
+                    });
+                }
+            },
+            None => Vec::new(),
+        };
         let mut parameterized_templates = HashMap::default();
         if let Some(specs) = execution.parameterized_ingestors.get(&ingestor.name) {
             for spec in specs {
@@ -8069,6 +7962,7 @@ impl Runtime {
             filter_where,
             codec,
             parameterization,
+            parameter_value_mappings,
             parameterized_templates,
         })
     }

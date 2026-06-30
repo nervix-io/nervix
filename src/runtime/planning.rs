@@ -1,6 +1,7 @@
 use nervix_models::{
-    CorrelationTimeoutAction, ParameterValueMapping, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
+    BranchParameterization, CorrelationTimeoutAction, CreateBranch, ParameterValueMapping,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
+    ProcessorOutputs as ModelProcessorOutputs,
 };
 
 use super::*;
@@ -37,6 +38,36 @@ fn processor_input_where_by_inputs(inputs: &ProcessorInputs) -> HashMap<Identifi
     processor_input_where_by_relay(inputs.where_clauses())
 }
 
+struct BranchEntrypoint {
+    ttl: Option<String>,
+    max_instances: Option<u64>,
+    values: Vec<ParameterValueMapping>,
+}
+
+fn branch_entrypoint(
+    parameterized_by: &BranchParameterization,
+    branches: &HashMap<Identifier, CreateBranch>,
+) -> BranchEntrypoint {
+    let Some(branch_ref) = parameterized_by.branch() else {
+        return BranchEntrypoint {
+            ttl: None,
+            max_instances: None,
+            values: Vec::new(),
+        };
+    };
+    let branch = branches
+        .get(branch_ref)
+        .expect("branch references must be validated before runtime planning");
+    BranchEntrypoint {
+        ttl: Some(branch.ttl.clone()),
+        max_instances: branch
+            .eviction
+            .as_ref()
+            .map(|eviction| eviction.max_instances()),
+        values: branch.values.clone(),
+    }
+}
+
 pub(in crate::runtime) fn parameterized_ingestor_specs_from_scheduled_nodes(
     nodes: &[ScheduledNode],
 ) -> Vec<ParameterizedIngestorSpec> {
@@ -66,6 +97,17 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_active_graph(
 pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
     nodes: impl Iterator<Item = (ModelKind, Identifier, Model, Option<Vec<Identifier>>)>,
 ) -> Vec<ParameterizedIngestorSpec> {
+    let nodes = nodes.collect::<Vec<_>>();
+    let branches = nodes
+        .iter()
+        .filter_map(|(_, _, model, _)| {
+            if let Model::Branch(branch) = model {
+                Some((branch.name.clone(), branch.clone()))
+            } else {
+                None
+            }
+        })
+        .collect::<HashMap<_, _>>();
     let mut processors_by_input = HashMap::<Identifier, Vec<ParameterizedProcessorSpec>>::new();
     let mut ingestors = Vec::new();
     let mut relay_roots = Vec::new();
@@ -274,12 +316,14 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
             }
             Model::Ingestor(ingestor) => {
                 for output in ingestor.output_routes.outputs() {
+                    let branch = branch_entrypoint(&ingestor.parameterized_by, &branches);
                     ingestors.push((
                         kind,
                         identifier.clone(),
                         output.relay.clone(),
-                        ingestor.parameterized_by.ttl().map(str::to_string),
-                        ingestor.parameterized_by.values().to_vec(),
+                        branch.ttl,
+                        branch.max_instances,
+                        branch.values,
                         ParametrizerAckBoundary::Preserve,
                         ingestor.flush_each.clone(),
                         ingestor.max_batch_size.clone(),
@@ -289,12 +333,14 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
             }
             Model::Reingestor(reingestor) => {
                 for output in reingestor.output_routes.outputs() {
+                    let branch = branch_entrypoint(&reingestor.parameterized_by, &branches);
                     ingestors.push((
                         kind,
                         identifier.clone(),
                         output.relay.clone(),
-                        reingestor.parameterized_by.ttl().map(str::to_string),
-                        reingestor.parameterized_by.values().to_vec(),
+                        branch.ttl,
+                        branch.max_instances,
+                        branch.values,
                         ParametrizerAckBoundary::Reingestor(reingestor.mode),
                         reingestor.flush_each.clone(),
                         reingestor.max_batch_size.clone(),
@@ -345,7 +391,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
 
     let entrypoint_relays = ingestors
         .iter()
-        .map(|(_, _, root_relay, _, _, _, _, _, _)| root_relay.clone())
+        .map(|(_, _, root_relay, _, _, _, _, _, _, _)| root_relay.clone())
         .collect::<HashSet<_>>();
     let relay_roots = relay_roots
         .into_iter()
@@ -357,6 +403,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 kind,
                 identifier,
                 root_relay,
+                None,
                 None,
                 Vec::new(),
                 ParametrizerAckBoundary::Preserve,
@@ -375,6 +422,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 identifier,
                 root_relay,
                 branch_ttl,
+                branch_max_instances,
                 entrypoint_parameter_mappings,
                 entrypoint_ack_boundary,
                 entrypoint_flush_each,
@@ -386,6 +434,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     identifier,
                     root_relay: root_relay.clone(),
                     branch_ttl,
+                    branch_max_instances,
                     entrypoint_parameter_mappings,
                     entrypoint_ack_boundary,
                     entrypoint_flush_each,
@@ -800,6 +849,26 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
             })
         })
         .transpose()?;
+    let branch_max_instances = spec
+        .branch_max_instances
+        .map(|max_instances| {
+            if max_instances == 0 {
+                return Err(format!(
+                    "invalid branch MAX INSTANCES '0' for {} '{}'",
+                    spec.kind.as_str(),
+                    spec.identifier.as_str()
+                ));
+            }
+            usize::try_from(max_instances).map_err(|_| {
+                format!(
+                    "branch MAX INSTANCES '{}' for {} '{}' is too large for this runtime",
+                    max_instances,
+                    spec.kind.as_str(),
+                    spec.identifier.as_str()
+                )
+            })
+        })
+        .transpose()?;
     let entrypoint_schema_relay = match model_index.get(&(spec.kind, spec.identifier.clone())) {
         Some(Model::Reingestor(reingestor)) => reingestor.from.first().ok_or_else(|| {
             format!(
@@ -840,6 +909,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
         source: spec.identifier.clone(),
         root_relay: spec.root_relay.clone(),
         branch_ttl,
+        branch_max_instances,
         entrypoint_schema,
         entrypoint_parameter_mappings: spec.entrypoint_parameter_mappings.clone(),
         entrypoint_ack_boundary: spec.entrypoint_ack_boundary,

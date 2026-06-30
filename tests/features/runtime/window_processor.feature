@@ -38,16 +38,16 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR tumbling_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
@@ -148,16 +148,16 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR sliding_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
         STEP 1 MESSAGES
         AGGREGATE
@@ -259,16 +259,16 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR restart_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
@@ -350,16 +350,16 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR histogram_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
@@ -422,12 +422,14 @@ Feature: Window processor runtime behavior
       CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
+      CREATE IF NOT EXISTS BRANCH by_invalid_histogram_latency
+        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m;
       """
     When these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration"
       """
       CREATE WINDOW PROCESSOR invalid_histogram_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_invalid_histogram_latency
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
@@ -485,16 +487,16 @@ Feature: Window processor runtime behavior
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR described_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
@@ -594,16 +596,16 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR delayed_histogram_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 1 MESSAGES
         AGGREGATE
@@ -676,16 +678,16 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR delayed_histogram_timeout
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES 5s DURATION
         STEP 1 MESSAGES
         AGGREGATE
@@ -758,16 +760,16 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR duration_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 300ms DURATION
         STEP 300ms DURATION
         AGGREGATE
@@ -836,16 +838,16 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR combined_latency
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES 3s DURATION
         STEP 3 MESSAGES 3s DURATION
         AGGREGATE
@@ -946,17 +948,17 @@ Feature: Window processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR first_window
         FROM metrics
         TO high_summaries WHERE high_summaries.total_latency >= 100
-        TO low_summaries PARAMETERIZED BY tenant_branch
+        TO low_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
@@ -966,7 +968,7 @@ Feature: Window processor runtime behavior
 
       CREATE WINDOW PROCESSOR second_window
         FROM high_summaries
-        TO chain_summaries PARAMETERIZED BY tenant_branch
+        TO chain_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
@@ -1061,10 +1063,10 @@ Feature: Window processor runtime behavior
         'auto.offset.reset' = 'earliest'
       };
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR kafka_metrics
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_kafka_metrics PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR kafka_metrics
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_kafka_metrics
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC metrics_{{test_id}}
@@ -1073,7 +1075,7 @@ Feature: Window processor runtime behavior
 
       CREATE WINDOW PROCESSOR attached_window
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_kafka_metrics
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
@@ -1158,10 +1160,10 @@ Feature: Window processor runtime behavior
         'auto.offset.reset' = 'earliest'
       };
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR kafka_metrics
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_kafka_metrics PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR kafka_metrics
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_kafka_metrics
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC metrics_{{test_id}}
@@ -1170,7 +1172,7 @@ Feature: Window processor runtime behavior
 
       CREATE DETACHED WINDOW PROCESSOR detached_window
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_kafka_metrics
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE

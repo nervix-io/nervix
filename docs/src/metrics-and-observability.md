@@ -117,7 +117,7 @@ Histogram `DESCRIBE` lines do not include raw `count` / `sum` values or rates. F
 Relay buffer summaries use `relay_buffer_len`. The percentile values are queued
 batch slots observed on the relay consumer fan-out channel, and `capacity=<n>`
 shows the bounded channel capacity for that runtime buffer. Parameterized relays
-observe the internal branch-collapse fan-out channel; unparameterized relays
+observe the internal branch-collapse fan-out channel; unbranched relays
 observe their direct consumer fan-out without inserting a collapse node. A
 branched relay can receive interleaved concrete branches through the same
 collapse point, so `DESCRIBE RELAY` reports observed buffer lengths as

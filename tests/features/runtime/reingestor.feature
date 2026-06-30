@@ -32,17 +32,17 @@ Feature: Reingestor repartitioning
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE REINGESTOR tenant_partition
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_tenant_partition PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m; CREATE REINGESTOR tenant_partition
         FROM notifications
         TO tenant_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m
+        BRANCHED BY by_tenant_partition
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO tenant_notifications;
@@ -97,20 +97,20 @@ Feature: Reingestor repartitioning
       CREATE VHOST edge http-{{test_id}}-fan-in.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        TO notifications
-        DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES {
+      CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_user_id_branch VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
-        } TTL 5m
+        } TTL 5m; CREATE INGESTOR http_notifications
+        TO notifications
+        DECODE USING notification_codec
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE REINGESTOR tenant_partition
+      CREATE IF NOT EXISTS BRANCH by_tenant_partition PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m; CREATE REINGESTOR tenant_partition
         FROM notifications
         TO tenant_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m
+        BRANCHED BY by_tenant_partition
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       CREATE CLIENT zeromq_main
@@ -157,8 +157,8 @@ Feature: Reingestor repartitioning
       | 1            |
       | 3            |
 
-  @unparameterized_direct_fanout
-  Scenario Outline: Unparameterized relay fan-out feeds subscriptions, reingestors, and emitters directly
+  @unbranched_direct_fanout
+  Scenario Outline: Unbranched relay fan-out feeds subscriptions, reingestors, and emitters directly
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -182,8 +182,8 @@ Feature: Reingestor repartitioning
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;
-      CREATE RELAY copied_notifications SCHEMA notification UNPARAMETERIZED;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE RELAY copied_notifications SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}-direct-fanout.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
@@ -191,14 +191,14 @@ Feature: Reingestor repartitioning
       CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE REINGESTOR copy_notifications
         FROM notifications
         TO copied_notifications
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       CREATE CLIENT zeromq_main
@@ -266,20 +266,20 @@ Feature: Reingestor repartitioning
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE REINGESTOR tenant_partition
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_tenant_partition PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m; CREATE REINGESTOR tenant_partition
         FROM notifications
         TO tenant_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m
+        BRANCHED BY by_tenant_partition
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       CREATE EMITTER kafka_forward
@@ -342,20 +342,20 @@ Feature: Reingestor repartitioning
           'bootstrap.servers' = '127.0.0.1:9092'
         };
 
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE DETACHED REINGESTOR tenant_partition
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_tenant_partition PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m; CREATE DETACHED REINGESTOR tenant_partition
         FROM notifications
         TO tenant_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m
+        BRANCHED BY by_tenant_partition
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       CREATE EMITTER kafka_forward

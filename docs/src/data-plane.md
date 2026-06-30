@@ -25,7 +25,7 @@ Nervix has three separate persistence boundaries:
 
 Nervix is not a durable event log for every in-flight row. If hot-path message or ACK state is lost, sources and ingestors react according to their delivery mode, offsets, and retry policy.
 
-Branch grouping is native runtime isolation based on `PARAMETERIZED BY <schema>`. Ingestors and reingestors compute a group for each record, and each concrete group is handled by its own branch. Runtime relay instances, processor buffers, deduplicator state, window state, and materialized entries are scoped to that group until an emitter drains records externally or a reingestor starts a new grouping.
+Branch grouping is native runtime isolation based on explicit `CREATE BRANCH` declarations. Relays declare the branch-key schema shape with `PARAMETERIZED BY <schema>`, while ingestors, reingestors, and branch-preserving processors select a concrete branch with `BRANCHED BY <branch>`. Each concrete branch instance is handled independently. Runtime relay instances, processor buffers, deduplicator state, window state, and materialized entries are scoped to that branch instance until an emitter drains records externally or a reingestor starts a new grouping.
 
 Filter-map programs are compiled from NSPL into a typed VM program before local graph instantiation. They are not distributed as bytecode. The leader validates them eagerly so invalid `SET` / `UNSET` / `WHERE` programs fail at command time instead of surfacing later during runtime startup.
 

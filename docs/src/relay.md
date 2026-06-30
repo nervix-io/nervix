@@ -12,20 +12,21 @@ CREATE [IF NOT EXISTS] RELAY notifications
 
 External feeds commonly contain records for many tenants, users, devices, accounts, or other business groups. Nervix parameter grouping lets one declared graph process those groups independently.
 
-Parameterization is defined by a schema name. Ingestors and reingestors provide the values for that schema with a `VALUES` map:
+Parameterization is defined by a schema name, and concrete branch creation is defined by a named branch:
 
-- `PARAMETERIZED BY user_branch VALUES { user_id = notifications.user_id }` isolates each user
-- `PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant }` isolates each tenant
-- `PARAMETERIZED BY tenant_user_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id }` isolates each tenant/user pair
+- `CREATE BRANCH by_user PARAMETERIZED BY user_branch VALUES { user_id = notifications.user_id } TTL 5m` isolates each user
+- `CREATE BRANCH by_tenant PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m` isolates each tenant
+- `CREATE BRANCH by_tenant_user PARAMETERIZED BY tenant_user_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m` isolates each tenant/user pair
+- `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
 
-Relays can declare their branch shape without values:
+Relays declare their branch-key shape without values:
 
 ```nspl
 CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_user_branch;
-CREATE RELAY global_notifications SCHEMA notification UNPARAMETERIZED;
+CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 ```
 
-An ingestor or reingestor computes the parameter group for each record. When records for a group arrive, Nervix uses a branch for that group. A branch is the runtime execution path for one concrete group.
+An ingestor or reingestor uses `BRANCHED BY <branch>` to compute the parameter group for each record. When records for a group arrive, Nervix uses a branch instance for that group. A branch instance is the runtime execution path for one concrete group.
 
 Inside a branch, records move through relay instances. Each relay instance has:
 
@@ -38,14 +39,14 @@ Processing node state also belongs to the branch. That gives each group independ
 
 Runtime branch rules:
 
-- an `INGESTOR` starts a branch for one concrete parameter group
+- an `INGESTOR` starts a branch for one concrete parameter group through `BRANCHED BY <branch>`
 - normal downstream processors keep the same branch group
 - output routes and forwarders send records to downstream relay names inside the same branch
 - stateful processors keep branch-local state for that group
-- a `REINGESTOR` consumes records across the whole input relay and starts new downstream branches with a new parameter grouping
+- a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <branch>`
 - an `EMITTER` consumes records across the whole input relay and terminates the branch at an external sink
 
-`branch` is a reserved namespace, so a relay cannot be named `branch`. Inside a parameterized branch, filter-map and parameter mapping expressions can read the current parameter group with `branch.<key>`. The key must exist in the branch schema, and unparameterized execution has no `branch.<key>` fields.
+`branch` is a reserved namespace, so a relay cannot be named `branch`. Inside a parameterized branch, filter-map and parameter mapping expressions can read the current parameter group with `branch.<key>`. The key must exist in the branch schema, and unbranched execution has no `branch.<key>` fields.
 
 ## Internal Payload Model
 
@@ -101,9 +102,7 @@ across every branch. If omitted, Nervix uses the default relay buffer.
 
 ## TTL
 
-TTL is a branch-root contract, not a relay-local setting. A parameterized `INGESTOR` or
-`REINGESTOR` declares `TTL <duration>` immediately after its `VALUES { ... }` map. `UNPARAMETERIZED`
-branch roots do not declare TTL because there are no concrete parameter groups to expire.
+TTL is a branch contract, not a relay-local setting. `CREATE BRANCH` declares `TTL <duration>` after its `VALUES { ... }` map. `UNBRANCHED` branch roots do not declare TTL because there are no concrete parameter groups to expire.
 
 TTL controls:
 

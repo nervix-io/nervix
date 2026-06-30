@@ -10,10 +10,10 @@ Feature: Schema type strictness
       CREATE RELAY notifications SCHEMA notification;
       CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE SCHEMA tenant_branch ( tenant U32 );
-      CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_kafka_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP strict_types MODE NO_ACK PARALLEL MAX 10
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -67,10 +67,10 @@ Feature: Schema type strictness
       CREATE SCHEMA projected_event (
         id STRING
       );
-      CREATE RELAY inbound_events SCHEMA inbound_event UNPARAMETERIZED;
-      CREATE RELAY missing_unset_events SCHEMA projected_event UNPARAMETERIZED;
-      CREATE RELAY unknown_set_events SCHEMA projected_event UNPARAMETERIZED;
-      CREATE RELAY valid_projected_events SCHEMA projected_event UNPARAMETERIZED;
+      CREATE RELAY inbound_events SCHEMA inbound_event UNBRANCHED;
+      CREATE RELAY missing_unset_events SCHEMA projected_event UNBRANCHED;
+      CREATE RELAY unknown_set_events SCHEMA projected_event UNBRANCHED;
+      CREATE RELAY valid_projected_events SCHEMA projected_event UNBRANCHED;
       """
     When these NSPL commands fail with "source field 'inbound_events.legacy' is not declared in the output schema and must be listed in UNSET"
       """
@@ -78,7 +78,7 @@ Feature: Schema type strictness
         FROM inbound_events
         TO missing_unset_events
           SET missing_unset_events.id = inbound_events.id
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON inbound_events.id
         MAX TIME 10m
         FLUSH IMMEDIATE
@@ -91,7 +91,7 @@ Feature: Schema type strictness
         TO unknown_set_events
           SET unknown_set_events.extra = "x"
           UNSET inbound_events.legacy
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON inbound_events.id
         MAX TIME 10m
         FLUSH IMMEDIATE
@@ -104,7 +104,7 @@ Feature: Schema type strictness
         TO valid_projected_events
           SET valid_projected_events.id = inbound_events.id
           UNSET inbound_events.legacy
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON inbound_events.id
         MAX TIME 10m
         FLUSH IMMEDIATE
@@ -133,9 +133,9 @@ Feature: Schema type strictness
         id STRING,
         memo STRING
       );
-      CREATE RELAY nullable_inbound_events SCHEMA nullable_inbound_event UNPARAMETERIZED;
-      CREATE RELAY nullable_projected_events SCHEMA nullable_projected_event UNPARAMETERIZED;
-      CREATE RELAY required_projected_events SCHEMA required_projected_event UNPARAMETERIZED;
+      CREATE RELAY nullable_inbound_events SCHEMA nullable_inbound_event UNBRANCHED;
+      CREATE RELAY nullable_projected_events SCHEMA nullable_projected_event UNBRANCHED;
+      CREATE RELAY required_projected_events SCHEMA required_projected_event UNBRANCHED;
       """
     When these NSPL commands fail with "SET field 'memo' may be null but the output field is required"
       """
@@ -144,7 +144,7 @@ Feature: Schema type strictness
         TO required_projected_events
           SET required_projected_events.memo = NULL
           UNSET nullable_inbound_events.legacy
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON nullable_inbound_events.id
         MAX TIME 10m
         FLUSH IMMEDIATE
@@ -157,7 +157,7 @@ Feature: Schema type strictness
         TO nullable_projected_events
           SET nullable_projected_events.memo = NULL
           UNSET nullable_inbound_events.legacy
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON nullable_inbound_events.id
         MAX TIME 10m
         FLUSH IMMEDIATE

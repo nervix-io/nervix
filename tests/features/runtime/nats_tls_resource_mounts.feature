@@ -39,10 +39,10 @@ Feature: NATS TLS resource mounts
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR nats_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_nats_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR nats_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_nats_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM NATS nats_tls
         SUBJECT notifications_{{test_id}}

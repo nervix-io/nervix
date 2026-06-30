@@ -167,6 +167,7 @@ pub enum RuntimeStateKind {
     MaterializedRelay = 4,
     WasmProcessor = 5,
     WindowProcessor = 6,
+    BranchLru = 7,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]

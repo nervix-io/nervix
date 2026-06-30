@@ -29,10 +29,10 @@ Feature: RabbitMQ ingestion
           'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR rabbit_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_rabbit_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR rabbit_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_rabbit_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM RABBITMQ rabbit_main
         QUEUE notifications_{{test_id}}
@@ -94,10 +94,10 @@ Feature: RabbitMQ ingestion
         };
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE INGESTOR rabbit_notifications
+      CREATE IF NOT EXISTS BRANCH by_rabbit_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR rabbit_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_rabbit_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM RABBITMQ rabbit_main
         QUEUE notifications_reconnect_{{test_id}}

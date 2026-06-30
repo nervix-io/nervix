@@ -4,7 +4,7 @@ Nervix supports several runtime node types that transform or route records betwe
 
 Processing nodes operate on one parameter group at a time. This keeps tenant-specific, user-specific, or other group-specific state isolated while records move through the graph. A processor receives branch-local relay batches and keeps branch-local buffers or state unless its node type explicitly crosses a branch boundary.
 
-Every normal processor that consumes relays must declare `PARAMETERIZED BY <schema>`. That schema must match the input and output relays. The declaration is a contract: the processor is materialized once per concrete branch and must not consume the mixed logical relay. Reingestors are different because they declare `PARAMETERIZED BY <schema> VALUES { ... }` to create a new downstream branch key. Emitters are terminal drains and do not declare processor parameterization.
+Every normal processor that consumes relays must declare `BRANCHED BY <branch>`. The branch's schema must match the input and output relays. The declaration is a contract: the processor is materialized once per concrete branch and must not consume the mixed logical relay. Reingestors are different because they reference an explicit branch whose `VALUES` map creates a new downstream branch key. Emitters are terminal drains and do not declare processor branch selection.
 
 `GENERATOR` is a periodic source runtime node.
 
@@ -81,6 +81,11 @@ Nested conditions and chained calls such as `lower(trim(raw))` are supported her
 Example:
 
 ```nspl
+CREATE BRANCH by_user
+  PARAMETERIZED BY user_branch VALUES {
+    user_id = branch.user_id
+  } TTL 5m;
+
 CREATE DEDUPLICATOR project_notifications
   FROM notifications WHERE notifications.active
   TO projected_notifications
@@ -88,7 +93,7 @@ CREATE DEDUPLICATOR project_notifications
         projected_notifications.amount = notifications.amount + 1
     UNSET notifications.raw, notifications.active
     WHERE trim(notifications.raw) != ''
-  PARAMETERIZED BY user_branch
+  BRANCHED BY by_user
   DEDUPLICATE ON notifications.tenant, notifications.user_id
   MAX TIME 10m
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -129,7 +134,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] JUNCTION <name>
   FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
-  PARAMETERIZED BY <schema>
+  BRANCHED BY <branch>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
   ON MESSAGE ERROR <policy>;
 ```
@@ -147,7 +152,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
   FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
-  PARAMETERIZED BY <schema>
+  BRANCHED BY <branch>
   USING RESOURCE <resource> [VERSION <n>]
   FILE '<model.onnx>'
   INPUTS {
@@ -175,7 +180,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] DEDUPLICATOR <name>
   FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
-  PARAMETERIZED BY <schema>
+  BRANCHED BY <branch>
   DEDUPLICATE ON <expr>[, <expr> ...]
   MAX TIME <duration>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
@@ -201,7 +206,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REORDERER <name>
   FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
-  PARAMETERIZED BY <schema>
+  BRANCHED BY <branch>
   BY <expr>, <expr>, ...
   MAX TIME <duration>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
@@ -228,7 +233,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] CORRELATOR <name>
   MATCH EARLIEST | LATEST
   [TO <output> WHERE <expr>]
   [TO <output>]
-  PARAMETERIZED BY <schema>
+  BRANCHED BY <branch>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
   OUTPUT
     <output>.<field> = <expr>,
@@ -256,7 +261,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
   [FILTER WHERE <expr>]
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
-  PARAMETERIZED BY <schema>
+  BRANCHED BY <branch>
   ON MESSAGE ERROR <policy>
   ON GLOBAL ERROR <policy>;
 ```
@@ -269,7 +274,7 @@ A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix re
 
 See [WASM Processor Guests](wasm-processor-guests.md) for the guest ABI and Rust/Go authoring examples.
 
-The declared `PARAMETERIZED BY` schema must match the input and output relays. WASM processors preserve the upstream branch group exactly as received; they do not consume from a mixed logical relay and they do not fan in records across branches. WASM processors do not inherit input fields. Route `SET` clauses may read guest output fields through the destination relay namespace, and may read the original source row through the `input` namespace, for example `TO out1 SET out1.name = lower(out1.name), out1.surname = input.surname`. `UNSET` is not valid on WASM output routes.
+The declared `BRANCHED BY` branch must match the input and output relays. WASM processors preserve the upstream branch group exactly as received; they do not consume from a mixed logical relay and they do not fan in records across branches. WASM processors do not inherit input fields. Route `SET` clauses may read guest output fields through the destination relay namespace, and may read the original source row through the `input` namespace, for example `TO out1 SET out1.name = lower(out1.name), out1.surname = input.surname`. `UNSET` is not valid on WASM output routes.
 
 The host initializes each branch instance with CBOR metadata:
 
@@ -294,7 +299,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WINDOW PROCESSOR <name>
   FROM <input> [WHERE <expr>], ...
   [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
   [TO <output> ...]
-  PARAMETERIZED BY <schema>
+  BRANCHED BY <branch>
   WIDTH [<n> MESSAGES] [<duration> DURATION]
   STEP [<n> MESSAGES] [<duration> DURATION]
   AGGREGATE
@@ -396,11 +401,16 @@ ACK behavior follows branch mode. In `ATTACHED` mode, the aggregate output carri
 ## Reingestor
 
 ```nspl
+CREATE BRANCH by_reingested_tenant
+  PARAMETERIZED BY tenant_branch VALUES {
+    tenant = output_relay.tenant
+  } TTL 5m;
+
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
   FROM <relay> [WHERE <expr>], ...
   [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
   [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
-  PARAMETERIZED BY <schema> VALUES { <field> = <relay>.<field>, ... } TTL 5m
+  BRANCHED BY by_reingested_tenant
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
   ON MESSAGE ERROR <policy>;
 ```
@@ -419,7 +429,7 @@ A reingestor is an explicit branch boundary:
 - it buffers rows under the new downstream branch group
 - it starts or resolves downstream branches in the target relay
 
-Reingestor `PARAMETERIZED BY ... VALUES { ... }` mappings can read either input relay fields or the source branch key. For example, `VALUES { tenant = branch.tenant }` preserves a tenant grouping even when the payload schema does not carry `tenant` as a row field.
+The referenced branch `VALUES` mappings can read either output relay fields or the source branch key. For example, `VALUES { tenant = branch.tenant }` preserves a tenant grouping even when the payload schema does not carry `tenant` as a row field.
 
 ## Materializer
 

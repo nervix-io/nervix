@@ -43,17 +43,17 @@ Feature: Inferencer resources
         PATH '/features'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR feature_source
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_feature_source PARAMETERIZED BY tenant_branch VALUES { tenant = features.tenant } TTL 5m; CREATE INGESTOR feature_source
         TO features
         DECODE USING features_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = features.tenant } TTL 5m
+        BRANCHED BY by_feature_source
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE INFERENCER score_model
         FROM features
         TO scored SET scored.tenant = features.tenant
-        PARAMETERIZED BY tenant_branch
+        BRANCHED BY by_feature_source
         USING RESOURCE fraud_model VERSION 1
         FILE 'models/simple_score.onnx'
         INPUTS { "features" = features.vector }
@@ -114,17 +114,17 @@ Feature: Inferencer resources
         PATH '/features'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR feature_source
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_feature_source PARAMETERIZED BY tenant_branch VALUES { tenant = features.tenant } TTL 5m; CREATE INGESTOR feature_source
         TO features
         DECODE USING features_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = features.tenant } TTL 5m
+        BRANCHED BY by_feature_source
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE INFERENCER score_model
         FROM features
         TO scored SET scored.tenant = features.tenant
-        PARAMETERIZED BY tenant_branch
+        BRANCHED BY by_feature_source
         USING RESOURCE fraud_model VERSION 1
         FILE 'models/simple_score.onnx'
         INPUTS { "<input_tensor>" = features.vector }

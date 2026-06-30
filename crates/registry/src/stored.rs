@@ -1,9 +1,9 @@
 use error_stack::Report;
 use nervix_models::{
-    AckMode, AvroType, BranchParameterization, ClickHouseValueMapping, CodecEncoding,
-    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+    AckMode, AvroType, BranchEviction, BranchParameterization, ClickHouseValueMapping,
+    CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
     CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
     CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
@@ -51,6 +51,7 @@ pub enum StoredModelVersioned {
     TransportAzureBlob(StoredCreateClientAzureBlob),
     TransportIcebergRest(StoredCreateClientIcebergRest),
     Vhost(StoredCreateVhost),
+    Branch(StoredCreateBranch),
     Endpoint(StoredCreateEndpoint),
     SignalingProtocol(StoredCreateSignalingProtocol),
     Generator(StoredCreateGenerator),
@@ -450,6 +451,20 @@ pub struct StoredCreateIngestor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredCreateBranch {
+    pub name: String,
+    pub parameterized_by: String,
+    pub values: Vec<StoredParameterValueMapping>,
+    pub ttl: String,
+    pub eviction: Option<StoredBranchEviction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredBranchEviction {
+    Lru { max_instances: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateGenerator {
     pub name: String,
     pub into_relay: String,
@@ -749,7 +764,7 @@ pub struct StoredCreateRelay {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredRelayParameterization {
     Parameterized { parameters: StoredRelayParameters },
-    Unparameterized,
+    Unbranched,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -767,12 +782,8 @@ pub struct StoredParameterValueMapping {
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredBranchParameterization {
-    Parameterized {
-        schema: String,
-        values: Vec<StoredParameterValueMapping>,
-        ttl: Option<String>,
-    },
-    Unparameterized,
+    BranchedBy { branch: String },
+    Unbranched,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1078,6 +1089,7 @@ impl From<Model> for StoredModelVersioned {
             Model::ClientAzureBlob(v) => Self::TransportAzureBlob(v.into()),
             Model::ClientIcebergRest(v) => Self::TransportIcebergRest(v.into()),
             Model::Vhost(v) => Self::Vhost(v.into()),
+            Model::Branch(v) => Self::Branch(v.into()),
             Model::Endpoint(v) => Self::Endpoint(v.into()),
             Model::SignalingProtocol(v) => Self::SignalingProtocol(v.into()),
             Model::Generator(v) => Self::Generator(v.into()),
@@ -1139,6 +1151,7 @@ impl TryFrom<StoredModelVersioned> for Model {
                 Ok(Model::ClientIcebergRest(v.try_into()?))
             }
             StoredModelVersioned::Vhost(v) => Ok(Model::Vhost(v.try_into()?)),
+            StoredModelVersioned::Branch(v) => Ok(Model::Branch(v.try_into()?)),
             StoredModelVersioned::Endpoint(v) => Ok(Model::Endpoint(v.try_into()?)),
             StoredModelVersioned::SignalingProtocol(v) => {
                 Ok(Model::SignalingProtocol(v.try_into()?))
@@ -2505,19 +2518,59 @@ impl TryFrom<StoredParameterValueMapping> for ParameterValueMapping {
     }
 }
 
+impl From<BranchEviction> for StoredBranchEviction {
+    fn from(value: BranchEviction) -> Self {
+        match value {
+            BranchEviction::Lru { max_instances } => Self::Lru { max_instances },
+        }
+    }
+}
+
+impl From<StoredBranchEviction> for BranchEviction {
+    fn from(value: StoredBranchEviction) -> Self {
+        match value {
+            StoredBranchEviction::Lru { max_instances } => Self::Lru { max_instances },
+        }
+    }
+}
+
+impl From<CreateBranch> for StoredCreateBranch {
+    fn from(value: CreateBranch) -> Self {
+        Self {
+            name: value.name.to_string(),
+            parameterized_by: value.parameterized_by.to_string(),
+            values: value.values.into_iter().map(Into::into).collect(),
+            ttl: value.ttl,
+            eviction: value.eviction.map(Into::into),
+        }
+    }
+}
+
+impl TryFrom<StoredCreateBranch> for CreateBranch {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredCreateBranch) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: Identifier::parse(&value.name)?,
+            parameterized_by: Identifier::parse(&value.parameterized_by)?,
+            values: value
+                .values
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+            ttl: value.ttl,
+            eviction: value.eviction.map(Into::into),
+        })
+    }
+}
+
 impl From<BranchParameterization> for StoredBranchParameterization {
     fn from(value: BranchParameterization) -> Self {
         match value {
-            BranchParameterization::Parameterized {
-                schema,
-                values,
-                ttl,
-            } => Self::Parameterized {
-                schema: schema.to_string(),
-                values: values.into_iter().map(Into::into).collect(),
-                ttl,
+            BranchParameterization::BranchedBy { branch } => Self::BranchedBy {
+                branch: branch.to_string(),
             },
-            BranchParameterization::Unparameterized => Self::Unparameterized,
+            BranchParameterization::Unbranched => Self::Unbranched,
         }
     }
 }
@@ -2527,21 +2580,10 @@ impl TryFrom<StoredBranchParameterization> for BranchParameterization {
 
     fn try_from(value: StoredBranchParameterization) -> Result<Self, Self::Error> {
         Ok(match value {
-            StoredBranchParameterization::Parameterized {
-                schema,
-                values,
-                ttl,
-            } => BranchParameterization::Parameterized {
-                schema: Identifier::parse(&schema)?,
-                values: values
-                    .into_iter()
-                    .map(TryInto::try_into)
-                    .collect::<Result<Vec<_>, _>>()?,
-                ttl,
-            },
-            StoredBranchParameterization::Unparameterized => {
-                BranchParameterization::unparameterized()
+            StoredBranchParameterization::BranchedBy { branch } => {
+                BranchParameterization::branched_by(Identifier::parse(&branch)?)
             }
+            StoredBranchParameterization::Unbranched => BranchParameterization::unbranched(),
         })
     }
 }
@@ -3482,7 +3524,7 @@ impl From<CreateRelay> for StoredCreateRelay {
                 };
                 StoredRelayParameterization::Parameterized { parameters }
             }
-            RelayParameterization::Unparameterized => StoredRelayParameterization::Unparameterized,
+            RelayParameterization::Unbranched => StoredRelayParameterization::Unbranched,
         };
         Self {
             name: value.name.to_string(),
@@ -3508,9 +3550,7 @@ impl TryFrom<StoredCreateRelay> for CreateRelay {
                 };
                 RelayParameterization::parameterized(parameters)
             }
-            StoredRelayParameterization::Unparameterized => {
-                RelayParameterization::unparameterized()
-            }
+            StoredRelayParameterization::Unbranched => RelayParameterization::unbranched(),
         };
         Ok(Self {
             name: Identifier::parse(&value.name)?,
@@ -4244,18 +4284,8 @@ mod tests {
         Identifier::parse(raw).expect("valid identifier")
     }
 
-    fn parameterized_by(schema: &str, relay: &str, fields: &[&str]) -> BranchParameterization {
-        BranchParameterization::parameterized(
-            identifier(schema),
-            fields
-                .iter()
-                .map(|field| ParameterValueMapping {
-                    field: identifier(field),
-                    relay: identifier(relay),
-                    relay_field: identifier(field),
-                })
-                .collect(),
-        )
+    fn parameterized_by(schema: &str, _relay: &str, _fields: &[&str]) -> BranchParameterization {
+        BranchParameterization::branched_by(identifier(&format!("by_{schema}")))
     }
 
     #[test]

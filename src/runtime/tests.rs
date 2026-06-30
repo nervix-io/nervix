@@ -14,17 +14,18 @@ use fjall::Database;
 use nervix_interconnect::{RelayPayload, RelayPayloadKind};
 use nervix_models::{
     AckMode, BranchParameterization, ClientConfigEntry, ClusterSchedule, CodecWireFormat,
-    CreateClientHttp, CreateClientMqtt, CreateClientPrometheus, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup,
-    CreateReingestor, CreateRelay, CreateSchema, CreateWasmProcessor, CreateWindowProcessor,
-    Domain, DomainConfig, DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick,
-    EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, JsonType, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos,
-    MqttSession, ParameterValueMapping, ParseAsType, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, RelayParameterization, RemoteAckOutcome,
-    RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus, RetryPolicy,
-    ScheduledNode, SchemaField, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    CreateBranch, CreateClientHttp, CreateClientMqtt, CreateClientPrometheus,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
+    CreateGenerator, CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateJunction,
+    CreateLookup, CreateReingestor, CreateRelay, CreateSchema, CreateWasmProcessor,
+    CreateWindowProcessor, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState,
+    DomainStatus, DomainTick, EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType, MessageErrorPolicy,
+    ModelKind, MqttIngestMode, MqttQos, MqttSession, ParameterValueMapping, ParseAsType,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayParameterization,
+    RemoteAckOutcome, RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus,
+    RetryPolicy, ScheduledNode, SchemaField, Timestamp, WindowBound, WireSchemaField,
+    ZeroMqIngestMode,
 };
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmBatchEnvelope, WasmMessageErrorSet, WasmNackSet,
@@ -92,18 +93,47 @@ fn nonzero_capacity(capacity: usize) -> NonZeroUsize {
     NonZeroUsize::new(capacity).expect("test relay capacity must be nonzero")
 }
 
-fn parameterized_by(schema: &str, relay: &str, fields: &[&str]) -> BranchParameterization {
-    BranchParameterization::parameterized_with_ttl(
-        identifier(schema),
-        fields
-            .iter()
-            .map(|field| ParameterValueMapping {
-                field: identifier(field),
-                relay: identifier(relay),
-                relay_field: identifier(field),
-            })
-            .collect(),
-        "5m".to_string(),
+fn parameterized_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchParameterization {
+    if fields.is_empty() {
+        BranchParameterization::unbranched()
+    } else {
+        BranchParameterization::branched_by(identifier(&format!("by_{relay}")))
+    }
+}
+
+fn parameter_mappings(relay: &str, fields: &[&str]) -> Vec<ParameterValueMapping> {
+    fields
+        .iter()
+        .map(|field| ParameterValueMapping {
+            field: identifier(field),
+            relay: identifier(relay),
+            relay_field: identifier(field),
+        })
+        .collect()
+}
+
+fn branch_model_tuple(
+    schema: &str,
+    relay: &str,
+    fields: &[&str],
+) -> (
+    ModelKind,
+    Identifier,
+    nervix_models::Model,
+    Option<Vec<Identifier>>,
+) {
+    let branch = identifier(&format!("by_{relay}"));
+    (
+        ModelKind::Branch,
+        branch.clone(),
+        nervix_models::Model::Branch(CreateBranch {
+            name: branch,
+            parameterized_by: identifier(schema),
+            values: parameter_mappings(relay, fields),
+            ttl: "5m".to_string(),
+            eviction: None,
+        }),
+        None,
     )
 }
 
@@ -1251,7 +1281,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                                 name: relay.clone(),
                                 schema: schema.clone(),
                                 buffer: 2,
-                                parameterization: RelayParameterization::unparameterized(),
+                                parameterization: RelayParameterization::unbranched(),
                                 materialized_state: None,
                             }),
                         ),
@@ -1280,7 +1310,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                                 name: ingestor.clone(),
                                 output_routes: ProcessorOutputs::single(relay.clone()),
                                 decode_using_codec: codec.clone(),
-                                parameterized_by: BranchParameterization::unparameterized(),
+                                parameterized_by: BranchParameterization::unbranched(),
                                 flush_each: "100ms".to_string(),
                                 max_batch_size: Some("1MiB".to_string()),
                                 timestamp_source: None,
@@ -1399,7 +1429,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                                 name: relay.clone(),
                                 schema: schema.clone(),
                                 buffer: 2,
-                                parameterization: RelayParameterization::unparameterized(),
+                                parameterization: RelayParameterization::unbranched(),
                                 materialized_state: None,
                             }),
                         ),
@@ -1422,7 +1452,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                                 name: ingestor.clone(),
                                 output_routes: ProcessorOutputs::single(relay.clone()),
                                 decode_using_codec: codec.clone(),
-                                parameterized_by: BranchParameterization::unparameterized(),
+                                parameterized_by: BranchParameterization::unbranched(),
                                 flush_each: "100ms".to_string(),
                                 max_batch_size: Some("1MiB".to_string()),
                                 timestamp_source: None,
@@ -2299,7 +2329,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
 }
 
 #[tokio::test]
-async fn unparameterized_relay_uses_direct_fanout_without_branch_collapse() {
+async fn unbranched_relay_uses_direct_fanout_without_branch_collapse() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let relay = identifier("notifications");
@@ -2317,7 +2347,7 @@ async fn unparameterized_relay_uses_direct_fanout_without_branch_collapse() {
 }
 
 #[tokio::test]
-async fn execution_builder_uses_direct_fanout_for_unparameterized_relay() {
+async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let schema = identifier("notification");
@@ -2350,7 +2380,7 @@ async fn execution_builder_uses_direct_fanout_for_unparameterized_relay() {
                             name: relay.clone(),
                             schema,
                             buffer: STUPID_CHANNEL_CAPACITY_REMOVE_ME,
-                            parameterization: RelayParameterization::unparameterized(),
+                            parameterization: RelayParameterization::unbranched(),
                             materialized_state: None,
                         }),
                     ),
@@ -2358,7 +2388,7 @@ async fn execution_builder_uses_direct_fanout_for_unparameterized_relay() {
             }),
         )
         .await
-        .expect("unparameterized relay execution should build");
+        .expect("unbranched relay execution should build");
 
     let execution = runtime
         .executions
@@ -2655,7 +2685,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
     let runtime = super::Runtime::default();
     let domain = Domain::parse("default").expect("valid domain");
     let relay_id = Identifier::parse("notifications").expect("valid identifier");
-    let expiring_state = runtime.expiring_stream_state(&domain, &relay_id, Duration::from_secs(1));
+    let expiring_state = runtime.expiring_stream_state(&domain, &relay_id);
     let registry = expiring_state.registry.clone();
     let services = test_relay_boundary_services();
     let (shutdown, _) = watch::channel(false);
@@ -2733,7 +2763,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
     let domain = domain("default");
     let relay = identifier("notifications");
     let branch = string_branch_key("tenant", "acme");
-    let expiring_state = runtime.expiring_stream_state(&domain, &relay, Duration::from_secs(60));
+    let expiring_state = runtime.expiring_stream_state(&domain, &relay);
     expiring_state.touch(&branch, Timestamp::from_unix_nanos(1));
     let (shutdown, _) = watch::channel(false);
 
@@ -3060,7 +3090,7 @@ async fn direct_fanout_subscription_uses_configured_buffer_capacity() {
     let direct_fanout = match &fanout {
         super::RelayBoundaryFanout::Direct(fanout) => fanout.clone(),
         super::RelayBoundaryFanout::BranchCollapse(_) => {
-            panic!("unparameterized relay must use direct fanout")
+            panic!("unbranched relay must use direct fanout")
         }
     };
     let mut receiver = fanout.subscription_receiver();
@@ -3146,7 +3176,7 @@ async fn relay_boundary_fanout_resize_preserves_existing_subscription_receiver()
             assert_eq!(resized_fanout.detached_runtime_consumers.capacity(), 5);
             &resized_fanout.subscriptions
         }
-        _ => panic!("unparameterized relay must use direct fanout"),
+        _ => panic!("unbranched relay must use direct fanout"),
     };
 
     broadcast
@@ -3931,6 +3961,8 @@ fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
 fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
+            branch_model_tuple("tenant", "orders", &["tenant"]),
+            branch_model_tuple("tenant", "projected_orders", &["tenant"]),
             (
                 ModelKind::Ingestor,
                 identifier("orders_ingestor"),
@@ -4035,6 +4067,8 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
 fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
+            branch_model_tuple("host", "metrics", &["host"]),
+            branch_model_tuple("host", "metric_summary", &["host"]),
             (
                 ModelKind::Ingestor,
                 identifier("metrics_ingestor"),
@@ -4130,6 +4164,8 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
 fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
+            branch_model_tuple("tenant", "features", &["tenant"]),
+            branch_model_tuple("tenant", "scores", &["tenant"]),
             (
                 ModelKind::Ingestor,
                 identifier("features_ingestor"),
@@ -4137,7 +4173,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                     name: identifier("features_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("features")),
                     decode_using_codec: identifier("features_codec"),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    parameterized_by: parameterized_by("tenant", "features", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4239,6 +4275,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
 fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
+            branch_model_tuple("tenant", "tenant_orders", &["tenant"]),
             (
                 ModelKind::Reingestor,
                 identifier("tenant_partition"),
@@ -4246,7 +4283,7 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
                     name: identifier("tenant_partition"),
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    parameterized_by: parameterized_by("tenant", "tenant_orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
@@ -4290,6 +4327,9 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
 fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
+            branch_model_tuple("tenant", "orders", &["tenant"]),
+            branch_model_tuple("tenant", "urgent_orders", &["tenant"]),
+            branch_model_tuple("tenant", "default_orders", &["tenant"]),
             (
                 ModelKind::Ingestor,
                 identifier("orders_ingestor"),
@@ -4410,6 +4450,9 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
 fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
+            branch_model_tuple("tenant", "left_stream", &["tenant"]),
+            branch_model_tuple("tenant", "right_stream", &["tenant"]),
+            branch_model_tuple("tenant", "joined_stream", &["tenant"]),
             (
                 ModelKind::Ingestor,
                 identifier("left_ingestor"),
@@ -4417,7 +4460,7 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
                     name: identifier("left_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("left_stream")),
                     decode_using_codec: identifier("notification_codec"),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    parameterized_by: parameterized_by("tenant", "left_stream", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4438,7 +4481,7 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
                     name: identifier("right_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("right_stream")),
                     decode_using_codec: identifier("notification_codec"),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    parameterized_by: parameterized_by("tenant", "right_stream", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4533,6 +4576,8 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
 fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
+            branch_model_tuple("tenant", "orders", &["tenant"]),
+            branch_model_tuple("tenant", "projected_orders", &["tenant"]),
             (
                 ModelKind::Ingestor,
                 identifier("orders_ingestor"),
@@ -4681,7 +4726,7 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
 }
 
 #[test]
-fn parameterized_ingestor_specs_use_explicit_unparameterized_relay_as_root() {
+fn parameterized_ingestor_specs_use_explicit_unbranched_relay_as_root() {
     let specs = super::parameterized_ingestor_specs_from_models(
         [
             (
@@ -4691,7 +4736,7 @@ fn parameterized_ingestor_specs_use_explicit_unparameterized_relay_as_root() {
                     name: identifier("orders"),
                     schema: identifier("order_event"),
                     buffer: 1,
-                    parameterization: RelayParameterization::unparameterized(),
+                    parameterization: RelayParameterization::unbranched(),
                     materialized_state: None,
                 }),
                 Some(Vec::new()),
@@ -4703,7 +4748,7 @@ fn parameterized_ingestor_specs_use_explicit_unparameterized_relay_as_root() {
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    parameterized_by: BranchParameterization::unbranched(),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4737,7 +4782,7 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
                     name: identifier("orders"),
                     schema: identifier("order_event"),
                     buffer: 1,
-                    parameterization: RelayParameterization::unparameterized(),
+                    parameterization: RelayParameterization::unbranched(),
                     materialized_state: None,
                 }),
                 Some(Vec::new()),
@@ -4749,7 +4794,7 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
                     name: identifier("filter_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("filtered_orders")),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    parameterized_by: BranchParameterization::unbranched(),
                     resource: identifier("filter_resource"),
                     resource_version: None,
                     file: "filter.wasm".to_string(),
@@ -4779,22 +4824,29 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
 #[test]
 fn parameterized_ingestor_specs_include_reingestor_with_declared_parameterization() {
     let specs = super::parameterized_ingestor_specs_from_models(
-        [(
-            ModelKind::Reingestor,
-            identifier("tenant_partition"),
-            nervix_models::Model::Reingestor(CreateReingestor {
-                name: identifier("tenant_partition"),
-                from: ProcessorInputs::single(identifier("notifications")),
-                output_routes: ProcessorOutputs::single(identifier("tenant_notifications")),
-                parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
-                mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
-                filter_where: None,
-            }),
-            None,
-        )]
+        [
+            branch_model_tuple("tenant", "tenant_notifications", &["tenant"]),
+            (
+                ModelKind::Reingestor,
+                identifier("tenant_partition"),
+                nervix_models::Model::Reingestor(CreateReingestor {
+                    name: identifier("tenant_partition"),
+                    from: ProcessorInputs::single(identifier("notifications")),
+                    output_routes: ProcessorOutputs::single(identifier("tenant_notifications")),
+                    parameterized_by: parameterized_by(
+                        "tenant",
+                        "tenant_notifications",
+                        &["tenant"],
+                    ),
+                    flush_each: "100ms".to_string(),
+                    max_batch_size: Some("1MiB".to_string()),
+                    mode: AckMode::Attached,
+                    message_error_policy: MessageErrorPolicy::Log,
+                    filter_where: None,
+                }),
+                None,
+            ),
+        ]
         .into_iter(),
     );
 
@@ -4891,10 +4943,9 @@ async fn reingestor_parameterized_entrypoint_splits_batches_with_arrow_filters()
         source: identifier("tenant_partition"),
         root_relay: root_relay.clone(),
         branch_ttl: None,
+        branch_max_instances: None,
         entrypoint_schema: schema.clone(),
-        entrypoint_parameter_mappings: parameterized_by("tenant", "orders", &["tenant"])
-            .values()
-            .to_vec(),
+        entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
         entrypoint_ack_boundary: super::ParametrizerAckBoundary::Reingestor(AckMode::Attached),
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -5004,10 +5055,9 @@ async fn reingestor_parameterized_entrypoint_reuses_existing_branches() {
         source: identifier("tenant_partition"),
         root_relay: root_relay.clone(),
         branch_ttl: None,
+        branch_max_instances: None,
         entrypoint_schema: schema.clone(),
-        entrypoint_parameter_mappings: parameterized_by("tenant", "orders", &["tenant"])
-            .values()
-            .to_vec(),
+        entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
         entrypoint_ack_boundary: super::ParametrizerAckBoundary::Reingestor(AckMode::Detached),
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -5085,10 +5135,9 @@ async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
             source: identifier("tenant_partition"),
             root_relay: relay.clone(),
             branch_ttl: Some(Duration::from_secs(30)),
+            branch_max_instances: None,
             entrypoint_schema: schema.clone(),
-            entrypoint_parameter_mappings: parameterized_by("tenant", "orders", &["tenant"])
-                .values()
-                .to_vec(),
+            entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
             entrypoint_ack_boundary: super::ParametrizerAckBoundary::Reingestor(AckMode::Attached),
             entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -5220,6 +5269,145 @@ async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
     parameterized_runtime.shutdown().await;
 }
 
+#[test]
+fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_state() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let relay = identifier("tenant_orders");
+    let branch_key = string_branch_key("tenant", "acme");
+    let registry = super::RelayRegistry::new();
+    registry.touch(&branch_key, Timestamp::from_unix_nanos(1));
+    let materialized_state = Arc::new(
+        super::ReplicatedMaterializedRelayState::new(
+            RuntimeStatePlacement {
+                domain: domain.clone(),
+                state: RuntimeStateKind::MaterializedRelay,
+                kind: ModelKind::Materializer,
+                identifier: relay.clone(),
+                branch_key: branch_key.clone(),
+            },
+            None,
+            "node-1".to_string(),
+            Vec::new(),
+            0,
+            &RuntimeMetrics::default(),
+            None,
+        )
+        .expect("materialized state should build"),
+    );
+    materialized_state.entries.insert(
+        branch_key.clone(),
+        RuntimeRecord::from_fields([(
+            "tenant".to_string(),
+            RuntimeValue::String("acme".to_string()),
+        )])
+        .to_remote(),
+    );
+    let branch = super::BranchRuntime {
+        key: branch_key.clone(),
+        runtime: runtime.clone(),
+        domain: domain.clone(),
+        source_kind: ModelKind::Ingestor,
+        source: identifier("tenant_ingestor"),
+        root_relay: relay.clone(),
+        relays: [(
+            relay.clone(),
+            super::ConcreteRelayRuntime::new(super::ConcreteRelayRuntimeBuild {
+                runtime,
+                domain,
+                relay: relay.clone(),
+                registry: registry.clone(),
+                services: test_relay_boundary_services(),
+                key: branch_key.clone(),
+            }),
+        )]
+        .into_iter()
+        .collect(),
+        materializers: [(relay, materialized_state.clone())].into_iter().collect(),
+        processors: HashMap::default(),
+        processors_by_input: HashMap::default(),
+        error_policies: ErrorPolicies::handled_by_log(),
+    };
+
+    branch.detach();
+
+    assert!(!registry.contains_key(&branch_key));
+    assert!(materialized_state.entries.contains_key(&branch_key));
+}
+
+#[tokio::test]
+async fn parameterized_runtime_shutdown_evicts_branch_relay_presence() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let root_relay = identifier("tenant_orders");
+    let registry = super::RelayRegistry::new();
+    let schema = test_schema(&[("tenant", ParseAsType::String)]);
+    let parameterized_runtime = super::ParameterizedIngestorRuntime::new(
+        runtime,
+        domain.clone(),
+        identifier("tenant_ingestor"),
+        Arc::new(ArcSwapOption::from(None)),
+        super::ParametrizerTemplate {
+            source_kind: ModelKind::Ingestor,
+            source: identifier("tenant_ingestor"),
+            root_relay: root_relay.clone(),
+            branch_ttl: Some(Duration::from_secs(30)),
+            branch_max_instances: None,
+            entrypoint_schema: schema,
+            entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
+            entrypoint_ack_boundary: super::ParametrizerAckBoundary::Preserve,
+            entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
+            error_policies: ErrorPolicies::handled_by_log(),
+            relays: [(
+                root_relay,
+                super::RelayProcessorRelayTemplate {
+                    registry: registry.clone(),
+                    services: test_relay_boundary_services(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            materialized_streams: HashSet::default(),
+            processors: HashMap::default(),
+            processors_by_input: HashMap::default(),
+        },
+        Duration::from_secs(30),
+    );
+    let branch_key = string_branch_key("tenant", "acme");
+
+    parameterized_runtime
+        .sender()
+        .send(super::ParameterizedEntrypointInput::UnresolvedRecord {
+            record: RuntimeRecord::from_fields([(
+                "tenant".to_string(),
+                RuntimeValue::String("acme".to_string()),
+            )]),
+            acks: AckSet::empty(),
+        })
+        .await
+        .expect("parameterized runtime should accept input");
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        tokio::task::consume_budget().await;
+        if registry.contains_key(&branch_key) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "branch relay presence should be registered before shutdown"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    parameterized_runtime.shutdown().await;
+
+    assert!(
+        !registry.contains_key(&branch_key),
+        "parameterized runtime shutdown must evict concrete branch relay presence"
+    );
+}
+
 #[tokio::test]
 async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() {
     let runtime = super::Runtime::default();
@@ -5241,10 +5429,9 @@ async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() 
         source: identifier("metric_ingestor"),
         root_relay: root_relay.clone(),
         branch_ttl: None,
+        branch_max_instances: None,
         entrypoint_schema: schema.clone(),
-        entrypoint_parameter_mappings: parameterized_by("tenant", "orders", &["tenant"])
-            .values()
-            .to_vec(),
+        entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
         entrypoint_ack_boundary: super::ParametrizerAckBoundary::Preserve,
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),

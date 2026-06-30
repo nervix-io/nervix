@@ -28,8 +28,8 @@ Feature: WASM processor runtime behavior
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
 
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -41,7 +41,7 @@ Feature: WASM processor runtime behavior
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -50,7 +50,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
       SUBSCRIBE SESSION TO filtered_metrics;
@@ -133,9 +133,9 @@ Feature: WASM processor runtime behavior
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric_input;
 
-      CREATE RELAY raw_metrics SCHEMA metric_input UNPARAMETERIZED;
-      CREATE RELAY selected_metrics SCHEMA metric_value UNPARAMETERIZED;
-      CREATE RELAY routed_metrics SCHEMA routed_metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric_input UNBRANCHED;
+      CREATE RELAY selected_metrics SCHEMA metric_value UNBRANCHED;
+      CREATE RELAY routed_metrics SCHEMA routed_metric UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -147,7 +147,7 @@ Feature: WASM processor runtime behavior
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -159,7 +159,7 @@ Feature: WASM processor runtime behavior
         TO routed_metrics
           SET routed_metrics.source = input.source,
               routed_metrics.bucket = lower(routed_metrics.bucket)
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
       SUBSCRIBE SESSION TO routed_metrics;
@@ -224,9 +224,9 @@ Feature: WASM processor runtime behavior
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
 
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY selected_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY routed_metrics SCHEMA routed_metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY selected_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY routed_metrics SCHEMA routed_metric UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -238,7 +238,7 @@ Feature: WASM processor runtime behavior
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -250,7 +250,7 @@ Feature: WASM processor runtime behavior
         TO routed_metrics
           SET routed_metrics.bucket = lower(routed_metrics.bucket)
           WHERE routed_metrics.value != 4 AS I32
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
       SUBSCRIBE SESSION TO routed_metrics;
@@ -340,8 +340,8 @@ Feature: WASM processor runtime behavior
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
 
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -353,7 +353,7 @@ Feature: WASM processor runtime behavior
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -362,7 +362,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
       SUBSCRIBE SESSION TO filtered_metrics;
@@ -413,14 +413,14 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
@@ -428,7 +428,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO filtered_metrics;
       START;
@@ -470,14 +470,14 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
@@ -485,7 +485,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO filtered_metrics;
       START;
@@ -529,15 +529,15 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY rust_filtered_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY go_filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR rust_filter_even_rows
@@ -545,14 +545,14 @@ Feature: WASM processor runtime behavior
         FILE 'nervix_wasm_processor_rust_guest.wasm'
         FROM raw_metrics
         TO rust_filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       CREATE WASM PROCESSOR go_filter_even_rows
         USING RESOURCE go_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_go_guest.wasm'
         FROM rust_filtered_metrics
         TO go_filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO rust_filtered_metrics;
       SUBSCRIBE SESSION TO go_filtered_metrics;
@@ -614,15 +614,15 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY rust_filtered_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY go_filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR rust_filter_even_rows
@@ -630,14 +630,14 @@ Feature: WASM processor runtime behavior
         FILE 'nervix_wasm_processor_rust_guest.wasm'
         FROM raw_metrics
         TO rust_filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       CREATE WASM PROCESSOR go_filter_even_rows
         USING RESOURCE go_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_go_guest.wasm'
         FROM rust_filtered_metrics
         TO go_filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO go_filtered_metrics;
       START;
@@ -691,15 +691,15 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY rust_filtered_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY go_filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 2s MAX BATCH SIZE 100kb
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR rust_filter_even_rows
@@ -707,14 +707,14 @@ Feature: WASM processor runtime behavior
         FILE 'nervix_wasm_processor_rust_guest.wasm'
         FROM raw_metrics
         TO rust_filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       CREATE WASM PROCESSOR go_filter_even_rows
         USING RESOURCE go_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_go_guest.wasm'
         FROM rust_filtered_metrics
         TO go_filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO go_filtered_metrics;
       START;
@@ -754,15 +754,15 @@ Feature: WASM processor runtime behavior
       );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY error_stream SCHEMA error_record UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY error_stream SCHEMA error_record UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
@@ -770,7 +770,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR DLQ error_stream SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
         ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO error_stream;
@@ -816,14 +816,14 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
@@ -831,7 +831,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO filtered_metrics;
       START;
@@ -869,14 +869,14 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
@@ -884,7 +884,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO filtered_metrics;
       START;
@@ -922,14 +922,14 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
@@ -937,7 +937,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO filtered_metrics;
       START;
@@ -976,14 +976,14 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
@@ -991,7 +991,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO filtered_metrics;
       START;
@@ -1021,14 +1021,14 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA metric ( value I32 );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
-      CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-      CREATE RELAY filtered_metrics SCHEMA metric UNPARAMETERIZED;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
@@ -1036,7 +1036,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        UNPARAMETERIZED
+        UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SUBSCRIBE SESSION TO filtered_metrics;
       START;

@@ -32,8 +32,8 @@ Feature: Processor output routing
         FROM WIRE JSON SCHEMA event_wire
         TO SCHEMA event_in;
 
-      CREATE RELAY error_events SCHEMA event_projection UNPARAMETERIZED;
-      CREATE RELAY audit_events SCHEMA event_projection UNPARAMETERIZED;
+      CREATE RELAY error_events SCHEMA event_projection UNBRANCHED;
+      CREATE RELAY audit_events SCHEMA event_projection UNBRANCHED;
 
       CREATE VHOST edge http-ingestor-output-{{test_id}}.example.com;
 
@@ -54,7 +54,7 @@ Feature: Processor output routing
               audit_events.normalized = lower(trim(message.raw))
           UNSET audit_events.active, audit_events.level, audit_events.raw
         DECODE USING event_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -138,17 +138,17 @@ Feature: Processor output routing
         PATH '/route-b'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE INGESTOR source_logs_a
+      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE IF NOT EXISTS BRANCH by_source_logs_a PARAMETERIZED BY id_branch VALUES { id = incoming_logs_a.id } TTL 5m; CREATE INGESTOR source_logs_a
         TO incoming_logs_a
         DECODE USING notification_codec
-        PARAMETERIZED BY id_branch VALUES { id = incoming_logs_a.id } TTL 5m
+        BRANCHED BY by_source_logs_a
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE INGESTOR source_logs_b
+      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE IF NOT EXISTS BRANCH by_source_logs_b PARAMETERIZED BY id_branch VALUES { id = incoming_logs_b.id } TTL 5m; CREATE INGESTOR source_logs_b
         TO incoming_logs_b
         DECODE USING notification_codec
-        PARAMETERIZED BY id_branch VALUES { id = incoming_logs_b.id } TTL 5m
+        BRANCHED BY by_source_logs_b
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -159,7 +159,7 @@ Feature: Processor output routing
         TO errors_ss WHERE incoming_logs_a.level = "error"
         TO warnings_ss WHERE incoming_logs_a.urgent
         TO info_ss
-        PARAMETERIZED BY id_branch
+        BRANCHED BY by_source_logs_a
         DEDUPLICATE ON incoming_logs_a.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -258,10 +258,10 @@ Feature: Processor output routing
         PATH '/output-route'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -271,7 +271,7 @@ Feature: Processor output routing
         TO projected_notifications
           SET projected_notifications.normalized = lower(trim(notifications.raw)), projected_notifications.amount = notifications.amount + 1
           UNSET notifications.raw, notifications.active
-        PARAMETERIZED BY tenant_user_id_branch
+        BRANCHED BY by_http_notifications
         DEDUPLICATE ON notifications.tenant, notifications.user_id
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -357,10 +357,10 @@ Feature: Processor output routing
         PATH '/project-output'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE INGESTOR source_logs
+      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE IF NOT EXISTS BRANCH by_source_logs PARAMETERIZED BY id_branch VALUES { id = incoming_logs.id } TTL 5m; CREATE INGESTOR source_logs
         TO incoming_logs
         DECODE USING notification_codec
-        PARAMETERIZED BY id_branch VALUES { id = incoming_logs.id } TTL 5m
+        BRANCHED BY by_source_logs
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -378,7 +378,7 @@ Feature: Processor output routing
         TO info_ss
           SET info_ss.severity = lower(incoming_logs.level)
           UNSET incoming_logs.level, incoming_logs.legacy
-        PARAMETERIZED BY id_branch
+        BRANCHED BY by_source_logs
         DEDUPLICATE ON incoming_logs.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

@@ -271,7 +271,7 @@ impl KafkaIngestor {
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
             let task_parameterization = parameterization.clone();
-            let task_parameter_value_mappings = ingestor.parameterized_by.values().to_vec();
+            let task_parameter_value_mappings = dependencies.parameter_value_mappings.clone();
             let task_parameterized_senders = parameterized_runtime.senders.clone();
             let task_kafka_offset_state = kafka_offset_state.clone();
             let task_ack_mode = ack_mode.clone();

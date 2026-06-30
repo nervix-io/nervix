@@ -434,6 +434,24 @@ CREATE IF NOT EXISTS SCHEMA device_branch (
   device_id STRING
 );
 
+CREATE BRANCH by_device
+  PARAMETERIZED BY device_branch VALUES {
+    tenant_id = device_activity_landing.tenant_id,
+    device_id = device_activity_landing.device_id
+  } TTL 30m;
+
+CREATE BRANCH by_edge_device
+  PARAMETERIZED BY device_branch VALUES {
+    tenant_id = edge_activity_landing.tenant_id,
+    device_id = edge_activity_landing.device_id
+  } TTL 30m;
+
+CREATE BRANCH by_auth_device
+  PARAMETERIZED BY device_branch VALUES {
+    tenant_id = auth_activity_landing.tenant_id,
+    device_id = auth_activity_landing.device_id
+  } TTL 30m;
+
 CREATE RELAY device_activity_landing SCHEMA device_activity PARAMETERIZED BY device_branch CAPACITY 1024;
 CREATE RELAY edge_activity_landing SCHEMA edge_activity PARAMETERIZED BY device_branch CAPACITY 1024;
 CREATE RELAY auth_activity_landing SCHEMA auth_activity PARAMETERIZED BY device_branch CAPACITY 1024;
@@ -520,10 +538,7 @@ CREATE INGESTOR iot_device_activity
         device_activity_landing.edge_id = lower(trim(message.edge_id)),
         device_activity_landing.firmware = lower(trim(message.firmware))
   DECODE USING device_activity_cbor_codec
-  PARAMETERIZED BY device_branch VALUES {
-    tenant_id = device_activity_landing.tenant_id,
-    device_id = device_activity_landing.device_id
-  } TTL 30m
+  BRANCHED BY by_device
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   TIMESTAMP AT ts
   FROM MQTT mqtt_devices
@@ -540,10 +555,7 @@ CREATE INGESTOR edge_server_activity
         edge_activity_landing.edge_name = lower(trim(message.edge_name)),
         edge_activity_landing.protocol = lower(trim(message.protocol))
   DECODE USING edge_activity_protobuf_codec
-  PARAMETERIZED BY device_branch VALUES {
-    tenant_id = edge_activity_landing.tenant_id,
-    device_id = edge_activity_landing.device_id
-  } TTL 30m
+  BRANCHED BY by_edge_device
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   TIMESTAMP AT ts
   FROM NATS nats_edge
@@ -560,10 +572,7 @@ CREATE INGESTOR auth_server_activity
         auth_activity_landing.auth_result = lower(trim(message.auth_result)),
         auth_activity_landing.edge_id = lower(trim(message.edge_id))
   DECODE USING auth_activity_json_codec
-  PARAMETERIZED BY device_branch VALUES {
-    tenant_id = auth_activity_landing.tenant_id,
-    device_id = auth_activity_landing.device_id
-  } TTL 30m
+  BRANCHED BY by_auth_device
   FLUSH EACH 250ms MAX BATCH SIZE 1MiB
   TIMESTAMP AT ts
   FROM KAFKA kafka_auth
@@ -581,7 +590,7 @@ CREATE DEDUPLICATOR edge_location_lookup
         edge_activity_enriched_landing.edge_lat = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lat"),
         edge_activity_enriched_landing.edge_lon = LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lon")
     WHERE NOT is_null(LOOKUP_HASH_MAP("edge_sites_by_id", edge_activity_landing.edge_id, "edge_lat"))
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON edge_activity_landing.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
@@ -593,7 +602,7 @@ CREATE DEDUPLICATOR device_activity_splitter
   TO device_location_events WHERE device_activity_landing.event_type = "location"
   TO device_disconnect_events WHERE device_activity_landing.event_type = "disconnect"
   TO device_location_events
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON device_activity_landing.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
@@ -604,7 +613,7 @@ CREATE DEDUPLICATOR edge_activity_splitter
   TO edge_connect_events WHERE edge_activity_enriched_landing.event_type = "connect"
   TO edge_disconnect_events WHERE edge_activity_enriched_landing.event_type = "disconnect"
   TO edge_connect_events
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON edge_activity_enriched_landing.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
@@ -615,7 +624,7 @@ CREATE DEDUPLICATOR auth_activity_splitter
   TO auth_authorized_events WHERE auth_activity_landing.event_type = "authorized" AND auth_activity_landing.auth_result = "allow"
   TO auth_denied_events WHERE auth_activity_landing.auth_result != "allow"
   TO auth_denied_events
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON auth_activity_landing.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
@@ -627,7 +636,7 @@ CREATE WASM PROCESSOR geoip_device_location_resolver
   FROM device_location_events
   TO device_location_geo_events
   TO device_location_geo_audit_events WHERE device_location_geo_audit_events.distance_to_hub_km > 0.0
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
 CREATE DEDUPLICATOR device_location_distance
@@ -640,7 +649,7 @@ CREATE DEDUPLICATOR device_location_distance
         device_location_checked_events.edge_lon = LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lon"),
         device_location_checked_events.distance_to_edge_km = 111.32 * sqrt(pow(LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat") - device_location_geo_events.device_lat, 2.0) + pow((LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lon") - device_location_geo_events.device_lon) * cos(device_location_geo_events.device_lat * 0.017453292519943295), 2.0))
     WHERE NOT is_null(LOOKUP_HASH_MAP("edge_sites_by_id", device_location_geo_events.edge_id, "edge_lat"))
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON device_location_geo_events.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
@@ -653,7 +662,7 @@ CREATE CORRELATOR device_edge_connect_correlator
     AND device_connect_events.edge_id = edge_connect_events.edge_id
   MATCH EARLIEST
   TO device_edge_connect_events
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   OUTPUT
     device_edge_connect_events.event_id = concat(device_connect_events.event_id, "-", edge_connect_events.event_id),
@@ -685,7 +694,7 @@ CREATE DEDUPLICATOR connect_distance_score
   FROM device_edge_connect_events
   TO device_edge_connect_scored_events
     SET device_edge_connect_scored_events.distance_to_edge_km = 111.32 * sqrt(pow(device_edge_connect_events.edge_lat - device_edge_connect_events.device_lat, 2.0) + pow((device_edge_connect_events.edge_lon - device_edge_connect_events.device_lon) * cos(device_edge_connect_events.device_lat * 0.017453292519943295), 2.0))
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON device_edge_connect_events.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
@@ -698,7 +707,7 @@ CREATE CORRELATOR connected_session_correlator
     AND device_edge_connect_scored_events.edge_id = auth_authorized_events.edge_id
   MATCH EARLIEST
   TO connected_sessions
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   OUTPUT
     connected_sessions.event_id = concat(device_edge_connect_scored_events.event_id, "-", auth_authorized_events.event_id),
@@ -737,7 +746,7 @@ CREATE CORRELATOR disconnect_correlator
     AND device_disconnect_events.edge_id = edge_disconnect_events.edge_id
   MATCH EARLIEST
   TO disconnect_events_matched
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   OUTPUT
     disconnect_events_matched.event_id = concat(device_disconnect_events.event_id, "-", edge_disconnect_events.event_id),
@@ -784,7 +793,7 @@ CREATE DEDUPLICATOR device_disconnect_only_projector
           device_disconnect_unmatched.event_type,
           device_disconnect_unmatched.ts,
           device_disconnect_unmatched.seq
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON device_disconnect_unmatched.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
@@ -808,7 +817,7 @@ CREATE DEDUPLICATOR edge_disconnect_only_projector
           edge_disconnect_unmatched.event_type,
           edge_disconnect_unmatched.ts,
           edge_disconnect_unmatched.seq
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON edge_disconnect_unmatched.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
@@ -826,7 +835,7 @@ CREATE DEDUPLICATOR denied_auth_security_mapper
           auth_denied_events.reason,
           auth_denied_events.ts,
           auth_denied_events.seq
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON auth_denied_events.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
@@ -844,7 +853,7 @@ CREATE DEDUPLICATOR uncorrelated_auth_security_mapper
           uncorrelated_auth_events.reason,
           uncorrelated_auth_events.ts,
           uncorrelated_auth_events.seq
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON uncorrelated_auth_events.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
@@ -876,7 +885,7 @@ CREATE DEDUPLICATOR connect_without_auth_security_mapper
           connect_without_auth_events.edge_lat,
           connect_without_auth_events.edge_lon,
           connect_without_auth_events.distance_to_edge_km
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON connect_without_auth_events.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
@@ -885,7 +894,7 @@ CREATE DEDUPLICATOR connect_without_auth_security_mapper
 CREATE JUNCTION security_event_junction
   FROM security_auth_denied_events, security_uncorrelated_auth_events, security_connect_without_auth_events
   TO security_events
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG;
 
@@ -920,7 +929,7 @@ CREATE DEDUPLICATOR location_distance_alert_mapper
           device_location_checked_events.edge_region,
           device_location_checked_events.edge_site_tier
     WHERE device_location_checked_events.distance_to_edge_km > 500.0
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON device_location_checked_events.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
@@ -952,7 +961,7 @@ CREATE DEDUPLICATOR connection_distance_alert_mapper
           connected_sessions.edge_site_tier,
           connected_sessions.risk_score
     WHERE connected_sessions.distance_to_edge_km > 500.0
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON connected_sessions.event_id
   MAX TIME 30m
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
@@ -961,7 +970,7 @@ CREATE DEDUPLICATOR connection_distance_alert_mapper
 CREATE JUNCTION distance_alert_junction
   FROM location_distance_alerts, connection_distance_alerts
   TO distance_alerts
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   FLUSH EACH 250ms MAX BATCH SIZE 256kb
   ON MESSAGE ERROR LOG;
 

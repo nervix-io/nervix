@@ -30,10 +30,10 @@ Feature: SQS ingestion
           'region' = 'us-east-1'
         };
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR sqs_notifications
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_sqs_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR sqs_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_sqs_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM SQS sqs_main
         QUEUE notifications_{{test_id}}
@@ -95,10 +95,10 @@ Feature: SQS ingestion
         };
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE INGESTOR sqs_notifications
+      CREATE IF NOT EXISTS BRANCH by_sqs_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR sqs_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_sqs_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM SQS sqs_main
         QUEUE notifications_reconnect_{{test_id}}

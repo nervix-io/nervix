@@ -39,10 +39,10 @@ Feature: Parameterized branch behavior
         PATH '/notifications'
         TYPE HTTP;
 
-      CREATE INGESTOR source_notifications
+      CREATE IF NOT EXISTS BRANCH by_source_notifications PARAMETERIZED BY tenant_user_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR source_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_source_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -100,15 +100,15 @@ Feature: Parameterized branch behavior
         PATH '/dedup'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_txns
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m; CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_txns
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY tenant_branch
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -185,16 +185,16 @@ Feature: Parameterized branch behavior
         PATH '/metrics'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WINDOW PROCESSOR latency_window
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
@@ -270,23 +270,23 @@ Feature: Parameterized branch behavior
         PATH '/ingest-b'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_one
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_source_one PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m; CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_two
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_source_two PARAMETERIZED BY tenant_branch VALUES { tenant = ss2.tenant } TTL 5m; CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss2.tenant } TTL 5m
+        BRANCHED BY by_source_two
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 PARAMETERIZED BY tenant_branch
+        TO ss10 BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO ss10 WHERE ss10.tenant = 'acme';
@@ -348,17 +348,17 @@ Feature: Parameterized branch behavior
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE REINGESTOR tenant_partition
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_tenant_partition PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m; CREATE REINGESTOR tenant_partition
         FROM notifications
         TO tenant_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m
+        BRANCHED BY by_tenant_partition
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       SUBSCRIBE SESSION TO tenant_notifications WHERE tenant_notifications.tenant = 'acme';

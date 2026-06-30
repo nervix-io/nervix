@@ -38,7 +38,7 @@ Feature: Cordon node
       CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}

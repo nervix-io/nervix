@@ -111,7 +111,7 @@ mod tests {
         let input = r#"
             CREATE GENERATOR synth
                 TO alerts
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 EACH 100ms
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 SET alerts.user_id = notifications.user_id, alerts.topic = notifications.topic ON MESSAGE ERROR LOG;
@@ -135,7 +135,7 @@ mod tests {
         let input = r#"
             CREATE GENERATOR synth
                 TO alerts
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 EACH 100ms
                 FLUSH EACH 1s MAX BATCH SIZE 1MiB
                 SET alerts.user_id = notifications.user_id ON MESSAGE ERROR LOG;
@@ -152,7 +152,7 @@ mod tests {
         let input = r#"
             CREATE GENERATOR synth
                 TO alerts
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 EACH 100ms
                 FLUSH IMMEDIATE
                 SET alerts.user_id = notifications.user_id ON MESSAGE ERROR LOG;
@@ -165,11 +165,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_create_generator_unparameterized() {
+    fn parses_create_generator_unbranched() {
         let input = r#"
             CREATE GENERATOR synth
                 TO alerts
-                UNPARAMETERIZED
+                UNBRANCHED
                 EACH 100ms
                 FLUSH IMMEDIATE
                 SET alerts.user_id = notifications.user_id ON MESSAGE ERROR LOG;
@@ -180,15 +180,15 @@ mod tests {
 
         assert_eq!(
             parsed.parameterized_by,
-            nervix_models::BranchParameterization::unparameterized()
+            nervix_models::BranchParameterization::unbranched()
         );
     }
 
     #[test]
     fn rejects_generator_without_flush_each() {
         let tokens = to_tokens(
-            "CREATE GENERATOR synth TO alerts PARAMETERIZED BY tenant EACH 100ms SET \
-             alerts.user_id = notifications.user_id ON MESSAGE ERROR LOG;",
+            "CREATE GENERATOR synth TO alerts BRANCHED BY tenant EACH 100ms SET alerts.user_id = \
+             notifications.user_id ON MESSAGE ERROR LOG;",
         );
         assert!(parse_create_generator_tokens(&tokens).is_err());
     }
@@ -196,8 +196,8 @@ mod tests {
     #[test]
     fn rejects_generator_where_clause() {
         let tokens = to_tokens(
-            "CREATE GENERATOR synth TO alerts PARAMETERIZED BY tenant EACH 100ms WHERE \
-             alerts.keep ON MESSAGE ERROR LOG;",
+            "CREATE GENERATOR synth TO alerts BRANCHED BY tenant EACH 100ms WHERE alerts.keep ON \
+             MESSAGE ERROR LOG;",
         );
         assert!(parse_create_generator_tokens(&tokens).is_err());
     }
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn suggests_flush_or_set_after_each_duration() {
-        let input = "CREATE GENERATOR synth TO alerts PARAMETERIZED BY tenant EACH 100ms ";
+        let input = "CREATE GENERATOR synth TO alerts BRANCHED BY tenant EACH 100ms ";
         let suggestions = suggest_create_generator(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
     }
@@ -222,8 +222,8 @@ mod tests {
     fn suggests_parameterization_after_generator_relay_without_cross_branch_leakage() {
         let input = "CREATE GENERATOR synth TO alerts ";
         let suggestions = suggest_create_generator(input, input.len());
-        assert!(suggestions.contains(&"PARAMETERIZED BY".to_string()));
-        assert!(suggestions.contains(&"UNPARAMETERIZED".to_string()));
+        assert!(suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(suggestions.contains(&"UNBRANCHED".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
     }
 }

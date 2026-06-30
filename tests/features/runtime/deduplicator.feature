@@ -34,15 +34,15 @@ Feature: Relay deduplication
         PATH '/dedup'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING ); CREATE INGESTOR source_txns
+      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING ); CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m; CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -102,15 +102,15 @@ Feature: Relay deduplication
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/dedup-expire' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING ); CREATE INGESTOR source_txns
+      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING ); CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m; CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 300ms
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -186,15 +186,15 @@ Feature: Relay deduplication
         PATH '/dedup-functions'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_txns
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m; CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_txns
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY tenant_branch
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON lower(trim(ss1.transaction_id)), abs(ss1.amount)
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -265,15 +265,15 @@ Feature: Relay deduplication
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/dedup-describe' TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_txns
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m; CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_txns
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY tenant_branch
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -363,19 +363,19 @@ Feature: Relay deduplication
       CREATE INGESTOR state_txns_ingestor
         TO state_txns
         DECODE USING transaction_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR source_txns
+      CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m; CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 SET ss2.source = state_txns.source PARAMETERIZED BY transaction_id_branch
+        FROM ss1 TO ss2 SET ss2.source = state_txns.source BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -426,8 +426,10 @@ Feature: Relay deduplication
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
       CREATE RELAY ss2 SCHEMA notification PARAMETERIZED BY transaction_id_branch;
 
+      CREATE IF NOT EXISTS BRANCH by_dedup_txns PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m;
+
       CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        FROM ss1 TO ss2 BRANCHED BY by_dedup_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

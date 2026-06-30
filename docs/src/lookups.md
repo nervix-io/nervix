@@ -64,13 +64,16 @@ The function evaluates `<key_expr>`, looks up that key in the named hash map, an
 Example enrichment:
 
 ```nspl
+CREATE BRANCH by_zip
+  PARAMETERIZED BY zip_branch VALUES { zip = inbound.zip } TTL 5m;
+
 CREATE DEDUPLICATOR enrich_zip
   FROM inbound
   TO enriched
     SET enriched.city = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"),
         enriched.region = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "region")
     WHERE NOT is_null(LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"))
-  PARAMETERIZED BY zip_branch
+  BRANCHED BY by_zip
   DEDUPLICATE ON inbound.zip
   MAX TIME 10m
   FLUSH IMMEDIATE

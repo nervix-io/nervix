@@ -855,11 +855,16 @@ fn build_ingestor_logic_commands(
 
       CREATE RELAY logic_notifications SCHEMA {};
       {}
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR logic_ingestor
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+      CREATE IF NOT EXISTS BRANCH by_logic_ingestor
+        PARAMETERIZED BY tenant_branch
+        VALUES {{ tenant = logic_notifications.tenant }}
+        TTL 5m;
+      CREATE INGESTOR logic_ingestor
         TO logic_notifications
         {}
         DECODE USING {}
-        PARAMETERIZED BY tenant_branch VALUES {{ tenant = logic_notifications.tenant }} TTL 5m
+        BRANCHED BY by_logic_ingestor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         {}
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
