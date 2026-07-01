@@ -13,41 +13,36 @@ Feature: Postgres emission
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-postgres-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC postgres_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT postgres_client
+        CREATE CLIENT postgres_client
         TYPE POSTGRES
         CONFIG {
           'addr' = 'host=127.0.0.1 port=5432 user=postgres password=nervix dbname=postgres'
         };
-
-      CREATE EMITTER to_pg
+        CREATE EMITTER to_pg
         FROM notifications
         TO POSTGRES postgres_client INSERT TO TABLE notifications_pg_out_{{test_id}}
         VALUES {
@@ -59,8 +54,8 @@ Feature: Postgres emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And emitter "to_pg" enters stall mode
     Then within "10s" repeatedly publishing MQTT message to topic "postgres_notifications_in_{{test_id}}" yields a relay subscription payload
@@ -101,41 +96,36 @@ Feature: Postgres emission
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-postgres-conflict-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC postgres_conflict_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT postgres_client
+        CREATE CLIENT postgres_client
         TYPE POSTGRES
         CONFIG {
           'addr' = 'host=127.0.0.1 port=5432 user=postgres password=nervix dbname=postgres'
         };
-
-      CREATE EMITTER to_pg
+        CREATE EMITTER to_pg
         FROM notifications
         TO POSTGRES postgres_client INSERT TO TABLE notifications_pg_conflict_{{test_id}}
         VALUES {
@@ -148,8 +138,8 @@ Feature: Postgres emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     Then within "10s" repeatedly publishing MQTT message to topic "postgres_conflict_notifications_in_{{test_id}}" yields a relay subscription payload
       """

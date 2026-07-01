@@ -4,7 +4,7 @@ use nervix_models::{AckMode, CreateInferencer, CreateStatement, InferencerTensor
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause, inferencer_name,
         into_parse_error, kw, lex_input, message_error_policy, processor_outputs, relay_ref,
         resource_ref, string_lit, suggestions_from_errors, tok, word_raw,
@@ -61,7 +61,7 @@ pub fn create_inferencer_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then_ignore(kw(Identifier::Using))
         .then_ignore(kw(Identifier::Resource))
         .then(resource_ref())
@@ -83,7 +83,7 @@ pub fn create_inferencer_parser<'src>()
             ) = value;
             let (
                 (((((if_not_exists, mode), name), from_input), filter_where), processor_outputs),
-                parameterized_by,
+                branched_by,
             ) = base;
             let (flush_each, max_batch_size) = flush_each;
             CreateStatement::new(
@@ -91,7 +91,7 @@ pub fn create_inferencer_parser<'src>()
                     name,
                     from: from_input,
                     output_routes: processor_outputs,
-                    parameterized_by,
+                    branched_by,
                     resource,
                     resource_version,
                     file,
@@ -168,7 +168,7 @@ mod tests {
             CREATE DETACHED INFERENCER score_model
             FROM features FILTER WHERE features.present
             TO scored SET scored.ready = true
-            PARAMETERIZED BY tenant
+            BRANCHED BY tenant
             USING RESOURCE fraud_model VERSION 3
             FILE 'models/fraud.onnx'
             INPUTS { "features" = features.vector }
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn rejects_inferencer_without_flush_policy() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b UNPARAMETERIZED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS { "x" = a.x } OUTPUTS { "y" = b.y } ON MESSAGE ERROR LOG;
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn rejects_legacy_parenthesized_tensor_mappings() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b UNPARAMETERIZED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS ("x" = a.x) OUTPUTS ("y" = b.y)
             FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
         "#;
@@ -224,8 +224,8 @@ mod tests {
 
     #[test]
     fn suggests_inputs_after_filter_map_without_schema_leakage() {
-        let input = "CREATE INFERENCER p FROM a TO b PARAMETERIZED BY tenant USING RESOURCE r \
-                     FILE 'm.onnx' ";
+        let input =
+            "CREATE INFERENCER p FROM a TO b BRANCHED BY tenant USING RESOURCE r FILE 'm.onnx' ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"INPUTS".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -234,11 +234,11 @@ mod tests {
 
     #[test]
     fn suggests_braced_tensor_mapping_without_branch_value_leakage() {
-        let input = "CREATE INFERENCER p FROM a TO b UNPARAMETERIZED USING RESOURCE r FILE \
-                     'm.onnx' INPUTS ";
+        let input =
+            "CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx' INPUTS ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"{".to_string()));
         assert!(!suggestions.contains(&"VALUES".to_string()));
-        assert!(!suggestions.contains(&"PARAMETERIZED BY".to_string()));
+        assert!(!suggestions.contains(&"BRANCHED BY".to_string()));
     }
 }

@@ -65,8 +65,8 @@ Feature: LOOKUP_HASH_MAP filter-map function
         FROM WIRE JSON SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
-      CREATE RELAY incoming_logs SCHEMA notification_in UNPARAMETERIZED;
-      CREATE RELAY enriched_logs SCHEMA notification_out UNPARAMETERIZED;
+      CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
+      CREATE RELAY enriched_logs SCHEMA notification_out UNBRANCHED;
 
       CREATE HASH MAP titles_by_normalized
         KEY normalized_title
@@ -84,7 +84,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
       CREATE INGESTOR source_logs
         TO incoming_logs
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -97,7 +97,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
               enriched_logs.region = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "region_name")
           UNSET incoming_logs.title, incoming_logs.legacy
           WHERE NOT is_null(LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name"))
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON incoming_logs.id
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -204,8 +204,8 @@ Feature: LOOKUP_HASH_MAP filter-map function
         FROM WIRE JSON SCHEMA title_lookup_wire
         TO SCHEMA title_lookup;
 
-      CREATE RELAY incoming_logs SCHEMA notification_in UNPARAMETERIZED;
-      CREATE RELAY enriched_logs SCHEMA notification_out UNPARAMETERIZED;
+      CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
+      CREATE RELAY enriched_logs SCHEMA notification_out UNBRANCHED;
 
       CREATE HASH MAP titles_by_normalized
         KEY normalized_title
@@ -221,7 +221,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
           SET enriched_logs.title_key = lower(incoming_logs.title),
               enriched_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "missing_city")
           UNSET incoming_logs.title
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON incoming_logs.id
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;

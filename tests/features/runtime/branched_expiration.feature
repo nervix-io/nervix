@@ -1,6 +1,6 @@
-Feature: Parameterized branch expiration
+Feature: Branched branch expiration
   Scenario Outline: Subscription survives reingestor branch expiration and re-creation
-    Given parameterized relay expiration scan interval is configured as "100ms"
+    Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -12,50 +12,44 @@ Feature: Parameterized branch expiration
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE RELAY reingested_notifications SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE RELAY projected_notifications SCHEMA notification PARAMETERIZED BY user_id_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 500ms;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE IF NOT EXISTS BRANCH by_reproject_notifications BY user_id_branch TTL 500ms;
+        CREATE RELAY reingested_notifications SCHEMA notification BRANCHED BY by_reproject_notifications;
+        CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 500ms
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE REINGESTOR reproject_notifications
+        CREATE REINGESTOR reproject_notifications
         FROM notifications
         TO reingested_notifications
-        PARAMETERIZED BY user_id_branch VALUES { user_id = reingested_notifications.user_id } TTL 500ms
+        BRANCHED BY by_reproject_notifications VALUES { user_id = reingested_notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      CREATE DEDUPLICATOR passthrough
+        CREATE DEDUPLICATOR passthrough
         FROM reingested_notifications
-        TO projected_notifications PARAMETERIZED BY user_id_branch
+        TO projected_notifications BRANCHED BY by_http_notifications
         DEDUPLICATE ON reingested_notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO projected_notifications;
-      START;
+        SUBSCRIBE SESSION TO projected_notifications;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -93,7 +87,7 @@ Feature: Parameterized branch expiration
       | 3            | 1             |
 
   Scenario Outline: Paced branch expiration follows domain logical time
-    Given parameterized relay expiration scan interval is configured as "100ms"
+    Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -117,8 +111,14 @@ Feature: Parameterized branch expiration
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE RELAY projected_notifications SCHEMA notification PARAMETERIZED BY user_id_branch;
+
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+
+      CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 200ms;
+
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+
+      CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_http_notifications;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -127,17 +127,17 @@ Feature: Parameterized branch expiration
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+      CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 200ms
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR passthrough
         FROM notifications
-        TO projected_notifications PARAMETERIZED BY user_id_branch
+        TO projected_notifications BRANCHED BY by_http_notifications
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

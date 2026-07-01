@@ -101,17 +101,26 @@ CREATE IF NOT EXISTS SCHEMA asset_signal_branch (
   sensor STRING
 );
 
-CREATE RELAY signals_by_site SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 256;
-CREATE RELAY rejected_signals SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 64;
-CREATE RELAY battery_alerts SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 64;
-CREATE RELAY clean_signals SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 256;
-CREATE RELAY signals_by_asset SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 256;
-CREATE RELAY signals_ordered SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 256;
-CREATE RELAY critical_signals SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 64;
-CREATE RELAY drift_signals SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 64;
-CREATE RELAY normal_signals SCHEMA machine_signal PARAMETERIZED BY asset_signal_branch CAPACITY 128;
-CREATE RELAY signal_windows SCHEMA signal_window PARAMETERIZED BY asset_signal_branch CAPACITY 64;
-CREATE RELAY site_critical_signals SCHEMA machine_signal PARAMETERIZED BY site_branch CAPACITY 64;
+CREATE BRANCH by_site
+  BY site_branch TTL 5m;
+
+CREATE RELAY signals_by_site SCHEMA machine_signal BRANCHED BY by_site CAPACITY 256;
+CREATE RELAY rejected_signals SCHEMA machine_signal BRANCHED BY by_site CAPACITY 64;
+CREATE RELAY battery_alerts SCHEMA machine_signal BRANCHED BY by_site CAPACITY 64;
+CREATE RELAY clean_signals SCHEMA machine_signal BRANCHED BY by_site CAPACITY 256;
+
+CREATE BRANCH by_asset_signal
+  BY asset_signal_branch TTL 5m;
+CREATE RELAY signals_by_asset SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 256;
+CREATE RELAY signals_ordered SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 256;
+CREATE RELAY critical_signals SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 64;
+CREATE RELAY drift_signals SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 64;
+CREATE RELAY normal_signals SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 128;
+CREATE RELAY signal_windows SCHEMA signal_window BRANCHED BY by_asset_signal CAPACITY 64;
+
+CREATE BRANCH by_site_critical
+  BY site_branch TTL 5m;
+CREATE RELAY site_critical_signals SCHEMA machine_signal BRANCHED BY by_site_critical CAPACITY 64;
 
 CREATE CLIENT nats_edge
   TYPE NATS
@@ -125,7 +134,7 @@ CREATE INGESTOR nats_machine_signals
         signals_by_site.sensor = lower(trim(message.sensor)),
         signals_by_site.unit = lower(trim(message.unit))
   DECODE USING machine_signal_codec
-  PARAMETERIZED BY site_branch VALUES { site = signals_by_site.site } TTL 5m
+  BRANCHED BY by_site VALUES { site = signals_by_site.site }
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
   TIMESTAMP AT ts
   FROM NATS nats_edge
@@ -140,7 +149,7 @@ CREATE DEDUPLICATOR intake_quality_gate
   TO rejected_signals WHERE signals_by_site.asset_id = "" OR signals_by_site.sensor = "" OR signals_by_site.status = "offline"
   TO battery_alerts WHERE signals_by_site.battery_pct < 15.0
   TO clean_signals
-  PARAMETERIZED BY site_branch
+  BRANCHED BY by_site
   DEDUPLICATE ON signals_by_site.site, signals_by_site.line, signals_by_site.asset_id, signals_by_site.sensor, signals_by_site.ts, signals_by_site.seq
   MAX TIME 5m
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
@@ -149,19 +158,19 @@ CREATE DEDUPLICATOR intake_quality_gate
 CREATE REINGESTOR asset_signal_repartition
   FROM clean_signals
   TO signals_by_asset
-  PARAMETERIZED BY asset_signal_branch VALUES {
+  BRANCHED BY by_asset_signal VALUES {
     site = signals_by_asset.site,
     line = signals_by_asset.line,
     asset_id = signals_by_asset.asset_id,
     sensor = signals_by_asset.sensor
-  } TTL 5m
+  }
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
   ON MESSAGE ERROR LOG;
 
 CREATE REORDERER asset_signal_reorderer
   FROM signals_by_asset
   TO signals_ordered
-  PARAMETERIZED BY asset_signal_branch
+  BRANCHED BY by_asset_signal
   BY signals_by_asset.ts, signals_by_asset.seq
   MAX TIME 5s
   FLUSH EACH 500ms MAX BATCH SIZE 32kb
@@ -172,7 +181,7 @@ CREATE DEDUPLICATOR process_alert_splitter
   TO critical_signals WHERE signals_ordered.status = "fault" OR signals_ordered.value >= signals_ordered.critical_high
   TO drift_signals WHERE signals_ordered.value < signals_ordered.target_min OR signals_ordered.value > signals_ordered.target_max
   TO normal_signals
-  PARAMETERIZED BY asset_signal_branch
+  BRANCHED BY by_asset_signal
   DEDUPLICATE ON signals_ordered.site, signals_ordered.line, signals_ordered.asset_id, signals_ordered.sensor, signals_ordered.ts, signals_ordered.seq
   MAX TIME 5m
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
@@ -181,7 +190,7 @@ CREATE DEDUPLICATOR process_alert_splitter
 CREATE WINDOW PROCESSOR asset_signal_window
   FROM signals_ordered
   TO signal_windows
-  PARAMETERIZED BY asset_signal_branch
+  BRANCHED BY by_asset_signal
   WIDTH 20 MESSAGES 30s DURATION
   STEP 10 MESSAGES 10s DURATION
   AGGREGATE
@@ -209,7 +218,7 @@ CREATE WINDOW PROCESSOR asset_signal_window
 CREATE REINGESTOR site_critical_repartition
   FROM critical_signals
   TO site_critical_signals
-  PARAMETERIZED BY site_branch VALUES { site = site_critical_signals.site } TTL 5m
+  BRANCHED BY by_site_critical VALUES { site = site_critical_signals.site }
   FLUSH EACH 250ms MAX BATCH SIZE 32kb
   ON MESSAGE ERROR LOG;
 

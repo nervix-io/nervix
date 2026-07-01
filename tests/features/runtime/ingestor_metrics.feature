@@ -12,29 +12,25 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ingestor_metrics_source
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
+        CREATE INGESTOR ingestor_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ingestor_metrics_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/ingestor-metrics"
       """
@@ -156,39 +152,34 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
+        CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-ingestor-metrics-{{test_id}}'
         };
-
-      CREATE CLIENT redis_main
+        CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
           'addr' = 'redis://127.0.0.1:6379/'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ingestor_metrics_source
+        CREATE INGESTOR ingestor_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ingestor_metrics_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         FROM <source_clause>
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      START;
+        START;
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "status: running"
     When 10 JSON messages with user id 42 are rapidly published to "<source_kind>" input "<input>"
@@ -234,28 +225,24 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
-      CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR ingestor_metrics_source
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
+        CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
+        CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
+        CREATE INGESTOR ingestor_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_ingestor_metrics_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingestor_metrics_restart_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      START;
+        START;
       """
     And http payload is posted to node "node-1" with host "http-{{test_id}}-ingestor-restart.example.com" path "/ingestor-metrics-restart"
       """
@@ -302,34 +289,30 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT redis_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_remote_owner_metrics_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_remote_owner_metrics_source;
+        CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
           'addr' = 'redis://127.0.0.1:6379/'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR remote_owner_metrics_source
+        CREATE INGESTOR remote_owner_metrics_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_remote_owner_metrics_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM REDIS PUBSUB redis_main CHANNEL remote_owner_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      START;
-      DRAIN NODE node-1;
-      SHOW CLUSTER STATUS;
+        START;
+        DRAIN NODE node-1;
+        SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "ingestor" "remote_owner_metrics_source" is saved as placeholder "ingestor_owner"
     And Redis channel "remote_owner_notifications_{{test_id}}" eventually has 1 subscribers

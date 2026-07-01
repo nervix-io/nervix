@@ -70,19 +70,19 @@ Feature: Cluster scheduling
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE RELAY forwarded_notifications SCHEMA notification PARAMETERIZED BY user_id_branch;
+
+      CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+      CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
 
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
-        };
-
-      CREATE INGESTOR kafka_notifications
+        }; CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
@@ -91,7 +91,7 @@ Feature: Cluster scheduling
 
       CREATE DEDUPLICATOR passthrough
         FROM notifications
-        TO forwarded_notifications PARAMETERIZED BY user_id_branch
+        TO forwarded_notifications BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -125,28 +125,24 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -196,9 +192,14 @@ Feature: Cluster scheduling
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
-      CREATE RELAY incoming_logs SCHEMA notification PARAMETERIZED BY id_branch;
+
       CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
-      CREATE RELAY routed_logs SCHEMA notification PARAMETERIZED BY id_branch;
+
+      CREATE IF NOT EXISTS BRANCH by_source_logs BY id_branch TTL 5m;
+
+      CREATE RELAY incoming_logs SCHEMA notification BRANCHED BY by_source_logs;
+
+      CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
 
       CREATE CLIENT kafka_main
         TYPE KAFKA
@@ -209,7 +210,7 @@ Feature: Cluster scheduling
       CREATE INGESTOR source_logs
         TO incoming_logs
         DECODE USING notification_codec
-        PARAMETERIZED BY id_branch VALUES { id = incoming_logs.id } TTL 5m
+        BRANCHED BY by_source_logs VALUES { id = incoming_logs.id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC deduplicator_describe_{{test_id}}
@@ -220,12 +221,13 @@ Feature: Cluster scheduling
         FROM incoming_logs
         TO routed_logs WHERE incoming_logs.level = "error"
         TO routed_logs
-        PARAMETERIZED BY id_branch
+        BRANCHED BY by_source_logs
         DEDUPLICATE ON incoming_logs.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
       START;
+
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "deduplicator" "remote_deduplicator" is saved as placeholder "deduplicator_owner"
@@ -255,7 +257,7 @@ Feature: Cluster scheduling
       messages_total received relay=incoming_logs physical_node={{deduplicator_owner}} total=1
       """
 
-  Scenario: All nodes report describe relay for a parameterized HTTP relay
+  Scenario: All nodes report describe relay for a branched HTTP relay
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -273,28 +275,24 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -346,40 +344,35 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT kafka_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR kafka_notifications
+        CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE EMITTER kafka_forward
+        CREATE EMITTER kafka_forward
         FROM notifications
         ENCODE USING notification_codec
         TO KAFKA kafka_main
         TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      START;
+        START;
       """
     And emitter "kafka_forward" enters fault mode
     And Kafka message is published to topic "notifications_{{test_id}}"
@@ -413,29 +406,24 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT kafka_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-
-      CREATE INGESTOR kafka_notifications
+        CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}

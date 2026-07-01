@@ -1,4 +1,4 @@
-Feature: Parameterized branch behavior
+Feature: Branched branch behavior
   @json_branch_key
   Scenario Outline: Branch keys are rendered as JSON instead of delimiter encoded text
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -30,19 +30,19 @@ Feature: Parameterized branch behavior
         user_id U32
       );
 
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_user_branch;
+      CREATE IF NOT EXISTS BRANCH by_source_notifications BY tenant_user_branch TTL 5m;
+
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_source_notifications;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
       CREATE ENDPOINT ingress
         ON edge
         PATH '/notifications'
-        TYPE HTTP;
-
-      CREATE INGESTOR source_notifications
+        TYPE HTTP; CREATE INGESTOR source_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_source_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -78,43 +78,37 @@ Feature: Parameterized branch behavior
         transaction_id STRING,
         amount I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         tenant string,
         transaction_id string,
         amount integer
       );
-
-      CREATE CODEC transaction_codec
+        CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss1 SCHEMA transaction PARAMETERIZED BY tenant_branch;
-      CREATE RELAY ss2 SCHEMA transaction PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_txns BY tenant_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_txns
+        CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_txns VALUES { tenant = ss1.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY tenant_branch
+        CREATE DEDUPLICATOR dedup_txns
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss2;
-      START;
+        SUBSCRIBE SESSION TO ss2;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup"
       """
@@ -159,50 +153,43 @@ Feature: Parameterized branch behavior
         tenant STRING,
         latency F64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency number
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/metrics'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR metric_ingestor
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR latency_window
+        CREATE WINDOW PROCESSOR latency_window
         FROM metrics
-        TO metric_summaries PARAMETERIZED BY tenant_branch
+        TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency) ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -230,7 +217,7 @@ Feature: Parameterized branch behavior
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Junction preserves aligned parameterized relays without mixing them
+  Scenario Outline: Junction preserves aligned branched relays without mixing them
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -243,54 +230,48 @@ Feature: Parameterized branch behavior
         tenant STRING,
         source STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         source string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss1 SCHEMA notification PARAMETERIZED BY tenant_branch;
-      CREATE RELAY ss2 SCHEMA notification PARAMETERIZED BY tenant_branch;
-      CREATE RELAY ss10 SCHEMA notification PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress_one
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_one BY tenant_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
+        CREATE IF NOT EXISTS BRANCH by_source_two BY tenant_branch TTL 5m;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
+        CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress_one
         ON edge
         PATH '/ingest-a'
         TYPE HTTP;
-
-      CREATE ENDPOINT ingress_two
+        CREATE ENDPOINT ingress_two
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_one
+        CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_one VALUES { tenant = ss1.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_two
+        CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss2.tenant } TTL 5m
+        BRANCHED BY by_source_two VALUES { tenant = ss2.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE JUNCTION join_streams
+        CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 PARAMETERIZED BY tenant_branch
+        TO ss10 BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss10 WHERE ss10.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO ss10 WHERE ss10.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-a"
       """
@@ -313,7 +294,7 @@ Feature: Parameterized branch behavior
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Reingestor is the node that changes branch parameterization
+  Scenario Outline: Reingestor is the node that changes branch branching
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -326,43 +307,39 @@ Feature: Parameterized branch behavior
         tenant STRING,
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_user_id_branch;
-      CREATE RELAY tenant_notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m;
+        CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE REINGESTOR tenant_partition
+        CREATE REINGESTOR tenant_partition
         FROM notifications
         TO tenant_notifications
-        PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m
+        BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO tenant_notifications WHERE tenant_notifications.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO tenant_notifications WHERE tenant_notifications.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """

@@ -12,34 +12,29 @@ Feature: HTTP codec ingestion
         tenant STRING,
         user_id I64
       );
-
-      CREATE STRICT WIRE <wire_format> SCHEMA notification_wire (
+        CREATE STRICT WIRE <wire_format> SCHEMA notification_wire (
         tenant <tenant_wire_type>,
         user_id <user_id_wire_type>
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE <wire_format> SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     When http payload encoded as "<wire_format>" is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -74,35 +69,30 @@ Feature: HTTP codec ingestion
         cpu_last_64 <cpu_type>,
         labels <labels_type> OPTIONAL
       );
-
-      CREATE STRICT WIRE <wire_format> SCHEMA metrics_wire (
+        CREATE STRICT WIRE <wire_format> SCHEMA metrics_wire (
         device STRING,
         cpu_last_64 ARRAY,
         labels ARRAY OPTIONAL
       );
-
-      CREATE CODEC metrics_codec
+        CREATE CODEC metrics_codec
         FROM WIRE <wire_format> SCHEMA metrics_wire
         TO SCHEMA metrics;
-
-      CREATE RELAY metrics_stream SCHEMA metrics;
-
-      CREATE VHOST edge http-arrays-{{test_id}}.example.com;
-
-      CREATE ENDPOINT metrics_endpoint
+        CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
+        CREATE IF NOT EXISTS BRANCH by_metrics_ingestor BY device_branch TTL 5m;
+        CREATE RELAY metrics_stream SCHEMA metrics BRANCHED BY by_metrics_ingestor;
+        CREATE VHOST edge http-arrays-{{test_id}}.example.com;
+        CREATE ENDPOINT metrics_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE INGESTOR metrics_ingestor
+        CREATE INGESTOR metrics_ingestor
         TO metrics_stream
         DECODE USING metrics_codec
-        PARAMETERIZED BY device_branch VALUES { device = metrics_stream.device } TTL 5m
+        BRANCHED BY by_metrics_ingestor VALUES { device = metrics_stream.device }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO metrics_stream;
-      START;
+        SUBSCRIBE SESSION TO metrics_stream;
+        START;
       """
     When http payload encoded as "<wire_format>" is posted to host "http-arrays-{{test_id}}.example.com" path "/ingest"
       """
@@ -153,8 +143,8 @@ Feature: HTTP codec ingestion
         FROM WIRE <wire_format> SCHEMA loose_notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY strict_notifications SCHEMA notification;
-      CREATE RELAY loose_notifications SCHEMA notification;
+      CREATE RELAY strict_notifications SCHEMA notification UNBRANCHED;
+      CREATE RELAY loose_notifications SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge strict-loose-{{test_id}}.example.com;
 
@@ -171,14 +161,14 @@ Feature: HTTP codec ingestion
       CREATE INGESTOR strict_notifications_source
         TO strict_notifications
         DECODE USING strict_notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT strict_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE INGESTOR loose_notifications_source
         TO loose_notifications
         DECODE USING loose_notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -222,30 +212,26 @@ Feature: HTTP codec ingestion
         cpu_last_64 <cpu_type>,
         labels <labels_type> OPTIONAL
       );
-
-      CREATE CODEC metrics_codec
+        CREATE CODEC metrics_codec
         FROM <wire_format>
         TO SCHEMA metrics
         WITH JAQ TRANSFORMATION '.';
-
-      CREATE RELAY metrics_stream SCHEMA metrics;
-
-      CREATE VHOST edge http-binary-arrays-{{test_id}}.example.com;
-
-      CREATE ENDPOINT metrics_endpoint
+        CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
+        CREATE IF NOT EXISTS BRANCH by_metrics_ingestor BY device_branch TTL 5m;
+        CREATE RELAY metrics_stream SCHEMA metrics BRANCHED BY by_metrics_ingestor;
+        CREATE VHOST edge http-binary-arrays-{{test_id}}.example.com;
+        CREATE ENDPOINT metrics_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE INGESTOR metrics_ingestor
+        CREATE INGESTOR metrics_ingestor
         TO metrics_stream
         DECODE USING metrics_codec
-        PARAMETERIZED BY device_branch VALUES { device = metrics_stream.device } TTL 5m
+        BRANCHED BY by_metrics_ingestor VALUES { device = metrics_stream.device }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO metrics_stream;
-      START;
+        SUBSCRIBE SESSION TO metrics_stream;
+        START;
       """
     When http payload encoded as "<wire_format>" is posted to host "http-binary-arrays-{{test_id}}.example.com" path "/ingest"
       """
@@ -275,30 +261,26 @@ Feature: HTTP codec ingestion
         tenant STRING,
         user_id I64
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM <wire_format>
         TO SCHEMA notification
         WITH JAQ TRANSFORMATION '.';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     When http payload encoded as "<wire_format>" is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """

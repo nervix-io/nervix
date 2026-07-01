@@ -13,32 +13,27 @@ Feature: Memory pressure
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT memory_pressure_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_memory_pressure_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_memory_pressure_source;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT memory_pressure_ingress
         ON edge
         PATH '/memory-pressure'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR memory_pressure_source
+        CREATE INGESTOR memory_pressure_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_memory_pressure_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT memory_pressure_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      START;
+        START;
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "status: stopped"
     And within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "memory-backpressure: active"

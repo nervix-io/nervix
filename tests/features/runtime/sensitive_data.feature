@@ -24,7 +24,7 @@ Feature: Sensitive data
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -36,7 +36,7 @@ Feature: Sensitive data
       CREATE INGESTOR sensitive_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -95,8 +95,8 @@ Feature: Sensitive data
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;
-      CREATE RELAY public_notifications SCHEMA public_notification UNPARAMETERIZED;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE RELAY public_notifications SCHEMA public_notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -108,7 +108,7 @@ Feature: Sensitive data
       CREATE INGESTOR sensitive_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -116,7 +116,7 @@ Feature: Sensitive data
         FROM notifications
         TO public_notifications
           SET public_notifications.secret = leak_sensitive(notifications.secret)
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -159,13 +159,13 @@ Feature: Sensitive data
         secret STRING
       );
 
-      CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;
-      CREATE RELAY public_notifications SCHEMA public_notification UNPARAMETERIZED;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE RELAY public_notifications SCHEMA public_notification UNBRANCHED;
 
       CREATE DEDUPLICATOR leak_notifications
         FROM notifications
         TO public_notifications
-        UNPARAMETERIZED
+        UNBRANCHED
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -212,7 +212,7 @@ Feature: Sensitive data
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA emitted_notification;
 
-      CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -224,7 +224,7 @@ Feature: Sensitive data
       CREATE INGESTOR sensitive_notifications
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 

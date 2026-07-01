@@ -22,12 +22,12 @@ Feature: Relay capacity
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification CAPACITY 3;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;
       SHOW CREATE RELAY notifications;
       """
     Then the last command output contains
       """
-      CREATE RELAY notifications SCHEMA notification CAPACITY 3;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;
       """
 
     Examples:
@@ -36,7 +36,7 @@ Feature: Relay capacity
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: ALTER RELAY SET CAPACITY updates a parameterized relay and its active branches
+  Scenario Outline: ALTER RELAY SET CAPACITY updates a branched relay and its active branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -63,15 +63,15 @@ Feature: Relay capacity
         tenant STRING
       );
 
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_branch CAPACITY 2;
+      CREATE IF NOT EXISTS BRANCH by_relay_capacity_source BY tenant_branch TTL 5m;
+
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_capacity_source CAPACITY 2;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity' TYPE HTTP;
-
-      CREATE INGESTOR relay_capacity_source
+      CREATE ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity' TYPE HTTP; CREATE INGESTOR relay_capacity_source
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_relay_capacity_source VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT relay_capacity_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -99,7 +99,7 @@ Feature: Relay capacity
       """
     Then the last command output contains
       """
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_branch CAPACITY 5;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_capacity_source CAPACITY 5;
       """
     And within "5s" node "node-1" eventually reports describe relay as "capacity: 5"
       """
@@ -147,7 +147,7 @@ Feature: Relay capacity
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED CAPACITY 3;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;
 
       CREATE CLIENT zeromq_capacity_shrink
         TYPE ZEROMQ
@@ -162,7 +162,7 @@ Feature: Relay capacity
       CREATE INGESTOR relay_capacity_shrink_source
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT relay_capacity_shrink_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 

@@ -12,30 +12,26 @@ Feature: JAQ native codec
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM <format>
         TO SCHEMA notification
         WITH JAQ TRANSFORMATION '<transformation>';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And JAQ native payload fixture "<payload_fixture>" is posted to host "http-{{test_id}}.example.com" path "/ingest"
     Then the relay subscription receives a payload
@@ -71,50 +67,42 @@ Feature: JAQ native codec
         user_id I64,
         payload STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         payload string
       );
-
-      CREATE CODEC json_notification_codec
+        CREATE CODEC json_notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE CODEC xml_notification_codec
+        CREATE CODEC xml_notification_codec
         FROM XML
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "notification", c: [{t: "user_id", c: [(.user_id | tostring)]}, {t: "payload", c: [.payload]}]}';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING json_notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT kafka_main
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE EMITTER kafka_notifications
+        CREATE EMITTER kafka_notifications
         FROM notifications
         ENCODE USING xml_notification_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      START;
+        START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -158,7 +146,7 @@ Feature: JAQ native codec
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "notification", c: [{t: "user_id", c: [(.user_id | tostring)]}, {t: "payload", c: [.payload]}]}';
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-invalid-{{test_id}}.example.com;
 
@@ -170,7 +158,7 @@ Feature: JAQ native codec
       CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING xml_notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -199,7 +187,7 @@ Feature: JAQ native codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATION '.';
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE CLIENT kafka_main
         TYPE KAFKA

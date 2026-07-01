@@ -63,16 +63,16 @@ impl WebsocketsIngestor {
                 None
             };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
-        let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
+        let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
             &ingestor.name,
-            dependencies.parameterized_templates,
+            dependencies.branched_templates,
         );
-        let parameterized_senders = parameterized_runtime.senders.clone();
+        let branched_senders = branched_runtime.senders.clone();
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let parameterization = dependencies.parameterization;
+        let branching = dependencies.branching;
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -80,7 +80,7 @@ impl WebsocketsIngestor {
         let task_ingestor = ingestor.name.clone();
         let task_signaling_protocol = signaling_protocol.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_parameter_value_mappings = ingestor.parameterized_by.values().to_vec();
+        let task_branch_value_mappings = dependencies.branch_value_mappings.clone();
         let task_events = runtime.events.clone();
         let task_endpoint_requires_tls =
             match ServiceUrl::new(endpoint.as_str(), "WebSockets endpoint")
@@ -234,11 +234,11 @@ impl WebsocketsIngestor {
                                         &task_domain,
                                         &task_ingestor,
                                         task_timestamp_source.as_ref(),
-                                        &parameterization,
-                                        &task_parameter_value_mappings,
+                                        &branching,
+                                        &task_branch_value_mappings,
                                         &output_routes,
                                         filter_where.as_ref(),
-                                        &parameterized_senders,
+                                        &branched_senders,
                                         codec.clone(),
                                         payload.as_slice(),
                                         &task_events,
@@ -279,11 +279,11 @@ impl WebsocketsIngestor {
                                                         &task_domain,
                                                         &task_ingestor,
                                                         task_timestamp_source.as_ref(),
-                                                        &parameterization,
-                                                        &task_parameter_value_mappings,
+                                                        &branching,
+                                                        &task_branch_value_mappings,
                                                         &output_routes,
                                                         filter_where.as_ref(),
-                                                        &parameterized_senders,
+                                                        &branched_senders,
                                                         codec.clone(),
                                                         &payload,
                                                         &task_events,
@@ -355,7 +355,7 @@ impl WebsocketsIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime.runtimes,
+                branched: branched_runtime.runtimes,
                 tasks: vec![task],
             },
         );
@@ -368,11 +368,11 @@ impl WebsocketsIngestor {
         domain: &Domain,
         ingestor: &Identifier,
         timestamp_source: Option<&IngestTimestampSource>,
-        parameterization: &[Identifier],
-        parameter_value_mappings: &[ParameterValueMapping],
+        branching: &[Identifier],
+        branch_value_mappings: &[BranchValueMapping],
         output_routes: &RelayProcessorOutputsNode,
         filter_where: Option<&CompiledProgramWithMaterializedInterest>,
-        parameterized_senders: &HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
         codec: Arc<CompiledCodec>,
         payload: &[u8],
         events: &broadcast::Sender<RuntimeEvent>,
@@ -385,11 +385,11 @@ impl WebsocketsIngestor {
                         domain,
                         ingestor,
                         timestamp_source,
-                        parameterization,
-                        parameter_value_mappings: Some(parameter_value_mappings),
+                        branching,
+                        branch_value_mappings: Some(branch_value_mappings),
                         output_routes: &mut output_routes,
                         filter_where,
-                        parameterized_senders,
+                        branched_senders,
                         record,
                         filter_map_metadata: None,
                         ingested_at: current_timestamp(),

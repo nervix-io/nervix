@@ -21,7 +21,7 @@ Use the node's observability address, not the data-plane HTTP listener:
 curl http://127.0.0.1:<observability-port>/metrics
 ```
 
-Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a relay is parameterized by high-cardinality values such as tenant, user, account, or device id.
+Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a relay is branched by high-cardinality values such as tenant, user, account, or device id.
 
 ## Metric Labels
 
@@ -116,8 +116,8 @@ Histogram `DESCRIBE` lines do not include raw `count` / `sum` values or rates. F
 
 Relay buffer summaries use `relay_buffer_len`. The percentile values are queued
 batch slots observed on the relay consumer fan-out channel, and `capacity=<n>`
-shows the bounded channel capacity for that runtime buffer. Parameterized relays
-observe the internal branch-collapse fan-out channel; unparameterized relays
+shows the bounded channel capacity for that runtime buffer. Branched relays
+observe the internal branch-collapse fan-out channel; unbranched relays
 observe their direct consumer fan-out without inserting a collapse node. A
 branched relay can receive interleaved concrete branches through the same
 collapse point, so `DESCRIBE RELAY` reports observed buffer lengths as

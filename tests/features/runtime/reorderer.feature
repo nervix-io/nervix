@@ -13,46 +13,40 @@ Feature: Reorderer
         sequence I64,
         payload STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         sequence integer,
         payload string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY incoming_notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ordered_notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_branch TTL 5m;
+        CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO incoming_notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_notifications.tenant } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { tenant = incoming_notifications.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE REORDERER order_notifications
+        CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications PARAMETERIZED BY tenant_branch
+        TO ordered_notifications BRANCHED BY by_http_notifications
         BY incoming_notifications.sequence
         MAX TIME 10s
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -103,47 +97,41 @@ Feature: Reorderer
         priority I32,
         payload STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         category string,
         priority integer,
         payload string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY incoming_notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ordered_notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_branch TTL 5m;
+        CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO incoming_notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_notifications.tenant } TTL 5m
+        BRANCHED BY by_http_notifications VALUES { tenant = incoming_notifications.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE REORDERER order_notifications
+        CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications PARAMETERIZED BY tenant_branch
+        TO ordered_notifications BRANCHED BY by_http_notifications
         BY lower(trim(incoming_notifications.category)), abs(incoming_notifications.priority)
         MAX TIME 10s
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -199,15 +187,14 @@ Feature: Reorderer
         tenant STRING,
         sequence I64
       );
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY incoming_notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ordered_notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
-
-      CREATE REORDERER order_notifications
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_order_notifications BY tenant_branch TTL 5m;
+        CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_order_notifications;
+        CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_order_notifications;
+        CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications PARAMETERIZED BY tenant_branch
+        TO ordered_notifications BRANCHED BY by_order_notifications
         BY incoming_notifications.sequence
         MAX TIME 10s
         FLUSH EACH 2s MAX BATCH SIZE 1MiB

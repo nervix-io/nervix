@@ -14,53 +14,44 @@ Feature: Deduplicator state replication
         transaction_id STRING,
         amount I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer
       );
-
-      CREATE CODEC transaction_codec
+        CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss1 SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss2 SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_txns BY transaction_id_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-
-      CREATE INGESTOR source_txns
+        CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        CREATE DEDUPLICATOR dedup_txns
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      CREATE CLIENT kafka_main
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE EMITTER kafka_notifications
+        CREATE EMITTER kafka_notifications
         FROM ss2
         ENCODE USING transaction_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      START;
+        START;
       """
     Then within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload
       """

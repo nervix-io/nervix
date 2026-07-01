@@ -1,13 +1,13 @@
 use chumsky::prelude::*;
 use nervix_models::{
     AlterRelay, AlterRelayOperation, CreateRelay, CreateStatement, MaterializedRelayState,
-    RelayParameterization, RelayParameters, default_relay_buffer,
+    RelayBranching, default_relay_buffer,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, if_not_exists_clause,
+        ParseError, ParseFromSourceError, branch_ref, current_word_prefix, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, lex_input, relay_name, relay_ref, schema_ref,
         suggestions_from_errors, tok, word_raw,
     },
@@ -43,27 +43,16 @@ pub fn create_relay_parser<'src>()
 
     let capacity = kw(Identifier::Capacity).ignore_then(positive_usize());
 
-    let parameterized_tail = kw_phrase2(Identifier::Parameterized, Identifier::By)
-        .ignore_then(schema_ref())
+    let branched_tail = kw_phrase2(Identifier::Branched, Identifier::By)
+        .ignore_then(branch_ref())
         .then(capacity.clone().or_not())
-        .map(|(parameterized_by, buffer)| {
-            (
-                RelayParameterization::parameterized(RelayParameters::declared(parameterized_by)),
-                buffer,
-            )
-        });
+        .map(|(branch, buffer)| (RelayBranching::branched_by(branch), buffer));
 
-    let unparameterized_tail = kw(Identifier::Unparameterized)
+    let unbranched_tail = kw(Identifier::Unbranched)
         .ignore_then(capacity.clone().or_not())
-        .map(|buffer| (RelayParameterization::unparameterized(), buffer));
+        .map(|buffer| (RelayBranching::unbranched(), buffer));
 
-    let default_tail = capacity.map(|buffer| {
-        (
-            RelayParameterization::parameterized(RelayParameters::inferred()),
-            Some(buffer),
-        )
-    });
-    let tail = choice((parameterized_tail, unparameterized_tail, default_tail)).or_not();
+    let tail = choice((branched_tail, unbranched_tail));
 
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
@@ -75,19 +64,13 @@ pub fn create_relay_parser<'src>()
         .then(materialized_state.or_not())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
-            |((((if_not_exists, name), schema), tail), materialized_state)| {
-                let (parameterization, buffer) = tail.unwrap_or_else(|| {
-                    (
-                        RelayParameterization::parameterized(RelayParameters::inferred()),
-                        None,
-                    )
-                });
+            |((((if_not_exists, name), schema), (branching, buffer)), materialized_state)| {
                 CreateStatement::new(
                     CreateRelay {
                         name,
                         schema,
                         buffer: buffer.unwrap_or_else(default_relay_buffer),
-                        parameterization,
+                        branching,
                         materialized_state,
                     },
                     if_not_exists,
@@ -204,37 +187,57 @@ mod tests {
 
     #[test]
     fn parses_create_stream() {
-        let tokens = to_tokens("CREATE RELAY notifications SCHEMA event_schema;");
+        let tokens = to_tokens("CREATE RELAY notifications SCHEMA event_schema UNBRANCHED;");
         let parsed = parse_create_stream_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), "notifications");
         assert_eq!(parsed.schema.as_str(), "event_schema");
         assert_eq!(parsed.buffer, 1);
-        assert_eq!(
-            parsed.parameterization,
-            RelayParameterization::parameterized(RelayParameters::inferred())
-        );
+        assert_eq!(parsed.branching, RelayBranching::unbranched());
         assert_eq!(parsed.materialized_state, None);
     }
 
     #[test]
-    fn parses_create_parameterized_stream() {
-        let tokens = to_tokens(
-            "CREATE RELAY notifications SCHEMA event_schema PARAMETERIZED BY tenant_branch;",
-        );
+    fn parses_create_branched_stream() {
+        let tokens =
+            to_tokens("CREATE RELAY notifications SCHEMA event_schema BRANCHED BY by_tenant;");
         let parsed = parse_create_stream_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.parameterization,
-            RelayParameterization::parameterized(RelayParameters::declared(
-                nervix_models::Identifier::parse("tenant_branch").expect("valid identifier"),
-            ))
+            parsed.branching,
+            RelayBranching::branched_by(
+                nervix_models::Identifier::parse("by_tenant").expect("valid identifier"),
+            )
         );
     }
 
     #[test]
+    fn rejects_bare_by_stream() {
+        let error =
+            parse_create_stream("CREATE RELAY notifications SCHEMA event_schema BY tenant_branch;")
+                .expect_err("BY is only valid in CREATE BRANCH");
+
+        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+            panic!("expected parse error");
+        };
+        assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
+    fn rejects_stream_without_branch_mode() {
+        let error = parse_create_stream("CREATE RELAY notifications SCHEMA event_schema;")
+            .expect_err("relay must declare UNBRANCHED or BRANCHED BY");
+
+        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+            panic!("expected parse error");
+        };
+        assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
     fn parses_create_stream_with_explicit_capacity() {
-        let tokens = to_tokens("CREATE RELAY notifications SCHEMA event_schema CAPACITY 32;");
+        let tokens =
+            to_tokens("CREATE RELAY notifications SCHEMA event_schema UNBRANCHED CAPACITY 32;");
         let parsed = parse_create_stream_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(parsed.buffer, 32);
@@ -266,8 +269,8 @@ mod tests {
     #[test]
     fn parses_create_stream_with_materialized_state() {
         let tokens = to_tokens(
-            "CREATE RELAY notifications SCHEMA event_schema WITH MATERIALIZED STATE LAST BY \
-             TIMESTAMP;",
+            "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED WITH MATERIALIZED STATE \
+             LAST BY TIMESTAMP;",
         );
         let parsed = parse_create_stream_tokens(&tokens).expect("parse should succeed");
 
@@ -279,9 +282,10 @@ mod tests {
 
     #[test]
     fn rejects_zero_capacity() {
-        let error =
-            parse_create_stream("CREATE RELAY notifications SCHEMA event_schema CAPACITY 0;")
-                .expect_err("parse should fail");
+        let error = parse_create_stream(
+            "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED CAPACITY 0;",
+        )
+        .expect_err("parse should fail");
 
         let ParseFromSourceError::Parse { diagnostics, .. } = error else {
             panic!("expected parse error");
@@ -290,16 +294,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_unparameterized_without_ttl() {
-        let tokens = to_tokens("CREATE RELAY notifications SCHEMA event_schema UNPARAMETERIZED;");
+    fn parses_unbranched_without_ttl() {
+        let tokens = to_tokens("CREATE RELAY notifications SCHEMA event_schema UNBRANCHED;");
         let parsed = parse_create_stream_tokens(&tokens).expect("parse should succeed");
 
-        assert!(parsed.parameterization.is_unparameterized());
+        assert!(parsed.branching.is_unbranched());
     }
 
     #[test]
     fn rejects_branch_as_relay_name() {
-        let error = parse_create_stream("CREATE RELAY branch SCHEMA event_schema;")
+        let error = parse_create_stream("CREATE RELAY branch SCHEMA event_schema UNBRANCHED;")
             .expect_err("reserved branch namespace must not be accepted as relay name");
 
         let ParseFromSourceError::Parse { diagnostics, .. } = error else {
@@ -311,8 +315,8 @@ mod tests {
     #[test]
     fn rejects_branch_as_relay_reference() {
         let error = crate::statement::parse_statement(
-            "CREATE REINGESTOR fw FROM branch TO projected PARAMETERIZED BY tenant_branch VALUES \
-             { tenant = branch.tenant } TTL 5m FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR fw FROM branch TO projected BRANCHED BY tenant_branch VALUES { \
+             tenant = projected.tenant } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
         )
         .expect_err("reserved branch namespace must not be accepted as relay reference");
 
@@ -323,9 +327,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unparameterized_with_ttl() {
+    fn rejects_unbranched_with_ttl() {
         let error = parse_create_stream(
-            "CREATE RELAY notifications SCHEMA event_schema UNPARAMETERIZED TTL 5m;",
+            "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED TTL 5m;",
         )
         .expect_err("parse should fail");
 
@@ -343,8 +347,17 @@ mod tests {
     }
 
     #[test]
+    fn suggests_branch_mode_after_schema_reference_without_bare_by() {
+        let input = "CREATE RELAY notifications SCHEMA event_schema ";
+        let suggestions = suggest_create_stream(input, input.len());
+        assert!(suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(suggestions.contains(&"UNBRANCHED".to_string()));
+        assert!(!suggestions.contains(&"BY".to_string()));
+    }
+
+    #[test]
     fn suggests_relay_capacity_after_capacity_keyword_without_keyword_leakage() {
-        let input = "CREATE RELAY notifications SCHEMA event_schema CAPACITY ";
+        let input = "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED CAPACITY ";
         let suggestions = suggest_create_stream(input, input.len());
         assert!(suggestions.contains(&"relay_capacity".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -362,14 +375,14 @@ mod tests {
 
     #[test]
     fn does_not_suggest_ttl_after_capacity_value() {
-        let input = "CREATE RELAY notifications SCHEMA event_schema CAPACITY 32 ";
+        let input = "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED CAPACITY 32 ";
         let suggestions = suggest_create_stream(input, input.len());
         assert!(!suggestions.contains(&"TTL".to_string()));
     }
 
     #[test]
     fn rejects_relay_ttl() {
-        let input = "CREATE RELAY notifications SCHEMA event_schema TTL ";
+        let input = "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED TTL ";
         let error = parse_create_stream(input).expect_err("parse should fail");
 
         let ParseFromSourceError::Parse { diagnostics, .. } = error else {
@@ -380,14 +393,14 @@ mod tests {
 
     #[test]
     fn suggests_materialized_after_with() {
-        let input = "CREATE RELAY notifications SCHEMA event_schema WITH ";
+        let input = "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED WITH ";
         let suggestions = suggest_create_stream(input, input.len());
         assert!(suggestions.contains(&"MATERIALIZED".to_string()));
     }
 
     #[test]
-    fn does_not_suggest_ttl_after_unparameterized() {
-        let input = "CREATE RELAY notifications SCHEMA event_schema UNPARAMETERIZED ";
+    fn does_not_suggest_ttl_after_unbranched() {
+        let input = "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED ";
         let suggestions = suggest_create_stream(input, input.len());
         assert!(!suggestions.contains(&"TTL".to_string()));
     }

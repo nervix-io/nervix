@@ -12,39 +12,35 @@ Feature: Pulsar emission
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT pulsar_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_pulsar_ingress BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_ingress;
+        CREATE CLIENT pulsar_main
         TYPE PULSAR
         CONFIG {
           'addr' = 'pulsar://127.0.0.1:6650'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR pulsar_ingress
+        CREATE INGESTOR pulsar_ingress
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_pulsar_ingress VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM PULSAR pulsar_main
         TOPIC notifications_in_{{test_id}}
         SUBSCRIPTION nervix_pulsar_emission_{{test_id}}
         INSTANCES 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE EMITTER pulsar_notifications
+        CREATE EMITTER pulsar_notifications
         FROM notifications
         ENCODE USING notification_codec
         TO PULSAR pulsar_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-      START;
+        START;
       """
     And emitter "pulsar_notifications" enters stall mode
     And Pulsar message is published to topic "notifications_in_{{test_id}}"

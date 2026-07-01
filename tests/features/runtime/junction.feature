@@ -13,70 +13,63 @@ Feature: Relay junction
         source STRING,
         raw STRING
       );
-
-      CREATE SCHEMA notification_projection (
+        CREATE SCHEMA notification_projection (
         user_id I64,
         source STRING,
         lane STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         source string,
         raw string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss1 SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss2 SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss10 SCHEMA notification_projection PARAMETERIZED BY user_id_branch;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss20 SCHEMA notification_projection PARAMETERIZED BY user_id_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress_one
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_source_one BY user_id_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
+        CREATE IF NOT EXISTS BRANCH by_source_two BY user_id_branch TTL 5m;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
+        CREATE RELAY ss10 SCHEMA notification_projection BRANCHED BY by_source_one;
+        CREATE RELAY ss20 SCHEMA notification_projection BRANCHED BY by_source_one;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress_one
         ON edge
         PATH '/ingest-a'
         TYPE HTTP;
-
-      CREATE ENDPOINT ingress_two
+        CREATE ENDPOINT ingress_two
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR source_one
+        CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = ss1.user_id } TTL 5m
+        BRANCHED BY by_source_one VALUES { user_id = ss1.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR source_two
+        CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = ss2.user_id } TTL 5m
+        BRANCHED BY by_source_two VALUES { user_id = ss2.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE JUNCTION join_streams
+        CREATE JUNCTION join_streams
         FROM ss1 WHERE ss1.source != "drop-left",
              ss2 WHERE ss2.source != "drop-right"
         FILTER WHERE ss1.user_id > 0
         TO ss10 SET ss10.lane = "left" UNSET ss10.raw WHERE ss1.source = "left"
         TO ss20 SET ss20.lane = "right" UNSET ss20.raw WHERE ss1.source = "right"
-        PARAMETERIZED BY user_id_branch
+        BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss10;
-      SUBSCRIBE SESSION TO ss20;
-      START;
+        SUBSCRIBE SESSION TO ss10;
+        SUBSCRIBE SESSION TO ss20;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-a"
       """
@@ -116,57 +109,51 @@ Feature: Relay junction
         tenant STRING,
         source STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         source string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss1 SCHEMA notification PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss2 SCHEMA notification PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss10 SCHEMA notification PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress_one
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_one BY tenant_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
+        CREATE IF NOT EXISTS BRANCH by_source_two BY tenant_branch TTL 5m;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
+        CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress_one
         ON edge
         PATH '/branch-a'
         TYPE HTTP;
-
-      CREATE ENDPOINT ingress_two
+        CREATE ENDPOINT ingress_two
         ON edge
         PATH '/branch-b'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_one
+        CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_one VALUES { tenant = ss1.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_two
+        CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss2.tenant } TTL 5m
+        BRANCHED BY by_source_two VALUES { tenant = ss2.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE JUNCTION join_streams
+        CREATE JUNCTION join_streams
         FROM ss1, ss2
         TO ss10
-        PARAMETERIZED BY tenant_branch
+        BRANCHED BY by_source_one
         <flush_policy> ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss10;
-      START;
+        SUBSCRIBE SESSION TO ss10;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/branch-a"
       """
@@ -212,72 +199,66 @@ Feature: Relay junction
         user_id I64,
         source STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         source string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY state_notifications
-        SCHEMA notification PARAMETERIZED BY user_id_branch
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_state_source BY user_id_branch TTL 5m;
+        CREATE RELAY state_notifications
+        SCHEMA notification BRANCHED BY by_state_source
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss1 SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss2 SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss10 SCHEMA notification PARAMETERIZED BY user_id_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT state_ingress
+        CREATE IF NOT EXISTS BRANCH by_source_one BY user_id_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
+        CREATE IF NOT EXISTS BRANCH by_source_two BY user_id_branch TTL 5m;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
+        CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_state_source;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT state_ingress
         ON edge
         PATH '/state'
         TYPE HTTP;
-
-      CREATE ENDPOINT ingress_one
+        CREATE ENDPOINT ingress_one
         ON edge
         PATH '/ingest-a'
         TYPE HTTP;
-
-      CREATE ENDPOINT ingress_two
+        CREATE ENDPOINT ingress_two
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR state_source
+        CREATE INGESTOR state_source
         TO state_notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = state_notifications.user_id } TTL 5m
+        BRANCHED BY by_state_source VALUES { user_id = state_notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR source_one
+        CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = ss1.user_id } TTL 5m
+        BRANCHED BY by_source_one VALUES { user_id = ss1.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE INGESTOR source_two
+        CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_branch VALUES { user_id = ss2.user_id } TTL 5m
+        BRANCHED BY by_source_two VALUES { user_id = ss2.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE JUNCTION join_streams
+        CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 SET ss10.source = state_notifications.source PARAMETERIZED BY user_id_branch
+        TO ss10 SET ss10.source = state_notifications.source BRANCHED BY by_state_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss10;
-      START;
+        SUBSCRIBE SESSION TO ss10;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"
       """
@@ -315,23 +296,21 @@ Feature: Relay junction
         user_id I64,
         source STRING
       );
-
-      CREATE SCHEMA wide_notification (
+        CREATE SCHEMA wide_notification (
         user_id I64,
         source STRING,
         extra STRING
       );
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss1 SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss2 SCHEMA wide_notification PARAMETERIZED BY user_id_branch;
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY ss10 SCHEMA notification PARAMETERIZED BY user_id_branch;
-
-      CREATE JUNCTION join_streams
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_join_streams BY user_id_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_join_streams;
+        CREATE RELAY ss2 SCHEMA wide_notification BRANCHED BY by_join_streams;
+        CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_join_streams;
+        CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 PARAMETERIZED BY user_id_branch
+        TO ss10 BRANCHED BY by_join_streams
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
 

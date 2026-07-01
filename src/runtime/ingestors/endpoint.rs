@@ -36,10 +36,10 @@ impl EndpointIngestor {
         };
 
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
-        let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
+        let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
             &ingestor.name,
-            dependencies.parameterized_templates,
+            dependencies.branched_templates,
         );
         let binding = EndpointIngestBinding {
             runtime_key: key.clone(),
@@ -49,9 +49,9 @@ impl EndpointIngestor {
             output_routes: dependencies.output_routes,
             filter_where: dependencies.filter_where,
             codec: dependencies.codec,
-            parameterization: dependencies.parameterization,
-            parameter_value_mappings: ingestor.parameterized_by.values().to_vec(),
-            parameterized_senders: parameterized_runtime.senders.clone(),
+            branching: dependencies.branching,
+            branch_value_mappings: dependencies.branch_value_mappings.clone(),
+            branched_senders: branched_runtime.senders.clone(),
         };
 
         let route_keys = route
@@ -75,7 +75,7 @@ impl EndpointIngestor {
             key,
             IngestorRuntime::Endpoint {
                 route_keys,
-                parameterized: parameterized_runtime.runtimes,
+                branched: branched_runtime.runtimes,
             },
         );
 

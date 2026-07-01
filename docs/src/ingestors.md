@@ -5,12 +5,13 @@ Ingestors are the entry points into the runtime graph.
 A typical ingestor:
 
 ```nspl
+CREATE BRANCH by_user
+  BY user_branch TTL 5m;
+
 CREATE [IF NOT EXISTS] INGESTOR kafka_notifications
   TO notifications
   DECODE USING notification_codec
-  PARAMETERIZED BY user_branch VALUES {
-    user_id = notifications.user_id
-  } TTL 5m
+  BRANCHED BY by_user
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   TIMESTAMP NOW
   FROM KAFKA kafka_main
@@ -26,8 +27,7 @@ Every ingestor defines:
 
 - the destination relay or relays
 - the codec used for decoding
-- the parameterization schema and direct outgoing-field mappings used for branch grouping
-- the branch TTL for parameterized branch groups
+- the explicit branch to use, or `UNBRANCHED`
 - the batch flush interval
 - the timestamp source
 - the transport-specific source
@@ -40,18 +40,20 @@ At runtime, the ingestor:
 
 - decodes inbound payloads into runtime records
 - optionally executes `FILTER WHERE` against the decoded input batch
-- resolves the concrete branch group from `PARAMETERIZED BY <schema> VALUES { ... }`
+- resolves the concrete branch group from the referenced `CREATE BRANCH`
 - accumulates decoded rows for that group until the flush interval fires
 - writes buffered rows into each matching destination relay inside that group's branch
 
 ## Branch Semantics
 
-Ingestors are where external mixed flows enter branch-isolated processing. The ingestor computes a parameter group for each decoded row:
+Ingestors are where external mixed flows enter branch-isolated processing. The ingestor references an explicit branch and owns the record-to-key value mapping. The branch declaration owns the key schema, TTL, and optional LRU eviction policy:
 
-- `PARAMETERIZED BY <schema> VALUES { field = relay.field, ... }` computes the group from direct values on the outgoing relay record
-- `PARAMETERIZED BY <schema> VALUES { ... } TTL <duration>` makes inactive concrete branch groups expire after the same duration across relays and downstream processor state
-- `UNPARAMETERIZED` uses the single root group without declaring or referencing a branch schema, and does not declare TTL
-- the parameterization schema defines the branch key shape shared by downstream relays and branch-preserving processors
+- `CREATE BRANCH <branch> BY <schema> TTL <duration>` declares the branch key schema and lifetime
+- `BRANCHED BY <branch> VALUES { field = relay.field, ... }` computes the group from direct values on the outgoing relay record
+- `MAX INSTANCES <n> EVICT LRU` may be added to cap active concrete branch instances and evict the least recently used branch when capacity is reached
+- `BRANCHED BY <branch>` tells the ingestor to use that explicit branch
+- `UNBRANCHED` uses the single root group without declaring or referencing a branch schema, and does not declare TTL
+- the branching schema defines the branch key shape shared by downstream relays and branch-preserving processors
 - decoded rows are appended to matching destination relays inside that group's branch
 - downstream normal processors keep the same group until a `REINGESTOR` or `EMITTER` boundary
 
@@ -60,7 +62,7 @@ Per-group behavior such as downstream deduplication, reordering, and window aggr
 Batching follows that same rule:
 
 - an ingestor buffers independently per concrete branch group
-- `UNPARAMETERIZED` produces one root branch and one batcher
+- `UNBRANCHED` produces one root branch and one batcher
 
 Client-backed ingestors can use resource-mounted client config values for TLS material and other file-based settings. See [Resources](resources.md#client-config-mounts).
 
@@ -69,6 +71,9 @@ Client-backed ingestors can use resource-mounted client config values for TLS ma
 Ingestors may declare an optional arrival filter and per-route filter-map clauses:
 
 ```nspl
+CREATE BRANCH by_tenant
+  BY tenant_branch TTL 5m;
+
 CREATE [IF NOT EXISTS] INGESTOR notifications_in
   FILTER WHERE message.active
   TO notifications
@@ -76,9 +81,7 @@ CREATE [IF NOT EXISTS] INGESTOR notifications_in
     UNSET notifications.raw
     WHERE message.tenant = 'acme'
   DECODE USING notification_codec
-  PARAMETERIZED BY tenant_branch VALUES {
-    tenant = notifications.tenant
-  } TTL 5m
+  BRANCHED BY by_tenant
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
   ON MESSAGE ERROR LOG
@@ -273,9 +276,9 @@ MODE ACK SEQUENTIAL
 ```
 
 - Kinesis maps cleanly to the emitter-side "publish bytes to a named relay" model
-- `UNPARAMETERIZED` always means the single root branch
+- `UNBRANCHED` always means the single root branch
 - transport keys such as the Kinesis partition key do not implicitly choose Nervix relay branches
-- if you want branching by transport-derived data, decode that data into record fields and name those fields in `PARAMETERIZED BY <schema>`
+- if you want branching by transport-derived data, decode that data into record fields and reference those fields from the ingestor `BRANCHED BY ... VALUES { ... }` mapping
 - `INSTANCES` spreads open shards across local worker tasks on the assigned execution node
 - unlike Kafka, there is no broker-managed `CONSUMER GROUP` clause here
 - this first cut does not provide Kafka-style replicated durable checkpoints or rebalance scheduling; startup position is controlled on the `CLIENT` with `start_position = 'latest'|'trim_horizon'`

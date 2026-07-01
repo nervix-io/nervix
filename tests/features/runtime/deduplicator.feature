@@ -12,44 +12,37 @@ Feature: Relay deduplication
         transaction_id STRING,
         amount I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer
       );
-
-      CREATE CODEC transaction_codec
+        CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss1 SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss2 SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_txns BY transaction_id_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING ); CREATE INGESTOR source_txns
+        CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        CREATE DEDUPLICATOR dedup_txns
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss2;
-
-      START;
+        SUBSCRIBE SESSION TO ss2;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup"
       """
@@ -84,40 +77,34 @@ Feature: Relay deduplication
         transaction_id STRING,
         amount I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer
       );
-
-      CREATE CODEC transaction_codec
+        CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss1 SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss2 SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/dedup-expire' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING ); CREATE INGESTOR source_txns
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_txns BY transaction_id_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/dedup-expire' TYPE HTTP;
+        CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        CREATE DEDUPLICATOR dedup_txns
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 300ms
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss2;
-
-      START;
+        SUBSCRIBE SESSION TO ss2;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup-expire"
       """
@@ -162,46 +149,39 @@ Feature: Relay deduplication
         amount I32,
         payload STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         tenant string,
         transaction_id string,
         amount integer,
         payload string
       );
-
-      CREATE CODEC transaction_codec
+        CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss1 SCHEMA transaction PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss2 SCHEMA transaction PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_txns BY tenant_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/dedup-functions'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_txns
+        CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_txns VALUES { tenant = ss1.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY tenant_branch
+        CREATE DEDUPLICATOR dedup_txns
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON lower(trim(ss1.transaction_id)), abs(ss1.amount)
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss2 WHERE ss2.tenant = 'acme';
-
-      START;
+        SUBSCRIBE SESSION TO ss2 WHERE ss2.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup-functions"
       """
@@ -246,39 +226,34 @@ Feature: Relay deduplication
         transaction_id STRING,
         amount I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         tenant string,
         transaction_id string,
         amount integer
       );
-
-      CREATE CODEC transaction_codec
+        CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss1 SCHEMA transaction PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY ss2 SCHEMA transaction PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/dedup-describe' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_txns
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_txns BY tenant_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/dedup-describe' TYPE HTTP;
+        CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant } TTL 5m
+        BRANCHED BY by_source_txns VALUES { tenant = ss1.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY tenant_branch
+        CREATE DEDUPLICATOR dedup_txns
+        FROM ss1 TO ss2 BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      DESCRIBE DEDUPLICATOR dedup_txns;
+        DESCRIBE DEDUPLICATOR dedup_txns;
       """
     Then the last command output contains
       """
@@ -329,60 +304,50 @@ Feature: Relay deduplication
         amount I32,
         source STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         transaction_id string,
         amount integer,
         source string
       );
-
-      CREATE CODEC transaction_codec
+        CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-
-      CREATE RELAY state_txns
-        SCHEMA transaction
+        CREATE RELAY state_txns
+        SCHEMA transaction UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss1 SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss2 SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT state_ingress
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_txns BY transaction_id_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT state_ingress
         ON edge
         PATH '/state'
         TYPE HTTP;
-
-      CREATE ENDPOINT ingress
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-
-      CREATE INGESTOR state_txns_ingestor
+        CREATE INGESTOR state_txns_ingestor
         TO state_txns
         DECODE USING transaction_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE INGESTOR source_txns
+        CREATE INGESTOR source_txns
         TO ss1
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = ss1.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 SET ss2.source = state_txns.source PARAMETERIZED BY transaction_id_branch
+        CREATE DEDUPLICATOR dedup_txns
+        FROM ss1 TO ss2 SET ss2.source = state_txns.source BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO ss2;
-
-      START;
+        SUBSCRIBE SESSION TO ss2;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"
       """
@@ -420,14 +385,13 @@ Feature: Relay deduplication
         user_id I64,
         source STRING
       );
-
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss1 SCHEMA notification PARAMETERIZED BY transaction_id_branch;
-      CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY ss2 SCHEMA notification PARAMETERIZED BY transaction_id_branch;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 PARAMETERIZED BY transaction_id_branch
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
+        CREATE IF NOT EXISTS BRANCH by_dedup_txns BY transaction_id_branch TTL 5m;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_dedup_txns;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_dedup_txns;
+        CREATE DEDUPLICATOR dedup_txns
+        FROM ss1 TO ss2 BRANCHED BY by_dedup_txns
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

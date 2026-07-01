@@ -9,57 +9,39 @@ struct ScheduledIngestorStartSpec {
     kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
 }
 
-fn branch_relay_ttls_from_parameterized_specs(
-    specs: &[ParameterizedIngestorSpec],
-) -> Result<HashMap<Identifier, Duration>, String> {
-    let mut ttls = HashMap::default();
-    for spec in specs {
-        let Some(raw_ttl) = spec.branch_ttl.as_deref() else {
-            continue;
-        };
-        let ttl = humantime::parse_duration(raw_ttl).map_err(|error| {
-            format!(
-                "invalid branch ttl '{}' for {} '{}': {}",
-                raw_ttl,
-                spec.kind.as_str(),
-                spec.identifier.as_str(),
-                error
-            )
-        })?;
-        for relay in spec.relay_ids() {
-            if let Some(existing) = ttls.get(&relay) {
-                if *existing != ttl {
-                    return Err(format!(
-                        "relay '{}' belongs to multiple parameterized branch roots with \
-                         conflicting TTLs",
-                        relay.as_str()
-                    ));
-                }
-            } else {
-                ttls.insert(relay, ttl);
-            }
-        }
-    }
-    Ok(ttls)
+fn branch_relays_from_branched_specs(specs: &[BranchedIngestorSpec]) -> HashSet<Identifier> {
+    specs
+        .iter()
+        .filter(|spec| spec.branch_ttl.is_some())
+        .flat_map(BranchedIngestorSpec::relay_ids)
+        .collect()
 }
 
-fn relay_parameterization_schema_for_runtime(
+fn relay_branching_schema_for_runtime(
     domain: &Domain,
     relay_identifier: &Identifier,
     relay: &CreateRelay,
-    effective_parameterization_schema: Option<&Identifier>,
+    effective_branching_schema: Option<&Identifier>,
     schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
 ) -> Result<Option<Arc<arrow_schema::Schema>>, RuntimeError> {
-    let Some(schema_name) =
-        effective_parameterization_schema.or_else(|| relay.parameterization.parameterized_by())
-    else {
+    let Some(schema_name) = effective_branching_schema else {
+        if let Some(branch) = relay.branching.branch() {
+            return Err(RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "missing effective branch branching schema for relay '{}' branched by '{}'",
+                    relay_identifier.as_str(),
+                    branch.as_str()
+                ),
+            });
+        }
         return Ok(None);
     };
     let Some(schema) = schemas.get(schema_name) else {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
             reason: format!(
-                "missing branch parameterization schema '{}' for relay '{}'",
+                "missing branch schema '{}' for relay '{}'",
                 schema_name.as_str(),
                 relay_identifier.as_str()
             ),
@@ -287,13 +269,13 @@ impl Runtime {
         };
         Ok(EmitterTaskDeps {
             input_schema,
-            input_parameterization: deps
-                .relay_parameterizations
+            input_branching: deps
+                .relay_branchings
                 .get(&emitter.from_relay)
                 .cloned()
                 .unwrap_or_default(),
-            input_parameterization_schema: deps
-                .relay_parameterization_schemas
+            input_branching_schema: deps
+                .relay_branching_schemas
                 .get(&emitter.from_relay)
                 .cloned()
                 .flatten(),
@@ -375,9 +357,9 @@ impl Runtime {
                 WasmRuntime::new(WasmRuntimeConfig::default())
                     .expect("wasm runtime should initialize"),
             ),
-            parametrizer_expiration_scan_interval: hooks
-                .parametrizer_expiration_scan_interval
-                .unwrap_or(PARAMETRIZER_EXPIRATION_SCAN_INTERVAL),
+            branch_instance_expiration_scan_interval: hooks
+                .branch_instance_expiration_scan_interval
+                .unwrap_or(BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL),
             state_store,
             state_snapshot_interval,
             state_replication_poll_interval: DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
@@ -1536,96 +1518,6 @@ impl Runtime {
         }))
     }
 
-    pub(in crate::runtime) fn spawn_stream_expiration_task(
-        &self,
-        shutdown_tx: &watch::Sender<bool>,
-        domain: &Domain,
-        relay: &Identifier,
-        state: Arc<ExpiringRelayState>,
-    ) -> JoinHandle<()> {
-        let runtime = self.clone();
-        let task_domain = domain.clone();
-        let task_relay = relay.clone();
-        let scan_interval = self.parametrizer_expiration_scan_interval;
-        let mut shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                    _ = sleep(scan_interval) => {
-                        let now = match runtime.current_stream_expiration_time(&task_domain) {
-                            Ok(Some(now)) => now,
-                            Ok(None) => continue,
-                            Err(error) => {
-                                warn!(
-                                    domain = task_domain.as_str(),
-                                    relay = task_relay.as_str(),
-                                    error = %error,
-                                    "failed to evaluate relay expiration clock"
-                                );
-                                continue;
-                            }
-                        };
-                        for key in state.expire(now) {
-                            let Some(key) = key else {
-                                continue;
-                            };
-                            debug!(
-                                domain = task_domain.as_str(),
-                                relay = task_relay.as_str(),
-                                key = key.as_str(),
-                                "expired concrete relay"
-                            );
-                            let placement = RuntimeStatePlacement {
-                                domain: task_domain.clone(),
-                                state: RuntimeStateKind::MaterializedRelay,
-                                kind: ModelKind::Materializer,
-                                identifier: task_relay.clone(),
-                                branch_key: Some(key.clone()),
-                            };
-                            if let Some(materialized_state) =
-                                runtime.replicated_materialized_stream_states.get(&placement)
-                            {
-                                let local_node_id = runtime.local_node_id.read().clone();
-                                let is_primary = match (
-                                    materialized_state.primary_node.as_deref(),
-                                    local_node_id.as_deref(),
-                                ) {
-                                    (Some(primary_node), Some(local_node_id)) => {
-                                        primary_node == local_node_id
-                                    }
-                                    (None, _) => true,
-                                    _ => false,
-                                };
-                                if is_primary
-                                    && let Err(error) = runtime
-                                        .delete_materialized_stream_key(
-                                            &materialized_state,
-                                            &Some(key.clone()),
-                                        )
-                                        .await
-                                {
-                                    warn!(
-                                        domain = task_domain.as_str(),
-                                        relay = task_relay.as_str(),
-                                        key = key.as_str(),
-                                        error = %error,
-                                        "failed to delete expired materialized relay key"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })
-    }
-
     pub(in crate::runtime) fn spawn_kafka_offset_replica_poll_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
@@ -1837,6 +1729,18 @@ impl Runtime {
         }
     }
 
+    pub(in crate::runtime) fn remove_stream_key_presence(
+        &self,
+        domain: &Domain,
+        relay: &Identifier,
+        key: &Option<BranchKey>,
+    ) {
+        let runtime_key = RuntimeKey::new(domain.clone(), relay.clone());
+        if let Some(state) = self.expiring_stream_states.get(&runtime_key) {
+            state.remove(key);
+        }
+    }
+
     pub(in crate::runtime) async fn ingest_stream_boundary_message(
         &self,
         domain: &Domain,
@@ -1913,13 +1817,12 @@ impl Runtime {
         &self,
         domain: &Domain,
         relay: &Identifier,
-        ttl: Duration,
     ) -> Arc<ExpiringRelayState> {
         let runtime_key = RuntimeKey::new(domain.clone(), relay.clone());
         if let Some(existing) = self.expiring_stream_states.get(&runtime_key) {
             return existing.clone();
         }
-        let state = Arc::new(ExpiringRelayState::new(ttl));
+        let state = Arc::new(ExpiringRelayState::new());
         self.expiring_stream_states
             .insert(runtime_key, state.clone());
         state
@@ -2606,8 +2509,8 @@ impl Runtime {
                 domain.as_str()
             ));
         };
-        let parameterization = execution
-            .relay_parameterizations
+        let branching = execution
+            .relay_branchings
             .get(relay)
             .cloned()
             .unwrap_or_default();
@@ -2627,10 +2530,10 @@ impl Runtime {
             )
         }))
         .into_runtime_record(message.record.metadata().clone());
-        let key = if parameterization.is_empty() {
+        let key = if branching.is_empty() {
             None
         } else {
-            resolve_concrete_branch(&dlq_record, &parameterization, node)?.into_relay_key()
+            resolve_concrete_branch(&dlq_record, &branching, node)?.into_relay_key()
         };
         let batch = RelayRecordBatch::single(schema, key, dlq_record, AckSet::empty())?;
         self.ingest_stream_boundary_message(domain, relay, &registry, &services, &batch)
@@ -2679,10 +2582,10 @@ impl Runtime {
             ),
         );
         if let Some(filter_where) = dispatch.filter_where {
-            let branch_key = if let Some(mappings) = dispatch.parameter_value_mappings {
+            let branch_key = if let Some(mappings) = dispatch.branch_value_mappings {
                 resolve_concrete_branch_from_mappings(&record, None, mappings, dispatch.ingestor)?
             } else {
-                resolve_concrete_branch(&record, dispatch.parameterization, dispatch.ingestor)?
+                resolve_concrete_branch(&record, dispatch.branching, dispatch.ingestor)?
             }
             .into_relay_key();
             let side_inputs = self
@@ -2734,7 +2637,7 @@ impl Runtime {
         let relay_schemas = execution.relay_schemas.clone();
         let relay_registries = execution.relay_registries.clone();
         let relay_services = execution.relay_services.clone();
-        let relay_parameterizations = execution.relay_parameterizations.clone();
+        let relay_branchings = execution.relay_branchings.clone();
         let owner_nodes = execution.materialized_stream_owner_nodes.clone();
         drop(execution);
         self.metrics
@@ -2755,13 +2658,13 @@ impl Runtime {
         let mut routed_records = Vec::new();
         for output in &dispatch.output_routes.routes {
             let output_record = if let Some(filter_map) = output.compiled_program.as_ref() {
-                let empty_parameterization = Vec::new();
-                let output_parameterization = relay_parameterizations
+                let empty_branching = Vec::new();
+                let output_branching = relay_branchings
                     .get(&output.relay)
-                    .unwrap_or(&empty_parameterization);
-                let branch_key = if output_parameterization.is_empty() {
+                    .unwrap_or(&empty_branching);
+                let branch_key = if output_branching.is_empty() {
                     ConcreteBranch::Root
-                } else if let Some(mappings) = dispatch.parameter_value_mappings {
+                } else if let Some(mappings) = dispatch.branch_value_mappings {
                     resolve_concrete_branch_from_mappings(
                         &record,
                         None,
@@ -2769,7 +2672,7 @@ impl Runtime {
                         dispatch.ingestor,
                     )?
                 } else {
-                    resolve_concrete_branch(&record, output_parameterization, dispatch.ingestor)?
+                    resolve_concrete_branch(&record, output_branching, dispatch.ingestor)?
                 }
                 .into_relay_key();
                 let side_inputs = self
@@ -2813,16 +2716,15 @@ impl Runtime {
             let acks = ack_queue
                 .pop_front()
                 .expect("ack queue must match routed output count");
-            if let Some(sender) = dispatch.parameterized_senders.get(&relay) {
+            if let Some(sender) = dispatch.branched_senders.get(&relay) {
                 if let Err(error) = sender
-                    .send(ParameterizedEntrypointInput::UnresolvedRecord {
+                    .send(BranchedEntrypointInput::UnresolvedRecord {
                         record: output_record,
                         acks,
                     })
                     .await
                 {
-                    let ParameterizedEntrypointInput::UnresolvedRecord { acks, .. } = error.0
-                    else {
+                    let BranchedEntrypointInput::UnresolvedRecord { acks, .. } = error.0 else {
                         continue;
                     };
                     self.handle_general_error_for_acks(
@@ -2832,8 +2734,8 @@ impl Runtime {
                         &ErrorPolicies::handled_by_log(),
                         std::iter::once(&acks),
                         format!(
-                            "ingestor '{}' failed to forward record to parametrization entrypoint \
-                             for relay '{}'",
+                            "ingestor '{}' failed to forward record to branch entrypoint for \
+                             relay '{}'",
                             dispatch.ingestor.as_str(),
                             relay.as_str()
                         ),
@@ -2841,13 +2743,11 @@ impl Runtime {
                 }
                 continue;
             }
-            let empty_parameterization = Vec::new();
-            let output_parameterization = relay_parameterizations
-                .get(&relay)
-                .unwrap_or(&empty_parameterization);
-            let key = if output_parameterization.is_empty() {
+            let empty_branching = Vec::new();
+            let output_branching = relay_branchings.get(&relay).unwrap_or(&empty_branching);
+            let key = if output_branching.is_empty() {
                 ConcreteBranch::Root
-            } else if let Some(mappings) = dispatch.parameter_value_mappings {
+            } else if let Some(mappings) = dispatch.branch_value_mappings {
                 resolve_concrete_branch_from_mappings(
                     &output_record,
                     None,
@@ -2855,7 +2755,7 @@ impl Runtime {
                     dispatch.ingestor,
                 )?
             } else {
-                resolve_concrete_branch(&output_record, output_parameterization, dispatch.ingestor)?
+                resolve_concrete_branch(&output_record, output_branching, dispatch.ingestor)?
             }
             .into_relay_key();
             let Some(schema) = relay_schemas.get(&relay).cloned() else {
@@ -2934,10 +2834,10 @@ impl Runtime {
 
         let mut rows_by_branch = HashMap::<Option<BranchKey>, Vec<usize>>::default();
         for (row, record) in selection.records.iter().enumerate() {
-            let branch_key = if let Some(mappings) = selection.parameter_value_mappings {
+            let branch_key = if let Some(mappings) = selection.branch_value_mappings {
                 resolve_concrete_branch_from_mappings(record, None, mappings, selection.ingestor)?
             } else {
-                resolve_concrete_branch(record, selection.parameterization, selection.ingestor)?
+                resolve_concrete_branch(record, selection.branching, selection.ingestor)?
             }
             .into_relay_key();
             rows_by_branch.entry(branch_key).or_default().push(row);
@@ -3255,27 +3155,27 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) fn start_parameterized_entrypoint_runtime(
+    pub(in crate::runtime) fn start_branched_entrypoint_runtime(
         &self,
         domain: &Domain,
         identifier: &Identifier,
-        parameterized: Option<(SharedActiveGraph, ParametrizerTemplate)>,
-    ) -> Option<Arc<ParameterizedIngestorRuntime>> {
-        parameterized.map(|(graph, template)| {
-            ParameterizedIngestorRuntime::new(
+        branched: Option<(SharedActiveGraph, BranchInstanceTemplate)>,
+    ) -> Option<Arc<BranchedIngestorRuntime>> {
+        branched.map(|(graph, template)| {
+            BranchedIngestorRuntime::new(
                 self.clone(),
                 domain.clone(),
                 identifier.clone(),
                 graph,
                 template,
-                self.parametrizer_expiration_scan_interval,
+                self.branch_instance_expiration_scan_interval,
             )
         })
     }
 
-    fn parameterized_specs_by_identifier(
-        specs: &[ParameterizedIngestorSpec],
-    ) -> HashMap<Identifier, Vec<ParameterizedIngestorSpec>> {
+    fn branched_specs_by_identifier(
+        specs: &[BranchedIngestorSpec],
+    ) -> HashMap<Identifier, Vec<BranchedIngestorSpec>> {
         let mut specs_by_identifier = HashMap::default();
         for spec in specs {
             specs_by_identifier
@@ -3286,26 +3186,26 @@ impl Runtime {
         specs_by_identifier
     }
 
-    pub(in crate::runtime) fn start_parameterized_ingestor_runtime(
+    pub(in crate::runtime) fn start_branched_ingestor_runtime(
         &self,
         domain: &Domain,
         ingestor: &Identifier,
-        parameterized: HashMap<Identifier, (SharedActiveGraph, ParametrizerTemplate)>,
-    ) -> ParameterizedIngestorRuntimes {
-        let mut roots = parameterized.into_iter().collect::<Vec<_>>();
+        branched: HashMap<Identifier, (SharedActiveGraph, BranchInstanceTemplate)>,
+    ) -> BranchedIngestorRuntimes {
+        let mut roots = branched.into_iter().collect::<Vec<_>>();
         roots.sort_by(|left, right| left.0.cmp(&right.0));
         let mut runtimes = Vec::with_capacity(roots.len());
         let mut senders = HashMap::with_capacity(roots.len());
         for (root_relay, template) in roots {
             let Some(runtime) =
-                self.start_parameterized_entrypoint_runtime(domain, ingestor, Some(template))
+                self.start_branched_entrypoint_runtime(domain, ingestor, Some(template))
             else {
                 continue;
             };
             senders.insert(root_relay, runtime.sender());
             runtimes.push(runtime);
         }
-        ParameterizedIngestorRuntimes { runtimes, senders }
+        BranchedIngestorRuntimes { runtimes, senders }
     }
 
     pub async fn apply_cluster_schedule(
@@ -3548,8 +3448,8 @@ impl Runtime {
         domain_graph.store(None);
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
-        let mut relay_parameterizations = HashMap::new();
-        let mut relay_parameterization_schemas = HashMap::new();
+        let mut relay_branchings = HashMap::new();
+        let mut relay_branching_schemas = HashMap::new();
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
@@ -3573,17 +3473,10 @@ impl Runtime {
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let all_parameterized_specs =
-            parameterized_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
-        let branch_relay_ttls = branch_relay_ttls_from_parameterized_specs(
-            &all_parameterized_specs,
-        )
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason,
-        })?;
-        let handled_processors = parameterized_processor_ids(&all_parameterized_specs);
-        let parameterized_specs = all_parameterized_specs
+        let all_branched_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
+        let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
+        let handled_processors = branched_processor_ids(&all_branched_specs);
+        let branched_specs = all_branched_specs
             .into_iter()
             .filter(|spec| {
                 schedule
@@ -3717,15 +3610,15 @@ impl Runtime {
                         ),
                     });
                 };
-                let expiring_state = branch_relay_ttls
-                    .get(&node.identifier)
-                    .map(|ttl| self.expiring_stream_state(domain, &node.identifier, *ttl));
+                let expiring_state = branch_relays
+                    .contains(&node.identifier)
+                    .then(|| self.expiring_stream_state(domain, &node.identifier));
                 let capacity = Self::relay_capacity(domain, &node.identifier, relay.buffer)?;
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
                         domain,
                         &node.identifier,
-                        !relay.parameterization.is_unparameterized(),
+                        !relay.branching.is_unbranched(),
                         capacity,
                     )
                     .await;
@@ -3743,19 +3636,18 @@ impl Runtime {
                         remote_runtime_consumers: Vec::new(),
                     },
                 );
-                relay_parameterizations.insert(
+                relay_branchings.insert(
                     node.identifier.clone(),
-                    node.effective_parameterization.clone().unwrap_or_default(),
+                    node.effective_branching.clone().unwrap_or_default(),
                 );
-                let parameterization_schema = relay_parameterization_schema_for_runtime(
+                let branching_schema = relay_branching_schema_for_runtime(
                     domain,
                     &node.identifier,
                     relay,
-                    None,
+                    node.effective_branching_schema.as_ref(),
                     &schemas,
                 )?;
-                relay_parameterization_schemas
-                    .insert(node.identifier.clone(), parameterization_schema);
+                relay_branching_schemas.insert(node.identifier.clone(), branching_schema);
                 relay_schemas.insert(node.identifier.clone(), schema);
                 if relay.materialized_state.is_some() {
                     materialized_stream_specs.insert(
@@ -3769,21 +3661,10 @@ impl Runtime {
                                 .get(&node.identifier)
                                 .expect("inserted relay schema must exist")
                                 .vm_sensitivity(),
-                            parameterization: node
-                                .effective_parameterization
-                                .clone()
-                                .unwrap_or_default(),
+                            branching: node.effective_branching.clone().unwrap_or_default(),
                         },
                     );
                     materialized_stream_owner_nodes.insert(node.identifier.clone(), None);
-                }
-                if let Some(expiring_state) = expiring_state {
-                    tasks.push(self.spawn_stream_expiration_task(
-                        &shutdown_tx,
-                        domain,
-                        &node.identifier,
-                        expiring_state,
-                    ));
                 }
             }
         }
@@ -3826,7 +3707,7 @@ impl Runtime {
                             ),
                         });
                     };
-                    let output_parameterization = relay_parameterizations
+                    let output_branching = relay_branchings
                         .get(&generator.into_relay)
                         .cloned()
                         .unwrap_or_default();
@@ -3881,7 +3762,7 @@ impl Runtime {
                         program,
                         source_streams,
                         source_nodes,
-                        output_parameterization,
+                        output_branching,
                         output_schema,
                     ));
                 }
@@ -4180,13 +4061,13 @@ impl Runtime {
             })
             .collect::<HashMap<_, _>>();
 
-        let mut parameterized_entrypoints = HashMap::new();
-        let mut parameterized_entrypoint_senders = HashMap::new();
-        for spec in &parameterized_specs {
+        let mut branched_entrypoints = HashMap::new();
+        let mut branched_entrypoint_senders = HashMap::new();
+        for spec in &branched_specs {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let template = materialize_parametrizer_template(
+            let template = materialize_branch_instance_template(
                 spec,
                 &model_index,
                 &relay_schemas,
@@ -4197,15 +4078,15 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason,
             })?;
-            let Some(runtime) = self.start_parameterized_entrypoint_runtime(
+            let Some(runtime) = self.start_branched_entrypoint_runtime(
                 domain,
                 &spec.identifier,
                 Some((domain_graph.clone(), template)),
             ) else {
                 continue;
             };
-            parameterized_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            parameterized_entrypoints
+            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
+            branched_entrypoints
                 .entry(spec.identifier.clone())
                 .or_insert_with(Vec::new)
                 .push(runtime);
@@ -4215,21 +4096,15 @@ impl Runtime {
         let execution_build_deps = ExecutionBuildDeps {
             domain,
             relay_schemas: &relay_schemas,
-            relay_parameterizations: &relay_parameterizations,
-            relay_parameterization_schemas: &relay_parameterization_schemas,
+            relay_branchings: &relay_branchings,
+            relay_branching_schemas: &relay_branching_schemas,
             materialized_relay_specs: &materialized_stream_specs,
             materialized_relay_owner_nodes: &materialized_stream_owner_nodes,
             lookups: &lookup_runtimes,
         };
 
-        for (
-            generator,
-            program,
-            source_streams,
-            source_nodes,
-            output_parameterization,
-            output_schema,
-        ) in generator_specs
+        for (generator, program, source_streams, source_nodes, output_branching, output_schema) in
+            generator_specs
         {
             let Some(output_registry) = relay_registries.get(&generator.into_relay).cloned() else {
                 return Err(RuntimeError::BuildDomainExecution {
@@ -4257,7 +4132,7 @@ impl Runtime {
                     program,
                     source_relays: source_streams,
                     source_nodes,
-                    output_parameterization,
+                    output_branching,
                     output_schema,
                     output_registry,
                     output_services,
@@ -4283,7 +4158,7 @@ impl Runtime {
             tasks.push(self.spawn_reingestor_task(
                 domain,
                 &shutdown_tx,
-                &parameterized_entrypoint_senders,
+                &branched_entrypoint_senders,
                 reingestor,
                 from_relay,
                 receiver,
@@ -4301,14 +4176,12 @@ impl Runtime {
                 relay_schemas,
                 relay_services,
                 lookups: lookup_runtimes,
-                relay_parameterizations,
-                relay_parameterization_schemas,
+                relay_branchings,
+                relay_branching_schemas,
                 materialized_stream_specs,
                 materialized_stream_owner_nodes,
-                parameterized_ingestors: Self::parameterized_specs_by_identifier(
-                    &parameterized_specs,
-                ),
-                parameterized_entrypoints,
+                branched_ingestors: Self::branched_specs_by_identifier(&branched_specs),
+                branched_entrypoints,
                 codecs,
                 signaling_protocols,
                 endpoint_routes,
@@ -4399,11 +4272,11 @@ impl Runtime {
                             domain: &binding.domain,
                             ingestor: &binding.ingestor,
                             timestamp_source: binding.timestamp_source.as_ref(),
-                            parameterization: &binding.parameterization,
-                            parameter_value_mappings: Some(&binding.parameter_value_mappings),
+                            branching: &binding.branching,
+                            branch_value_mappings: Some(&binding.branch_value_mappings),
                             output_routes: &mut output_routes,
                             filter_where: binding.filter_where.as_ref(),
-                            parameterized_senders: &binding.parameterized_senders,
+                            branched_senders: &binding.branched_senders,
                             record,
                             filter_map_metadata: Some(IngestFilterMapMetadata::from_headers(
                                 headers.clone(),
@@ -5228,8 +5101,8 @@ impl Runtime {
         domain_graph.store(Some(Arc::new(graph.clone())));
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
-        let mut relay_parameterizations = HashMap::new();
-        let mut relay_parameterization_schemas = HashMap::new();
+        let mut relay_branchings = HashMap::new();
+        let mut relay_branching_schemas = HashMap::new();
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
@@ -5246,18 +5119,14 @@ impl Runtime {
         let mut emitter_specs = Vec::new();
         let mut reingestor_specs = Vec::new();
         let mut tasks = Vec::new();
-        let parameterized_specs = parameterized_ingestor_specs_from_active_graph(&graph);
-        let branch_relay_ttls = branch_relay_ttls_from_parameterized_specs(&parameterized_specs)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason,
-            })?;
+        let branched_specs = branched_ingestor_specs_from_active_graph(&graph);
+        let branch_relays = branch_relays_from_branched_specs(&branched_specs);
         let model_index = graph
             .nodes()
             .into_iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let handled_processors = parameterized_processor_ids(&parameterized_specs);
+        let handled_processors = branched_processor_ids(&branched_specs);
 
         for node in graph.nodes() {
             match node.config.as_ref() {
@@ -5381,15 +5250,15 @@ impl Runtime {
                         ),
                     });
                 };
-                let expiring_state = branch_relay_ttls
-                    .get(&node.identifier)
-                    .map(|ttl| self.expiring_stream_state(domain, &node.identifier, *ttl));
+                let expiring_state = branch_relays
+                    .contains(&node.identifier)
+                    .then(|| self.expiring_stream_state(domain, &node.identifier));
                 let capacity = Self::relay_capacity(domain, &node.identifier, relay.buffer)?;
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
                         domain,
                         &node.identifier,
-                        !relay.parameterization.is_unparameterized(),
+                        !relay.branching.is_unbranched(),
                         capacity,
                     )
                     .await;
@@ -5407,19 +5276,18 @@ impl Runtime {
                         remote_runtime_consumers: Vec::new(),
                     },
                 );
-                relay_parameterizations.insert(
+                relay_branchings.insert(
                     node.identifier.clone(),
-                    node.effective_parameterization.clone().unwrap_or_default(),
+                    node.effective_branching.clone().unwrap_or_default(),
                 );
-                let parameterization_schema = relay_parameterization_schema_for_runtime(
+                let branching_schema = relay_branching_schema_for_runtime(
                     domain,
                     &node.identifier,
                     relay,
-                    node.effective_parameterization_schema.as_ref(),
+                    node.effective_branching_schema.as_ref(),
                     &schemas,
                 )?;
-                relay_parameterization_schemas
-                    .insert(node.identifier.clone(), parameterization_schema);
+                relay_branching_schemas.insert(node.identifier.clone(), branching_schema);
                 relay_schemas.insert(node.identifier.clone(), schema);
                 if relay.materialized_state.is_some() {
                     materialized_stream_specs.insert(
@@ -5433,21 +5301,10 @@ impl Runtime {
                                 .get(&node.identifier)
                                 .expect("inserted relay schema must exist")
                                 .vm_sensitivity(),
-                            parameterization: node
-                                .effective_parameterization
-                                .clone()
-                                .unwrap_or_default(),
+                            branching: node.effective_branching.clone().unwrap_or_default(),
                         },
                     );
                     materialized_stream_owner_nodes.insert(node.identifier.clone(), None);
-                }
-                if let Some(expiring_state) = expiring_state {
-                    tasks.push(self.spawn_stream_expiration_task(
-                        &shutdown_tx,
-                        domain,
-                        &node.identifier,
-                        expiring_state,
-                    ));
                 }
             }
         }
@@ -5508,7 +5365,7 @@ impl Runtime {
                             ),
                         });
                     };
-                    let output_parameterization = relay_parameterizations
+                    let output_branching = relay_branchings
                         .get(&generator.into_relay)
                         .cloned()
                         .unwrap_or_default();
@@ -5557,7 +5414,7 @@ impl Runtime {
                         program,
                         source_streams,
                         source_nodes,
-                        output_parameterization,
+                        output_branching,
                         output_schema,
                     ));
                 }
@@ -5649,13 +5506,13 @@ impl Runtime {
             })
             .collect::<HashMap<_, _>>();
 
-        let mut parameterized_entrypoints = HashMap::new();
-        let mut parameterized_entrypoint_senders = HashMap::new();
-        for spec in &parameterized_specs {
+        let mut branched_entrypoints = HashMap::new();
+        let mut branched_entrypoint_senders = HashMap::new();
+        for spec in &branched_specs {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let template = materialize_parametrizer_template(
+            let template = materialize_branch_instance_template(
                 spec,
                 &model_index,
                 &relay_schemas,
@@ -5666,15 +5523,15 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason,
             })?;
-            let Some(runtime) = self.start_parameterized_entrypoint_runtime(
+            let Some(runtime) = self.start_branched_entrypoint_runtime(
                 domain,
                 &spec.identifier,
                 Some((domain_graph.clone(), template)),
             ) else {
                 continue;
             };
-            parameterized_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            parameterized_entrypoints
+            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
+            branched_entrypoints
                 .entry(spec.identifier.clone())
                 .or_insert_with(Vec::new)
                 .push(runtime);
@@ -5684,21 +5541,15 @@ impl Runtime {
         let execution_build_deps = ExecutionBuildDeps {
             domain,
             relay_schemas: &relay_schemas,
-            relay_parameterizations: &relay_parameterizations,
-            relay_parameterization_schemas: &relay_parameterization_schemas,
+            relay_branchings: &relay_branchings,
+            relay_branching_schemas: &relay_branching_schemas,
             materialized_relay_specs: &materialized_stream_specs,
             materialized_relay_owner_nodes: &materialized_stream_owner_nodes,
             lookups: &lookup_runtimes,
         };
 
-        for (
-            generator,
-            program,
-            source_streams,
-            source_nodes,
-            output_parameterization,
-            output_schema,
-        ) in generator_specs
+        for (generator, program, source_streams, source_nodes, output_branching, output_schema) in
+            generator_specs
         {
             let Some(output_registry) = relay_registries.get(&generator.into_relay).cloned() else {
                 return Err(RuntimeError::BuildDomainExecution {
@@ -5726,7 +5577,7 @@ impl Runtime {
                     program,
                     source_relays: source_streams,
                     source_nodes,
-                    output_parameterization,
+                    output_branching,
                     output_schema,
                     output_registry,
                     output_services,
@@ -5752,7 +5603,7 @@ impl Runtime {
             tasks.push(self.spawn_reingestor_task(
                 domain,
                 &shutdown_tx,
-                &parameterized_entrypoint_senders,
+                &branched_entrypoint_senders,
                 reingestor,
                 from_relay,
                 receiver,
@@ -5771,7 +5622,8 @@ impl Runtime {
                             identifier: node.identifier,
                             kind: node.kind,
                             config: Box::new((*node.config).clone()),
-                            effective_parameterization: node.effective_parameterization,
+                            effective_branching: node.effective_branching,
+                            effective_branching_schema: node.effective_branching_schema,
                             kafka_partition_schedule: None,
                             primary_node: None,
                             assigned_nodes: Vec::new(),
@@ -5785,14 +5637,12 @@ impl Runtime {
                 relay_schemas,
                 relay_services,
                 lookups: lookup_runtimes,
-                relay_parameterizations,
-                relay_parameterization_schemas,
+                relay_branchings,
+                relay_branching_schemas,
                 materialized_stream_specs,
                 materialized_stream_owner_nodes,
-                parameterized_ingestors: Self::parameterized_specs_by_identifier(
-                    &parameterized_specs,
-                ),
-                parameterized_entrypoints,
+                branched_ingestors: Self::branched_specs_by_identifier(&branched_specs),
+                branched_entrypoints,
                 codecs,
                 signaling_protocols,
                 endpoint_routes,
@@ -5809,8 +5659,8 @@ impl Runtime {
         schedule: &DomainSchedule,
     ) -> Result<DomainExecution, RuntimeError> {
         let mut relay_builders = HashMap::new();
-        let mut relay_parameterizations = HashMap::new();
-        let mut relay_parameterization_schemas = HashMap::new();
+        let mut relay_branchings = HashMap::new();
+        let mut relay_branching_schemas = HashMap::new();
         let mut relay_schemas = HashMap::new();
         let mut schemas = HashMap::new();
         let mut wire_schemas = HashMap::new();
@@ -5835,7 +5685,7 @@ impl Runtime {
                         .relay_boundary_fanout_with_capacity(
                             domain,
                             &node.identifier,
-                            !relay.parameterization.is_unparameterized(),
+                            !relay.branching.is_unbranched(),
                             capacity,
                         )
                         .await;
@@ -5849,19 +5699,18 @@ impl Runtime {
                             remote_runtime_consumers: Vec::new(),
                         },
                     );
-                    relay_parameterizations.insert(
+                    relay_branchings.insert(
                         node.identifier.clone(),
-                        node.effective_parameterization.clone().unwrap_or_default(),
+                        node.effective_branching.clone().unwrap_or_default(),
                     );
-                    let parameterization_schema = relay_parameterization_schema_for_runtime(
+                    let branching_schema = relay_branching_schema_for_runtime(
                         domain,
                         &node.identifier,
                         relay,
-                        None,
+                        node.effective_branching_schema.as_ref(),
                         &schemas,
                     )?;
-                    relay_parameterization_schemas
-                        .insert(node.identifier.clone(), parameterization_schema);
+                    relay_branching_schemas.insert(node.identifier.clone(), branching_schema);
                     relay_schemas.insert(node.identifier.clone(), schema);
                 }
                 Model::Schema(schema) => {
@@ -5957,12 +5806,12 @@ impl Runtime {
             relay_schemas,
             relay_services,
             lookups,
-            relay_parameterizations,
-            relay_parameterization_schemas,
+            relay_branchings,
+            relay_branching_schemas,
             materialized_stream_specs: HashMap::default(),
             materialized_stream_owner_nodes: HashMap::default(),
-            parameterized_ingestors: HashMap::default(),
-            parameterized_entrypoints: HashMap::default(),
+            branched_ingestors: HashMap::default(),
+            branched_entrypoints: HashMap::default(),
             codecs,
             signaling_protocols: HashMap::default(),
             endpoint_routes: HashMap::default(),
@@ -5981,7 +5830,7 @@ impl Runtime {
             program,
             source_relays: source_streams,
             source_nodes,
-            output_parameterization,
+            output_branching,
             output_schema,
             output_registry,
             output_services,
@@ -6005,7 +5854,7 @@ impl Runtime {
         let task_output_relay = generator.into_relay.clone();
         let task_source_streams = source_streams;
         let task_source_nodes = source_nodes;
-        let task_output_parameterization = output_parameterization;
+        let task_output_branching = output_branching;
         let mut shutdown_rx = shutdown_tx.subscribe();
         let runtime = self.clone();
         let task_events = self.events.clone();
@@ -6195,18 +6044,18 @@ impl Runtime {
                                     continue;
                                 }
                             };
-                            let output_key = if task_output_parameterization.is_empty() {
+                            let output_key = if task_output_branching.is_empty() {
                                 None
                             } else {
                                 let key = match BranchKey::from_record(
                                     &record,
-                                    task_output_parameterization.iter(),
+                                    task_output_branching.iter(),
                                 ) {
                                     Ok(Some(key)) => key,
                                     Ok(None) => {
                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                             "generator '{}' produced record missing destination \
-                                             parameterization for relay '{}'",
+                                             branching for relay '{}'",
                                             task_generator.as_str(),
                                             task_output_relay.as_str(),
                                         )));
@@ -6215,7 +6064,7 @@ impl Runtime {
                                     Err(error) => {
                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                             "generator '{}' produced invalid destination \
-                                             parameterization for relay '{}': {}",
+                                             branching for relay '{}': {}",
                                             task_generator.as_str(),
                                             task_output_relay.as_str(),
                                             error
@@ -6335,7 +6184,7 @@ impl Runtime {
                 output_schema,
                 materialized_stream_specs,
                 available_lookups,
-                current_parameterization,
+                current_branching,
                 current_branch_schema,
             ) = {
                 let Some(execution) = self.executions.get(domain) else {
@@ -6374,12 +6223,12 @@ impl Runtime {
                     execution.materialized_stream_specs.clone(),
                     execution.lookups.clone(),
                     execution
-                        .relay_parameterizations
+                        .relay_branchings
                         .get(from_relay)
                         .cloned()
                         .unwrap_or_default(),
                     execution
-                        .relay_parameterization_schemas
+                        .relay_branching_schemas
                         .get(from_relay)
                         .cloned()
                         .flatten(),
@@ -6398,7 +6247,7 @@ impl Runtime {
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &available_lookups,
-                    current_parameterization: &current_parameterization,
+                    current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
                 },
@@ -6604,7 +6453,7 @@ impl Runtime {
         mode: AckMode,
         error_policies: &ErrorPolicies,
         output_routes: &mut RelayProcessorOutputsNode,
-        parameterized_senders: &HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
         batch: RelayRecordBatch,
     ) {
         if batch.message_count() == 0 {
@@ -6775,7 +6624,7 @@ impl Runtime {
             .zip(messages_by_output)
             .zip(batches_by_output)
         {
-            let Some(parameterized_sender) = parameterized_senders.get(&relay) else {
+            let Some(branched_sender) = branched_senders.get(&relay) else {
                 for message in messages {
                     self.handle_message_error(
                         domain,
@@ -6784,7 +6633,7 @@ impl Runtime {
                         error_policies,
                         message,
                         format!(
-                            "missing reingestor parameterized entrypoint for relay '{}'",
+                            "missing reingestor branched entrypoint for relay '{}'",
                             relay.as_str()
                         ),
                     )
@@ -6798,7 +6647,7 @@ impl Runtime {
                         error_policies,
                         batch.acks.iter(),
                         format!(
-                            "missing reingestor parameterized entrypoint for relay '{}'",
+                            "missing reingestor branched entrypoint for relay '{}'",
                             relay.as_str()
                         ),
                     );
@@ -6869,16 +6718,13 @@ impl Runtime {
                     continue;
                 }
             };
-            match parameterized_sender
-                .send(ParameterizedEntrypointInput::PendingParameterizationBatch(
-                    forwarded,
-                ))
+            match branched_sender
+                .send(BranchedEntrypointInput::PendingBranchingBatch(forwarded))
                 .await
             {
                 Ok(()) => {}
                 Err(error) => {
-                    let ParameterizedEntrypointInput::PendingParameterizationBatch(batch) = error.0
-                    else {
+                    let BranchedEntrypointInput::PendingBranchingBatch(batch) = error.0 else {
                         continue;
                     };
                     if mode == AckMode::Detached {
@@ -6894,8 +6740,8 @@ impl Runtime {
                         error_policies,
                         batch.acks.iter(),
                         format!(
-                            "reingestor '{}' failed to forward batch to parametrization \
-                             entrypoint for relay '{}'",
+                            "reingestor '{}' failed to forward batch to branch entrypoint for \
+                             relay '{}'",
                             reingestor.as_str(),
                             relay.as_str()
                         ),
@@ -6924,7 +6770,7 @@ impl Runtime {
                 input_schema,
                 materialized_stream_specs,
                 available_lookups,
-                current_parameterization,
+                current_branching,
                 current_branch_schema,
             ) = {
                 let Some(execution) = self.executions.get(domain) else {
@@ -6961,12 +6807,12 @@ impl Runtime {
                     execution.materialized_stream_specs.clone(),
                     execution.lookups.clone(),
                     execution
-                        .relay_parameterizations
+                        .relay_branchings
                         .get(from_relay)
                         .cloned()
                         .unwrap_or_default(),
                     execution
-                        .relay_parameterization_schemas
+                        .relay_branching_schemas
                         .get(from_relay)
                         .cloned()
                         .flatten(),
@@ -6984,7 +6830,7 @@ impl Runtime {
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &available_lookups,
-                    current_parameterization: &current_parameterization,
+                    current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
                 },
@@ -7082,10 +6928,7 @@ impl Runtime {
         &self,
         domain: &Domain,
         shutdown_tx: &watch::Sender<bool>,
-        parameterized_entrypoint_senders: &HashMap<
-            Identifier,
-            mpsc::Sender<ParameterizedEntrypointInput>,
-        >,
+        branched_entrypoint_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
         reingestor: CreateReingestor,
         from_relay: Identifier,
         receiver: RelayRuntimeFanIn,
@@ -7102,18 +6945,18 @@ impl Runtime {
                 })
                 .collect(),
         };
-        let mut task_parameterized_senders = HashMap::default();
+        let mut task_branched_senders = HashMap::default();
         for output in reingestor.output_routes.outputs() {
-            let Some(sender) = parameterized_entrypoint_senders.get(&output.relay).cloned() else {
+            let Some(sender) = branched_entrypoint_senders.get(&output.relay).cloned() else {
                 return Err(RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!(
-                        "missing reingestor parameterized entrypoint for relay '{}'",
+                        "missing reingestor branched entrypoint for relay '{}'",
                         output.relay.as_str()
                     ),
                 });
             };
-            task_parameterized_senders.insert(output.relay.clone(), sender);
+            task_branched_senders.insert(output.relay.clone(), sender);
         }
         let task_domain = domain.clone();
         let task_reingestor = reingestor.name.clone();
@@ -7192,7 +7035,7 @@ impl Runtime {
                                 task_mode,
                                 &task_error_policies,
                                 &mut task_output_routes,
-                                &task_parameterized_senders,
+                                &task_branched_senders,
                                 batch,
                             )
                             .await;
@@ -7424,13 +7267,13 @@ impl Runtime {
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
         }
-        for (identifier, runtimes) in execution.parameterized_entrypoints {
+        for (identifier, runtimes) in execution.branched_entrypoints {
             for runtime in runtimes {
                 runtime.shutdown().await;
                 info!(
                     domain = domain.as_str(),
                     entrypoint = identifier.as_str(),
-                    "stopped parameterized entrypoint runtime"
+                    "stopped branched entrypoint runtime"
                 );
             }
         }
@@ -7841,7 +7684,7 @@ impl Runtime {
         match runtime {
             IngestorRuntime::Background {
                 shutdown,
-                parameterized,
+                branched,
                 tasks,
             } => {
                 if shutdown.send(true).is_err() {
@@ -7854,13 +7697,13 @@ impl Runtime {
                 for task in tasks {
                     Self::await_shutdown_task(task, domain, Some(ingestor), "ingestor").await;
                 }
-                for parameterized in parameterized {
-                    parameterized.shutdown().await;
+                for branched in branched {
+                    branched.shutdown().await;
                 }
             }
             IngestorRuntime::Endpoint {
                 route_keys,
-                parameterized,
+                branched,
             } => {
                 for route_key in route_keys {
                     let remove_route =
@@ -7874,8 +7717,8 @@ impl Runtime {
                         self.endpoint_bindings.remove(&route_key);
                     }
                 }
-                for parameterized in parameterized {
-                    parameterized.shutdown().await;
+                for branched in branched {
+                    branched.shutdown().await;
                 }
             }
         }
@@ -7960,7 +7803,7 @@ impl Runtime {
         };
         let message_namespace =
             Identifier::parse(INGEST_MESSAGE_NAMESPACE).expect("static namespace is valid");
-        let empty_parameterization = Vec::new();
+        let empty_branching = Vec::new();
         let filter_where = compile_filter_map_program(
             domain,
             &ingestor.name,
@@ -7973,7 +7816,7 @@ impl Runtime {
             RuntimeVmCompileContext {
                 available_materialized_streams: &execution.materialized_stream_specs,
                 available_lookups: &execution.lookups,
-                current_parameterization: &empty_parameterization,
+                current_branching: &empty_branching,
                 current_branch_schema: None,
                 current_branch_sensitivity: None,
             },
@@ -8011,8 +7854,8 @@ impl Runtime {
                 RuntimeVmCompileContext {
                     available_materialized_streams: &execution.materialized_stream_specs,
                     available_lookups: &execution.lookups,
-                    current_parameterization: &execution
-                        .relay_parameterizations
+                    current_branching: &execution
+                        .relay_branchings
                         .get(&output.relay)
                         .cloned()
                         .unwrap_or_default(),
@@ -8035,8 +7878,8 @@ impl Runtime {
                 ),
             });
         };
-        let parameterization = execution
-            .relay_parameterizations
+        let branching = execution
+            .relay_branchings
             .get(&base_output_relay)
             .cloned()
             .unwrap_or_default();
@@ -8046,10 +7889,11 @@ impl Runtime {
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let mut parameterized_templates = HashMap::default();
-        if let Some(specs) = execution.parameterized_ingestors.get(&ingestor.name) {
+        let branch_value_mappings = ingestor.branched_by.values().to_vec();
+        let mut branched_templates = HashMap::default();
+        if let Some(specs) = execution.branched_ingestors.get(&ingestor.name) {
             for spec in specs {
-                let template = materialize_parametrizer_template(
+                let template = materialize_branch_instance_template(
                     spec,
                     &model_index,
                     &execution.relay_schemas,
@@ -8060,7 +7904,7 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason,
                 })?;
-                parameterized_templates
+                branched_templates
                     .insert(spec.root_relay.clone(), (execution.graph.clone(), template));
             }
         }
@@ -8068,8 +7912,9 @@ impl Runtime {
             output_routes,
             filter_where,
             codec,
-            parameterization,
-            parameterized_templates,
+            branching,
+            branch_value_mappings,
+            branched_templates,
         })
     }
 

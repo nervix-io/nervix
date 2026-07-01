@@ -13,46 +13,40 @@ Feature: Window processor metrics
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics_input SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE RELAY metrics_summary SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT window_metrics_ingress ON edge PATH '/window-metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR window_metrics_source
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_window_metrics_source BY tenant_branch TTL 5m;
+        CREATE RELAY metrics_input SCHEMA metric BRANCHED BY by_window_metrics_source;
+        CREATE RELAY metrics_summary SCHEMA metric_summary BRANCHED BY by_window_metrics_source;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT window_metrics_ingress ON edge PATH '/window-metrics' TYPE HTTP;
+        CREATE INGESTOR window_metrics_source
         TO metrics_input
         DECODE USING metric_codec
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics_input.tenant } TTL 5m
+        BRANCHED BY by_window_metrics_source VALUES { tenant = metrics_input.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT window_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR window_metrics_node
+        CREATE WINDOW PROCESSOR window_metrics_node
         FROM metrics_input
-        TO metrics_summary PARAMETERIZED BY tenant_branch
+        TO metrics_summary BRANCHED BY by_window_metrics_source
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
           metrics_summary.tenant = FIRST(metrics_input.tenant),
           metrics_summary.sample_count = COUNT(metrics_input.latency) ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metrics_summary;
-      START;
+        SUBSCRIBE SESSION TO metrics_summary;
+        START;
       """
     When http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/window-metrics"
       """

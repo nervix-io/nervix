@@ -1,33 +1,33 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    AvroType, AzureBlobConfigEntry, BranchParameterization, ClickHouseConfigEntry,
-    ClickHouseValueMapping, CodecEncoding, CodecEncodingRule, CodecJaqTransformations,
-    CodecWireFormat, CorrelationTimeoutAction, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientKinesis, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql,
-    CreateClientNats, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
-    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
-    EndpointType, ErrorPolicies, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
-    IcebergCatalog, Identifier, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry,
-    KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry,
-    MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
-    MySqlConflictAction, NatsConfigEntry, NatsIngestMode, ParameterValueMapping, ParseAsType,
-    PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayParameterization, RelayParameters, RetryPolicy, S3ConfigEntry, SchemaField,
-    SqsConfigEntry, SqsIngestMode, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    AvroType, AzureBlobConfigEntry, BranchEviction, BranchInitiatorSelection, BranchSelection,
+    BranchValueMapping, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
+    CodecEncodingRule, CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction,
+    CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
+    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
+    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
+    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
+    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
+    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
+    KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry, KinesisIngestMode,
+    MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
+    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
+    NatsConfigEntry, NatsIngestMode, ParseAsType, PostgresConfigEntry, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry,
+    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
+    RedisPubSubIngestMode, RelayBranching, RetryPolicy, S3ConfigEntry, SchemaField, SqsConfigEntry,
+    SqsIngestMode, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField,
+    ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
-fn parameter_values_to_nspl(values: &[ParameterValueMapping]) -> String {
+fn branch_values_to_nspl(values: &[BranchValueMapping]) -> String {
     values
         .iter()
         .map(|value| {
@@ -56,33 +56,25 @@ fn value_mappings_to_nspl(values: &[ClickHouseValueMapping]) -> Result<String, C
         .map(|mappings| mappings.join(", "))
 }
 
-fn parameterization_to_nspl(parameterization: &BranchParameterization) -> String {
-    match parameterization {
-        BranchParameterization::Parameterized {
-            schema,
-            values,
-            ttl,
-        } => {
-            let mut rendered = format!(
-                "PARAMETERIZED BY {} VALUES {{{}}}",
-                schema.as_str(),
-                parameter_values_to_nspl(values)
-            );
-            if let Some(ttl) = ttl {
-                rendered.push_str(&format!(" TTL {ttl}"));
-            }
-            rendered
+fn branch_selection_to_nspl(branching: &BranchSelection) -> String {
+    match branching {
+        BranchSelection::BranchedBy { branch } => {
+            format!("BRANCHED BY {}", branch.as_str())
         }
-        BranchParameterization::Unparameterized => "UNPARAMETERIZED".to_string(),
+        BranchSelection::Unbranched => "UNBRANCHED".to_string(),
     }
 }
 
-fn processor_parameterization_to_nspl(parameterization: &BranchParameterization) -> String {
-    match parameterization {
-        BranchParameterization::Parameterized { schema, .. } => {
-            format!("PARAMETERIZED BY {}", schema.as_str())
+fn branch_initiator_selection_to_nspl(branching: &BranchInitiatorSelection) -> String {
+    match branching {
+        BranchInitiatorSelection::BranchedBy { branch, values } => {
+            format!(
+                "BRANCHED BY {} VALUES {{{}}}",
+                branch.as_str(),
+                branch_values_to_nspl(values)
+            )
         }
-        BranchParameterization::Unparameterized => "UNPARAMETERIZED".to_string(),
+        BranchInitiatorSelection::Unbranched => "UNBRANCHED".to_string(),
     }
 }
 
@@ -133,6 +125,7 @@ impl Model {
             Self::ClientAzureBlob(client) => client.to_canonical_nspl(),
             Self::ClientIcebergRest(client) => client.to_canonical_nspl(),
             Self::Vhost(vhost) => vhost.to_canonical_nspl(),
+            Self::Branch(branch) => branch.to_canonical_nspl(),
             Self::Endpoint(endpoint) => endpoint.to_canonical_nspl(),
             Self::SignalingProtocol(protocol) => protocol.to_canonical_nspl(),
             Self::Generator(generator) => generator.to_canonical_nspl(),
@@ -739,9 +732,29 @@ fn codec_encoding_to_nspl(encoding: CodecEncoding) -> &'static str {
     }
 }
 
+impl CreateBranch {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let mut rendered = format!(
+            "CREATE BRANCH {} BY {} TTL {}",
+            self.name.as_str(),
+            self.branched_by.as_str(),
+            self.ttl
+        );
+        if let Some(eviction) = &self.eviction {
+            match eviction {
+                BranchEviction::Lru { max_instances } => {
+                    rendered.push_str(&format!(" MAX INSTANCES {max_instances} EVICT LRU"));
+                }
+            }
+        }
+        rendered.push(';');
+        Ok(rendered)
+    }
+}
+
 impl CreateIngestor {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let params = parameterization_to_nspl(&self.parameterized_by);
+        let branch = branch_initiator_selection_to_nspl(&self.branched_by);
         let timestamp = self
             .timestamp_source
             .as_ref()
@@ -759,7 +772,7 @@ impl CreateIngestor {
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             self.decode_using_codec.as_str(),
-            params,
+            branch,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             timestamp,
             source,
@@ -774,7 +787,7 @@ impl CreateGenerator {
             "CREATE GENERATOR {} TO {} {} EACH {} {} {} {};",
             self.name.as_str(),
             self.into_relay.as_str(),
-            processor_parameterization_to_nspl(&self.parameterized_by),
+            branch_selection_to_nspl(&self.branched_by),
             self.each,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             self.set,
@@ -790,15 +803,13 @@ impl CreateRelay {
             self.name.as_str(),
             self.schema.as_str()
         );
-        match &self.parameterization {
-            RelayParameterization::Parameterized { parameters } => {
-                if let RelayParameters::Declared(parameterized_by) = parameters {
-                    rendered.push_str(&format!(" PARAMETERIZED BY {}", parameterized_by.as_str()));
-                }
+        match &self.branching {
+            RelayBranching::BranchedBy { branch } => {
+                rendered.push_str(&format!(" BRANCHED BY {}", branch.as_str()));
                 rendered.push_str(&format!(" CAPACITY {}", self.buffer));
             }
-            RelayParameterization::Unparameterized => {
-                rendered.push_str(&format!(" UNPARAMETERIZED CAPACITY {}", self.buffer));
+            RelayBranching::Unbranched => {
+                rendered.push_str(&format!(" UNBRANCHED CAPACITY {}", self.buffer));
             }
         }
         if let Some(state) = &self.materialized_state {
@@ -893,7 +904,7 @@ impl CreateJunction {
             processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
-            processor_parameterization_to_nspl(&self.parameterized_by),
+            branch_selection_to_nspl(&self.branched_by),
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             message_error_policy_to_nspl(&self.message_error_policy)
         ))
@@ -909,7 +920,7 @@ impl CreateDeduplicator {
             processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
-            processor_parameterization_to_nspl(&self.parameterized_by),
+            branch_selection_to_nspl(&self.branched_by),
             self.deduplicate_on,
             self.max_time,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
@@ -931,7 +942,7 @@ impl CreateCorrelator {
             self.match_policy.as_ref(),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
-            processor_parameterization_to_nspl(&self.parameterized_by),
+            branch_selection_to_nspl(&self.branched_by),
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             self.output,
             self.max_time,
@@ -958,7 +969,7 @@ impl CreateReorderer {
             processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
-            processor_parameterization_to_nspl(&self.parameterized_by),
+            branch_selection_to_nspl(&self.branched_by),
             self.order_by,
             self.max_time,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
@@ -976,7 +987,7 @@ impl CreateWindowProcessor {
             processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
-            processor_parameterization_to_nspl(&self.parameterized_by),
+            branch_selection_to_nspl(&self.branched_by),
             window_bound_to_nspl(&self.width),
             window_bound_to_nspl(&self.step),
             self.aggregate,
@@ -1035,7 +1046,7 @@ impl CreateReingestor {
             processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
-            parameterization_to_nspl(&self.parameterized_by),
+            branch_initiator_selection_to_nspl(&self.branched_by),
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             message_error_policy_to_nspl(&self.message_error_policy)
         ))
@@ -1056,7 +1067,7 @@ impl CreateInferencer {
             processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
-            processor_parameterization_to_nspl(&self.parameterized_by),
+            branch_selection_to_nspl(&self.branched_by),
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
@@ -1084,7 +1095,7 @@ impl CreateWasmProcessor {
             processor_inputs_to_nspl(&self.from),
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
-            processor_parameterization_to_nspl(&self.parameterized_by),
+            branch_selection_to_nspl(&self.branched_by),
             message_error_policy_to_nspl(&self.message_error_policy),
             general_error_policy_to_nspl(&self.global_error_policy).replace("GENERAL", "GLOBAL")
         ))
@@ -1913,21 +1924,21 @@ impl NativeTypeToNspl for AvroType {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AckMode, AvroType, BranchParameterization, CodecEncoding, CodecEncodingRule,
-        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
-        CreateClientHttp, CreateClientKafka, CreateClientKinesis, CreateClientMqtt,
-        CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
-        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
-        CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
-        EndpointIngestMode, EndpointType, ErrorPolicies, HttpConfigEntry, Identifier, IngestSource,
-        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode,
-        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode,
-        ParameterValueMapping, ParseAsType, PostgresConflictAction, PostgresValueMapping,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-        RabbitMqIngestMode, RedisPubSubIngestMode, RelayParameterization, RelayParameters,
+        AckMode, AvroType, BranchInitiatorSelection, BranchSelection, BranchValueMapping,
+        CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
+        CodecProtobufConfig, CodecWireFormat, CreateClientHttp, CreateClientKafka,
+        CreateClientKinesis, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
+        CreateClientRabbitMq, CreateClientRedis, CreateClientSqs, CreateClientWebsockets,
+        CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateEndpoint,
+        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateSchema,
+        CreateSignalingProtocol, CreateVhost, CreateWindowProcessor, CreateWireSchema,
+        CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
+        HttpConfigEntry, Identifier, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, KinesisIngestMode, MessageErrorPolicy, Model, MongoDbConflictAction,
+        MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+        MySqlValueMapping, NatsIngestMode, ParseAsType, PostgresConflictAction,
+        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
         RetryPolicy, SchemaField, SqsIngestMode, WebsocketsIngestMode, WindowBound,
         WireSchemaField, ZeroMqIngestMode,
     };
@@ -1936,19 +1947,22 @@ mod tests {
         Identifier::try_from(raw).expect("valid identifier")
     }
 
-    fn parameterized_by(schema: &str, relay: &str, fields: &[&str]) -> BranchParameterization {
-        BranchParameterization::parameterized_with_ttl(
-            identifier(schema),
+    fn branched_by(schema: &str, relay: &str, fields: &[&str]) -> BranchInitiatorSelection {
+        BranchInitiatorSelection::branched_by(
+            identifier(&format!("by_{schema}")),
             fields
                 .iter()
-                .map(|field| ParameterValueMapping {
+                .map(|field| BranchValueMapping {
                     field: identifier(field),
                     relay: identifier(relay),
                     relay_field: identifier(field),
                 })
                 .collect(),
-            "5m".to_string(),
         )
+    }
+
+    fn processor_branched_by(schema: &str) -> BranchSelection {
+        BranchSelection::branched_by(identifier(&format!("by_{schema}")))
     }
 
     fn config_entry(key: &str, value: &str) -> KafkaConfigEntry {
@@ -2427,24 +2441,24 @@ mod tests {
             name: identifier("orders_stream"),
             schema: identifier("orders"),
             buffer: 1,
-            parameterization: RelayParameterization::parameterized(RelayParameters::inferred()),
+            branching: RelayBranching::branched_by(identifier("by_orders")),
             materialized_state: None,
         };
         assert_eq!(
             relay.to_canonical_nspl().expect("must render"),
-            "CREATE RELAY orders_stream SCHEMA orders CAPACITY 1;"
+            "CREATE RELAY orders_stream SCHEMA orders BRANCHED BY by_orders CAPACITY 1;"
         );
 
         let relay = CreateRelay {
             name: identifier("orders_stream"),
             schema: identifier("orders"),
             buffer: 1,
-            parameterization: RelayParameterization::unparameterized(),
+            branching: RelayBranching::unbranched(),
             materialized_state: None,
         };
         assert_eq!(
             relay.to_canonical_nspl().expect("must render"),
-            "CREATE RELAY orders_stream SCHEMA orders UNPARAMETERIZED CAPACITY 1;"
+            "CREATE RELAY orders_stream SCHEMA orders UNBRANCHED CAPACITY 1;"
         );
 
         let junction = CreateJunction {
@@ -2454,7 +2468,7 @@ mod tests {
                 Vec::new(),
             ),
             output_routes: ProcessorOutputs::single(identifier("orders_all")),
-            parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
+            branched_by: processor_branched_by("tenant_branch"),
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
@@ -2465,7 +2479,7 @@ mod tests {
             junction.to_canonical_nspl().expect("must render"),
             with_message_error_policy(
                 "CREATE ATTACHED JUNCTION orders_junction FROM orders_a, orders_b TO orders_all \
-                 PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"
+                 BRANCHED BY by_tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"
             )
         );
 
@@ -2473,7 +2487,7 @@ mod tests {
             name: identifier("orders_dedup"),
             from: ProcessorInputs::single(identifier("orders_in")),
             output_routes: ProcessorOutputs::single(identifier("orders_out")),
-            parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
+            branched_by: processor_branched_by("tenant_branch"),
             deduplicate_on: "ss1.transaction_id".to_string(),
             max_time: "10m".to_string(),
             flush_each: "100ms".to_string(),
@@ -2485,9 +2499,9 @@ mod tests {
         assert_eq!(
             deduplicator.to_canonical_nspl().expect("must render"),
             with_message_error_policy(
-                "CREATE DETACHED DEDUPLICATOR orders_dedup FROM orders_in TO orders_out \
-                 PARAMETERIZED BY tenant_branch DEDUPLICATE ON ss1.transaction_id MAX TIME 10m \
-                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"
+                "CREATE DETACHED DEDUPLICATOR orders_dedup FROM orders_in TO orders_out BRANCHED \
+                 BY by_tenant_branch DEDUPLICATE ON ss1.transaction_id MAX TIME 10m FLUSH EACH \
+                 100ms MAX BATCH SIZE 1MiB;"
             )
         );
 
@@ -2495,7 +2509,7 @@ mod tests {
             name: identifier("latency_window"),
             from: ProcessorInputs::single(identifier("orders_in")),
             output_routes: ProcessorOutputs::single(identifier("orders_p99")),
-            parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
+            branched_by: processor_branched_by("tenant_branch"),
             width: WindowBound {
                 messages: Some(100),
                 duration: Some("10s".to_string()),
@@ -2515,8 +2529,8 @@ mod tests {
             window_processor.to_canonical_nspl().expect("must render"),
             with_message_error_policy(
                 "CREATE ATTACHED WINDOW PROCESSOR latency_window FROM orders_in TO orders_p99 \
-                 PARAMETERIZED BY tenant_branch WIDTH 100 MESSAGES 10s DURATION STEP 10 MESSAGES \
-                 1s DURATION AGGREGATE orders_p99.latency_p99 = \
+                 BRANCHED BY by_tenant_branch WIDTH 100 MESSAGES 10s DURATION STEP 10 MESSAGES 1s \
+                 DURATION AGGREGATE orders_p99.latency_p99 = \
                  PERCENTILE_LINEAR_HISTOGRAM(orders_in.latency, 99, 2048, 0, 10000, '2s');"
             )
         );
@@ -2525,7 +2539,7 @@ mod tests {
             name: identifier("orders_repartition"),
             from: ProcessorInputs::single(identifier("orders_in")),
             output_routes: ProcessorOutputs::single(identifier("orders_out")),
-            parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
+            branched_by: branched_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
@@ -2536,8 +2550,8 @@ mod tests {
             reingestor.to_canonical_nspl().expect("must render"),
             with_message_error_policy(
                 "CREATE ATTACHED REINGESTOR orders_repartition FROM orders_in TO orders_out \
-                 PARAMETERIZED BY tenant_branch VALUES {tenant = orders.tenant} TTL 5m FLUSH EACH \
-                 100ms MAX BATCH SIZE 1MiB;"
+                 BRANCHED BY by_tenant_branch VALUES {tenant = orders.tenant} FLUSH EACH 100ms \
+                 MAX BATCH SIZE 1MiB;"
             )
         );
 
@@ -2560,7 +2574,7 @@ mod tests {
                     filter_map: None,
                 },
             ]),
-            parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
+            branched_by: branched_by("tenant_branch", "orders", &["tenant"]),
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Detached,
@@ -2570,7 +2584,7 @@ mod tests {
         assert_eq!(
             route_reingestor.to_canonical_nspl().expect("must render"),
             with_message_error_policy(
-                r#"CREATE DETACHED REINGESTOR orders_splitter FROM orders_in FILTER WHERE active TO orders_errors WHERE level = "error" TO orders_warn SET severity = "warning" WHERE level = "warn" TO orders_info PARAMETERIZED BY tenant_branch VALUES {tenant = orders.tenant} TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"#
+                r#"CREATE DETACHED REINGESTOR orders_splitter FROM orders_in FILTER WHERE active TO orders_errors WHERE level = "error" TO orders_warn SET severity = "warning" WHERE level = "warn" TO orders_info BRANCHED BY by_tenant_branch VALUES {tenant = orders.tenant} FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"#
             )
         );
     }
@@ -2805,7 +2819,7 @@ mod tests {
                     name: identifier("http_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: parameterized_by("tenant_branch", "orders", &["tenant"]),
+                    branched_by: branched_by("tenant_branch", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -2819,16 +2833,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR http_ingestor TO orders DECODE USING orders_codec PARAMETERIZED \
-                 BY tenant_branch VALUES {tenant = orders.tenant} TTL 5m FLUSH EACH 100ms MAX \
-                 BATCH SIZE 1MiB FROM HTTP http_main EVERY 30s;",
+                "CREATE INGESTOR http_ingestor TO orders DECODE USING orders_codec BRANCHED BY \
+                 by_tenant_branch VALUES {tenant = orders.tenant} FLUSH EACH 100ms MAX BATCH SIZE \
+                 1MiB FROM HTTP http_main EVERY 30s;",
             ),
             (
                 CreateIngestor {
                     name: identifier("kinesis_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -2847,9 +2861,9 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR kinesis_ingestor TO orders DECODE USING orders_codec \
-                 UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KINESIS kinesis_main \
-                 RELAY orders_stream INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 12s RETRY POLICY \
+                "CREATE INGESTOR kinesis_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KINESIS kinesis_main RELAY \
+                 orders_stream INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 12s RETRY POLICY \
                  BACKOFF 1s MAX 30s;",
             ),
             (
@@ -2857,7 +2871,7 @@ mod tests {
                     name: identifier("kafka_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: parameterized_by(
+                    branched_by: branched_by(
                         "tenant_region_branch",
                         "orders",
                         &["tenant", "region"],
@@ -2883,18 +2897,18 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR kafka_ingestor TO orders DECODE USING orders_codec PARAMETERIZED \
-                 BY tenant_region_branch VALUES {tenant = orders.tenant, region = orders.region} \
-                 TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA kafka_main TOPIC \
-                 orders_topic OFFSET BY CONSUMER GROUP orders_group INSTANCES 3 MODE ACK PARALLEL \
-                 MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s;",
+                "CREATE INGESTOR kafka_ingestor TO orders DECODE USING orders_codec BRANCHED BY \
+                 by_tenant_region_branch VALUES {tenant = orders.tenant, region = orders.region} \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA kafka_main TOPIC orders_topic \
+                 OFFSET BY CONSUMER GROUP orders_group INSTANCES 3 MODE ACK PARALLEL MAX 8 BATCH \
+                 TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s;",
             ),
             (
                 CreateIngestor {
                     name: identifier("mqtt_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -2913,16 +2927,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR mqtt_ingestor TO orders DECODE USING orders_codec \
-                 UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM MQTT mqtt_main TOPIC \
-                 orders_topic MODE NO_ACK SEQUENTIAL;",
+                "CREATE INGESTOR mqtt_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM MQTT mqtt_main TOPIC orders_topic MODE \
+                 NO_ACK SEQUENTIAL;",
             ),
             (
                 CreateIngestor {
                     name: identifier("nats_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -2939,16 +2953,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR nats_ingestor TO orders DECODE USING orders_codec \
-                 UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM NATS nats_main SUBJECT \
-                 orders_subject QUEUE GROUP orders_workers INSTANCES 2 MODE NO_ACK SEQUENTIAL;",
+                "CREATE INGESTOR nats_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM NATS nats_main SUBJECT orders_subject \
+                 QUEUE GROUP orders_workers INSTANCES 2 MODE NO_ACK SEQUENTIAL;",
             ),
             (
                 CreateIngestor {
                     name: identifier("rabbit_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -2967,17 +2981,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR rabbit_ingestor TO orders DECODE USING orders_codec \
-                 UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM RABBITMQ rmq_main \
-                 QUEUE orders_q INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY \
-                 BACKOFF 1s MAX 30s;",
+                "CREATE INGESTOR rabbit_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM RABBITMQ rmq_main QUEUE orders_q \
+                 INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 1s MAX 30s;",
             ),
             (
                 CreateIngestor {
                     name: identifier("redis_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -2992,16 +3005,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR redis_ingestor TO orders DECODE USING orders_codec \
-                 UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM REDIS PUBSUB \
-                 redis_main CHANNEL orders_channel MODE NO_ACK SEQUENTIAL;",
+                "CREATE INGESTOR redis_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM REDIS PUBSUB redis_main CHANNEL \
+                 orders_channel MODE NO_ACK SEQUENTIAL;",
             ),
             (
                 CreateIngestor {
                     name: identifier("prom_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -3016,16 +3029,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR prom_ingestor TO orders DECODE USING orders_codec \
-                 UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM PROMETHEUS prom_main \
-                 QUERY 'sum(rate(http_requests_total[5m]))' EVERY 15s;",
+                "CREATE INGESTOR prom_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM PROMETHEUS prom_main QUERY \
+                 'sum(rate(http_requests_total[5m]))' EVERY 15s;",
             ),
             (
                 CreateIngestor {
                     name: identifier("zmq_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -3039,7 +3052,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR zmq_ingestor TO orders DECODE USING orders_codec UNPARAMETERIZED \
+                "CREATE INGESTOR zmq_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
                  FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ZEROMQ zmq_main MODE NO_ACK SEQUENTIAL;",
             ),
             (
@@ -3047,7 +3060,7 @@ mod tests {
                     name: identifier("sqs_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -3066,7 +3079,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR sqs_ingestor TO orders DECODE USING orders_codec UNPARAMETERIZED \
+                "CREATE INGESTOR sqs_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
                  FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM SQS sqs_main QUEUE orders_queue MODE \
                  ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s;",
             ),
@@ -3075,7 +3088,7 @@ mod tests {
                     name: identifier("endpoint_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -3089,16 +3102,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR endpoint_ingestor TO orders DECODE USING orders_codec \
-                 UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT \
-                 orders_endpoint MODE NO_ACK SEQUENTIAL;",
+                "CREATE INGESTOR endpoint_ingestor TO orders DECODE USING orders_codec UNBRANCHED \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT orders_endpoint MODE NO_ACK \
+                 SEQUENTIAL;",
             ),
             (
                 CreateIngestor {
                     name: identifier("ws_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -3112,9 +3125,8 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR ws_ingestor TO orders DECODE USING orders_codec UNPARAMETERIZED \
-                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM WEBSOCKETS ws_main MODE NO_ACK \
-                 SEQUENTIAL;",
+                "CREATE INGESTOR ws_ingestor TO orders DECODE USING orders_codec UNBRANCHED FLUSH \
+                 EACH 100ms MAX BATCH SIZE 1MiB FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL;",
             ),
         ];
 

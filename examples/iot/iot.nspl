@@ -55,17 +55,26 @@ CREATE IF NOT EXISTS SCHEMA device_branch (
   device_id STRING
 );
 
-CREATE RELAY telemetry_by_site SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
-CREATE RELAY telemetry_rejected SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
-CREATE RELAY battery_alerts SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
-CREATE RELAY telemetry_clean SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
-CREATE RELAY telemetry_by_device SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
-CREATE RELAY telemetry_ordered SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
-CREATE RELAY critical_alerts SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
-CREATE RELAY thermal_alerts SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
-CREATE RELAY maintenance_alerts SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
-CREATE RELAY normal_telemetry SCHEMA iot_telemetry PARAMETERIZED BY device_branch CAPACITY 2;
-CREATE RELAY site_critical_alerts SCHEMA iot_telemetry PARAMETERIZED BY site_branch CAPACITY 2;
+CREATE BRANCH by_site
+  BY site_branch TTL 5m;
+
+CREATE RELAY telemetry_by_site SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
+CREATE RELAY telemetry_rejected SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
+CREATE RELAY battery_alerts SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
+CREATE RELAY telemetry_clean SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
+
+CREATE BRANCH by_device
+  BY device_branch TTL 5m;
+CREATE RELAY telemetry_by_device SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY telemetry_ordered SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY critical_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY thermal_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY maintenance_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY normal_telemetry SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+
+CREATE BRANCH by_site_critical
+  BY site_branch TTL 5m;
+CREATE RELAY site_critical_alerts SCHEMA iot_telemetry BRANCHED BY by_site_critical CAPACITY 2;
 
 CREATE CLIENT mqtt_edge
   TYPE MQTT
@@ -86,7 +95,7 @@ CREATE INGESTOR mqtt_telemetry
         telemetry_by_site.sensor = lower(trim(message.sensor)),
         telemetry_by_site.unit = lower(trim(message.unit))
   DECODE USING iot_telemetry_codec
-  PARAMETERIZED BY site_branch VALUES { site = telemetry_by_site.site } TTL 5m
+  BRANCHED BY by_site VALUES { site = telemetry_by_site.site }
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
   TIMESTAMP AT ts
   FROM MQTT mqtt_edge
@@ -100,7 +109,7 @@ CREATE DEDUPLICATOR quality_gate
   TO telemetry_rejected WHERE telemetry_by_site.device_id = "" OR telemetry_by_site.sensor = "" OR telemetry_by_site.status = "offline"
   TO battery_alerts WHERE telemetry_by_site.battery_pct < 15.0
   TO telemetry_clean
-  PARAMETERIZED BY site_branch
+  BRANCHED BY by_site
   DEDUPLICATE ON telemetry_by_site.site, telemetry_by_site.device_id, telemetry_by_site.sensor, telemetry_by_site.ts, telemetry_by_site.seq
   MAX TIME 5m
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
@@ -109,18 +118,18 @@ CREATE DEDUPLICATOR quality_gate
 CREATE REINGESTOR device_repartition
   FROM telemetry_clean
   TO telemetry_by_device
-  PARAMETERIZED BY device_branch VALUES {
+  BRANCHED BY by_device VALUES {
     site = telemetry_by_device.site,
     line = telemetry_by_device.line,
     device_id = telemetry_by_device.device_id
-  } TTL 5m
+  }
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
   ON MESSAGE ERROR LOG;
 
 CREATE REORDERER device_event_reorderer
   FROM telemetry_by_device
   TO telemetry_ordered
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   BY telemetry_by_device.ts, telemetry_by_device.seq
   MAX TIME 5s
   FLUSH EACH 500ms MAX BATCH SIZE 10kb
@@ -132,7 +141,7 @@ CREATE DEDUPLICATOR anomaly_splitter
   TO thermal_alerts WHERE telemetry_ordered.sensor = "temperature" AND telemetry_ordered.value >= 80.0
   TO maintenance_alerts WHERE telemetry_ordered.value >= telemetry_ordered.warn_high
   TO normal_telemetry
-  PARAMETERIZED BY device_branch
+  BRANCHED BY by_device
   DEDUPLICATE ON telemetry_ordered.site, telemetry_ordered.line, telemetry_ordered.device_id, telemetry_ordered.sensor, telemetry_ordered.ts, telemetry_ordered.seq
   MAX TIME 5m
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
@@ -141,7 +150,7 @@ CREATE DEDUPLICATOR anomaly_splitter
 CREATE REINGESTOR site_alert_repartition
   FROM critical_alerts
   TO site_critical_alerts
-  PARAMETERIZED BY site_branch VALUES { site = site_critical_alerts.site } TTL 5m
+  BRANCHED BY by_site_critical VALUES { site = site_critical_alerts.site }
   FLUSH EACH 250ms MAX BATCH SIZE 10kb
   ON MESSAGE ERROR LOG;
 

@@ -21,13 +21,14 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterRelay, AlterRelayOperation, AvroType, BranchParameterization, CodecEncoding,
-    CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction, CreateCodec, CreateCorrelator,
-    CreateDeduplicator, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
-    CreateMaterializer, CreateReingestor, CreateSchema, CreateSignalingProtocol,
-    CreateWindowProcessor, CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink,
-    EndpointType, Identifier, IngestSource, IngestTimestampSource, JsonType, MessageErrorPolicy,
-    Model, ModelKind, ParseAsType, ProcessorOutput, ProcessorOutputs, ScheduledNode, SchemaField,
+    AlterRelay, AlterRelayOperation, AvroType, BranchInitiatorSelection, BranchSelection,
+    CodecEncoding, CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
+    CreateCodec, CreateCorrelator, CreateDeduplicator, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateLookup, CreateMaterializer, CreateReingestor, CreateSchema,
+    CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchemaStmt, Domain, DomainSchedule,
+    DropModel, EmitSink, EndpointType, Identifier, IngestSource, IngestTimestampSource, JsonType,
+    MessageErrorPolicy, Model, ModelKind, ParseAsType, ProcessorOutput, ProcessorOutputs,
+    ScheduledNode, SchemaField,
 };
 use nervix_nspl::{
     vm_program::{
@@ -736,33 +737,43 @@ impl DomainState {
         let mut indices = HashMap::new();
 
         for (key, model) in models {
-            let effective_parameterization = match model {
+            let (effective_branching, effective_branching_schema) = match model {
                 Model::Relay(relay) => {
-                    if let Some(schema) = relay.parameterization.parameterized_by() {
-                        Some(parameterization_schema_fields(
+                    if let Some(branch_ref) = relay.branching.branch() {
+                        let branch = branch_model(domain, &key.identifier, models, branch_ref)?;
+                        (
+                            Some(branching_schema_fields(
+                                domain,
+                                &key.identifier,
+                                models,
+                                &branch.branched_by,
+                            )?),
+                            Some(branch.branched_by.clone()),
+                        )
+                    } else {
+                        (Some(Vec::new()), None)
+                    }
+                }
+                _ => {
+                    if let Some(branched_by) = model_branch_selection(model) {
+                        let branching = resolved_branch_selection(
                             domain,
                             &key.identifier,
                             models,
-                            schema,
-                        )?)
-                    } else if relay.parameterization.is_unparameterized() {
-                        Some(Vec::new())
+                            branched_by,
+                        )?;
+                        (Some(branching.fields), branching.schema)
                     } else {
-                        None
+                        (None, None)
                     }
                 }
-                _ => None,
-            };
-            let effective_parameterization_schema = match model {
-                Model::Relay(relay) => relay.parameterization.parameterized_by().cloned(),
-                _ => None,
             };
             let node = ActiveNode {
                 identifier: key.identifier.clone(),
                 kind: key.kind,
                 config: Arc::new(model.clone()),
-                effective_parameterization,
-                effective_parameterization_schema,
+                effective_branching,
+                effective_branching_schema,
             };
             let index = graph.add_node(node);
             indices.insert(key.clone(), index);
@@ -774,9 +785,35 @@ impl DomainState {
                 .get(key)
                 .expect("graph node must exist for every model");
 
+            if let Some(branched_by) = model_branch_selection(model) {
+                if let Some(branch_ref) = branched_by.branch_ref() {
+                    let branch = expect_kind(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        branch_ref,
+                        ModelKind::Branch,
+                    )?;
+                    graph.add_edge(branch, source, EdgeKind::RequiredBy);
+                }
+            }
+
             match model {
                 Model::Schema(schema) => {
                     ensure_schema_has_fields(domain, identifier, &schema.fields, "schema")?;
+                }
+                Model::Branch(branch) => {
+                    let branch_schema = expect_kind(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &branch.branched_by,
+                        ModelKind::Schema,
+                    )?;
+                    graph.add_edge(branch_schema, source, EdgeKind::RequiredBy);
+                    validate_branch_model(domain, identifier, models, branch)?;
                 }
                 Model::WireSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
@@ -1176,7 +1213,7 @@ impl DomainState {
                             consumer_schema,
                             "ingestor output",
                         )?;
-                        ensure_ingestor_output_parameterization_source(
+                        ensure_ingestor_output_branching_source(
                             domain,
                             identifier,
                             models,
@@ -1191,7 +1228,6 @@ impl DomainState {
                         ingestor,
                         producer_schema,
                     )?;
-                    validate_branch_ttl(domain, identifier, &ingestor.parameterized_by)?;
                     add_message_error_policy_edges(
                         domain,
                         identifier,
@@ -1223,16 +1259,16 @@ impl DomainState {
                         ModelKind::Schema,
                     )?;
                     graph.add_edge(schema, source, EdgeKind::RequiredBy);
-                    if let Some(parameter_schema) = stream.parameterization.parameterized_by() {
-                        let parameter_schema_node = expect_kind(
+                    if let Some(branch_ref) = stream.branching.branch() {
+                        let branch = expect_kind(
                             domain,
                             identifier,
                             models,
                             &indices,
-                            parameter_schema,
-                            ModelKind::Schema,
+                            branch_ref,
+                            ModelKind::Branch,
                         )?;
-                        graph.add_edge(parameter_schema_node, source, EdgeKind::RequiredBy);
+                        graph.add_edge(branch, source, EdgeKind::RequiredBy);
                     }
                 }
                 Model::Reingestor(reingestor) => {
@@ -1303,7 +1339,7 @@ impl DomainState {
                             consumer_schema,
                             "reingestor flow",
                         )?;
-                        ensure_reingestor_parameterization_target(
+                        ensure_reingestor_branching_target(
                             domain,
                             identifier,
                             models,
@@ -1313,7 +1349,6 @@ impl DomainState {
                             branch_schema,
                         )?;
                     }
-                    validate_branch_ttl(domain, identifier, &reingestor.parameterized_by)?;
                     add_message_error_policy_edges(
                         domain,
                         identifier,
@@ -1944,8 +1979,8 @@ impl DomainState {
 
         validate_vhost_hostnames(domain, models)?;
         validate_endpoint_paths(domain, models)?;
-        infer_stream_parameterizations(domain, models, &indices, &mut graph)?;
-        validate_processing_branch_parameterizations(domain, models, &indices, &graph)?;
+        infer_stream_branchings(domain, models, &indices, &mut graph)?;
+        validate_processing_branch_selections(domain, models, &indices, &graph)?;
         attach_materializer_nodes(models, &indices, &mut graph);
 
         Ok(Self {
@@ -2066,7 +2101,8 @@ impl ActiveGraph {
                         identifier: node.identifier,
                         kind: node.kind,
                         config: Box::new((*node.config).clone()),
-                        effective_parameterization: node.effective_parameterization,
+                        effective_branching: node.effective_branching,
+                        effective_branching_schema: node.effective_branching_schema,
                         kafka_partition_schedule: None,
                         primary_node,
                         assigned_nodes,
@@ -2241,8 +2277,8 @@ pub struct ActiveNode {
     pub identifier: Identifier,
     pub kind: ModelKind,
     pub config: Arc<Model>,
-    pub effective_parameterization: Option<Vec<Identifier>>,
-    pub effective_parameterization_schema: Option<Identifier>,
+    pub effective_branching: Option<Vec<Identifier>>,
+    pub effective_branching_schema: Option<Identifier>,
 }
 
 impl ActiveNode {
@@ -2326,8 +2362,8 @@ impl ActiveNode {
             self.dataflow_kind(),
             self.dataflow_subtype(),
         )
-        .with_optional_parameterization_schema(
-            self.dataflow_parameterization_schema()
+        .with_optional_branching_schema(
+            self.dataflow_branching_schema()
                 .map(|schema| schema.as_str().to_string()),
         );
         match self.config.as_ref() {
@@ -2366,14 +2402,8 @@ impl ActiveNode {
         }
     }
 
-    fn dataflow_parameterization_schema(&self) -> Option<Identifier> {
-        match self.config.as_ref() {
-            Model::Ingestor(ingestor) => ingestor.parameterized_by.schema().cloned(),
-            Model::Reingestor(reingestor) => reingestor.parameterized_by.schema().cloned(),
-            Model::Relay(_) => self.effective_parameterization_schema.clone(),
-            Model::Emitter(_) => self.effective_parameterization_schema.clone(),
-            _ => self.effective_parameterization_schema.clone(),
-        }
+    fn dataflow_branching_schema(&self) -> Option<Identifier> {
+        self.effective_branching_schema.clone()
     }
 
     fn is_dataflow_node(&self) -> bool {
@@ -2574,12 +2604,12 @@ fn attach_materializer_nodes(
         else {
             continue;
         };
-        let effective_parameterization = graph
+        let effective_branching = graph
             .node_weight(stream_index)
-            .and_then(|node| node.effective_parameterization.clone());
-        let effective_parameterization_schema = graph
+            .and_then(|node| node.effective_branching.clone());
+        let effective_branching_schema = graph
             .node_weight(stream_index)
-            .and_then(|node| node.effective_parameterization_schema.clone());
+            .and_then(|node| node.effective_branching_schema.clone());
         let materializer = CreateMaterializer {
             relay: relay.name,
             state,
@@ -2588,30 +2618,31 @@ fn attach_materializer_nodes(
             identifier: identifier.clone(),
             kind: ModelKind::Materializer,
             config: Arc::new(Model::Materializer(materializer)),
-            effective_parameterization,
-            effective_parameterization_schema,
+            effective_branching,
+            effective_branching_schema,
         });
         graph.add_edge(stream_index, materializer_index, EdgeKind::RequiredBy);
         graph.add_edge(stream_index, materializer_index, EdgeKind::SendsTo);
     }
 }
 
-fn validate_branch_ttl(
+fn validate_branch_model(
     domain: &Domain,
     identifier: &Identifier,
-    parameterization: &BranchParameterization,
+    models: &HashMap<RegistryKey, Model>,
+    branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
-    match parameterization.ttl() {
-        Some(ttl) => parse_branch_ttl(domain, identifier, ttl).map(|_| ()),
-        None if parameterization.schema().is_some() => {
-            Err(Report::new(RegistryError::InvalidModel {
+    parse_branch_ttl(domain, identifier, &branch.ttl)?;
+    if let Some(eviction) = &branch.eviction {
+        if eviction.max_instances() == 0 {
+            return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
-                reason: "parameterized branch ttl is required".to_string(),
-            }))
+                reason: "branch MAX INSTANCES must be greater than zero".to_string(),
+            }));
         }
-        None => Ok(()),
     }
+    ensure_branch_schema_exists(domain, identifier, models, branch)
 }
 
 fn parse_branch_ttl(
@@ -2626,6 +2657,27 @@ fn parse_branch_ttl(
             reason: format!("invalid branch ttl '{ttl}': {error}"),
         })
     })
+}
+
+fn ensure_branch_schema_exists(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    branch: &CreateBranch,
+) -> Result<(), Report<RegistryError>> {
+    let Some(Model::Schema(_)) = models.get(&RegistryKey::new(
+        ModelKind::Schema,
+        branch.branched_by.clone(),
+    )) else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Schema.as_str(),
+            reference: branch.branched_by.as_str().to_string(),
+        }));
+    };
+
+    Ok(())
 }
 
 fn ensure_schema_has_fields<T>(
@@ -6032,7 +6084,7 @@ fn ensure_lookup_key_field_exists(
     }))
 }
 
-fn ensure_ingestor_output_parameterization_source(
+fn ensure_ingestor_output_branching_source(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
@@ -6040,13 +6092,14 @@ fn ensure_ingestor_output_parameterization_source(
     schema: &CreateSchema,
     output_relay: &Identifier,
 ) -> Result<(), Report<RegistryError>> {
-    if let Some(parameter_schema) = ingestor.parameterized_by.schema() {
-        ensure_parameter_values_match_schema(
+    if let Some(branch_ref) = ingestor.branched_by.branch() {
+        let branch = branch_model(domain, identifier, models, branch_ref)?;
+        ensure_branch_values_match_schema(
             domain,
             identifier,
             models,
-            parameter_schema,
-            ingestor.parameterized_by.values(),
+            &branch.branched_by,
+            ingestor.branched_by.values(),
             schema,
             output_relay,
             None,
@@ -6097,7 +6150,7 @@ fn ensure_ingestor_timestamp_source(
     }
 }
 
-fn ensure_reingestor_parameterization_target(
+fn ensure_reingestor_branching_target(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
@@ -6106,13 +6159,14 @@ fn ensure_reingestor_parameterization_target(
     output_relay: &Identifier,
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
-    if let Some(parameter_schema) = reingestor.parameterized_by.schema() {
-        ensure_parameter_values_match_schema(
+    if let Some(branch_ref) = reingestor.branched_by.branch() {
+        let branch = branch_model(domain, identifier, models, branch_ref)?;
+        ensure_branch_values_match_schema(
             domain,
             identifier,
             models,
-            parameter_schema,
-            reingestor.parameterized_by.values(),
+            &branch.branched_by,
+            reingestor.branched_by.values(),
             schema,
             output_relay,
             branch_schema,
@@ -6137,41 +6191,43 @@ fn relay_declared_branch_schema<'a>(
             reference: relay.as_str().to_string(),
         }));
     };
-    let Some(schema_name) = relay_model.parameterization.parameterized_by() else {
+    let Some(branch_ref) = relay_model.branching.branch() else {
         return Ok(None);
     };
-    let Some(Model::Schema(schema)) =
-        models.get(&RegistryKey::new(ModelKind::Schema, schema_name.clone()))
-    else {
-        return Err(Report::new(RegistryError::MissingReference {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Schema.as_str(),
-            reference: schema_name.as_str().to_string(),
-        }));
-    };
-    Ok(Some(schema))
-}
-
-fn ensure_parameter_values_match_schema(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    parameter_schema: &Identifier,
-    values: &[nervix_models::ParameterValueMapping],
-    output_schema: &CreateSchema,
-    output_relay: &Identifier,
-    branch_schema: Option<&CreateSchema>,
-) -> Result<(), Report<RegistryError>> {
-    let Some(Model::Schema(parameter_schema_model)) = models.get(&RegistryKey::new(
+    let branch = branch_model(domain, identifier, models, branch_ref)?;
+    let Some(Model::Schema(schema)) = models.get(&RegistryKey::new(
         ModelKind::Schema,
-        parameter_schema.clone(),
+        branch.branched_by.clone(),
     )) else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             expected_kind: ModelKind::Schema.as_str(),
-            reference: parameter_schema.as_str().to_string(),
+            reference: branch.branched_by.as_str().to_string(),
+        }));
+    };
+    Ok(Some(schema))
+}
+
+fn ensure_branch_values_match_schema(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    branch_schema_name: &Identifier,
+    values: &[nervix_models::BranchValueMapping],
+    output_schema: &CreateSchema,
+    output_relay: &Identifier,
+    current_branch_schema: Option<&CreateSchema>,
+) -> Result<(), Report<RegistryError>> {
+    let Some(Model::Schema(branch_schema_model)) = models.get(&RegistryKey::new(
+        ModelKind::Schema,
+        branch_schema_name.clone(),
+    )) else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Schema.as_str(),
+            reference: branch_schema_name.as_str().to_string(),
         }));
     };
     let mut seen = HashSet::new();
@@ -6181,34 +6237,33 @@ fn ensure_parameter_values_match_schema(
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "PARAMETERIZED BY value field '{}' is specified more than once",
+                    "BY value field '{}' is specified more than once",
                     value.field.as_str()
                 ),
             }));
         }
         let source_schema = if value.relay.as_str() == BRANCH_NAMESPACE {
-            let Some(branch_schema) = branch_schema else {
+            let Some(current_branch_schema) = current_branch_schema else {
                 return Err(Report::new(RegistryError::IncompatibleSchema {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
                     reason: format!(
-                        "PARAMETERIZED BY VALUES for '{}' cannot read '{}.{}' because the current \
-                         branch is unparameterized",
+                        "BY VALUES for '{}' cannot read '{}.{}' because the current branch is \
+                         unbranched",
                         value.field.as_str(),
                         value.relay.as_str(),
                         value.relay_field.as_str()
                     ),
                 }));
             };
-            branch_schema
+            current_branch_schema
         } else {
             if value.relay != *output_relay {
                 return Err(Report::new(RegistryError::IncompatibleSchema {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
                     reason: format!(
-                        "PARAMETERIZED BY VALUES for '{}' must read directly from outgoing relay \
-                         '{}' or branch",
+                        "BY VALUES for '{}' must read directly from outgoing relay '{}' or branch",
                         value.field.as_str(),
                         output_relay.as_str()
                     ),
@@ -6225,14 +6280,14 @@ fn ensure_parameter_values_match_schema(
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "PARAMETERIZED BY source field '{}.{}' is missing from schema '{}'",
+                    "BY source field '{}.{}' is missing from schema '{}'",
                     value.relay.as_str(),
                     value.relay_field.as_str(),
                     source_schema.name.as_str()
                 ),
             }));
         };
-        let Some(parameter_field) = parameter_schema_model
+        let Some(branch_field) = branch_schema_model
             .fields
             .iter()
             .find(|schema_field| schema_field.name == value.field)
@@ -6241,38 +6296,38 @@ fn ensure_parameter_values_match_schema(
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "PARAMETERIZED BY schema '{}' has no field '{}'",
-                    parameter_schema.as_str(),
+                    "BY schema '{}' has no field '{}'",
+                    branch_schema_name.as_str(),
                     value.field.as_str()
                 ),
             }));
         };
-        if source_field.ty != parameter_field.ty {
+        if source_field.ty != branch_field.ty {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "PARAMETERIZED BY value field '{}' type mismatch: schema {:?}, source {:?}",
+                    "BY value field '{}' type mismatch: schema {:?}, source {:?}",
                     value.field.as_str(),
-                    parameter_field.ty,
+                    branch_field.ty,
                     source_field.ty
                 ),
             }));
         }
-        if source_field.optional != parameter_field.optional {
+        if source_field.optional != branch_field.optional {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "PARAMETERIZED BY value field '{}' optionality mismatch: schema {}, source {}",
+                    "BY value field '{}' optionality mismatch: schema {}, source {}",
                     value.field.as_str(),
-                    parameter_field.optional,
+                    branch_field.optional,
                     source_field.optional
                 ),
             }));
         }
     }
-    for field in &parameter_schema_model.fields {
+    for field in &branch_schema_model.fields {
         if values.iter().any(|value| value.field == field.name) {
             continue;
         }
@@ -6280,8 +6335,8 @@ fn ensure_parameter_values_match_schema(
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "PARAMETERIZED BY schema '{}' field '{}' has no VALUES mapping",
-                parameter_schema.as_str(),
+                "BY schema '{}' field '{}' has no VALUES mapping",
+                branch_schema_name.as_str(),
                 field.name.as_str()
             ),
         }));
@@ -6359,7 +6414,7 @@ fn validate_endpoint_paths(
     Ok(())
 }
 
-fn infer_stream_parameterizations(
+fn infer_stream_branchings(
     domain: &Domain,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
@@ -6432,138 +6487,133 @@ fn infer_stream_parameterizations(
             let proposed = match model {
                 Model::Generator(generator) => Some(vec![(
                     generator.into_relay.clone(),
-                    resolved_branch_parameterization(
-                        domain,
-                        producer_id,
-                        models,
-                        &generator.parameterized_by,
-                    )?,
+                    resolved_branch_selection(domain, producer_id, models, &generator.branched_by)?,
                 )]),
                 Model::Inferencer(processor) => {
-                    let parameterization = resolved_branch_parameterization(
+                    let branching = resolved_branch_selection(
                         domain,
                         producer_id,
                         models,
-                        &processor.parameterized_by,
+                        &processor.branched_by,
                     )?;
                     Some(
                         processor
                             .output_routes
                             .relays()
                             .cloned()
-                            .map(|target| (target, parameterization.clone()))
+                            .map(|target| (target, branching.clone()))
                             .collect(),
                     )
                 }
                 Model::WasmProcessor(processor) => {
-                    let parameterization = resolved_branch_parameterization(
+                    let branching = resolved_branch_selection(
                         domain,
                         producer_id,
                         models,
-                        &processor.parameterized_by,
+                        &processor.branched_by,
                     )?;
                     Some(
                         processor
                             .output_routes
                             .relays()
                             .cloned()
-                            .map(|target| (target, parameterization.clone()))
+                            .map(|target| (target, branching.clone()))
                             .collect(),
                     )
                 }
                 Model::Ingestor(ingestor) => {
-                    let parameterization = resolved_branch_parameterization(
+                    let branching = resolved_branch_selection(
                         domain,
                         producer_id,
                         models,
-                        &ingestor.parameterized_by,
+                        &ingestor.branched_by,
                     )?;
                     Some(
                         ingestor
                             .output_routes
                             .relays()
                             .cloned()
-                            .map(|target| (target, parameterization.clone()))
+                            .map(|target| (target, branching.clone()))
                             .collect(),
                     )
                 }
                 Model::Reingestor(reingestor) => {
-                    let parameterization = resolved_branch_parameterization(
+                    let branching = resolved_branch_selection(
                         domain,
                         producer_id,
                         models,
-                        &reingestor.parameterized_by,
+                        &reingestor.branched_by,
                     )?;
                     Some(
                         reingestor
                             .output_routes
                             .relays()
                             .cloned()
-                            .map(|target| (target, parameterization.clone()))
+                            .map(|target| (target, branching.clone()))
                             .collect(),
                     )
                 }
                 Model::Deduplicator(deduplicator) => {
-                    let parameterization = resolved_branch_parameterization(
+                    let branching = resolved_branch_selection(
                         domain,
                         producer_id,
                         models,
-                        &deduplicator.parameterized_by,
+                        &deduplicator.branched_by,
                     )?;
                     Some(
                         deduplicator
                             .output_routes
                             .relays()
                             .cloned()
-                            .map(|target| (target, parameterization.clone()))
+                            .map(|target| (target, branching.clone()))
                             .collect(),
                     )
                 }
                 Model::Correlator(correlator) => {
-                    let parameterization = resolved_branch_parameterization(
+                    let branching = resolved_branch_selection(
                         domain,
                         producer_id,
                         models,
-                        &correlator.parameterized_by,
+                        &correlator.branched_by,
                     )?;
                     Some(
                         correlator
                             .output_routes
                             .relays()
                             .cloned()
-                            .map(|target| (target, parameterization.clone()))
+                            .map(|target| (target, branching.clone()))
                             .collect(),
                     )
                 }
                 Model::Junction(junction) => {
-                    let parameterization = resolved_branch_parameterization(
+                    let branching = resolved_branch_selection(
                         domain,
                         producer_id,
                         models,
-                        &junction.parameterized_by,
+                        &junction.branched_by,
                     )?;
                     Some(
                         junction
                             .output_routes
                             .relays()
                             .cloned()
-                            .map(|target| (target, parameterization.clone()))
+                            .map(|target| (target, branching.clone()))
                             .collect(),
                     )
                 }
                 Model::WindowProcessor(window_processor) => {
-                    let parameterization = resolved_branch_parameterization(
+                    let branching = resolved_branch_selection(
                         domain,
                         producer_id,
                         models,
-                        &window_processor.parameterized_by,
+                        &window_processor.branched_by,
                     )?;
                     Some(
                         window_processor
                             .output_routes
                             .relays()
                             .cloned()
-                            .map(|target| (target, parameterization.clone()))
+                            .map(|target| (target, branching.clone()))
                             .collect(),
                     )
                 }
@@ -6574,12 +6624,12 @@ fn infer_stream_parameterizations(
                 continue;
             };
 
-            for (target_relay, parameterization) in proposed_targets {
-                changed |= assign_stream_parameterization(
+            for (target_relay, branching) in proposed_targets {
+                changed |= assign_stream_branching(
                     domain,
                     producer_id,
                     &target_relay,
-                    parameterization,
+                    branching,
                     indices,
                     graph,
                 )?;
@@ -6590,20 +6640,20 @@ fn infer_stream_parameterizations(
     Ok(())
 }
 
-fn validate_processing_branch_parameterizations(
+fn validate_processing_branch_selections(
     domain: &Domain,
     models: &HashMap<RegistryKey, Model>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<(), Report<RegistryError>> {
     // Normal processors are branch-preserving: they must run under an explicit
-    // concrete relay branch. Only REINGESTOR may change parameterization and
+    // concrete relay branch. Only REINGESTOR may change branching and
     // only EMITTER may fan in across branches, so every processor source checked
     // here must already have an inferred branch shape.
     for (key, model) in models {
         match model {
             Model::Inferencer(processor) => {
-                let check = ProcessorParameterizationCheck {
+                let check = ProcessorBranchingCheck {
                     domain,
                     identifier: &key.identifier,
                     model_kind: "inferencer",
@@ -6612,11 +6662,11 @@ fn validate_processing_branch_parameterizations(
                     graph,
                 };
                 for from_relay in processor.from.relays() {
-                    check.matches_relay(&processor.parameterized_by, from_relay)?;
+                    check.matches_relay(&processor.branched_by, from_relay)?;
                 }
             }
             Model::WasmProcessor(processor) => {
-                let check = ProcessorParameterizationCheck {
+                let check = ProcessorBranchingCheck {
                     domain,
                     identifier: &key.identifier,
                     model_kind: "wasm processor",
@@ -6625,11 +6675,11 @@ fn validate_processing_branch_parameterizations(
                     graph,
                 };
                 for from_relay in processor.from.relays() {
-                    check.matches_relay(&processor.parameterized_by, from_relay)?;
+                    check.matches_relay(&processor.branched_by, from_relay)?;
                 }
             }
             Model::Deduplicator(deduplicator) => {
-                let check = ProcessorParameterizationCheck {
+                let check = ProcessorBranchingCheck {
                     domain,
                     identifier: &key.identifier,
                     model_kind: "deduplicator",
@@ -6638,11 +6688,11 @@ fn validate_processing_branch_parameterizations(
                     graph,
                 };
                 for from_relay in deduplicator.from.relays() {
-                    check.matches_relay(&deduplicator.parameterized_by, from_relay)?;
+                    check.matches_relay(&deduplicator.branched_by, from_relay)?;
                 }
             }
             Model::Correlator(correlator) => {
-                let check = ProcessorParameterizationCheck {
+                let check = ProcessorBranchingCheck {
                     domain,
                     identifier: &key.identifier,
                     model_kind: "correlator",
@@ -6651,22 +6701,22 @@ fn validate_processing_branch_parameterizations(
                     graph,
                 };
                 for relay in correlator.left.relays() {
-                    check.matches_relay(&correlator.parameterized_by, relay)?;
+                    check.matches_relay(&correlator.branched_by, relay)?;
                 }
                 for relay in correlator.right.relays() {
-                    check.matches_relay(&correlator.parameterized_by, relay)?;
+                    check.matches_relay(&correlator.branched_by, relay)?;
                 }
                 if let CorrelationTimeoutAction::SendTo { relay } = &correlator.timeout_policy.left
                 {
-                    check.matches_relay(&correlator.parameterized_by, relay)?;
+                    check.matches_relay(&correlator.branched_by, relay)?;
                 }
                 if let CorrelationTimeoutAction::SendTo { relay } = &correlator.timeout_policy.right
                 {
-                    check.matches_relay(&correlator.parameterized_by, relay)?;
+                    check.matches_relay(&correlator.branched_by, relay)?;
                 }
             }
             Model::Reorderer(reorderer) => {
-                let check = ProcessorParameterizationCheck {
+                let check = ProcessorBranchingCheck {
                     domain,
                     identifier: &key.identifier,
                     model_kind: "reorderer",
@@ -6675,12 +6725,12 @@ fn validate_processing_branch_parameterizations(
                     graph,
                 };
                 for from_relay in reorderer.from.relays() {
-                    check.matches_relay(&reorderer.parameterized_by, from_relay)?;
+                    check.matches_relay(&reorderer.branched_by, from_relay)?;
                 }
             }
             Model::Reingestor(reingestor) => {
                 for from_relay in reingestor.from.relays() {
-                    ensure_processing_source_parameterization(
+                    ensure_processing_source_branching(
                         domain,
                         &key.identifier,
                         "reingestor",
@@ -6691,7 +6741,7 @@ fn validate_processing_branch_parameterizations(
                 }
             }
             Model::WindowProcessor(window_processor) => {
-                let check = ProcessorParameterizationCheck {
+                let check = ProcessorBranchingCheck {
                     domain,
                     identifier: &key.identifier,
                     model_kind: "window processor",
@@ -6700,11 +6750,11 @@ fn validate_processing_branch_parameterizations(
                     graph,
                 };
                 for from_relay in window_processor.from.relays() {
-                    check.matches_relay(&window_processor.parameterized_by, from_relay)?;
+                    check.matches_relay(&window_processor.branched_by, from_relay)?;
                 }
             }
             Model::Junction(junction) => {
-                let check = ProcessorParameterizationCheck {
+                let check = ProcessorBranchingCheck {
                     domain,
                     identifier: &key.identifier,
                     model_kind: "junction",
@@ -6713,7 +6763,7 @@ fn validate_processing_branch_parameterizations(
                     graph,
                 };
                 for from_relay in junction.from.relays() {
-                    check.matches_relay(&junction.parameterized_by, from_relay)?;
+                    check.matches_relay(&junction.branched_by, from_relay)?;
                 }
             }
             _ => {}
@@ -6723,7 +6773,7 @@ fn validate_processing_branch_parameterizations(
     Ok(())
 }
 
-struct ProcessorParameterizationCheck<'a> {
+struct ProcessorBranchingCheck<'a> {
     domain: &'a Domain,
     identifier: &'a Identifier,
     model_kind: &'a str,
@@ -6732,50 +6782,47 @@ struct ProcessorParameterizationCheck<'a> {
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
 }
 
-impl ProcessorParameterizationCheck<'_> {
+impl ProcessorBranchingCheck<'_> {
     fn matches_relay(
         &self,
-        parameterized_by: &BranchParameterization,
+        branched_by: &BranchSelection,
         relay: &Identifier,
     ) -> Result<(), Report<RegistryError>> {
-        if !parameterized_by.values().is_empty() {
+        let declared =
+            resolved_branch_selection(self.domain, self.identifier, self.models, branched_by)?
+                .fields;
+        let relay_fields =
+            if let Some(relay_fields) = relay_branching_fields(self.indices, self.graph, relay) {
+                relay_fields
+            } else if declared.is_empty() {
+                return Ok(());
+            } else {
+                return Err(Report::new(RegistryError::IncompatibleSchema {
+                    domain: self.domain.as_str().to_string(),
+                    identifier: self.identifier.as_str().to_string(),
+                    reason: format!(
+                        "{} '{}' requires relay '{}' to have branch fields ({})",
+                        self.model_kind,
+                        self.identifier.as_str(),
+                        relay.as_str(),
+                        format_branched_by(&declared),
+                    ),
+                }));
+            };
+
+        if relay_fields.is_empty() && !declared.is_empty() {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: self.domain.as_str().to_string(),
                 identifier: self.identifier.as_str().to_string(),
                 reason: format!(
-                    "{} '{}' declares branch schema only; VALUES are only valid for ingestors and \
-                     reingestors",
-                    self.model_kind,
-                    self.identifier.as_str(),
-                ),
-            }));
-        }
-        let declared = resolved_branch_parameterization(
-            self.domain,
-            self.identifier,
-            self.models,
-            parameterized_by,
-        )?
-        .fields;
-        let relay_fields = if let Some(relay_fields) =
-            relay_parameterization_fields(self.indices, self.graph, relay)
-        {
-            relay_fields
-        } else if declared.is_empty() {
-            return Ok(());
-        } else {
-            return Err(Report::new(RegistryError::IncompatibleSchema {
-                domain: self.domain.as_str().to_string(),
-                identifier: self.identifier.as_str().to_string(),
-                reason: format!(
-                    "{} '{}' requires relay '{}' to have parameterization ({})",
+                    "{} '{}' requires relay '{}' to have branch fields ({})",
                     self.model_kind,
                     self.identifier.as_str(),
                     relay.as_str(),
-                    format_parameterized_by(&declared),
+                    format_branched_by(&declared),
                 ),
             }));
-        };
+        }
 
         if relay_fields == declared {
             return Ok(());
@@ -6785,18 +6832,18 @@ impl ProcessorParameterizationCheck<'_> {
             domain: self.domain.as_str().to_string(),
             identifier: self.identifier.as_str().to_string(),
             reason: format!(
-                "{} '{}' parameterization ({}) does not match relay '{}' parameterization ({})",
+                "{} '{}' branch fields ({}) do not match relay '{}' branch fields ({})",
                 self.model_kind,
                 self.identifier.as_str(),
-                format_parameterized_by(&declared),
+                format_branched_by(&declared),
                 relay.as_str(),
-                format_parameterized_by(&relay_fields),
+                format_branched_by(&relay_fields),
             ),
         }))
     }
 }
 
-fn ensure_processing_source_parameterization(
+fn ensure_processing_source_branching(
     domain: &Domain,
     identifier: &Identifier,
     model_kind: &str,
@@ -6820,70 +6867,122 @@ fn ensure_processing_source_parameterization(
             reference: relay.as_str().to_string(),
         }));
     };
-    if node.effective_parameterization.is_none() {
-        return Err(Report::new(RegistryError::IncompatibleSchema {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "{} '{}' requires an explicit upstream parameterization on relay '{}'",
-                model_kind,
-                identifier.as_str(),
-                relay.as_str(),
-            ),
-        }));
+    if node.effective_branching.is_some() {
+        return Ok(());
     }
-    Ok(())
+
+    Err(Report::new(RegistryError::IncompatibleSchema {
+        domain: domain.as_str().to_string(),
+        identifier: identifier.as_str().to_string(),
+        reason: format!(
+            "{} '{}' requires relay '{}' to declare BRANCHED BY or UNBRANCHED",
+            model_kind,
+            identifier.as_str(),
+            relay.as_str(),
+        ),
+    }))
 }
 
-fn relay_parameterization_fields(
+fn relay_branching_fields(
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
     relay: &Identifier,
 ) -> Option<Vec<Identifier>> {
     let index = indices.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))?;
     let node = graph.node_weight(*index)?;
-    node.effective_parameterization.clone()
+    node.effective_branching.clone()
 }
 
 #[derive(Clone)]
-struct ResolvedParameterization {
+struct ResolvedBranching {
     schema: Option<Identifier>,
     fields: Vec<Identifier>,
 }
 
-fn resolved_branch_parameterization(
+trait BranchReference {
+    fn branch_ref(&self) -> Option<&Identifier>;
+}
+
+impl BranchReference for BranchSelection {
+    fn branch_ref(&self) -> Option<&Identifier> {
+        self.branch()
+    }
+}
+
+impl BranchReference for BranchInitiatorSelection {
+    fn branch_ref(&self) -> Option<&Identifier> {
+        self.branch()
+    }
+}
+
+fn resolved_branch_selection(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
-    parameterized_by: &BranchParameterization,
-) -> Result<ResolvedParameterization, Report<RegistryError>> {
-    let Some(schema) = parameterized_by.schema() else {
-        return Ok(ResolvedParameterization {
+    branched_by: &dyn BranchReference,
+) -> Result<ResolvedBranching, Report<RegistryError>> {
+    let Some(branch_ref) = branched_by.branch_ref() else {
+        return Ok(ResolvedBranching {
             schema: None,
             fields: Vec::new(),
         });
     };
-    Ok(ResolvedParameterization {
-        schema: Some(schema.clone()),
-        fields: parameterization_schema_fields(domain, identifier, models, schema)?,
+    let branch = branch_model(domain, identifier, models, branch_ref)?;
+    Ok(ResolvedBranching {
+        schema: Some(branch.branched_by.clone()),
+        fields: branching_schema_fields(domain, identifier, models, &branch.branched_by)?,
     })
 }
 
-fn parameterization_schema_fields(
+fn branch_model<'a>(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &'a HashMap<RegistryKey, Model>,
+    branch_ref: &Identifier,
+) -> Result<&'a CreateBranch, Report<RegistryError>> {
+    let Some(Model::Branch(branch)) =
+        models.get(&RegistryKey::new(ModelKind::Branch, branch_ref.clone()))
+    else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Branch.as_str(),
+            reference: branch_ref.as_str().to_string(),
+        }));
+    };
+    Ok(branch)
+}
+
+fn model_branch_selection(model: &Model) -> Option<&dyn BranchReference> {
+    match model {
+        Model::Generator(generator) => Some(&generator.branched_by),
+        Model::Inferencer(processor) => Some(&processor.branched_by),
+        Model::WasmProcessor(processor) => Some(&processor.branched_by),
+        Model::Ingestor(ingestor) => Some(&ingestor.branched_by),
+        Model::Reingestor(reingestor) => Some(&reingestor.branched_by),
+        Model::Deduplicator(deduplicator) => Some(&deduplicator.branched_by),
+        Model::Correlator(correlator) => Some(&correlator.branched_by),
+        Model::Junction(junction) => Some(&junction.branched_by),
+        Model::Reorderer(reorderer) => Some(&reorderer.branched_by),
+        Model::WindowProcessor(window_processor) => Some(&window_processor.branched_by),
+        _ => None,
+    }
+}
+
+fn branching_schema_fields(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
-    parameter_schema: &Identifier,
+    branch_schema: &Identifier,
 ) -> Result<Vec<Identifier>, Report<RegistryError>> {
-    let Some(Model::Schema(schema)) = models.get(&RegistryKey::new(
-        ModelKind::Schema,
-        parameter_schema.clone(),
-    )) else {
+    let Some(Model::Schema(schema)) =
+        models.get(&RegistryKey::new(ModelKind::Schema, branch_schema.clone()))
+    else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             expected_kind: ModelKind::Schema.as_str(),
-            reference: parameter_schema.as_str().to_string(),
+            reference: branch_schema.as_str().to_string(),
         }));
     };
     Ok(schema
@@ -6893,11 +6992,11 @@ fn parameterization_schema_fields(
         .collect())
 }
 
-fn assign_stream_parameterization(
+fn assign_stream_branching(
     domain: &Domain,
     producer: &Identifier,
     relay: &Identifier,
-    parameterization: ResolvedParameterization,
+    branching: ResolvedBranching,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
 ) -> Result<bool, Report<RegistryError>> {
@@ -6908,16 +7007,15 @@ fn assign_stream_parameterization(
         .node_weight_mut(index)
         .expect("stream node must exist in graph");
 
-    match &node.effective_parameterization {
+    match &node.effective_branching {
         None => {
-            node.effective_parameterization = Some(parameterization.fields);
-            node.effective_parameterization_schema = parameterization.schema;
+            node.effective_branching = Some(branching.fields);
+            node.effective_branching_schema = branching.schema;
             Ok(true)
         }
-        Some(existing) if *existing == parameterization.fields => {
-            if node.effective_parameterization_schema.is_none() && parameterization.schema.is_some()
-            {
-                node.effective_parameterization_schema = parameterization.schema;
+        Some(existing) if *existing == branching.fields => {
+            if node.effective_branching_schema.is_none() && branching.schema.is_some() {
+                node.effective_branching_schema = branching.schema;
                 return Ok(true);
             }
             Ok(false)
@@ -6926,22 +7024,22 @@ fn assign_stream_parameterization(
             domain: domain.as_str().to_string(),
             identifier: producer.as_str().to_string(),
             reason: format!(
-                "stream '{}' receives conflicting parameterizations: existing ({}) vs producer \
-                 '{}' with ({})",
+                "stream '{}' receives conflicting branch fields: existing ({}) vs producer '{}' \
+                 with ({})",
                 relay.as_str(),
-                format_parameterized_by(existing),
+                format_branched_by(existing),
                 producer.as_str(),
-                format_parameterized_by(&parameterization.fields),
+                format_branched_by(&branching.fields),
             ),
         })),
     }
 }
 
-fn format_parameterized_by(parameterized_by: &[Identifier]) -> String {
-    if parameterized_by.is_empty() {
+fn format_branched_by(branched_by: &[Identifier]) -> String {
+    if branched_by.is_empty() {
         "(none)".to_string()
     } else {
-        parameterized_by
+        branched_by
             .iter()
             .map(Identifier::as_str)
             .collect::<Vec<_>>()
@@ -7516,19 +7614,18 @@ mod tests {
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, BranchParameterization, ClientConfigEntry,
-        CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-        CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-        CorrelatorMatchPolicy, CreateClientKafka, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateIngestor, CreateJunction, CreateReingestor,
-        CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-        CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink,
-        ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource,
-        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
-        MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession,
-        ParameterValueMapping, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        RelayParameterization, RelayParameters, ScheduledNode, SchemaField, WindowBound,
-        WireSchemaField,
+        AckMode, AlterRelay, AlterRelayOperation, BranchInitiatorSelection, BranchSelection,
+        BranchValueMapping, ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+        CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction,
+        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientKafka,
+        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateIngestor,
+        CreateJunction, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
+        CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain,
+        DomainSchedule, DropModel, EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier,
+        IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
+        MqttIngestMode, MqttQos, MqttSession, ParseAsType, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, RelayBranching, ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
     use super::{ModelStorage, Registry, RegistryError, RuntimeChange};
@@ -7556,34 +7653,65 @@ mod tests {
         Identifier::parse(raw).expect("valid identifier")
     }
 
-    fn parameterized_by(schema: &str, relay: &str, fields: &[&str]) -> BranchParameterization {
-        BranchParameterization::parameterized_with_ttl(
-            identifier(schema),
+    fn branch_name_for_relay(relay: &str) -> Identifier {
+        identifier(&format!("by_{relay}"))
+    }
+
+    fn branched_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchInitiatorSelection {
+        BranchInitiatorSelection::branched_by(
+            branch_name_for_relay(relay),
             fields
                 .iter()
-                .map(|field| ParameterValueMapping {
+                .map(|field| BranchValueMapping {
                     field: identifier(field),
                     relay: identifier(relay),
                     relay_field: identifier(field),
                 })
                 .collect(),
-            "5m".to_string(),
         )
     }
 
-    fn processor_parameterized_by(schema: &str) -> BranchParameterization {
-        BranchParameterization::parameterized(identifier(schema), Vec::new())
-    }
-
-    fn with_processor_parameterization(mut model: Model, schema: &str) -> Model {
-        let parameterized_by = processor_parameterized_by(schema);
+    fn with_processor_branching(mut model: Model, schema: &str) -> Model {
         match &mut model {
-            Model::Deduplicator(processor) => processor.parameterized_by = parameterized_by,
-            Model::Correlator(processor) => processor.parameterized_by = parameterized_by,
-            Model::Junction(processor) => processor.parameterized_by = parameterized_by,
-            Model::WindowProcessor(processor) => processor.parameterized_by = parameterized_by,
+            Model::Deduplicator(processor) => {
+                let branch = processor
+                    .from
+                    .relays()
+                    .first()
+                    .expect("processor helper requires at least one input");
+                processor.branched_by =
+                    BranchSelection::branched_by(branch_name_for_relay(branch.as_str()));
+            }
+            Model::Correlator(processor) => {
+                let branch = processor
+                    .left
+                    .relays()
+                    .first()
+                    .expect("processor helper requires at least one input");
+                processor.branched_by =
+                    BranchSelection::branched_by(branch_name_for_relay(branch.as_str()));
+            }
+            Model::Junction(processor) => {
+                let branch = processor
+                    .from
+                    .relays()
+                    .first()
+                    .expect("processor helper requires at least one input");
+                processor.branched_by =
+                    BranchSelection::branched_by(branch_name_for_relay(branch.as_str()));
+            }
+            Model::WindowProcessor(processor) => {
+                let branch = processor
+                    .from
+                    .relays()
+                    .first()
+                    .expect("processor helper requires at least one input");
+                processor.branched_by =
+                    BranchSelection::branched_by(branch_name_for_relay(branch.as_str()));
+            }
             _ => panic!("model is not a branch-preserving processor"),
         }
+        let _ = schema;
         model
     }
 
@@ -7602,6 +7730,24 @@ mod tests {
         })
     }
 
+    fn branch(name: &str, schema: &str, _relay: &str, _fields: &[&str]) -> Model {
+        Model::Branch(CreateBranch {
+            name: identifier(name),
+            branched_by: identifier(schema),
+            ttl: "5m".to_string(),
+            eviction: None,
+        })
+    }
+
+    fn branch_for_relay(relay: &str, schema: &str, _fields: &[&str]) -> Model {
+        Model::Branch(CreateBranch {
+            name: branch_name_for_relay(relay),
+            branched_by: identifier(schema),
+            ttl: "5m".to_string(),
+            eviction: None,
+        })
+    }
+
     fn branch_schema_with_types(name: &str, fields: &[(&str, ParseAsType)]) -> Model {
         Model::Schema(CreateSchema {
             name: identifier(name),
@@ -7617,8 +7763,8 @@ mod tests {
         })
     }
 
-    fn parameter_schema_name(fields: &[&str]) -> String {
-        assert!(!fields.is_empty(), "parameter schema requires fields");
+    fn branch_schema_name(fields: &[&str]) -> String {
+        assert!(!fields.is_empty(), "branch schema requires fields");
         format!("{}_branch", fields.join("_"))
     }
 
@@ -7795,11 +7941,11 @@ mod tests {
         else {
             unreachable!("ingestor helper must build an ingestor model")
         };
-        ingestor.parameterized_by = BranchParameterization::unparameterized();
+        ingestor.branched_by = BranchInitiatorSelection::unbranched();
         Model::Ingestor(ingestor)
     }
 
-    fn unparameterized_ingestor(name: &str, into: &str, codec: &str, client: &str) -> Model {
+    fn unbranched_ingestor(name: &str, into: &str, codec: &str, client: &str) -> Model {
         ingestor(name, into, codec, client)
     }
 
@@ -7808,22 +7954,18 @@ mod tests {
         into: &str,
         codec: &str,
         client: &str,
-        parameter_fields: &[&str],
+        branch_fields: &[&str],
     ) -> Model {
-        let parameterized_by = if parameter_fields.is_empty() {
-            BranchParameterization::unparameterized()
+        let branched_by = if branch_fields.is_empty() {
+            BranchInitiatorSelection::unbranched()
         } else {
-            parameterized_by(
-                &parameter_schema_name(parameter_fields),
-                into,
-                parameter_fields,
-            )
+            branched_by(&branch_schema_name(branch_fields), into, branch_fields)
         };
         Model::Ingestor(CreateIngestor {
             name: identifier(name),
             output_routes: ProcessorOutputs::single(identifier(into)),
             decode_using_codec: identifier(codec),
-            parameterized_by,
+            branched_by,
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             timestamp_source: None,
@@ -7853,18 +7995,32 @@ mod tests {
             name: Identifier::parse(name).expect("valid identifier"),
             schema: Identifier::parse(schema).expect("valid identifier"),
             buffer: 1,
-            parameterization: RelayParameterization::parameterized(RelayParameters::inferred()),
+            branching: RelayBranching::unbranched(),
             materialized_state: None,
         })
     }
 
-    fn relay_parameterized_by(name: &str, schema: &str, parameter_schema: &str) -> Model {
+    fn relay_branched_by(name: &str, schema: &str, branch: &str) -> Model {
         let Model::Relay(mut relay) = relay(name, schema) else {
             unreachable!("relay helper must build a relay model")
         };
-        relay.parameterization = RelayParameterization::parameterized(RelayParameters::declared(
-            identifier(parameter_schema),
-        ));
+        relay.branching = RelayBranching::branched_by(identifier(branch));
+        Model::Relay(relay)
+    }
+
+    fn relay_branched_by_relay_branch(name: &str, schema: &str) -> Model {
+        let Model::Relay(mut relay) = relay(name, schema) else {
+            unreachable!("relay helper must build a relay model")
+        };
+        relay.branching = RelayBranching::branched_by(branch_name_for_relay(name));
+        Model::Relay(relay)
+    }
+
+    fn relay_branched_like(name: &str, schema: &str, source_relay: &str) -> Model {
+        let Model::Relay(mut relay) = relay(name, schema) else {
+            unreachable!("relay helper must build a relay model")
+        };
+        relay.branching = RelayBranching::branched_by(branch_name_for_relay(source_relay));
         Model::Relay(relay)
     }
 
@@ -7873,16 +8029,16 @@ mod tests {
             name: Identifier::parse(name).expect("valid identifier"),
             schema: Identifier::parse(schema).expect("valid identifier"),
             buffer: 1,
-            parameterization: RelayParameterization::parameterized(RelayParameters::inferred()),
+            branching: RelayBranching::branched_by(branch_name_for_relay(name)),
             materialized_state: Some(MaterializedRelayState::LastByTimestamp),
         })
     }
 
-    fn explicitly_unparameterized_relay(name: &str, schema: &str) -> Model {
+    fn explicitly_unbranched_relay(name: &str, schema: &str) -> Model {
         let Model::Relay(mut relay) = relay(name, schema) else {
             unreachable!("relay helper must build a relay model")
         };
-        relay.parameterization = RelayParameterization::unparameterized();
+        relay.branching = RelayBranching::unbranched();
         Model::Relay(relay)
     }
 
@@ -7901,7 +8057,7 @@ mod tests {
             name: identifier(name),
             from: ProcessorInputs::single(identifier(from_relay)),
             output_routes: ProcessorOutputs::single(identifier(into_relay)),
-            parameterized_by: BranchParameterization::unparameterized(),
+            branched_by: BranchSelection::unbranched(),
             resource: identifier("wasm_filter"),
             resource_version: Some(1),
             file: "processors/filter_even.wasm".to_string(),
@@ -7912,7 +8068,7 @@ mod tests {
         })
     }
 
-    fn unparameterized_correlator(
+    fn unbranched_correlator(
         name: &str,
         left_relay: &str,
         right_relay: &str,
@@ -7923,7 +8079,7 @@ mod tests {
             left: ProcessorInputs::single(identifier(left_relay)),
             right: ProcessorInputs::single(identifier(right_relay)),
             output_routes: ProcessorOutputs::single(identifier(into_relay)),
-            parameterized_by: BranchParameterization::unparameterized(),
+            branched_by: BranchSelection::unbranched(),
             correlate_where: format!("WHERE {left_relay}.value = {right_relay}.value"),
             match_policy: CorrelatorMatchPolicy::Earliest,
             output: format!("{into_relay}.value = {left_relay}.value"),
@@ -7947,7 +8103,7 @@ mod tests {
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
-            parameterized_by: processor_parameterized_by("value_branch"),
+            branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
             width: WindowBound {
                 messages: Some(10),
                 duration: None,
@@ -7976,7 +8132,11 @@ mod tests {
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
-            parameterized_by: processor_parameterized_by("value_branch"),
+            branched_by: BranchSelection::branched_by(branch_name_for_relay(
+                from_relays
+                    .first()
+                    .expect("junction helper requires at least one input"),
+            )),
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
@@ -7998,7 +8158,7 @@ mod tests {
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
-            parameterized_by: processor_parameterized_by("value_branch"),
+            branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
             deduplicate_on: field.to_string(),
             max_time: max_time.to_string(),
             flush_each: "100ms".to_string(),
@@ -8010,10 +8170,10 @@ mod tests {
     }
 
     fn reingestor(name: &str, from_relay: &str, into_relay: &str, params: &[&str]) -> Model {
-        let parameterized_by = if params.is_empty() {
-            BranchParameterization::unparameterized()
+        let branched_by = if params.is_empty() {
+            BranchInitiatorSelection::unbranched()
         } else {
-            parameterized_by(&parameter_schema_name(params), into_relay, params)
+            branched_by(&branch_schema_name(params), into_relay, params)
         };
         Model::Reingestor(CreateReingestor {
             name: Identifier::parse(name).expect("valid identifier"),
@@ -8021,7 +8181,7 @@ mod tests {
             output_routes: ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ),
-            parameterized_by,
+            branched_by,
             flush_each: "100ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
@@ -8064,12 +8224,13 @@ mod tests {
         vec![
             schema("event_schema"),
             branch_schema("value_branch", &["value"]),
+            branch_for_relay("notifications", "value_branch", &["value"]),
             wire_schema("event_wire"),
             codec("event_codec", "event_schema"),
             client_model("broker_in"),
             client_model("broker_out"),
-            relay("notifications", "event_schema"),
-            relay("p99", "event_schema"),
+            relay_branched_by_relay_branch("notifications", "event_schema"),
+            relay_branched_like("p99", "event_schema", "notifications"),
             ingestor_with_params(
                 "ing",
                 "notifications",
@@ -8406,7 +8567,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_accepts_unparameterized_ingestor_without_branch_schema() {
+    fn apply_batch_accepts_unbranched_ingestor_without_branch_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -8420,10 +8581,10 @@ mod tests {
                     codec("event_codec", "event_schema"),
                     client_model("kafka_main"),
                     relay("notifications", "event_schema"),
-                    unparameterized_ingestor("ing", "notifications", "event_codec", "kafka_main"),
+                    unbranched_ingestor("ing", "notifications", "event_codec", "kafka_main"),
                 ],
             )
-            .expect("unparameterized ingestor should not require a branch schema");
+            .expect("unbranched ingestor should not require a branch schema");
 
         let graph = registry
             .active_graph(&domain)
@@ -8431,8 +8592,8 @@ mod tests {
         let relay = graph
             .node(ModelKind::Relay, &identifier("notifications"))
             .expect("relay should exist");
-        assert_eq!(relay.effective_parameterization, Some(Vec::new()));
-        assert_eq!(relay.effective_parameterization_schema, None);
+        assert_eq!(relay.effective_branching, Some(Vec::new()));
+        assert_eq!(relay.effective_branching_schema, None);
 
         let _ = fs::remove_dir_all(path);
     }
@@ -8453,13 +8614,15 @@ mod tests {
             );
 
             CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-            CREATE RELAY features SCHEMA features PARAMETERIZED BY tenant_branch;
-            CREATE RELAY scored SCHEMA scored PARAMETERIZED BY tenant_branch;
+            CREATE RELAY features SCHEMA features BRANCHED BY by_tenant_branch;
+            CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant_branch;
+            CREATE BRANCH by_tenant_branch
+              BY tenant_branch TTL 5m;
 
             CREATE INFERENCER score_model
               FROM features
               TO scored SET scored.tenant = features.tenant
-              PARAMETERIZED BY tenant_branch
+              BRANCHED BY by_tenant_branch
               USING RESOURCE fraud_model VERSION 1
               FILE 'models/simple_score.onnx'
               INPUTS { "features" = features.vector }
@@ -8493,12 +8656,14 @@ mod tests {
             );
 
             CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-            CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-            CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
+            CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant_branch;
+            CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
+            CREATE BRANCH by_tenant_branch
+              BY tenant_branch TTL 5m;
 
             CREATE WINDOW PROCESSOR latency_window
               FROM metrics
-              TO metric_summaries PARAMETERIZED BY tenant_branch
+              TO metric_summaries BRANCHED BY by_tenant_branch
               WIDTH 2 MESSAGES
               STEP 2 MESSAGES
               AGGREGATE
@@ -8532,12 +8697,14 @@ mod tests {
             );
 
             CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-            CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-            CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
+            CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant_branch;
+            CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
+            CREATE BRANCH by_tenant_branch
+              BY tenant_branch TTL 5m;
 
             CREATE WINDOW PROCESSOR latency_window
               FROM metrics
-              TO metric_summaries PARAMETERIZED BY tenant_branch
+              TO metric_summaries BRANCHED BY by_tenant_branch
               WIDTH 10s DURATION
               STEP 5s DURATION
               AGGREGATE
@@ -8576,14 +8743,16 @@ mod tests {
             );
 
             CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-            CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-            CREATE RELAY high_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-            CREATE RELAY low_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
+            CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant_branch;
+            CREATE RELAY high_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
+            CREATE RELAY low_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
+            CREATE BRANCH by_tenant_branch
+              BY tenant_branch TTL 5m;
 
             CREATE WINDOW PROCESSOR first_window
               FROM metrics
               TO high_summaries WHERE high_summaries.total_latency >= 100
-              TO low_summaries PARAMETERIZED BY tenant_branch
+              TO low_summaries BRANCHED BY by_tenant_branch
               WIDTH 2 MESSAGES
               STEP 2 MESSAGES
               AGGREGATE
@@ -8618,9 +8787,9 @@ mod tests {
               bucket STRING
             );
 
-            CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-            CREATE RELAY even_metrics SCHEMA metric UNPARAMETERIZED;
-            CREATE RELAY projected_metrics SCHEMA projected_metric UNPARAMETERIZED;
+            CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+            CREATE RELAY even_metrics SCHEMA metric UNBRANCHED;
+            CREATE RELAY projected_metrics SCHEMA projected_metric UNBRANCHED;
 
             CREATE WASM PROCESSOR route_guest_output
               USING RESOURCE wasm_filter VERSION 1
@@ -8630,7 +8799,7 @@ mod tests {
               TO projected_metrics
                 SET projected_metrics.source = input.source,
                     projected_metrics.bucket = lower(projected_metrics.bucket)
-              UNPARAMETERIZED
+              UNBRANCHED
               ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
             "#,
         );
@@ -8654,12 +8823,12 @@ mod tests {
               source STRING
             );
 
-            CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-            CREATE RELAY deduped_metrics SCHEMA metric UNPARAMETERIZED;
+            CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+            CREATE RELAY deduped_metrics SCHEMA metric UNBRANCHED;
 
             CREATE DEDUPLICATOR dedup_metrics
               FROM raw_metrics WHERE raw_metrics.value >= 0
-              TO deduped_metrics UNPARAMETERIZED
+              TO deduped_metrics UNBRANCHED
               DEDUPLICATE ON raw_metrics.source
               MAX TIME 10m
               FLUSH IMMEDIATE
@@ -8686,12 +8855,12 @@ mod tests {
               source STRING
             );
 
-            CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-            CREATE RELAY deduped_metrics SCHEMA metric UNPARAMETERIZED;
+            CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+            CREATE RELAY deduped_metrics SCHEMA metric UNBRANCHED;
 
             CREATE DEDUPLICATOR dedup_metrics
               FROM raw_metrics WHERE raw_metrics.value
-              TO deduped_metrics UNPARAMETERIZED
+              TO deduped_metrics UNBRANCHED
               DEDUPLICATE ON raw_metrics.source
               MAX TIME 10m
               FLUSH IMMEDIATE
@@ -8727,12 +8896,12 @@ mod tests {
               source STRING
             );
 
-            CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-            CREATE RELAY deduped_metrics SCHEMA metric UNPARAMETERIZED;
+            CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+            CREATE RELAY deduped_metrics SCHEMA metric UNBRANCHED;
 
             CREATE DEDUPLICATOR dedup_metrics
               FROM raw_metrics WHERE deduped_metrics.value >= 0
-              TO deduped_metrics UNPARAMETERIZED
+              TO deduped_metrics UNBRANCHED
               DEDUPLICATE ON raw_metrics.source
               MAX TIME 10m
               FLUSH IMMEDIATE
@@ -8768,8 +8937,8 @@ mod tests {
               value I64
             );
 
-            CREATE RELAY raw_metrics SCHEMA metric UNPARAMETERIZED;
-            CREATE RELAY projected_metrics SCHEMA metric UNPARAMETERIZED;
+            CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+            CREATE RELAY projected_metrics SCHEMA metric UNBRANCHED;
 
             CREATE WASM PROCESSOR route_guest_output
               USING RESOURCE wasm_filter VERSION 1
@@ -8777,7 +8946,7 @@ mod tests {
               FROM raw_metrics
               TO projected_metrics
               TO projected_metrics WHERE projected_metrics.value >= 0
-              UNPARAMETERIZED
+              UNBRANCHED
               ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
             "#,
         );
@@ -8809,13 +8978,13 @@ mod tests {
                 &domain,
                 vec![
                     schema("event_schema"),
-                    explicitly_unparameterized_relay("raw_events", "event_schema"),
-                    explicitly_unparameterized_relay("projected_events", "event_schema"),
+                    explicitly_unbranched_relay("raw_events", "event_schema"),
+                    explicitly_unbranched_relay("projected_events", "event_schema"),
                     Model::Deduplicator(CreateDeduplicator {
                         name: identifier("dedup_events"),
                         from: ProcessorInputs::single(identifier("raw_events")),
                         output_routes: ProcessorOutputs::single(identifier("projected_events")),
-                        parameterized_by: BranchParameterization::unparameterized(),
+                        branched_by: BranchSelection::unbranched(),
                         deduplicate_on: "raw_events.value".to_string(),
                         max_time: "10m".to_string(),
                         flush_each: "IMMEDIATE".to_string(),
@@ -8972,14 +9141,20 @@ mod tests {
                     client_model("broker_b"),
                     client_model("broker_c"),
                     client_model("broker_out"),
-                    relay("root_a", "event_schema"),
-                    relay("root_b", "event_schema"),
-                    relay("root_c", "event_schema"),
-                    relay("branch_a", "event_schema"),
-                    relay("branch_b", "event_schema"),
-                    relay("branch_c", "event_schema"),
-                    relay("shared", "event_schema"),
+                    relay_branched_by_relay_branch("root_a", "event_schema"),
+                    relay_branched_by_relay_branch("root_b", "event_schema"),
+                    relay_branched_by_relay_branch("root_c", "event_schema"),
+                    relay_branched_like("branch_a", "event_schema", "root_a"),
+                    relay_branched_like("branch_b", "event_schema", "root_b"),
+                    relay_branched_like("branch_c", "event_schema", "root_c"),
+                    relay_branched_like("shared", "event_schema", "branch_a"),
                     branch_schema("value_branch", &["value"]),
+                    branch_for_relay("root_a", "value_branch", &["value"]),
+                    branch_for_relay("root_b", "value_branch", &["value"]),
+                    branch_for_relay("root_c", "value_branch", &["value"]),
+                    branch_for_relay("branch_a", "value_branch", &["value"]),
+                    branch_for_relay("branch_b", "value_branch", &["value"]),
+                    branch_for_relay("branch_c", "value_branch", &["value"]),
                     ingestor_with_params("ing_a", "root_a", "event_codec", "broker_a", &["value"]),
                     ingestor_with_params("ing_b", "root_b", "event_codec", "broker_b", &["value"]),
                     ingestor_with_params("ing_c", "root_c", "event_codec", "broker_c", &["value"]),
@@ -9049,7 +9224,7 @@ mod tests {
                         ),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
-                        parameterized_by: BranchParameterization::unparameterized(),
+                        branched_by: BranchInitiatorSelection::unbranched(),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -9110,7 +9285,7 @@ mod tests {
                         Identifier::parse("notifications").expect("valid identifier"),
                     ),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -9185,7 +9360,7 @@ mod tests {
                         Identifier::parse("notifications").expect("valid identifier"),
                     ),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: Some(IngestTimestampSource::At(
@@ -9289,8 +9464,9 @@ mod tests {
                     })),
                     codec("event_codec", "event_schema"),
                     client_model("broker"),
-                    relay("notifications", "transformed_schema"),
+                    relay_branched_by_relay_branch("notifications", "transformed_schema"),
                     branch_schema("tenant_branch", &["tenant"]),
+                    branch_for_relay("notifications", "tenant_branch", &["tenant"]),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("ing").expect("valid identifier"),
                         output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
@@ -9303,11 +9479,7 @@ mod tests {
                         }]),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
-                        parameterized_by: parameterized_by(
-                            "tenant_branch",
-                            "notifications",
-                            &["tenant"],
-                        ),
+                        branched_by: branched_by("tenant_branch", "notifications", &["tenant"]),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -9380,7 +9552,7 @@ mod tests {
                         ),
                     }]),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -9455,6 +9627,7 @@ mod tests {
                 client_model("broker"),
                 relay("notifications", "event_schema"),
                 branch_schema("tenant_branch", &["tenant"]),
+                branch_for_relay("notifications", "tenant_branch", &["tenant"]),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
                     output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
@@ -9462,11 +9635,7 @@ mod tests {
                         filter_map: Some("UNSET notifications.value".to_string()),
                     }]),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
-                    parameterized_by: parameterized_by(
-                        "tenant_branch",
-                        "notifications",
-                        &["tenant"],
-                    ),
+                    branched_by: branched_by("tenant_branch", "notifications", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -9525,7 +9694,7 @@ mod tests {
                         ),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
-                        parameterized_by: BranchParameterization::unparameterized(),
+                        branched_by: BranchInitiatorSelection::unbranched(),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -10052,7 +10221,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_parameterization_value_type_mismatch() {
+    fn apply_batch_rejects_branching_value_type_mismatch() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -10082,6 +10251,7 @@ mod tests {
                             sensitive: false,
                         }],
                     }),
+                    branch_for_relay("events", "value_branch", &["value"]),
                     client_model("kafka_main"),
                     ingestor_with_params(
                         "events_in",
@@ -10092,7 +10262,7 @@ mod tests {
                     ),
                 ],
             )
-            .expect_err("parameterization value type mismatch must fail");
+            .expect_err("branch value type mismatch must fail");
 
         let message = format!("{err}");
         assert!(matches!(
@@ -10100,7 +10270,7 @@ mod tests {
             RegistryError::IncompatibleSchema { .. }
         ));
         assert!(
-            message.contains("PARAMETERIZED BY value field 'value' type mismatch"),
+            message.contains("BY value field 'value' type mismatch"),
             "unexpected error: {message}"
         );
 
@@ -10178,6 +10348,8 @@ mod tests {
                     }),
                     relay("notifications", "event_schema"),
                     relay("wide", "wide_schema"),
+                    branch_schema("value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch", &["value"]),
                     processor("project", "notifications", "wide"),
                 ],
             )
@@ -10219,9 +10391,9 @@ mod tests {
                             },
                         ],
                     }),
-                    explicitly_unparameterized_relay("notifications_a", "event_schema"),
-                    explicitly_unparameterized_relay("notifications_b", "wide_schema"),
-                    explicitly_unparameterized_relay("deduped", "event_schema"),
+                    explicitly_unbranched_relay("notifications_a", "event_schema"),
+                    explicitly_unbranched_relay("notifications_b", "wide_schema"),
+                    explicitly_unbranched_relay("deduped", "event_schema"),
                     Model::Deduplicator(CreateDeduplicator {
                         name: identifier("dedup_notifications"),
                         from: ProcessorInputs::new(
@@ -10229,7 +10401,7 @@ mod tests {
                             Vec::new(),
                         ),
                         output_routes: ProcessorOutputs::single(identifier("deduped")),
-                        parameterized_by: BranchParameterization::unparameterized(),
+                        branched_by: BranchSelection::unbranched(),
                         deduplicate_on: "notifications_a.value".to_string(),
                         max_time: "10m".to_string(),
                         flush_each: "IMMEDIATE".to_string(),
@@ -10295,13 +10467,13 @@ mod tests {
                             },
                         ],
                     }),
-                    explicitly_unparameterized_relay("sensitive_events", "sensitive_event"),
-                    explicitly_unparameterized_relay("public_events", "public_event"),
+                    explicitly_unbranched_relay("sensitive_events", "sensitive_event"),
+                    explicitly_unbranched_relay("public_events", "public_event"),
                     Model::Reingestor(CreateReingestor {
                         name: identifier("leak_events"),
                         from: ProcessorInputs::single(identifier("sensitive_events")),
                         output_routes: ProcessorOutputs::single(identifier("public_events")),
-                        parameterized_by: BranchParameterization::unparameterized(),
+                        branched_by: BranchInitiatorSelection::unbranched(),
                         flush_each: "IMMEDIATE".to_string(),
                         max_batch_size: None,
                         mode: AckMode::Attached,
@@ -10352,6 +10524,8 @@ mod tests {
                     relay("notifications_a", "event_schema"),
                     relay("notifications_b", "wide_schema"),
                     relay("merged", "event_schema"),
+                    branch_schema("value_branch", &["value"]),
+                    branch_for_relay("notifications_a", "value_branch", &["value"]),
                     junction(
                         "join_streams",
                         &["notifications_a", "notifications_b"],
@@ -10406,6 +10580,8 @@ mod tests {
                     relay("short_stream", "short_schema"),
                     relay("long_stream", "long_schema"),
                     relay("merged", "short_schema"),
+                    branch_schema("window_branch", &["window"]),
+                    branch_for_relay("short_stream", "window_branch", &["window"]),
                     junction("merge_windows", &["short_stream", "long_stream"], "merged"),
                 ],
             )
@@ -10436,6 +10612,8 @@ mod tests {
                     schema("event_schema"),
                     relay("notifications", "event_schema"),
                     relay("deduped", "event_schema"),
+                    branch_schema("value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch", &["value"]),
                     deduplicator(
                         "dedup",
                         "notifications",
@@ -10469,16 +10647,16 @@ mod tests {
               value STRING
             );
 
-            CREATE RELAY left_events SCHEMA event UNPARAMETERIZED;
-            CREATE RELAY right_events SCHEMA event UNPARAMETERIZED;
-            CREATE RELAY correlated_events SCHEMA correlated_event UNPARAMETERIZED;
+            CREATE RELAY left_events SCHEMA event UNBRANCHED;
+            CREATE RELAY right_events SCHEMA event UNBRANCHED;
+            CREATE RELAY correlated_events SCHEMA correlated_event UNBRANCHED;
 
             CREATE CORRELATOR correlate_events
               LEFT FROM left_events
               RIGHT FROM right_events
               CORRELATE WHERE lower(left_events.value)
               MATCH EARLIEST
-              TO correlated_events UNPARAMETERIZED
+              TO correlated_events UNBRANCHED
               FLUSH IMMEDIATE
               OUTPUT correlated_events.value = left_events.value
               MAX TIME 5s
@@ -10523,16 +10701,18 @@ mod tests {
               value STRING
             );
 
-            CREATE RELAY left_events SCHEMA event PARAMETERIZED BY tenant_branch;
-            CREATE RELAY right_events SCHEMA event PARAMETERIZED BY tenant_branch;
-            CREATE RELAY correlated_events SCHEMA correlated_event PARAMETERIZED BY tenant_branch;
+            CREATE RELAY left_events SCHEMA event BRANCHED BY by_tenant_branch;
+            CREATE RELAY right_events SCHEMA event BRANCHED BY by_tenant_branch;
+            CREATE RELAY correlated_events SCHEMA correlated_event BRANCHED BY by_tenant_branch;
+            CREATE BRANCH by_tenant_branch
+              BY tenant_branch TTL 5m;
 
             CREATE CORRELATOR correlate_events
               LEFT FROM left_events
               RIGHT FROM right_events
               CORRELATE WHERE branch.tenant = left_events.tenant
               MATCH EARLIEST
-              TO correlated_events PARAMETERIZED BY tenant_branch
+              TO correlated_events BRANCHED BY by_tenant_branch
               FLUSH IMMEDIATE
               OUTPUT correlated_events.value = left_events.value
               MAX TIME 5s
@@ -10581,10 +10761,10 @@ mod tests {
               value STRING
             );
 
-            CREATE RELAY left_events SCHEMA left_event UNPARAMETERIZED;
-            CREATE RELAY other_left_events SCHEMA other_left_event UNPARAMETERIZED;
-            CREATE RELAY right_events SCHEMA right_event UNPARAMETERIZED;
-            CREATE RELAY correlated_events SCHEMA correlated_event UNPARAMETERIZED;
+            CREATE RELAY left_events SCHEMA left_event UNBRANCHED;
+            CREATE RELAY other_left_events SCHEMA other_left_event UNBRANCHED;
+            CREATE RELAY right_events SCHEMA right_event UNBRANCHED;
+            CREATE RELAY correlated_events SCHEMA correlated_event UNBRANCHED;
 
             CREATE CORRELATOR correlate_events
               LEFT FROM left_events
@@ -10592,7 +10772,7 @@ mod tests {
               RIGHT FROM right_events
               CORRELATE WHERE left_events.value = right_events.value
               MATCH EARLIEST
-              TO correlated_events UNPARAMETERIZED
+              TO correlated_events UNBRANCHED
               FLUSH IMMEDIATE
               OUTPUT correlated_events.value = left_events.value
               MAX TIME 5s
@@ -10630,8 +10810,10 @@ mod tests {
                 &domain,
                 vec![
                     schema("event_schema"),
-                    relay("notifications", "event_schema"),
-                    relay("summaries", "event_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
+                    relay_branched_like("summaries", "event_schema", "notifications"),
+                    branch_schema("value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch", &["value"]),
                     window_processor(
                         "window",
                         "notifications",
@@ -10665,8 +10847,10 @@ mod tests {
                 &domain,
                 vec![
                     schema("event_schema"),
-                    relay("notifications", "event_schema"),
-                    relay("summaries", "event_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
+                    relay_branched_like("summaries", "event_schema", "notifications"),
+                    branch_schema("value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch", &["value"]),
                     window_processor(
                         "window",
                         "notifications",
@@ -10690,7 +10874,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_parameterized_by_fields_missing_from_schema() {
+    fn apply_batch_rejects_branched_by_fields_missing_from_schema() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -10705,6 +10889,7 @@ mod tests {
                     client_model("broker_in"),
                     relay("notifications", "event_schema"),
                     branch_schema("missing_key_branch", &["missing_key"]),
+                    branch_for_relay("notifications", "missing_key_branch", &["missing_key"]),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -10714,15 +10899,14 @@ mod tests {
                     ),
                 ],
             )
-            .expect_err("missing parameter field should fail");
+            .expect_err("missing branch field should fail");
 
         assert!(matches!(
             err.current_context(),
             RegistryError::IncompatibleSchema { .. }
         ));
         assert!(
-            format!("{err}")
-                .contains("PARAMETERIZED BY source field 'notifications.missing_key' is missing"),
+            format!("{err}").contains("BY source field 'notifications.missing_key' is missing"),
             "unexpected error: {err}"
         );
 
@@ -10730,7 +10914,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_mismatched_ingestor_parameterization_for_same_stream() {
+    fn apply_batch_rejects_mismatched_ingestor_branching_for_same_stream() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -10794,6 +10978,11 @@ mod tests {
                             ("user_id", ParseAsType::I64),
                         ],
                     ),
+                    branch_for_relay(
+                        "notifications",
+                        "tenant_user_id_branch",
+                        &["tenant", "user_id"],
+                    ),
                     ingestor_with_params(
                         "ing_a",
                         "notifications",
@@ -10802,23 +10991,53 @@ mod tests {
                         &["tenant", "user_id"],
                     ),
                     branch_schema_with_types("user_id_branch", &[("user_id", ParseAsType::I64)]),
-                    ingestor_with_params(
-                        "ing_b",
+                    branch(
+                        "by_notifications_user_id",
+                        "user_id_branch",
                         "notifications",
-                        "event_codec",
-                        "broker_in_2",
                         &["user_id"],
                     ),
+                    Model::Ingestor(CreateIngestor {
+                        name: identifier("ing_b"),
+                        output_routes: ProcessorOutputs::single(identifier("notifications")),
+                        decode_using_codec: identifier("event_codec"),
+                        branched_by: BranchInitiatorSelection::branched_by(
+                            identifier("by_notifications_user_id"),
+                            vec![BranchValueMapping {
+                                field: identifier("user_id"),
+                                relay: identifier("notifications"),
+                                relay_field: identifier("user_id"),
+                            }],
+                        ),
+                        flush_each: "100ms".to_string(),
+                        max_batch_size: Some("1MiB".to_string()),
+                        timestamp_source: None,
+                        source: IngestSource::Kafka {
+                            client: identifier("broker_in_2"),
+                            topic: identifier("notifications"),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup(identifier("cg")),
+                            instances: 1,
+                            mode: KafkaIngestMode::AckSequential {
+                                timeout: "30s".to_string(),
+                                retry_policy: nervix_models::RetryPolicy {
+                                    backoff: "200ms".to_string(),
+                                    max_backoff: "5s".to_string(),
+                                },
+                            },
+                        },
+                        error_policies: ErrorPolicies::handled_by_log(),
+                        filter_where: None,
+                    }),
                 ],
             )
-            .expect_err("mismatched ingestor parameterization should fail");
+            .expect_err("mismatched ingestor branch fields should fail");
 
         assert!(matches!(
             err.current_context(),
             RegistryError::IncompatibleSchema { .. }
         ));
         assert!(
-            format!("{err}").contains("conflicting parameterizations"),
+            format!("{err}").contains("conflicting branch fields"),
             "unexpected error: {err}"
         );
 
@@ -10854,7 +11073,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_infers_stream_parameterization_through_deduplicator_chain() {
+    fn apply_batch_infers_stream_branching_through_deduplicator_chain() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -10909,14 +11128,19 @@ mod tests {
                     })),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
-                    relay("notifications", "event_schema"),
-                    relay("projected", "event_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
+                    relay_branched_like("projected", "event_schema", "notifications"),
                     branch_schema_with_types(
                         "tenant_user_id_branch",
                         &[
                             ("tenant", ParseAsType::String),
                             ("user_id", ParseAsType::I64),
                         ],
+                    ),
+                    branch_for_relay(
+                        "notifications",
+                        "tenant_user_id_branch",
+                        &["tenant", "user_id"],
                     ),
                     ingestor_with_params(
                         "ing",
@@ -10925,13 +11149,13 @@ mod tests {
                         "broker_in",
                         &["tenant", "user_id"],
                     ),
-                    with_processor_parameterization(
+                    with_processor_branching(
                         processor("project", "notifications", "projected"),
                         "tenant_user_id_branch",
                     ),
                 ],
             )
-            .expect("graph with inherited parameterization should succeed");
+            .expect("graph with inherited branch fields should succeed");
 
         let graph = registry
             .active_graph(&domain)
@@ -10945,9 +11169,9 @@ mod tests {
 
         assert_eq!(
             projected
-                .effective_parameterization
+                .effective_branching
                 .as_ref()
-                .expect("projected relay should be parameterized")
+                .expect("projected relay should be branched")
                 .iter()
                 .map(Identifier::as_str)
                 .collect::<Vec<_>>(),
@@ -10958,7 +11182,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_infers_stream_parameterization_through_reingestor_outputs() {
+    fn apply_batch_infers_stream_branching_through_reingestor_outputs() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11013,14 +11237,14 @@ mod tests {
                     })),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
-                    relay_parameterized_by(
+                    relay_branched_by(
                         "notifications",
                         "event_schema",
-                        "tenant_user_id_branch",
+                        branch_name_for_relay("notifications").as_str(),
                     ),
-                    relay("errors", "event_schema"),
-                    relay("warnings", "event_schema"),
-                    relay("info", "event_schema"),
+                    relay_branched_by("errors", "event_schema", "by_route_logs"),
+                    relay_branched_by("warnings", "event_schema", "by_route_logs"),
+                    relay_branched_by("info", "event_schema", "by_route_logs"),
                     branch_schema_with_types(
                         "tenant_user_id_branch",
                         &[
@@ -11028,11 +11252,22 @@ mod tests {
                             ("user_id", ParseAsType::I64),
                         ],
                     ),
+                    branch_for_relay(
+                        "notifications",
+                        "tenant_user_id_branch",
+                        &["tenant", "user_id"],
+                    ),
                     ingestor_with_params(
                         "ing",
                         "notifications",
                         "event_codec",
                         "broker_in",
+                        &["tenant", "user_id"],
+                    ),
+                    branch(
+                        "by_route_logs",
+                        "tenant_user_id_branch",
+                        super::BRANCH_NAMESPACE,
                         &["tenant", "user_id"],
                     ),
                     Model::Reingestor(CreateReingestor {
@@ -11053,17 +11288,20 @@ mod tests {
                             },
                             ProcessorOutput::new(identifier("info")),
                         ]),
-                        parameterized_by: BranchParameterization::parameterized_with_ttl(
-                            identifier("tenant_user_id_branch"),
-                            ["tenant", "user_id"]
-                                .into_iter()
-                                .map(|field| ParameterValueMapping {
-                                    field: identifier(field),
+                        branched_by: BranchInitiatorSelection::branched_by(
+                            identifier("by_route_logs"),
+                            vec![
+                                BranchValueMapping {
+                                    field: identifier("tenant"),
                                     relay: identifier(super::BRANCH_NAMESPACE),
-                                    relay_field: identifier(field),
-                                })
-                                .collect(),
-                            "5m".to_string(),
+                                    relay_field: identifier("tenant"),
+                                },
+                                BranchValueMapping {
+                                    field: identifier("user_id"),
+                                    relay: identifier(super::BRANCH_NAMESPACE),
+                                    relay_field: identifier("user_id"),
+                                },
+                            ],
                         ),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
@@ -11089,9 +11327,9 @@ mod tests {
 
             assert_eq!(
                 relay
-                    .effective_parameterization
+                    .effective_branching
                     .as_ref()
-                    .expect("routed relay should be parameterized")
+                    .expect("routed relay should be branched")
                     .iter()
                     .map(Identifier::as_str)
                     .collect::<Vec<_>>(),
@@ -11147,10 +11385,12 @@ mod tests {
                     })),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
-                    relay("notifications", "event_schema"),
-                    relay("errors", "event_schema"),
-                    relay("info", "event_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
+                    relay_branched_by_relay_branch("errors", "event_schema"),
+                    relay_branched_like("info", "event_schema", "errors"),
                     branch_schema("tenant_branch", &["tenant"]),
+                    branch_for_relay("notifications", "tenant_branch", &["tenant"]),
+                    branch_for_relay("errors", "tenant_branch", &["tenant"]),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -11170,7 +11410,7 @@ mod tests {
                             },
                             ProcessorOutput::new(identifier("info")),
                         ]),
-                        parameterized_by: processor_parameterized_by("tenant_branch"),
+                        branched_by: branched_by("tenant_branch", "errors", &["tenant"]),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         mode: AckMode::Attached,
@@ -11195,7 +11435,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_deduplicator_without_explicit_upstream_parameterization_alias() {
+    fn apply_batch_rejects_deduplicator_without_explicit_upstream_branching_alias() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11206,12 +11446,13 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     branch_schema("value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch", &["value"]),
                     relay("notifications", "event_schema"),
-                    relay("projected", "event_schema"),
+                    relay_branched_like("projected", "event_schema", "notifications"),
                     processor("project", "notifications", "projected"),
                 ],
             )
-            .expect_err("deduplicator without upstream parameterization should fail");
+            .expect_err("deduplicator without upstream branch fields should fail");
 
         assert!(matches!(
             err.current_context(),
@@ -11219,7 +11460,7 @@ mod tests {
         ));
         assert!(
             format!("{err}").contains(
-                "deduplicator 'project' requires relay 'notifications' to have parameterization",
+                "deduplicator 'project' requires relay 'notifications' to have branch fields",
             ),
             "unexpected error: {err}"
         );
@@ -11228,7 +11469,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_infers_stream_parameterization_through_deduplicators() {
+    fn apply_batch_infers_stream_branching_through_deduplicators() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11274,9 +11515,10 @@ mod tests {
                     })),
                     codec("event_codec", "notification"),
                     client_model("broker_in"),
-                    relay("notifications", "notification"),
-                    relay("deduped", "notification"),
+                    relay_branched_by_relay_branch("notifications", "notification"),
+                    relay_branched_like("deduped", "notification", "notifications"),
                     branch_schema("tenant_branch", &["tenant"]),
+                    branch_for_relay("notifications", "tenant_branch", &["tenant"]),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -11284,7 +11526,7 @@ mod tests {
                         "broker_in",
                         &["tenant"],
                     ),
-                    with_processor_parameterization(
+                    with_processor_branching(
                         deduplicator(
                             "dedup",
                             "notifications",
@@ -11296,7 +11538,7 @@ mod tests {
                     ),
                 ],
             )
-            .expect("graph with deduplicator parameterization should succeed");
+            .expect("graph with deduplicator branch fields should succeed");
 
         let schedule = changes
             .graph
@@ -11304,7 +11546,7 @@ mod tests {
             .schedule_for_domain(&domain, &["node-1".to_string()], 0);
         let deduped = scheduled_node(&schedule, ModelKind::Relay, "deduped");
         assert_eq!(
-            deduped.effective_parameterization,
+            deduped.effective_branching,
             Some(vec![Identifier::parse("tenant").expect("valid identifier")])
         );
 
@@ -11312,7 +11554,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_deduplicator_without_explicit_upstream_parameterization() {
+    fn apply_batch_rejects_deduplicator_without_explicit_upstream_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11323,8 +11565,9 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     branch_schema("value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch", &["value"]),
                     relay("notifications", "event_schema"),
-                    relay("deduped", "event_schema"),
+                    relay_branched_like("deduped", "event_schema", "notifications"),
                     deduplicator(
                         "dedup",
                         "notifications",
@@ -11334,7 +11577,7 @@ mod tests {
                     ),
                 ],
             )
-            .expect_err("deduplicator without upstream parameterization should fail");
+            .expect_err("deduplicator without upstream branch fields should fail");
 
         assert!(matches!(
             err.current_context(),
@@ -11342,7 +11585,7 @@ mod tests {
         ));
         assert!(
             format!("{err}").contains(
-                "deduplicator 'dedup' requires relay 'notifications' to have parameterization",
+                "deduplicator 'dedup' requires relay 'notifications' to have branch fields",
             ),
             "unexpected error: {err}"
         );
@@ -11351,7 +11594,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_infers_reingestor_target_parameterization() {
+    fn apply_batch_infers_reingestor_target_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11406,8 +11649,8 @@ mod tests {
                     })),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
-                    relay("notifications", "event_schema"),
-                    relay("tenant_notifications", "event_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
+                    relay_branched_by_relay_branch("tenant_notifications", "event_schema"),
                     branch_schema_with_types(
                         "tenant_user_id_branch",
                         &[
@@ -11416,6 +11659,12 @@ mod tests {
                         ],
                     ),
                     branch_schema("tenant_branch", &["tenant"]),
+                    branch_for_relay(
+                        "notifications",
+                        "tenant_user_id_branch",
+                        &["tenant", "user_id"],
+                    ),
+                    branch_for_relay("tenant_notifications", "tenant_branch", &["tenant"]),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -11431,7 +11680,7 @@ mod tests {
                     ),
                 ],
             )
-            .expect("graph with reingestor parameterization should succeed");
+            .expect("graph with reingestor branch fields should succeed");
 
         let graph = registry
             .active_graph(&domain)
@@ -11445,9 +11694,9 @@ mod tests {
 
         assert_eq!(
             target
-                .effective_parameterization
+                .effective_branching
                 .as_ref()
-                .expect("target relay should be parameterized")
+                .expect("target relay should be branched")
                 .iter()
                 .map(Identifier::as_str)
                 .collect::<Vec<_>>(),
@@ -11455,28 +11704,28 @@ mod tests {
         );
         assert_eq!(
             target
-                .effective_parameterization_schema
+                .effective_branching_schema
                 .as_ref()
                 .map(Identifier::as_str),
             Some("tenant_branch")
         );
 
         let dataflow_graph = graph.to_dataflow_graph(domain.as_str());
-        let parameterization_schemas = dataflow_graph
+        let branching_schemas = dataflow_graph
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), node.parameterization_schema.as_deref()))
+            .map(|node| (node.id.as_str(), node.branching_schema.as_deref()))
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(
-            parameterization_schemas.get("ingestor:ing"),
+            branching_schemas.get("ingestor:ing"),
             Some(&Some("tenant_user_id_branch"))
         );
         assert_eq!(
-            parameterization_schemas.get("reingestor:tenant_partition"),
+            branching_schemas.get("reingestor:tenant_partition"),
             Some(&Some("tenant_branch"))
         );
         assert_eq!(
-            parameterization_schemas.get("relay:tenant_notifications"),
+            branching_schemas.get("relay:tenant_notifications"),
             Some(&Some("tenant_branch"))
         );
 
@@ -11484,12 +11733,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_reingestor_without_explicit_upstream_parameterization() {
+    fn apply_batch_accepts_reingestor_from_unbranched_source_to_branched_target() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
 
-        let err = registry
+        registry
             .apply_batch(
                 &domain,
                 vec![
@@ -11511,8 +11760,9 @@ mod tests {
                         ],
                     }),
                     branch_schema("tenant_branch", &["tenant"]),
+                    branch_for_relay("tenant_notifications", "tenant_branch", &["tenant"]),
                     relay("notifications", "event_schema"),
-                    relay("tenant_notifications", "event_schema"),
+                    relay_branched_by_relay_branch("tenant_notifications", "event_schema"),
                     reingestor(
                         "tenant_partition",
                         "notifications",
@@ -11521,24 +11771,43 @@ mod tests {
                     ),
                 ],
             )
-            .expect_err("reingestor without upstream parameterization should fail");
+            .expect("reingestor may repartition an explicitly unbranched source");
 
-        assert!(matches!(
-            err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
-        ));
-        assert!(
-            format!("{err}").contains(
-                "reingestor 'tenant_partition' requires an explicit upstream parameterization"
-            ),
-            "unexpected error: {err}"
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let source = graph
+            .node(ModelKind::Relay, &identifier("notifications"))
+            .expect("source relay should exist");
+        assert_eq!(source.effective_branching, Some(Vec::new()));
+        assert_eq!(source.effective_branching_schema, None);
+
+        let target = graph
+            .node(ModelKind::Relay, &identifier("tenant_notifications"))
+            .expect("target relay should exist");
+        assert_eq!(
+            target
+                .effective_branching
+                .as_ref()
+                .expect("target relay should be branched")
+                .iter()
+                .map(Identifier::as_str)
+                .collect::<Vec<_>>(),
+            vec!["tenant"]
+        );
+        assert_eq!(
+            target
+                .effective_branching_schema
+                .as_ref()
+                .map(Identifier::as_str),
+            Some("tenant_branch")
         );
 
         let _ = fs::remove_dir_all(path);
     }
 
     #[test]
-    fn apply_batch_rejects_junction_without_explicit_upstream_parameterization() {
+    fn apply_batch_rejects_junction_without_explicit_upstream_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11549,13 +11818,14 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     branch_schema("value_branch", &["value"]),
+                    branch_for_relay("left", "value_branch", &["value"]),
                     relay("left", "event_schema"),
                     relay("right", "event_schema"),
-                    relay("merged", "event_schema"),
+                    relay_branched_like("merged", "event_schema", "left"),
                     junction("join_streams", &["left", "right"], "merged"),
                 ],
             )
-            .expect_err("junction without upstream parameterization should fail");
+            .expect_err("junction without upstream branch fields should fail");
 
         assert!(matches!(
             err.current_context(),
@@ -11563,7 +11833,7 @@ mod tests {
         ));
         assert!(
             format!("{err}")
-                .contains("junction 'join_streams' requires relay 'left' to have parameterization"),
+                .contains("junction 'join_streams' requires relay 'left' to have branch fields"),
             "unexpected error: {err}"
         );
 
@@ -11571,7 +11841,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_transitive_parameterization_conflict() {
+    fn apply_batch_rejects_transitive_branching_conflict() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11631,6 +11901,7 @@ mod tests {
                     relay("right", "event_schema"),
                     relay("merged", "event_schema"),
                     branch_schema("tenant_branch", &["tenant"]),
+                    branch_for_relay("left", "tenant_branch", &["tenant"]),
                     ingestor_with_params(
                         "ing_left",
                         "left",
@@ -11639,6 +11910,7 @@ mod tests {
                         &["tenant"],
                     ),
                     branch_schema_with_types("user_id_branch", &[("user_id", ParseAsType::I64)]),
+                    branch_for_relay("right", "user_id_branch", &["user_id"]),
                     ingestor_with_params(
                         "ing_right",
                         "right",
@@ -11646,24 +11918,24 @@ mod tests {
                         "broker_in_2",
                         &["user_id"],
                     ),
-                    with_processor_parameterization(
+                    with_processor_branching(
                         processor("left_proc", "left", "merged"),
                         "tenant_branch",
                     ),
-                    with_processor_parameterization(
+                    with_processor_branching(
                         processor("right_proc", "right", "merged"),
                         "user_id_branch",
                     ),
                 ],
             )
-            .expect_err("transitive parameterization conflict should fail");
+            .expect_err("transitive branch field conflict should fail");
 
         assert!(matches!(
             err.current_context(),
             RegistryError::IncompatibleSchema { .. }
         ));
         assert!(
-            format!("{err}").contains("conflicting parameterizations"),
+            format!("{err}").contains("conflicting branch fields"),
             "unexpected error: {err}"
         );
 
@@ -11690,10 +11962,11 @@ mod tests {
             wire_schema("event_wire"),
             codec("event_codec", "event_schema"),
             client_model("broker_out"),
-            relay("p99", "event_schema"),
-            relay("notifications", "event_schema"),
+            relay_branched_like("p99", "event_schema", "notifications"),
+            relay_branched_by_relay_branch("notifications", "event_schema"),
             emitter("emit", "p99", "event_codec", "broker_out"),
             branch_schema("value_branch", &["value"]),
+            branch_for_relay("notifications", "value_branch", &["value"]),
             ingestor_with_params(
                 "ing",
                 "notifications",
@@ -11712,8 +11985,8 @@ mod tests {
             .active_graph(&domain)
             .expect("graph should be installed");
 
-        assert_eq!(graph_a.node_count(), 11);
-        assert_eq!(graph_a.edge_count(), 16);
+        assert_eq!(graph_a.node_count(), 12);
+        assert_eq!(graph_a.edge_count(), 21);
         assert_eq!(graph_a.node_count(), graph_b.node_count());
         assert_eq!(graph_a.edge_count(), graph_b.edge_count());
 
@@ -11798,6 +12071,7 @@ mod tests {
                     client_model("broker_in"),
                     relay("input", "my_schema"),
                     branch_schema("value_branch", &["value"]),
+                    branch_for_relay("input", "value_branch", &["value"]),
                     ingestor_with_params("ing", "input", "event_codec", "broker_in", &["value"]),
                     processor("p99_proc", "input", "missing_output"),
                 ],
@@ -11825,8 +12099,8 @@ mod tests {
         let graph = registry
             .active_graph(&domain)
             .expect("graph should be installed");
-        assert_eq!(graph.node_count(), 11);
-        assert_eq!(graph.edge_count(), 16);
+        assert_eq!(graph.node_count(), 12);
+        assert_eq!(graph.edge_count(), 21);
 
         let _ = fs::remove_dir_all(path);
     }
@@ -11845,9 +12119,10 @@ mod tests {
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
-                    relay("raw_events", "event_schema"),
-                    relay("deduped_events", "event_schema"),
+                    relay_branched_by_relay_branch("raw_events", "event_schema"),
+                    relay_branched_like("deduped_events", "event_schema", "raw_events"),
                     branch_schema("value_branch", &["value"]),
+                    branch_for_relay("raw_events", "value_branch", &["value"]),
                     ingestor_with_params(
                         "ingest_events",
                         "raw_events",
@@ -11882,21 +12157,21 @@ mod tests {
             node_ids.contains(&"relay:deduped_events"),
             "deduped relay missing from {node_ids:?}"
         );
-        let parameterization_schemas = dataflow_graph
+        let branching_schemas = dataflow_graph
             .nodes
             .iter()
-            .map(|node| (node.id.as_str(), node.parameterization_schema.as_deref()))
+            .map(|node| (node.id.as_str(), node.branching_schema.as_deref()))
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(
-            parameterization_schemas.get("ingestor:ingest_events"),
+            branching_schemas.get("ingestor:ingest_events"),
             Some(&Some("value_branch"))
         );
         assert_eq!(
-            parameterization_schemas.get("relay:raw_events"),
+            branching_schemas.get("relay:raw_events"),
             Some(&Some("value_branch"))
         );
         assert_eq!(
-            parameterization_schemas.get("relay:deduped_events"),
+            branching_schemas.get("relay:deduped_events"),
             Some(&Some("value_branch"))
         );
         let edges = dataflow_graph
@@ -11931,14 +12206,9 @@ mod tests {
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
-                    explicitly_unparameterized_relay("raw_events", "event_schema"),
-                    explicitly_unparameterized_relay("filtered_events", "event_schema"),
-                    unparameterized_ingestor(
-                        "ingest_events",
-                        "raw_events",
-                        "event_codec",
-                        "broker_in",
-                    ),
+                    explicitly_unbranched_relay("raw_events", "event_schema"),
+                    explicitly_unbranched_relay("filtered_events", "event_schema"),
+                    unbranched_ingestor("ingest_events", "raw_events", "event_codec", "broker_in"),
                     wasm_processor("filter_events", "raw_events", "filtered_events"),
                 ],
             )
@@ -11998,13 +12268,8 @@ mod tests {
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
                     client_model("broker"),
-                    explicitly_unparameterized_relay("raw_events", "event_schema"),
-                    unparameterized_ingestor(
-                        "ingest_events",
-                        "raw_events",
-                        "event_codec",
-                        "broker",
-                    ),
+                    explicitly_unbranched_relay("raw_events", "event_schema"),
+                    unbranched_ingestor("ingest_events", "raw_events", "event_codec", "broker"),
                     emitter("emit_events", "raw_events", "event_codec", "broker"),
                 ],
             )
@@ -12057,14 +12322,14 @@ mod tests {
                 &domain,
                 vec![
                     schema("event_schema"),
-                    explicitly_unparameterized_relay("left_events", "event_schema"),
-                    explicitly_unparameterized_relay("right_events", "event_schema"),
-                    explicitly_unparameterized_relay("matched_events", "event_schema"),
-                    explicitly_unparameterized_relay("uncorrelated_left_events", "event_schema"),
-                    explicitly_unparameterized_relay("uncorrelated_right_events", "event_schema"),
-                    explicitly_unparameterized_relay("correlator_errors", "event_schema"),
+                    explicitly_unbranched_relay("left_events", "event_schema"),
+                    explicitly_unbranched_relay("right_events", "event_schema"),
+                    explicitly_unbranched_relay("matched_events", "event_schema"),
+                    explicitly_unbranched_relay("uncorrelated_left_events", "event_schema"),
+                    explicitly_unbranched_relay("uncorrelated_right_events", "event_schema"),
+                    explicitly_unbranched_relay("correlator_errors", "event_schema"),
                     {
-                        let Model::Correlator(mut correlator) = unparameterized_correlator(
+                        let Model::Correlator(mut correlator) = unbranched_correlator(
                             "match_events",
                             "left_events",
                             "right_events",
@@ -12164,6 +12429,7 @@ mod tests {
                     client_model("broker_in"),
                     materialized_relay("state_txns", "event_schema"),
                     branch_schema("value_branch", &["value"]),
+                    branch_for_relay("state_txns", "value_branch", &["value"]),
                     ingestor_with_params(
                         "state_txns_ingestor",
                         "state_txns",
@@ -12340,9 +12606,10 @@ mod tests {
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
-                    relay("input", "event_schema"),
-                    relay("output", "event_schema"),
+                    relay_branched_by_relay_branch("input", "event_schema"),
+                    relay_branched_like("output", "event_schema", "input"),
                     branch_schema("value_branch", &["value"]),
+                    branch_for_relay("input", "value_branch", &["value"]),
                     ingestor_with_params("ing", "input", "event_codec", "broker_in", &["value"]),
                     processor("p99_proc", "input", "output"),
                 ],

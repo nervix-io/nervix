@@ -1,5 +1,5 @@
-Feature: Parameterized branch inheritance
-  Scenario Outline: Downstream deduplicators preserve the ingestor parameter key
+Feature: Branched branch inheritance
+  Scenario Outline: Downstream deduplicators preserve the ingestor branch key
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -12,45 +12,40 @@ Feature: Parameterized branch inheritance
         tenant STRING,
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_user_id_branch;
-      CREATE RELAY projected_notifications SCHEMA notification PARAMETERIZED BY tenant_user_id_branch;
-
-      CREATE CLIENT mqtt_main
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
-          'client_id' = 'nervix-cucumber-parameterized-processor-{{test_id}}'
+          'client_id' = 'nervix-cucumber-branched-processor-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m
+        BRANCHED BY by_mqtt_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR passthrough
+        CREATE DEDUPLICATOR passthrough
         FROM notifications
-        TO projected_notifications PARAMETERIZED BY tenant_user_id_branch
+        TO projected_notifications BRANCHED BY by_mqtt_notifications
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO projected_notifications;
-      START;
+        SUBSCRIBE SESSION TO projected_notifications;
+        START;
       """
     And MQTT message is published to topic "notifications_{{test_id}}"
       """

@@ -7,7 +7,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
         lex_input, message_error_policy, output_filter_map_program, relay_ref, resource_ref,
         string_lit, suggestions_from_errors, tok, wasm_processor_name,
@@ -89,7 +89,7 @@ pub fn create_wasm_processor_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(wasm_processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then(message_error_policy())
         .then(global_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -113,7 +113,7 @@ pub fn create_wasm_processor_parser<'src>()
                             ),
                             outputs,
                         ),
-                        parameterized_by,
+                        branched_by,
                     ),
                     message_error_policy,
                 ),
@@ -124,7 +124,7 @@ pub fn create_wasm_processor_parser<'src>()
                         name,
                         from: from_input,
                         output_routes: outputs,
-                        parameterized_by,
+                        branched_by,
                         resource,
                         resource_version,
                         file,
@@ -201,7 +201,7 @@ mod tests {
             CREATE DETACHED WASM PROCESSOR filter_even
             USING RESOURCE wasm_filters VERSION 2 FILE 'processors/filter_even.wasm'
             FROM raw_orders TO filtered_orders
-            PARAMETRIZED BY tenant_branch
+            BRANCHED BY tenant_branch
             ON MESSAGE ERROR LOG ON GLOBAL ERROR IGNORE;
         "#;
 
@@ -228,27 +228,23 @@ mod tests {
         );
         assert_eq!(parsed.global_error_policy, GeneralErrorPolicy::Ignore);
         assert_eq!(
-            parsed
-                .parameterized_by
-                .schema()
-                .map(|schema| schema.as_str()),
+            parsed.branched_by.branch().map(|branch| branch.as_str()),
             Some("tenant_branch")
         );
-        assert!(parsed.parameterized_by.values().is_empty());
     }
 
     #[test]
     fn rejects_values_block() {
-        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b \
-                     PARAMETERIZED BY tenant_branch VALUES { tenant = a.tenant } ON MESSAGE ERROR \
-                     LOG ON GLOBAL ERROR LOG;";
+        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b BRANCHED \
+                     BY tenant_branch VALUES { tenant = a.tenant } ON MESSAGE ERROR LOG ON GLOBAL \
+                     ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 
     #[test]
     fn rejects_flush_policy() {
         let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b \
-                     UNPARAMETERIZED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+                     UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 
@@ -260,7 +256,7 @@ mod tests {
             FROM raw_orders FILTER WHERE raw_orders.value >= 0
             TO even_orders WHERE even_orders.value = even_orders.value
             TO other_orders SET other_orders.bucket = "fallback"
-            UNPARAMETERIZED
+            UNBRANCHED
             ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
         "#;
 
@@ -281,7 +277,7 @@ mod tests {
     #[test]
     fn parses_unconditional_output_route() {
         let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b \
-                     UNPARAMETERIZED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+                     UNBRANCHED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         let tokens = to_tokens(input);
         let parsed =
             parse_create_wasm_processor_tokens(&tokens).expect("unconditional TO should parse");
@@ -293,8 +289,8 @@ mod tests {
     #[test]
     fn parses_output_route_with_set_but_no_where() {
         let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM input TO out1 \
-                     SET out1.name = lower(out1.name), out1.surname = input.surname \
-                     UNPARAMETERIZED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+                     SET out1.name = lower(out1.name), out1.surname = input.surname UNBRANCHED ON \
+                     MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         let tokens = to_tokens(input);
         let parsed = parse_create_wasm_processor_tokens(&tokens)
             .expect("TO with SET and no WHERE should parse");
@@ -307,7 +303,7 @@ mod tests {
     #[test]
     fn rejects_output_route_with_unset() {
         let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM input TO out1 \
-                     UNSET out1.legacy UNPARAMETERIZED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+                     UNSET out1.legacy UNBRANCHED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 }

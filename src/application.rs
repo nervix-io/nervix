@@ -75,19 +75,20 @@ use nervix_interconnect::{
     TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint,
-    CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor, CreateReorderer,
-    CreateResource, CreateStatement, CreateUser, CreateWindowProcessor, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
-    DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier,
-    IngestSource, IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
-    Model, ModelKind, MongoDbConflictAction, MySqlConflictAction, ParseAsType,
-    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, ResourceNodeState,
-    ResourceNodeStatus, ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    Timestamp, UploadResource, VhostTlsResource,
+    BranchInitiatorSelection, BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain,
+    CreateEmitter, CreateEndpoint, CreateInferencer, CreateIngestor, CreateLookup,
+    CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser,
+    CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeLookup, DescribeReingestor,
+    DescribeRelay, DescribeReorderer, DescribeResource, DescribeWasmProcessor,
+    DescribeWindowProcessor, Domain, DomainConfig, DomainPace, DomainStartPoint, DomainState,
+    DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier, IngestSource,
+    IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind,
+    MongoDbConflictAction, MySqlConflictAction, ParseAsType, PostgresConflictAction,
+    ProcessorInputs, ProcessorOutputs, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
+    UploadResource, VhostTlsResource,
 };
 use nervix_nspl::{
     Token, Word,
@@ -193,7 +194,7 @@ use crate::{
         RelaySubscriptionReceiver, RelaySubscriptionRecvError, Runtime, RuntimeEvent,
         RuntimeMaterializedRelaySpec, RuntimeTestHooks, RuntimeVmCompileContext,
         WebsocketSignalingSession, compile_session_filter_map_program,
-        execute_filter_map_on_record, scheduled_parametrized_stream_owner_nodes,
+        execute_filter_map_on_record, scheduled_branched_stream_owner_nodes,
     },
     runtime_schema,
 };
@@ -484,18 +485,18 @@ fn format_stream_message(
 
 fn validate_subscription_bindings(
     relay: &Identifier,
-    parameterization: &[Identifier],
+    branching: &[Identifier],
     schema: &nervix_models::CreateSchema,
     bindings: &[SubscriptionBinding],
 ) -> Result<SubscriptionFilter, String> {
-    if parameterization.is_empty() {
+    if branching.is_empty() {
         if bindings.is_empty() {
             return Ok(SubscriptionFilter {
                 bindings: Vec::new(),
             });
         }
         return Err(format!(
-            "stream '{}' is not parameterized and does not accept WHERE bindings",
+            "stream '{}' is not branched and does not accept WHERE bindings",
             relay.as_str()
         ));
     }
@@ -504,7 +505,7 @@ fn validate_subscription_bindings(
         return Err(format!(
             "stream '{}' requires WHERE bindings for ({})",
             relay.as_str(),
-            parameterization
+            branching
                 .iter()
                 .map(Identifier::as_str)
                 .collect::<Vec<_>>()
@@ -530,13 +531,13 @@ fn validate_subscription_bindings(
         }
     }
 
-    let expected = SortedSet::from_unsorted(parameterization.to_vec()).into_vec();
+    let expected = SortedSet::from_unsorted(branching.to_vec()).into_vec();
     let actual = SortedSet::from_unsorted(bound.keys().cloned().collect::<Vec<_>>()).into_vec();
     if expected != actual {
         return Err(format!(
             "subscription bindings for relay '{}' must exactly match ({})",
             relay.as_str(),
-            parameterization
+            branching
                 .iter()
                 .map(Identifier::as_str)
                 .collect::<Vec<_>>()
@@ -545,17 +546,17 @@ fn validate_subscription_bindings(
     }
 
     let mut matchers = Vec::new();
-    for field in parameterization {
+    for field in branching {
         let ty = fields.get(field).ok_or_else(|| {
             format!(
-                "parameter field '{}' is missing from schema '{}'",
+                "branch field '{}' is missing from schema '{}'",
                 field.as_str(),
                 schema.name.as_str()
             )
         })?;
         let literal = bound
             .get(field)
-            .expect("validated binding set must include parameter field");
+            .expect("validated binding set must include branch field");
         let expected = parse_subscription_literal(field, ty, literal)?;
         matchers.push(SubscriptionMatcher {
             field: field.clone(),
@@ -567,21 +568,21 @@ fn validate_subscription_bindings(
 }
 
 fn branch_key_from_filter(
-    parameterization: &[Identifier],
+    branching: &[Identifier],
     filter: &SubscriptionFilter,
 ) -> Result<Option<crate::runtime::BranchKey>, String> {
-    if parameterization.is_empty() {
+    if branching.is_empty() {
         return Ok(None);
     }
-    let mut fields = Vec::with_capacity(parameterization.len());
-    for field in parameterization {
+    let mut fields = Vec::with_capacity(branching.len());
+    for field in branching {
         let Some(binding) = filter
             .bindings
             .iter()
             .find(|binding| binding.field == *field)
         else {
             return Err(format!(
-                "missing binding for parameter field '{}'",
+                "missing binding for branch field '{}'",
                 field.as_str()
             ));
         };
@@ -3909,7 +3910,7 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(Vec::new());
         };
-        Ok(scheduled_parametrized_stream_owner_nodes(
+        Ok(scheduled_branched_stream_owner_nodes(
             domain_schedule,
             relay,
         ))
@@ -4066,7 +4067,7 @@ impl SessionServiceImpl {
     }
 
     async fn describe_stream(&self, domain: &Domain, describe: DescribeRelay) -> CommandResult {
-        let (ack_model, schema, parameterization) = match self
+        let (ack_model, schema, branching) = match self
             .subscription_target_from_schedule(domain, &describe.relay)
             .await
         {
@@ -4105,7 +4106,7 @@ impl SessionServiceImpl {
 
         if describe.bindings.is_empty() {
             return command_ok(append_metrics_lines(
-                format_relay_describe_output(&ack_model, &parameterization),
+                format_relay_describe_output(&ack_model, &branching),
                 self.runtime
                     .describe_metrics_for(domain, "RELAY", &describe.relay),
             ));
@@ -4113,7 +4114,7 @@ impl SessionServiceImpl {
 
         let filter = match validate_subscription_bindings(
             &ack_model.name,
-            &parameterization,
+            &branching,
             &schema,
             &describe.bindings,
         ) {
@@ -4132,7 +4133,7 @@ impl SessionServiceImpl {
                 };
             }
         };
-        let key = match branch_key_from_filter(&parameterization, &filter) {
+        let key = match branch_key_from_filter(&branching, &filter) {
             Ok(key) => key,
             Err(message) => {
                 return CommandResult {
@@ -4296,7 +4297,7 @@ impl SessionServiceImpl {
     ) -> Result<bool, String> {
         self.prepare_stream_owner_control_request(&request.domain, &request.relay)
             .await?;
-        let Some((ack_model, schema, parameterization)) = self
+        let Some((ack_model, schema, branching)) = self
             .subscription_target_from_schedule(&request.domain, &request.relay)
             .await?
         else {
@@ -4309,11 +4310,11 @@ impl SessionServiceImpl {
 
         let filter = validate_subscription_bindings(
             &ack_model.name,
-            &parameterization,
+            &branching,
             &schema,
             &request.bindings,
         )?;
-        let key = branch_key_from_filter(&parameterization, &filter)?;
+        let key = branch_key_from_filter(&branching, &filter)?;
         match self
             .runtime
             .describe_local_stream_exists(&request.domain, &request.relay, &key)
@@ -8306,10 +8307,7 @@ impl SessionServiceImpl {
         Ok(Some((
             ack_model.clone(),
             schema.clone(),
-            relay_node
-                .effective_parameterization
-                .clone()
-                .unwrap_or_default(),
+            relay_node.effective_branching.clone().unwrap_or_default(),
         )))
     }
 
@@ -8361,30 +8359,53 @@ impl SessionServiceImpl {
     ) -> Result<Option<Arc<arrow_schema::Schema>>, String> {
         match self.registry.get(domain, ModelKind::Relay, relay) {
             Ok(Some(Model::Relay(relay_model))) => {
-                let Some(parameter_schema) = relay_model.parameterization.parameterized_by() else {
+                let Some(branch_ref) = relay_model.branching.branch() else {
                     return Ok(None);
+                };
+                let branch = match self.registry.get(domain, ModelKind::Branch, branch_ref) {
+                    Ok(Some(Model::Branch(branch))) => branch,
+                    Ok(Some(_)) => {
+                        return Err(format!(
+                            "stream '{}' references non-branch model '{}'",
+                            relay.as_str(),
+                            branch_ref.as_str()
+                        ));
+                    }
+                    Ok(None) => {
+                        return Err(format!(
+                            "stream '{}' references missing branch '{}'",
+                            relay.as_str(),
+                            branch_ref.as_str()
+                        ));
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "failed to resolve branch '{}' for relay '{}': {err}",
+                            branch_ref.as_str(),
+                            relay.as_str()
+                        ));
+                    }
                 };
                 match self
                     .registry
-                    .get(domain, ModelKind::Schema, parameter_schema)
+                    .get(domain, ModelKind::Schema, &branch.branched_by)
                 {
                     Ok(Some(Model::Schema(schema))) => {
                         Ok(Some(runtime_schema::compile_schema(&schema).arrow_schema()))
                     }
                     Ok(Some(_)) => Err(format!(
-                        "stream '{}' references non-schema branch parameterization '{}'",
+                        "stream '{}' references non-schema branch schema '{}'",
                         relay.as_str(),
-                        parameter_schema.as_str()
+                        branch.branched_by.as_str()
                     )),
                     Ok(None) => Err(format!(
-                        "stream '{}' references missing branch parameterization schema '{}'",
+                        "stream '{}' references missing branch schema '{}'",
                         relay.as_str(),
-                        parameter_schema.as_str()
+                        branch.branched_by.as_str()
                     )),
                     Err(err) => Err(format!(
-                        "failed to resolve branch parameterization schema '{}' for relay '{}': \
-                         {err}",
-                        parameter_schema.as_str(),
+                        "failed to resolve branch schema '{}' for relay '{}': {err}",
+                        branch.branched_by.as_str(),
                         relay.as_str()
                     )),
                 }
@@ -8420,29 +8441,41 @@ impl SessionServiceImpl {
         let Model::Relay(relay_model) = relay_node.config.as_ref() else {
             return Err("scheduled relay node has invalid model kind".to_string());
         };
-        if let Some(parameter_schema) = relay_model.parameterization.parameterized_by() {
+        if let Some(branch_ref) = relay_model.branching.branch() {
+            let Some(branch_node) = domain_schedule
+                .nodes
+                .iter()
+                .find(|node| node.kind == ModelKind::Branch && node.identifier == *branch_ref)
+            else {
+                return Err(format!(
+                    "stream '{}' references missing scheduled branch '{}'",
+                    relay.as_str(),
+                    branch_ref.as_str()
+                ));
+            };
+            let Model::Branch(branch) = branch_node.config.as_ref() else {
+                return Err("scheduled branch node has invalid model kind".to_string());
+            };
             let Some(schema_node) = domain_schedule.nodes.iter().find(|node| {
-                node.kind == ModelKind::Schema && node.identifier == *parameter_schema
+                node.kind == ModelKind::Schema && node.identifier == branch.branched_by
             }) else {
                 return Err(format!(
-                    "stream '{}' references missing scheduled branch parameterization schema '{}'",
+                    "stream '{}' references missing scheduled branch schema '{}'",
                     relay.as_str(),
-                    parameter_schema.as_str()
+                    branch.branched_by.as_str()
                 ));
             };
             let Model::Schema(schema) = schema_node.config.as_ref() else {
-                return Err(
-                    "scheduled branch parameterization node has invalid model kind".to_string(),
-                );
+                return Err("scheduled branch schema node has invalid model kind".to_string());
             };
             return Ok(Some(runtime_schema::compile_schema(schema).arrow_schema()));
         }
 
-        let parameterization = relay_node
-            .effective_parameterization
+        let branching = relay_node
+            .effective_branching
             .as_deref()
             .unwrap_or_default();
-        if parameterization.is_empty() {
+        if branching.is_empty() {
             return Ok(None);
         }
         let Some(schema_node) = domain_schedule
@@ -8459,14 +8492,18 @@ impl SessionServiceImpl {
         let Model::Schema(schema) = schema_node.config.as_ref() else {
             return Err("scheduled relay schema node has invalid model kind".to_string());
         };
-        let mut fields = Vec::with_capacity(parameterization.len());
-        for parameter in parameterization {
-            let Some(field) = schema.fields.iter().find(|field| field.name == *parameter) else {
+        let mut fields = Vec::with_capacity(branching.len());
+        for branch_field in branching {
+            let Some(field) = schema
+                .fields
+                .iter()
+                .find(|field| field.name == *branch_field)
+            else {
                 return Err(format!(
-                    "stream '{}' inferred branch field '{}' from its parameterization, but the \
-                     field is missing from schema '{}'",
+                    "stream '{}' inferred branch field '{}' from its branching, but the field is \
+                     missing from schema '{}'",
                     relay.as_str(),
-                    parameter.as_str(),
+                    branch_field.as_str(),
                     schema.name.as_str()
                 ));
             };
@@ -8528,10 +8565,7 @@ impl SessionServiceImpl {
                 RuntimeMaterializedRelaySpec {
                     schema: runtime_schema::compile_schema(schema).arrow_schema(),
                     sensitivity: runtime_schema::compile_schema(schema).vm_sensitivity(),
-                    parameterization: relay_node
-                        .effective_parameterization
-                        .clone()
-                        .unwrap_or_default(),
+                    branching: relay_node.effective_branching.clone().unwrap_or_default(),
                 },
             );
             owners.insert(ack_model.name.clone(), None);
@@ -8738,12 +8772,12 @@ impl SessionServiceImpl {
             }
         }
 
-        let relay_parameterization = self
+        let relay_branching = self
             .subscription_target_from_schedule(domain, &subscription.relay)
             .await
             .ok()
             .flatten()
-            .map(|(_, _, parameterization)| parameterization)
+            .map(|(_, _, branching)| branching)
             .unwrap_or_default();
         let relay_branch_schema = match self
             .subscription_branch_schema(domain, &subscription.relay)
@@ -8806,7 +8840,7 @@ impl SessionServiceImpl {
                     RuntimeVmCompileContext {
                         available_materialized_streams: &materialized_stream_specs,
                         available_lookups: &HashMap::default(),
-                        current_parameterization: &relay_parameterization,
+                        current_branching: &relay_branching,
                         current_branch_schema: relay_branch_schema.as_ref(),
                         current_branch_sensitivity: None,
                     },
@@ -9148,8 +9182,8 @@ fn format_ingestor_describe_output(
             format_timestamp_source(ingestor.timestamp_source.as_ref())
         ),
         format!(
-            "branch ttl: {}",
-            ingestor.parameterized_by.ttl().unwrap_or("-")
+            "branch: {}",
+            format_branch_initiator_selection(&ingestor.branched_by)
         ),
         format!(
             "status: {}",
@@ -9243,6 +9277,20 @@ fn format_ingestor_describe_output(
     lines.join("\n")
 }
 
+fn format_branch_selection(branched_by: &BranchSelection) -> &str {
+    branched_by
+        .branch()
+        .map(Identifier::as_str)
+        .unwrap_or("UNBRANCHED")
+}
+
+fn format_branch_initiator_selection(branched_by: &BranchInitiatorSelection) -> &str {
+    branched_by
+        .branch()
+        .map(Identifier::as_str)
+        .unwrap_or("UNBRANCHED")
+}
+
 fn append_metrics_lines(mut output: String, metrics: Vec<String>) -> String {
     if metrics.is_empty() {
         return output;
@@ -9254,32 +9302,32 @@ fn append_metrics_lines(mut output: String, metrics: Vec<String>) -> String {
 
 fn format_relay_describe_output(
     relay: &nervix_models::CreateRelay,
-    parameterization: &[Identifier],
+    branching: &[Identifier],
 ) -> String {
     let mut lines = vec![
         format!("relay: {}", relay.name.as_str()),
         "kind: RELAY".to_string(),
         format!("schema: {}", relay.schema.as_str()),
         format!(
-            "parameterized by: {}",
+            "branched by: {}",
             relay
-                .parameterization
-                .parameterized_by()
+                .branching
+                .branch()
                 .map(Identifier::as_str)
                 .unwrap_or_else(|| {
-                    if relay.parameterization.is_unparameterized() {
-                        "UNPARAMETERIZED"
+                    if relay.branching.is_unbranched() {
+                        "UNBRANCHED"
                     } else {
                         "-"
                     }
                 })
         ),
         format!(
-            "parameter fields: {}",
-            if parameterization.is_empty() {
+            "branch fields: {}",
+            if branching.is_empty() {
                 "-".to_string()
             } else {
-                parameterization
+                branching
                     .iter()
                     .map(Identifier::as_str)
                     .collect::<Vec<_>>()
@@ -9296,7 +9344,7 @@ fn format_relay_describe_output(
             }
         ),
     ];
-    if !parameterization.is_empty() {
+    if !branching.is_empty() {
         lines.push("branch-local describe: use WHERE bindings".to_string());
     }
     lines.join("\n")
@@ -9428,16 +9476,8 @@ fn format_reingestor_describe_output(
     lines.extend([
         format!("from: {}", processor_input_names(&reingestor.from)),
         format!(
-            "parameterized by: {}",
-            reingestor
-                .parameterized_by
-                .schema()
-                .map(Identifier::as_str)
-                .unwrap_or("UNPARAMETERIZED")
-        ),
-        format!(
-            "branch ttl: {}",
-            reingestor.parameterized_by.ttl().unwrap_or("-")
+            "branch: {}",
+            format_branch_initiator_selection(&reingestor.branched_by)
         ),
         format!("mode: {}", reingestor.mode.as_ref()),
         format!("flush each: {}", reingestor.flush_each),
@@ -9468,12 +9508,8 @@ fn format_correlator_describe_output(
         format!("left: {}", processor_input_names(&correlator.left)),
         format!("right: {}", processor_input_names(&correlator.right)),
         format!(
-            "parameterized by: {}",
-            correlator
-                .parameterized_by
-                .schema()
-                .map(Identifier::as_str)
-                .unwrap_or("UNPARAMETERIZED")
+            "branch: {}",
+            format_branch_selection(&correlator.branched_by)
         ),
         format!("mode: {}", correlator.mode.as_ref()),
         format!("match: {}", correlator.match_policy.as_ref()),
@@ -13085,7 +13121,8 @@ mod tests {
             identifier: identifier(identifier_raw),
             kind,
             config: Box::new(Model::Schema(schema_with_fields(Vec::new()))),
-            effective_parameterization: None,
+            effective_branching: None,
+            effective_branching_schema: None,
             kafka_partition_schedule: None,
             primary_node: Some("node-1".to_string()),
             assigned_nodes: vec!["node-1".to_string()],
@@ -13483,6 +13520,7 @@ mod tests {
         let existing = DomainSchedule {
             domain,
             nodes: vec![ScheduledNode {
+                effective_branching_schema: None,
                 kafka_partition_schedule: Some(preserved_schedule.clone()),
                 assigned_nodes: vec!["node-1".to_string()],
                 ..scheduled_node("ingest_notifications", ModelKind::Ingestor)
@@ -13520,10 +13558,12 @@ mod tests {
             domain,
             nodes: vec![
                 ScheduledNode {
+                    effective_branching_schema: None,
                     kafka_partition_schedule: Some(KafkaPartitionSchedule::new(2, vec![0, 1], 3)),
                     ..scheduled_node("other_ingestor", ModelKind::Ingestor)
                 },
                 ScheduledNode {
+                    effective_branching_schema: None,
                     kafka_partition_schedule: Some(KafkaPartitionSchedule::new(1, vec![0], 2)),
                     ..scheduled_node("ingest_notifications", ModelKind::Client)
                 },
@@ -13842,7 +13882,7 @@ mod tests {
         assert_eq!(response.message, "parse error");
         assert_eq!(response.diagnostics, vec![mapped]);
 
-        let query = "CREATE RELAY orders SCHEMA notification;";
+        let query = "CREATE RELAY orders SCHEMA notification UNBRANCHED;";
         let identifier = identifier("orders");
         assert_eq!(find_identifier_span(query, &identifier), Some(13..19));
 
@@ -14173,8 +14213,8 @@ mod tests {
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA notification; \
-                            CREATE SCHEMA notification ( user_id U32 )"
+                    query: "CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA notification \
+                            UNBRANCHED; CREATE SCHEMA notification ( user_id U32 )"
                         .to_string(),
                     domain: "prod".to_string(),
                 },
@@ -14289,8 +14329,8 @@ mod tests {
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA missing_schema; \
-                            CREATE SCHEMA notification ( user_id U32 )"
+                    query: "CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA missing_schema \
+                            UNBRANCHED; CREATE SCHEMA notification ( user_id U32 )"
                         .to_string(),
                     domain: "prod".to_string(),
                 },
@@ -14529,18 +14569,18 @@ mod tests {
             "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
             "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
              notification;",
-            "CREATE RELAY notifications SCHEMA notification UNPARAMETERIZED;",
-            "CREATE RELAY forwarded_notifications SCHEMA notification UNPARAMETERIZED;",
+            "CREATE RELAY notifications SCHEMA notification UNBRANCHED;",
+            "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR notifications_ingestor TO notifications DECODE USING \
-             notification_codec UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP \
-             NOW FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP \
+             notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW \
+             FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP \
              notifications_group MODE NO_ACK PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR \
              LOG;",
             "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications TO \
-             forwarded_notifications UNPARAMETERIZED DEDUPLICATE ON notifications.user_id MAX \
-             TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             forwarded_notifications UNBRANCHED DEDUPLICATE ON notifications.user_id MAX TIME 10m \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE DETACHED EMITTER kafka_forward FROM notifications ENCODE USING \
              notification_codec TO KAFKA kafka_main TOPIC notifications_out ON MESSAGE ERROR LOG \
              ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;",
@@ -14705,22 +14745,22 @@ mod tests {
             "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
             "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
              notification;",
-            "CREATE RELAY notifications_a SCHEMA notification UNPARAMETERIZED;",
-            "CREATE RELAY notifications_b SCHEMA notification UNPARAMETERIZED;",
-            "CREATE RELAY notifications_all SCHEMA notification UNPARAMETERIZED;",
+            "CREATE RELAY notifications_a SCHEMA notification UNBRANCHED;",
+            "CREATE RELAY notifications_b SCHEMA notification UNBRANCHED;",
+            "CREATE RELAY notifications_all SCHEMA notification UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR ingest_a TO notifications_a DECODE USING notification_codec \
-             UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA \
-             kafka_main TOPIC notifications_a OFFSET BY CONSUMER GROUP notifications_a_group MODE \
-             NO_ACK PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
+             TOPIC notifications_a OFFSET BY CONSUMER GROUP notifications_a_group MODE NO_ACK \
+             PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE INGESTOR ingest_b TO notifications_b DECODE USING notification_codec \
-             UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA \
-             kafka_main TOPIC notifications_b OFFSET BY CONSUMER GROUP notifications_b_group MODE \
-             NO_ACK PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
+             TOPIC notifications_b OFFSET BY CONSUMER GROUP notifications_b_group MODE NO_ACK \
+             PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
-             notifications_all UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
-             ERROR LOG;",
+             notifications_all UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
+             LOG;",
         ] {
             let result = service
                 .process_command(
@@ -14877,17 +14917,17 @@ mod tests {
              integer );",
             "CREATE CODEC transaction_codec FROM WIRE JSON SCHEMA transaction_wire TO SCHEMA \
              transaction;",
-            "CREATE RELAY inbound SCHEMA transaction UNPARAMETERIZED;",
-            "CREATE RELAY deduped SCHEMA transaction UNPARAMETERIZED;",
+            "CREATE RELAY inbound SCHEMA transaction UNBRANCHED;",
+            "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
             "CREATE INGESTOR inbound_ingestor TO inbound DECODE USING transaction_codec \
-             UNPARAMETERIZED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA \
-             kafka_main TOPIC inbound OFFSET BY CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL \
-             MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
-            "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped UNPARAMETERIZED DEDUPLICATE \
-             ON inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-             MESSAGE ERROR LOG;",
+             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
+             TOPIC inbound OFFSET BY CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL MAX 1 ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped UNBRANCHED DEDUPLICATE ON \
+             inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
+             ERROR LOG;",
         ] {
             let result = service
                 .process_command(
@@ -15186,8 +15226,8 @@ mod tests {
     #[test]
     fn parse_server_statement_accepts_junction_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 UNPARAMETERIZED FLUSH EACH 100ms \
-             MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 UNBRANCHED FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("junction statement should parse");
         let Statement::Create(model) = parsed else {
@@ -15199,7 +15239,7 @@ mod tests {
     #[test]
     fn parse_server_statement_accepts_deduplicator_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 UNPARAMETERIZED DEDUPLICATE ON \
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 UNBRANCHED DEDUPLICATE ON \
              ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
              ERROR LOG;",
         )

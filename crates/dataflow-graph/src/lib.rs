@@ -38,7 +38,7 @@ pub struct DataflowNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnect_wait_millis: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameterization_schema: Option<String>,
+    pub branching_schema: Option<String>,
     #[serde(default, skip_serializing_if = "DataflowStatistics::is_empty")]
     pub statistics: DataflowStatistics,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -463,7 +463,7 @@ impl DataflowNode {
             status: DataflowNodeStatus::Ok,
             status_detail: None,
             reconnect_wait_millis: None,
-            parameterization_schema: None,
+            branching_schema: None,
             statistics: DataflowStatistics::default(),
             branches: Vec::new(),
             x: 0,
@@ -476,16 +476,13 @@ impl DataflowNode {
         self
     }
 
-    pub fn with_parameterization_schema(mut self, schema: impl Into<String>) -> Self {
-        self.parameterization_schema = Some(schema.into());
+    pub fn with_branching_schema(mut self, schema: impl Into<String>) -> Self {
+        self.branching_schema = Some(schema.into());
         self
     }
 
-    pub fn with_optional_parameterization_schema(
-        mut self,
-        schema: Option<impl Into<String>>,
-    ) -> Self {
-        self.parameterization_schema = schema.map(Into::into);
+    pub fn with_optional_branching_schema(mut self, schema: Option<impl Into<String>>) -> Self {
+        self.branching_schema = schema.map(Into::into);
         self
     }
 

@@ -4,7 +4,7 @@ use nervix_models::{AckMode, CreateReorderer, CreateStatement};
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         duration_lit, filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause,
         into_parse_error, kw, lex_input, message_error_policy, processor_outputs, reorderer_name,
         suggestions_from_errors, tok,
@@ -103,7 +103,7 @@ pub fn create_reorderer_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then(by_exprs())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
@@ -121,7 +121,7 @@ pub fn create_reorderer_parser<'src>()
                                     ((((if_not_exists, mode), name), from_input), filter_where),
                                     outputs,
                                 ),
-                                parameterized_by,
+                                branched_by,
                             ),
                             order_by,
                         ),
@@ -137,7 +137,7 @@ pub fn create_reorderer_parser<'src>()
                         name,
                         from: from_input,
                         output_routes: outputs,
-                        parameterized_by,
+                        branched_by,
                         order_by,
                         max_time,
                         flush_each,
@@ -207,9 +207,8 @@ mod tests {
     fn parses_create_reorderer() {
         let tokens = to_tokens(
             "CREATE REORDERER order_notifications FROM s1 TO s2 SET s2.id = trim(s1.id) WHERE \
-             s1.active PARAMETERIZED BY tenant BY s1.tenant, concat(lower(s1.id), '-', \
-             trim(s1.kind)) MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-             LOG;",
+             s1.active BRANCHED BY tenant BY s1.tenant, concat(lower(s1.id), '-', trim(s1.kind)) \
+             MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reorderer_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "order_notifications");
@@ -234,17 +233,17 @@ mod tests {
     #[test]
     fn rejects_reorderer_global_error_policy() {
         let tokens = to_tokens(
-            "CREATE REORDERER order_notifications FROM s1 TO s2 PARAMETERIZED BY tenant BY s1.id \
-             MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
-             ERROR LOG;",
+            "CREATE REORDERER order_notifications FROM s1 TO s2 BRANCHED BY tenant BY s1.id MAX \
+             TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR \
+             LOG;",
         );
         assert!(parse_create_reorderer_tokens(&tokens).is_err());
     }
 
     #[test]
     fn suggests_flush_after_max_time_without_cross_branch_leakage() {
-        let input = "CREATE REORDERER order_notifications FROM s1 TO s2 PARAMETERIZED BY tenant \
-                     BY s1.id MAX TIME 10s FL";
+        let input = "CREATE REORDERER order_notifications FROM s1 TO s2 BRANCHED BY tenant BY \
+                     s1.id MAX TIME 10s FL";
         let suggestions = suggest_create_reorderer(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(suggestions.contains(&"FLUSH IMMEDIATE".to_string()));

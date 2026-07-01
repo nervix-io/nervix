@@ -17,6 +17,8 @@ pub fn statement_parser<'src>()
             crate::create_resource::create_resource_parser().map(Statement::CreateResource),
             crate::domain::start_domain_parser().map(Statement::StartDomain),
             crate::domain::stop_domain_parser().map(Statement::StopDomain),
+            crate::branch::create_branch_parser()
+                .map(|create| Statement::Create(create.map_body(Model::Branch).map_body(Box::new))),
             crate::describe_deduplicator::describe_deduplicator_parser()
                 .map(Statement::DescribeDeduplicator),
             crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
@@ -229,44 +231,42 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 mod tests {
     use bolero::check;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchParameterization,
-        CodecWireFormat, CordonNode, CreateClientAzureBlob, CreateClientGcs,
-        CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-        CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
-        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction,
-        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, CreateWireSchemaStmt,
-        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType,
-        ErrorPolicies, Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, MessageErrorPolicy, Model, ModelKind, MqttIngestMode,
-        MqttQos, MqttSession, NatsIngestMode, ParameterValueMapping, ParseAsType, ProcessorInputs,
-        ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
-        SchemaField, SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
-        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchInitiatorSelection,
+        BranchSelection, BranchValueMapping, CodecWireFormat, CordonNode, CreateClientAzureBlob,
+        CreateClientGcs, CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt,
+        CreateClientNats, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+        CreateClientRedis, CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec,
+        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor,
+        CreateJunction, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema,
+        CreateWireSchemaStmt, DescribeRelay, DrainNode, DropModel, DropNode, EmitSink,
+        EndpointIngestMode, EndpointType, ErrorPolicies, Identifier as ModelIdentifier,
+        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+        MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
+        ParseAsType, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingProtocolOnConnect, SqsIngestMode,
+        Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode, WireSchemaField,
+        ZeroMqIngestMode,
     };
 
     use super::*;
 
-    fn parameterized_by(
-        schema: ModelIdentifier,
+    fn branched_by(
+        branch: ModelIdentifier,
         fields: Vec<ModelIdentifier>,
-    ) -> BranchParameterization {
-        BranchParameterization::parameterized_with_ttl(
-            schema.clone(),
-            fields
-                .into_iter()
-                .map(|field| ParameterValueMapping {
-                    field: field.clone(),
-                    relay: schema.clone(),
-                    relay_field: field,
-                })
-                .collect(),
-            "5m".to_string(),
-        )
+    ) -> BranchInitiatorSelection {
+        let values = fields
+            .into_iter()
+            .map(|field| BranchValueMapping {
+                relay: branch.clone(),
+                relay_field: field.clone(),
+                field,
+            })
+            .collect();
+        BranchInitiatorSelection::branched_by(branch, values)
     }
 
-    fn processor_parameterized_by(schema: ModelIdentifier) -> BranchParameterization {
-        BranchParameterization::parameterized(schema, Vec::new())
+    fn processor_branched_by(schema: ModelIdentifier) -> BranchSelection {
+        BranchSelection::branched_by(schema)
     }
 
     struct ByteGen<'a> {
@@ -381,7 +381,7 @@ mod tests {
             25 => Model::Generator(CreateGenerator {
                 name: g.ident(),
                 into_relay: g.ident(),
-                parameterized_by: processor_parameterized_by(g.ident()),
+                branched_by: processor_branched_by(g.ident()),
                 each: format!("{}ms", g.bounded_u64(1, 5000)),
                 flush_each: format!("{}ms", g.bounded_u64(1, 5000)),
                 max_batch_size: Some("1MiB".to_string()),
@@ -493,7 +493,7 @@ mod tests {
                 for _ in 0..param_count {
                     params.push(g.ident());
                 }
-                let params = parameterized_by(g.ident(), params);
+                let params = branched_by(g.ident(), params);
 
                 if g.bool() {
                     let mode = match g.next_u8() % 3 {
@@ -523,7 +523,7 @@ mod tests {
                             name: g.ident(),
                             output_routes: ProcessorOutputs::single(g.ident()),
                             decode_using_codec: g.ident(),
-                            parameterized_by: params,
+                            branched_by: params,
                             flush_each: "100ms".to_string(),
                             max_batch_size: Some("1MiB".to_string()),
                             timestamp_source: None,
@@ -542,7 +542,7 @@ mod tests {
                             name: g.ident(),
                             output_routes: ProcessorOutputs::single(g.ident()),
                             decode_using_codec: g.ident(),
-                            parameterized_by: params,
+                            branched_by: params,
                             flush_each: "100ms".to_string(),
                             max_batch_size: Some("1MiB".to_string()),
                             timestamp_source: None,
@@ -584,7 +584,7 @@ mod tests {
                         name: g.ident(),
                         output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
-                        parameterized_by: params,
+                        branched_by: params,
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -625,9 +625,7 @@ mod tests {
                 name: g.ident(),
                 schema: g.ident(),
                 buffer: g.bounded_u64(1, 1024) as usize,
-                parameterization: nervix_models::RelayParameterization::parameterized(
-                    nervix_models::RelayParameters::inferred(),
-                ),
+                branching: nervix_models::RelayBranching::unbranched(),
                 materialized_state: None,
             }),
             8 => Model::ClientMqtt(CreateClientMqtt {
@@ -642,7 +640,7 @@ mod tests {
                 name: g.ident(),
                 from: ProcessorInputs::new(vec![g.ident(), g.ident(), g.ident()], Vec::new()),
                 output_routes: ProcessorOutputs::single(g.ident()),
-                parameterized_by: processor_parameterized_by(g.ident()),
+                branched_by: processor_branched_by(g.ident()),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: if g.bool() {
@@ -657,7 +655,7 @@ mod tests {
                 name: g.ident(),
                 from: ProcessorInputs::single(g.ident()),
                 output_routes: ProcessorOutputs::single(g.ident()),
-                parameterized_by: processor_parameterized_by(g.ident()),
+                branched_by: processor_branched_by(g.ident()),
                 deduplicate_on: g.ident().to_string(),
                 max_time: "10m".to_string(),
                 flush_each: "100ms".to_string(),
@@ -684,13 +682,13 @@ mod tests {
                 for _ in 0..param_count {
                     params.push(g.ident());
                 }
-                let params = parameterized_by(g.ident(), params);
+                let params = branched_by(g.ident(), params);
 
                 Model::Ingestor(CreateIngestor {
                     name: g.ident(),
                     output_routes: ProcessorOutputs::single(g.ident()),
                     decode_using_codec: g.ident(),
-                    parameterized_by: params,
+                    branched_by: params,
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -709,7 +707,7 @@ mod tests {
                         name: g.ident(),
                         output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
-                        parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                        branched_by: branched_by(g.ident(), vec![g.ident()]),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -730,7 +728,7 @@ mod tests {
                         name: g.ident(),
                         output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
-                        parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                        branched_by: branched_by(g.ident(), vec![g.ident()]),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -838,7 +836,7 @@ mod tests {
                 name: g.ident(),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
-                parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
@@ -871,7 +869,7 @@ mod tests {
                 name: g.ident(),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
-                parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
@@ -903,7 +901,7 @@ mod tests {
                         },
                         nervix_models::ProcessorOutput::new(g.ident()),
                     ]),
-                    parameterized_by: BranchParameterization::unparameterized(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: if g.bool() {
@@ -983,7 +981,7 @@ mod tests {
                 name: g.ident(),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
-                parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
@@ -1051,14 +1049,32 @@ mod tests {
 
     #[test]
     fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch PARAMETERIZED BY u_branch VALUES { u \
-                     = s.u } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA t TOPIC top \
-                     OFFSET BY CONSUMER GROUP g MODE ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA t TOPIC top OFFSET BY \
+                     CONSUMER GROUP g MODE ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO_ACK".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
+    }
+
+    #[test]
+    fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
+        let input = "CREATE INGESTOR i TO s DECODE USING sch ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"UNBRANCHED".to_string()));
+        assert!(suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(!suggestions.contains(&"BY".to_string()));
+    }
+
+    #[test]
+    fn ingestor_bare_by_is_rejected() {
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BY u_branch FLUSH EACH 100ms MAX \
+                     BATCH SIZE 1MiB FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG \
+                     ON GENERAL ERROR LOG;";
+
+        parse_statement(input).expect_err("BY is only valid in CREATE BRANCH");
     }
 
     #[test]
@@ -1119,8 +1135,8 @@ mod tests {
 
     #[test]
     fn deduplicator_context_suggestions_do_not_leak_schema_keywords() {
-        let input = "CREATE DEDUPLICATOR dedup FROM ss1 TO ss2 PARAMETERIZED BY tenant \
-                     DEDUPLICATE ON ss1.transaction_id MAX ";
+        let input = "CREATE DEDUPLICATOR dedup FROM ss1 TO ss2 BRANCHED BY tenant DEDUPLICATE ON \
+                     ss1.transaction_id MAX ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"TIME".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1150,8 +1166,9 @@ mod tests {
     fn reingestor_output_context_suggestions_do_not_leak_schema_keywords() {
         let input = "CREATE REINGESTOR log_splitter FROM incoming_logs TO errors_ss ";
         let suggestions = suggest_statement(input, input.len());
-        assert!(suggestions.contains(&"UNPARAMETERIZED".to_string()));
-        assert!(suggestions.contains(&"PARAMETERIZED BY".to_string()));
+        assert!(suggestions.contains(&"UNBRANCHED".to_string()));
+        assert!(suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(!suggestions.contains(&"BY".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
@@ -1460,7 +1477,7 @@ mod tests {
     fn parses_junction_statement_with_implicit_attached_mode() {
         let parsed = parse_statement(
             "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
-             merged_notifications PARAMETERIZED BY tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+             merged_notifications BRANCHED BY tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
              MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
@@ -1478,8 +1495,8 @@ mod tests {
     #[test]
     fn parses_deduplicator_statement_with_implicit_attached_mode() {
         let parsed = parse_statement(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 PARAMETERIZED BY tenant DEDUPLICATE \
-             ON ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant DEDUPLICATE ON \
+             ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
              ERROR LOG;",
         )
         .expect("parse should succeed");
@@ -1497,7 +1514,7 @@ mod tests {
     #[test]
     fn parses_inferencer_statement() {
         let parsed = parse_statement(
-            r#"CREATE INFERENCER score_model FROM features TO scored UNPARAMETERIZED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" = features.vector } OUTPUTS { "score" = scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
+            r#"CREATE INFERENCER score_model FROM features TO scored UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" = features.vector } OUTPUTS { "score" = scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
@@ -1518,9 +1535,9 @@ mod tests {
     #[test]
     fn parses_reingestor_statement_with_flush_each() {
         let parsed = parse_statement(
-            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-             PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL \
-             5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
+             tenant_branch VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1536,7 +1553,7 @@ mod tests {
     #[test]
     fn parses_reingestor_statement_with_multiple_output_routes() {
         let parsed = parse_statement(
-            r#"CREATE REINGESTOR log_splitter FROM incoming_logs FILTER WHERE incoming_logs.active TO errors_ss SET errors_ss.severity = lower(incoming_logs.level) WHERE incoming_logs.level = "error" TO warnings_ss WHERE incoming_logs.level = "warn" TO info_ss PARAMETERIZED BY tenant_branch VALUES { tenant = incoming_logs.tenant } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
+            r#"CREATE REINGESTOR log_splitter FROM incoming_logs FILTER WHERE incoming_logs.active TO errors_ss SET errors_ss.severity = lower(incoming_logs.level) WHERE incoming_logs.level = "error" TO warnings_ss WHERE incoming_logs.level = "warn" TO info_ss BRANCHED BY tenant_branch VALUES { tenant = errors_ss.tenant } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
@@ -1567,8 +1584,8 @@ mod tests {
     fn parses_single_reingestor_output_route_with_filter_map() {
         let parsed = parse_statement(
             "CREATE REINGESTOR fw1 FROM ss1 TO ss3 SET ss3.normalized = lower(ss1.raw) UNSET \
-             ss3.raw WHERE ss1.active PARAMETERIZED BY tenant_branch VALUES { tenant = ss1.tenant \
-             } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             ss3.raw WHERE ss1.active BRANCHED BY tenant_branch VALUES { tenant = ss3.tenant } \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1618,9 +1635,9 @@ mod tests {
             (
                 "ingestor",
                 "CREATE INGESTOR http_notifications TO notifications DECODE USING \
-                 notification_codec PARAMETERIZED BY user_id_branch VALUES { user_id = \
-                 notifications.user_id } TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM \
-                 ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL",
+                 notification_codec BRANCHED BY user_id_branch VALUES { user_id = \
+                 notifications.user_id } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT \
+                 http_notifications_endpoint MODE NO_ACK SEQUENTIAL",
                 " ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
@@ -1654,35 +1671,34 @@ mod tests {
             (
                 "reingestor",
                 "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-                 PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } \
-                 TTL 5m FLUSH EACH 100ms MAX BATCH SIZE 1MiB",
+                 BRANCHED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } FLUSH \
+                 EACH 100ms MAX BATCH SIZE 1MiB",
             ),
             (
                 "junction",
                 "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
-                 notifications_all PARAMETERIZED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE \
-                 1MiB",
+                 notifications_all BRANCHED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB",
             ),
             (
                 "deduplicator",
-                "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped PARAMETERIZED BY \
-                 tenant_branch DEDUPLICATE ON inbound.transaction_id MAX TIME 10m FLUSH EACH \
-                 100ms MAX BATCH SIZE 1MiB",
+                "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped BRANCHED BY tenant_branch \
+                 DEDUPLICATE ON inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH \
+                 SIZE 1MiB",
             ),
             (
                 "window processor",
-                "CREATE WINDOW PROCESSOR latency_window FROM metrics TO metric_summaries \
-                 PARAMETERIZED BY tenant_branch WIDTH 10s DURATION STEP 5s DURATION AGGREGATE \
+                "CREATE WINDOW PROCESSOR latency_window FROM metrics TO metric_summaries BRANCHED \
+                 BY tenant_branch WIDTH 10s DURATION STEP 5s DURATION AGGREGATE \
                  metric_summaries.total_latency = SUM(metrics.latency)",
             ),
             (
                 "generator",
-                "CREATE GENERATOR synth TO alerts PARAMETERIZED BY tenant_branch EACH 100ms FLUSH \
-                 EACH 100ms MAX BATCH SIZE 1MiB SET alerts.user_id = notifications.user_id",
+                "CREATE GENERATOR synth TO alerts BRANCHED BY tenant_branch EACH 100ms FLUSH EACH \
+                 100ms MAX BATCH SIZE 1MiB SET alerts.user_id = notifications.user_id",
             ),
             (
                 "inferencer",
-                r#"CREATE INFERENCER score_model FROM features TO scored UNPARAMETERIZED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" = features.vector } OUTPUTS { "score" = scored.score } FLUSH IMMEDIATE"#,
+                r#"CREATE INFERENCER score_model FROM features TO scored UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" = features.vector } OUTPUTS { "score" = scored.score } FLUSH IMMEDIATE"#,
             ),
         ];
 
@@ -1713,7 +1729,7 @@ mod tests {
     fn message_error_policy_accepts_dlq_but_general_policy_does_not() {
         parse_statement(
             "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications \
-             PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m FLUSH \
+             BRANCHED BY tenant_branch VALUES { tenant = forwarded_notifications.tenant } FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR DLQ error_stream SET error_message = \
              message_error.message;",
         )
@@ -1731,25 +1747,25 @@ mod tests {
     }
 
     #[test]
-    fn branch_preserving_processors_accept_unparameterized() {
+    fn branch_preserving_processors_accept_unbranched() {
         for statement in [
-            "CREATE RELAY raw SCHEMA metric UNPARAMETERIZED;",
-            "CREATE DEDUPLICATOR dedup FROM raw TO projected UNPARAMETERIZED DEDUPLICATE ON \
-             raw.value MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
-            "CREATE REORDERER reorder FROM raw TO projected UNPARAMETERIZED BY raw.value MAX TIME \
-             10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
-            "CREATE JUNCTION join_streams FROM left, right TO joined UNPARAMETERIZED FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
-            "CREATE WINDOW PROCESSOR window_metrics FROM raw TO projected UNPARAMETERIZED WIDTH 2 \
+            "CREATE RELAY raw SCHEMA metric UNBRANCHED;",
+            "CREATE DEDUPLICATOR dedup FROM raw TO projected UNBRANCHED DEDUPLICATE ON raw.value \
+             MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE REORDERER reorder FROM raw TO projected UNBRANCHED BY raw.value MAX TIME 10s \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM left, right TO joined UNBRANCHED FLUSH EACH 100ms \
+             MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE WINDOW PROCESSOR window_metrics FROM raw TO projected UNBRANCHED WIDTH 2 \
              MESSAGES STEP 2 MESSAGES AGGREGATE projected.value = COUNT(raw.value) ON MESSAGE \
              ERROR LOG;",
-            "CREATE INFERENCER score FROM features TO scored UNPARAMETERIZED USING RESOURCE \
+            "CREATE INFERENCER score FROM features TO scored UNBRANCHED USING RESOURCE \
              fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { \"features\" = \
              features.vector } OUTPUTS { \"score\" = scored.score } FLUSH IMMEDIATE ON MESSAGE \
              ERROR LOG;",
             "CREATE WASM PROCESSOR filter_even USING RESOURCE wasm_filter VERSION 1 FILE \
-             'processors/filter_even.wasm' FROM raw TO projected UNPARAMETERIZED ON MESSAGE ERROR \
-             LOG ON GLOBAL ERROR LOG;",
+             'processors/filter_even.wasm' FROM raw TO projected UNBRANCHED ON MESSAGE ERROR LOG \
+             ON GLOBAL ERROR LOG;",
         ] {
             parse_statement(statement).unwrap_or_else(|error| {
                 panic!("statement should parse: {statement}\n{error:?}");
@@ -2014,7 +2030,8 @@ mod tests {
             CREATE INGESTOR kafka_notifications
                 TO notifications
                 DECODE USING notification_kafka_message
-                PARAMETERIZED BY user_id_kind_branch VALUES { user_id = notifications.user_id, kind = notifications.kind } TTL 5m
+                BRANCHED BY user_id_kind_branch
+                VALUES { user_id = notifications.user_id, kind = notifications.kind }
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 FROM
                     KAFKA kafka_main
@@ -2038,7 +2055,8 @@ mod tests {
             CREATE INGESTOR prom_samples
                 TO samples
                 DECODE USING sample_codec
-                PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m
+                BRANCHED BY source_branch
+                VALUES { source = samples.source }
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 FROM PROMETHEUS prom_main
                 QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
@@ -2057,7 +2075,7 @@ mod tests {
     #[test]
     fn canonical_roundtrip_stream() {
         let input = r#"
-            CREATE RELAY p99_latency SCHEMA notification_schema;
+            CREATE RELAY p99_latency SCHEMA notification_schema UNBRANCHED;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2075,7 +2093,7 @@ mod tests {
             CREATE JUNCTION join_streams
                 FROM ss1, ss2, ss3
                 TO ss10
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
         "#;
 
@@ -2093,7 +2111,7 @@ mod tests {
         let input = r#"
             CREATE DEDUPLICATOR dedup_txns
                 FROM ss1 TO ss2
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 DEDUPLICATE ON ss1.transaction_id
                 MAX TIME 10m
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use error_stack::{Report, ResultExt};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
-use nervix_models::{BranchParameterization, Domain, Identifier, KafkaOffsetMode, Model, ModelKind};
+use nervix_models::{BranchSelection, Domain, Identifier, KafkaOffsetMode, Model, ModelKind};
 use serde::{Deserialize, Serialize};
 pub use stored::{StoredModelEnvelope, StoredModelVersioned};
 use thiserror::Error;
@@ -262,7 +262,7 @@ mod tests {
             decode_using_codec: Identifier::parse("notification_kafka_message")
                 .expect("valid identifier"),
             timestamp_source: None,
-            parameterized_by: BranchParameterization::unparameterized(),
+            branched_by: BranchSelection::unbranched(),
             source: nervix_models::IngestSource::Kafka {
                 client: transport_id,
                 topic: Identifier::parse("notifications").expect("valid identifier"),

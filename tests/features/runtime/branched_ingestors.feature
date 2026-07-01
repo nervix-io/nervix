@@ -1,12 +1,12 @@
-Feature: Ingestor parameterization consistency
-  Scenario Outline: Ingestors targeting the same relay must share PARAMETERIZED BY schema
+Feature: Ingestor branch consistency
+  Scenario Outline: Ingestors targeting the same relay must use compatible branch schemas
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "conflicting parameterizations"
+    When these NSPL commands fail with "conflicting branch fields"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -31,39 +31,39 @@ Feature: Ingestor parameterization consistency
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY tenant_user_branch TTL 5m;
+
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
 
       CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
-          'client_id' = 'nervix-cucumber-parameterized-mqtt-{{test_id}}'
+          'client_id' = 'nervix-cucumber-branched-mqtt-{{test_id}}'
         };
 
       CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
           'addr' = 'redis://127.0.0.1:6379/'
-        };
-
-      CREATE INGESTOR mqtt_notifications
+        }; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_branch VALUES {
+        BRANCHED BY by_mqtt_notifications VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
-        } TTL 5m
+        }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR redis_notifications
+      CREATE IF NOT EXISTS BRANCH by_redis_notifications BY user_branch TTL 5m; CREATE INGESTOR redis_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_branch VALUES {
+        BRANCHED BY by_redis_notifications VALUES {
           user_id = notifications.user_id
-        } TTL 5m
+        }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_{{test_id}}
@@ -76,7 +76,7 @@ Feature: Ingestor parameterization consistency
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Multiple ingestors can share one parameterization schema for one relay
+  Scenario Outline: Multiple ingestors can share one branch schema for one relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -104,41 +104,41 @@ Feature: Ingestor parameterization consistency
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_user_branch;
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications_secondary BY tenant_user_branch TTL 5m;
+
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications_secondary;
 
       CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
-          'client_id' = 'nervix-cucumber-parameterized-mqtt-a-{{test_id}}'
+          'client_id' = 'nervix-cucumber-branched-mqtt-a-{{test_id}}'
         };
 
       CREATE CLIENT mqtt_secondary
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
-          'client_id' = 'nervix-cucumber-parameterized-mqtt-b-{{test_id}}'
+          'client_id' = 'nervix-cucumber-branched-mqtt-b-{{test_id}}'
         };
 
-      CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY tenant_user_branch TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_branch VALUES {
+        BRANCHED BY by_mqtt_notifications VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
-        } TTL 5m
+        }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_a_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE INGESTOR mqtt_notifications_secondary
+        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR mqtt_notifications_secondary
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY tenant_user_branch VALUES {
+        BRANCHED BY by_mqtt_notifications_secondary VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
-        } TTL 5m
+        }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_secondary
         TOPIC notifications_b_{{test_id}}

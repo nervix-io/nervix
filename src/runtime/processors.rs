@@ -2,8 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use nervix_models::{
-    AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    ErrorPolicies, Identifier, InferencerTensorMapping, ModelKind, ParameterValueMapping,
+    AckMode, BranchValueMapping, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+    CorrelatorMatchPolicy, ErrorPolicies, Identifier, InferencerTensorMapping, ModelKind,
     Timestamp, WindowBound,
 };
 use nervix_nspl::window_processor::aggregate::WindowAggregateProgram;
@@ -33,28 +33,29 @@ pub(super) struct WasmAckContext {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParameterizedIngestorSpec {
+pub(super) struct BranchedIngestorSpec {
     pub(super) kind: ModelKind,
     pub(super) identifier: Identifier,
     pub(super) root_relay: Identifier,
     pub(super) branch_ttl: Option<String>,
-    pub(super) entrypoint_parameter_mappings: Vec<ParameterValueMapping>,
-    pub(super) entrypoint_ack_boundary: ParametrizerAckBoundary,
+    pub(super) branch_max_instances: Option<u64>,
+    pub(super) entrypoint_branch_mappings: Vec<BranchValueMapping>,
+    pub(super) entrypoint_ack_boundary: BranchInstanceAckBoundary,
     pub(super) entrypoint_flush_each: String,
     pub(super) entrypoint_max_batch_size: Option<String>,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) processors: Vec<ParameterizedProcessorSpec>,
-    pub(super) roots: Vec<ParameterizedProcessorSpec>,
+    pub(super) processors: Vec<BranchedProcessorSpec>,
+    pub(super) roots: Vec<BranchedProcessorSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ParametrizerAckBoundary {
+pub(super) enum BranchInstanceAckBoundary {
     Preserve,
     Reingestor(AckMode),
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParameterizedProcessorSpec {
+pub(super) struct BranchedProcessorSpec {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
     pub(super) input_relays: Vec<Identifier>,
@@ -62,31 +63,31 @@ pub(super) struct ParameterizedProcessorSpec {
     pub(super) error_policies: ErrorPolicies,
     pub(super) from_where: HashMap<Identifier, String>,
     pub(super) filter_where: Option<String>,
-    pub(super) operation: ParameterizedProcessorOperationSpec,
+    pub(super) operation: BranchedProcessorOperationSpec,
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum ParameterizedProcessorOperationSpec {
+pub(super) enum BranchedProcessorOperationSpec {
     Deduplicator {
-        output_routes: ParameterizedProcessorOutputsSpec,
+        output_routes: BranchedProcessorOutputsSpec,
         deduplicate_on: String,
         max_time: String,
     },
     WindowProcessor {
-        output_routes: ParameterizedProcessorOutputsSpec,
+        output_routes: BranchedProcessorOutputsSpec,
         width: WindowBound,
         step: WindowBound,
         aggregate: String,
     },
     Reorderer {
-        output_routes: ParameterizedProcessorOutputsSpec,
+        output_routes: BranchedProcessorOutputsSpec,
         order_by: String,
         max_time: String,
         flush_each: String,
         max_batch_size: Option<String>,
     },
     Correlator {
-        output_routes: ParameterizedProcessorOutputsSpec,
+        output_routes: BranchedProcessorOutputsSpec,
         left_relays: Vec<Identifier>,
         right_relays: Vec<Identifier>,
         correlate_where: String,
@@ -98,12 +99,12 @@ pub(super) enum ParameterizedProcessorOperationSpec {
         timeout_policy: CorrelationTimeoutPolicy,
     },
     Junction {
-        output_routes: ParameterizedProcessorOutputsSpec,
+        output_routes: BranchedProcessorOutputsSpec,
         flush_each: String,
         max_batch_size: Option<String>,
     },
     Inferencer {
-        output_routes: ParameterizedProcessorOutputsSpec,
+        output_routes: BranchedProcessorOutputsSpec,
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
@@ -113,7 +114,7 @@ pub(super) enum ParameterizedProcessorOperationSpec {
         max_batch_size: Option<String>,
     },
     WasmProcessor {
-        output_routes: ParameterizedProcessorOutputsSpec,
+        output_routes: BranchedProcessorOutputsSpec,
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
@@ -121,54 +122,48 @@ pub(super) enum ParameterizedProcessorOperationSpec {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParameterizedProcessorOutputsSpec {
-    pub(super) routes: Vec<ParameterizedProcessorOutputSpec>,
+pub(super) struct BranchedProcessorOutputsSpec {
+    pub(super) routes: Vec<BranchedProcessorOutputSpec>,
 }
 
-impl ParameterizedProcessorOutputsSpec {
-    pub(super) fn outputs(&self) -> impl Iterator<Item = &ParameterizedProcessorOutputSpec> {
+impl BranchedProcessorOutputsSpec {
+    pub(super) fn outputs(&self) -> impl Iterator<Item = &BranchedProcessorOutputSpec> {
         self.routes.iter()
     }
 
-    pub(super) fn outputs_mut(
-        &mut self,
-    ) -> impl Iterator<Item = &mut ParameterizedProcessorOutputSpec> {
+    pub(super) fn outputs_mut(&mut self) -> impl Iterator<Item = &mut BranchedProcessorOutputSpec> {
         self.routes.iter_mut()
     }
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParameterizedProcessorOutputSpec {
+pub(super) struct BranchedProcessorOutputSpec {
     pub(super) relay: Identifier,
     pub(super) filter_map: Option<String>,
-    pub(super) children: Vec<ParameterizedProcessorSpec>,
+    pub(super) children: Vec<BranchedProcessorSpec>,
 }
 
-impl ParameterizedIngestorSpec {
+impl BranchedIngestorSpec {
     pub(super) fn relay_ids(&self) -> HashSet<Identifier> {
         let mut relays = HashSet::default();
         relays.insert(self.root_relay.clone());
 
-        fn collect(nodes: &[ParameterizedProcessorSpec], relays: &mut HashSet<Identifier>) {
+        fn collect(nodes: &[BranchedProcessorSpec], relays: &mut HashSet<Identifier>) {
             for node in nodes {
                 relays.extend(node.input_relays.iter().cloned());
                 match &node.operation {
-                    ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::WindowProcessor {
-                        output_routes, ..
-                    }
-                    | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::WasmProcessor {
-                        output_routes, ..
-                    } => {
+                    BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
+                    | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
+                    | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+                    | BranchedProcessorOperationSpec::Junction { output_routes, .. }
+                    | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
+                    | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
                         for output in output_routes.outputs() {
                             relays.insert(output.relay.clone());
                             collect(&output.children, relays);
                         }
                     }
-                    ParameterizedProcessorOperationSpec::Correlator {
+                    BranchedProcessorOperationSpec::Correlator {
                         output_routes,
                         timeout_policy,
                         ..
@@ -197,15 +192,15 @@ impl ParameterizedIngestorSpec {
             return true;
         }
 
-        fn contains(nodes: &[ParameterizedProcessorSpec], relay: &Identifier) -> bool {
+        fn contains(nodes: &[BranchedProcessorSpec], relay: &Identifier) -> bool {
             nodes.iter().any(|node| match &node.operation {
-                ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
+                BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
+                | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+                | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
+                | BranchedProcessorOperationSpec::Correlator { output_routes, .. }
+                | BranchedProcessorOperationSpec::Junction { output_routes, .. }
+                | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
+                | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
                     output_routes
                         .outputs()
                         .any(|output| &output.relay == relay || contains(&output.children, relay))
@@ -218,14 +213,15 @@ impl ParameterizedIngestorSpec {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParametrizerTemplate {
+pub(super) struct BranchInstanceTemplate {
     pub(super) source_kind: ModelKind,
     pub(super) source: Identifier,
     pub(super) root_relay: Identifier,
     pub(super) branch_ttl: Option<Duration>,
+    pub(super) branch_max_instances: Option<usize>,
     pub(super) entrypoint_schema: Arc<CompiledSchema>,
-    pub(super) entrypoint_parameter_mappings: Vec<ParameterValueMapping>,
-    pub(super) entrypoint_ack_boundary: ParametrizerAckBoundary,
+    pub(super) entrypoint_branch_mappings: Vec<BranchValueMapping>,
+    pub(super) entrypoint_ack_boundary: BranchInstanceAckBoundary,
     pub(super) entrypoint_flush_each: RuntimeFlushPolicy,
     pub(super) error_policies: ErrorPolicies,
     pub(super) relays: HashMap<Identifier, RelayProcessorRelayTemplate>,

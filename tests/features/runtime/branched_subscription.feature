@@ -1,5 +1,5 @@
-Feature: Parameterized session subscriptions
-  Scenario Outline: Session subscriptions collect records from all parameterized branches
+Feature: Branched session subscriptions
+  Scenario Outline: Session subscriptions collect records from all branched branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -12,36 +12,32 @@ Feature: Parameterized session subscriptions
         user_id I64,
         tenant STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         tenant string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_main
+        CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_tenant_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
-          'client_id' = 'nervix-cucumber-parameterized-subscription-{{test_id}}'
+          'client_id' = 'nervix-cucumber-branched-subscription-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING ); CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_tenant_branch VALUES { user_id = notifications.user_id, tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id, tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     When MQTT message is published to topic "notifications_{{test_id}}"
       """
@@ -63,7 +59,7 @@ Feature: Parameterized session subscriptions
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Session subscriptions filter-map collected parameterized records
+  Scenario Outline: Session subscriptions filter-map collected branched records
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -79,42 +75,38 @@ Feature: Parameterized session subscriptions
         raw STRING,
         normalized STRING OPTIONAL
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         tenant string,
         active boolean,
         raw string,
         normalized string OPTIONAL
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_main
+        CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_tenant_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
-          'client_id' = 'nervix-cucumber-parameterized-subscription-filter-map-{{test_id}}'
+          'client_id' = 'nervix-cucumber-branched-subscription-filter-map-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING ); CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        PARAMETERIZED BY user_id_tenant_branch VALUES { user_id = notifications.user_id, tenant = notifications.tenant } TTL 5m
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id, tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications
+        SUBSCRIBE SESSION TO notifications
         SET notifications.normalized = lower(trim(notifications.raw))
         UNSET notifications.raw, notifications.active, notifications.user_id
         WHERE notifications.tenant = 'acme' AND notifications.active;
-      START;
+        START;
       """
     When MQTT message is published to topic "notifications_{{test_id}}"
       """

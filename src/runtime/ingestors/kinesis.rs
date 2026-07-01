@@ -43,15 +43,15 @@ impl KinesisIngestor {
             }
         };
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
-        let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
+        let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
             &ingestor.name,
-            dependencies.parameterized_templates,
+            dependencies.branched_templates,
         );
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let parameterization = dependencies.parameterization;
+        let branching = dependencies.branching;
         let (ack_timeout, retry_policy) = match &ack_mode {
             KinesisIngestMode::AckSequential {
                 timeout,
@@ -113,9 +113,9 @@ impl KinesisIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
-            let task_parameterization = parameterization.clone();
-            let task_parameter_value_mappings = ingestor.parameterized_by.values().to_vec();
-            let task_parameterized_senders = parameterized_runtime.senders.clone();
+            let task_branching = branching.clone();
+            let task_branch_value_mappings = dependencies.branch_value_mappings.clone();
+            let task_branched_senders = branched_runtime.senders.clone();
             let task_client = client.clone();
             let task_retry_policy = retry_policy;
             let task_client_mounts = resolved_client.mounts.clone();
@@ -257,17 +257,17 @@ impl KinesisIngestor {
                                             domain: &task_domain,
                                             ingestor: &task_ingestor,
                                             timestamp_source: task_timestamp_source.as_ref(),
-                                            parameterization: &task_parameterization,
-                                            parameter_value_mappings: Some(
-                                                &task_parameter_value_mappings,
+                                            branching: &task_branching,
+                                            branch_value_mappings: Some(
+                                                &task_branch_value_mappings,
                                             ),
                                             output_routes: &mut output_routes,
                                             filter_where: task_filter_where.as_ref(),
-                                            parameterized_senders: &task_parameterized_senders,
+                                            branched_senders: &task_branched_senders,
                                             record,
                                             filter_map_metadata: None,
                                             ingested_at: current_timestamp(),
-                                            acks: if !task_parameterized_senders.is_empty() {
+                                            acks: if !task_branched_senders.is_empty() {
                                                 acks.attached()
                                             } else {
                                                 acks.clone()
@@ -404,7 +404,7 @@ impl KinesisIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime.runtimes,
+                branched: branched_runtime.runtimes,
                 tasks,
             },
         );

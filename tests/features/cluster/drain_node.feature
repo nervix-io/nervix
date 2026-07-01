@@ -22,9 +22,14 @@ Feature: Drain node
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY inbound SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
+
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY deduped SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
+
+      CREATE IF NOT EXISTS BRANCH by_source_txns BY transaction_id_branch TTL 5m;
+
+      CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_source_txns;
+
+      CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_source_txns;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -36,12 +41,12 @@ Feature: Drain node
       CREATE INGESTOR source_txns
         TO inbound
         DECODE USING transaction_codec
-        PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = inbound.transaction_id } TTL 5m
+        BRANCHED BY by_source_txns VALUES { transaction_id = inbound.transaction_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR dedup_txns
-        FROM inbound TO deduped PARAMETERIZED BY transaction_id_branch
+        FROM inbound TO deduped BRANCHED BY by_source_txns
         DEDUPLICATE ON inbound.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
@@ -75,7 +80,7 @@ Feature: Drain node
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE CLIENT kafka_main
         TYPE KAFKA
@@ -86,7 +91,7 @@ Feature: Drain node
       CREATE INGESTOR kafka_a
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_a_{{test_id}}
@@ -96,7 +101,7 @@ Feature: Drain node
       CREATE INGESTOR kafka_b
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_b_{{test_id}}
@@ -106,7 +111,7 @@ Feature: Drain node
       CREATE INGESTOR kafka_c
         TO notifications
         DECODE USING notification_codec
-        UNPARAMETERIZED
+        UNBRANCHED
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_c_{{test_id}}

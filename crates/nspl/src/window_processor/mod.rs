@@ -6,7 +6,7 @@ use nervix_models::{AckMode, CreateStatement, CreateWindowProcessor, WindowBound
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         duration_lit, filter_where_clause, from_relay_clauses, if_not_exists_clause,
         into_parse_error, kw, lex_input, message_error_policy, processor_outputs,
         suggestions_from_errors, tok, window_processor_name,
@@ -209,7 +209,7 @@ pub fn create_window_processor_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then_ignore(kw(Identifier::Width))
         .then(window_bound())
         .then_ignore(kw(Identifier::Step))
@@ -227,7 +227,7 @@ pub fn create_window_processor_parser<'src>()
                                     ((((if_not_exists, mode), name), from_input), filter_where),
                                     outputs,
                                 ),
-                                parameterized_by,
+                                branched_by,
                             ),
                             width,
                         ),
@@ -244,7 +244,7 @@ pub fn create_window_processor_parser<'src>()
                         name,
                         from: from_input,
                         output_routes: outputs,
-                        parameterized_by,
+                        branched_by,
                         width,
                         step,
                         aggregate,
@@ -320,7 +320,7 @@ mod tests {
             CREATE WINDOW PROCESSOR latency_window
                 FROM s1
                 TO s2
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 WIDTH 100 MESSAGES 10s DURATION
                 STEP 10 MESSAGES 1s DURATION
                 AGGREGATE
@@ -357,7 +357,7 @@ mod tests {
         let input = r#"
             CREATE DETACHED WINDOW PROCESSOR counts
                 FROM s1 TO s2
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 WIDTH 100 MESSAGES
                 STEP 100 MESSAGES
                 AGGREGATE s2.count = COUNT(s1.value) ON MESSAGE ERROR LOG;
@@ -377,7 +377,7 @@ mod tests {
         let input = r#"
             CREATE WINDOW PROCESSOR bad
                 FROM s1 TO s2
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 WIDTH 100 MESSAGES
                 STEP 101 MESSAGES
                 AGGREGATE s2.count = COUNT(s1.value) ON MESSAGE ERROR LOG;
@@ -390,7 +390,7 @@ mod tests {
         let input = r#"
             CREATE WINDOW PROCESSOR bad
                 FROM s1 TO s2
-                PARAMETERIZED BY tenant
+                BRANCHED BY tenant
                 WIDTH 100 MESSAGES
                 STEP 1s DURATION
                 AGGREGATE s2.count = COUNT(s1.value) ON MESSAGE ERROR LOG;
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn suggests_window_processor_keywords() {
-        let input = "CREATE WINDOW PROCESSOR p FROM s1 TO s2 PARAMETERIZED BY tenant ";
+        let input = "CREATE WINDOW PROCESSOR p FROM s1 TO s2 BRANCHED BY tenant ";
         let suggestions = suggest_create_window_processor(input, input.len());
         assert!(suggestions.contains(&"WIDTH".to_string()));
     }

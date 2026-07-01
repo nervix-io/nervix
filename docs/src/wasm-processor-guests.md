@@ -78,7 +78,7 @@ it unless they own a strict compatibility rule for the exact Nervix version they
 are targeting.
 
 `branch_key` is the serialized concrete branch key for this instance. An
-explicit `UNPARAMETERIZED` relay is still represented by one concrete branch
+explicit `UNBRANCHED` relay is still represented by one concrete branch
 key.
 
 `WasmProcessorType` is encoded with Serde's externally tagged CBOR enum shape.

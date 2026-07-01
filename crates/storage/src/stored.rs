@@ -2,8 +2,7 @@ use error_stack::Report;
 use nervix_models::{
     AvroType, CreateIngestor, CreateRelay, CreateSchema, CreateSchemaStmt, CreateTransportKafka,
     Identifier, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-    MaterializedStreamState, Model, NameError, ParseAsType, RelayParameterization,
-    RelayParameters, SchemaField,
+    MaterializedStreamState, Model, NameError, ParseAsType, RelayBranching, SchemaField,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -137,7 +136,7 @@ pub struct StoredCreateIngestor {
     pub into_relay: String,
     pub decode_using_codec: String,
     pub timestamp_source: Option<StoredIngestTimestampSource>,
-    pub parameterized_by: Vec<String>,
+    pub branched_by: Vec<String>,
     pub source: StoredIngestSource,
     pub filter_map: Option<String>,
 }
@@ -189,22 +188,14 @@ pub struct StoredCreateRelay {
     pub name: String,
     pub schema: String,
     pub buffer: u64,
-    pub parameterization: StoredRelayParameterization,
+    pub branching: StoredRelayBranching,
     pub materialized_state: Option<StoredMaterializedStreamState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredRelayParameterization {
-    Parameterized {
-        parameters: StoredRelayParameters,
-    },
-    Unparameterized,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredRelayParameters {
-    Inferred,
-    Declared(String),
+pub enum StoredRelayBranching {
+    BranchedBy { branch: String },
+    Unbranched,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -590,8 +581,8 @@ impl From<CreateIngestor> for StoredCreateIngestor {
             into_relay: value.into_relay.to_string(),
             decode_using_codec: value.decode_using_codec.to_string(),
             timestamp_source: value.timestamp_source.map(Into::into),
-            parameterized_by: value
-                .parameterized_by
+            branched_by: value
+                .branched_by
                 .into_iter()
                 .map(|x| x.to_string())
                 .collect(),
@@ -610,8 +601,8 @@ impl TryFrom<StoredCreateIngestor> for CreateIngestor {
             into_relay: Identifier::parse(&value.into_relay)?,
             decode_using_codec: Identifier::parse(&value.decode_using_codec)?,
             timestamp_source: value.timestamp_source.map(TryInto::try_into).transpose()?,
-            parameterized_by: value
-                .parameterized_by
+            branched_by: value
+                .branched_by
                 .into_iter()
                 .map(|x| Identifier::parse(&x))
                 .collect::<Result<Vec<_>, _>>()?,
@@ -769,23 +760,19 @@ impl From<StoredKafkaIngestMode> for KafkaIngestMode {
 
 impl From<CreateRelay> for StoredCreateRelay {
     fn from(value: CreateRelay) -> Self {
-        let parameterization = match value.parameterization {
-            RelayParameterization::Parameterized { parameters } => {
-                let parameters = match parameters {
-                    RelayParameters::Declared(schema) => {
-                        StoredRelayParameters::Declared(schema.to_string())
-                    }
-                    RelayParameters::Inferred => StoredRelayParameters::Inferred,
-                };
-                StoredRelayParameterization::Parameterized { parameters }
+        let branching = match value.branching {
+            RelayBranching::BranchedBy { branch } => {
+                StoredRelayBranching::BranchedBy {
+                    branch: branch.to_string(),
+                }
             }
-            RelayParameterization::Unparameterized => StoredRelayParameterization::Unparameterized,
+            RelayBranching::Unbranched => StoredRelayBranching::Unbranched,
         };
         Self {
             name: value.name.to_string(),
             schema: value.schema.to_string(),
             buffer: value.buffer as u64,
-            parameterization,
+            branching,
             materialized_state: value.materialized_state.map(Into::into),
         }
     }
@@ -795,25 +782,17 @@ impl TryFrom<StoredCreateRelay> for CreateRelay {
     type Error = Report<NameError>;
 
     fn try_from(value: StoredCreateRelay) -> Result<Self, Self::Error> {
-        let parameterization = match value.parameterization {
-            StoredRelayParameterization::Parameterized { parameters } => {
-                let parameters = match parameters {
-                    StoredRelayParameters::Declared(schema) => {
-                        RelayParameters::declared(Identifier::parse(&schema)?)
-                    }
-                    StoredRelayParameters::Inferred => RelayParameters::inferred(),
-                };
-                RelayParameterization::parameterized(parameters)
+        let branching = match value.branching {
+            StoredRelayBranching::BranchedBy { branch } => {
+                RelayBranching::branched_by(Identifier::parse(&branch)?)
             }
-            StoredRelayParameterization::Unparameterized => {
-                RelayParameterization::unparameterized()
-            }
+            StoredRelayBranching::Unbranched => RelayBranching::unbranched(),
         };
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             schema: Identifier::parse(&value.schema)?,
             buffer: value.buffer as usize,
-            parameterization,
+            branching,
             materialized_state: value.materialized_state.map(Into::into),
         })
     }
