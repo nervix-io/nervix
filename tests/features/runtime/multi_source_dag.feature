@@ -14,107 +14,95 @@ Feature: Multi-source DAG routing
         user_id I64,
         source STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         source string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY kafka_ingress SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE RELAY rabbit_ingress SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE RELAY kafka_projected SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE RELAY rabbit_projected SCHEMA notification PARAMETERIZED BY user_id_branch;
-      CREATE RELAY shared_dispatch SCHEMA notification PARAMETERIZED BY user_id_branch;
-
-      CREATE CLIENT kafka_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY kafka_ingress SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY rabbit_ingress SCHEMA notification BRANCHED BY by_rabbit_notifications;
+        CREATE RELAY kafka_projected SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE RELAY rabbit_projected SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE RELAY shared_dispatch SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE CLIENT rabbit_main
+        CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
           'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
         };
-
-      CREATE CLIENT redis_main
+        CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
           'addr' = 'redis://127.0.0.1:6379/'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = kafka_ingress.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
+        CREATE INGESTOR kafka_notifications
         TO kafka_ingress
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications
+        BRANCHED BY by_kafka_notifications VALUES { user_id = kafka_ingress.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC dag_kafka_{{test_id}}
         OFFSET BY CONSUMER GROUP dag_cucumber_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_rabbit_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = rabbit_ingress.user_id } TTL 5m; CREATE INGESTOR rabbit_notifications
+        CREATE INGESTOR rabbit_notifications
         TO rabbit_ingress
         DECODE USING notification_codec
-        BRANCHED BY by_rabbit_notifications
+        BRANCHED BY by_rabbit_notifications VALUES { user_id = rabbit_ingress.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM RABBITMQ rabbit_main
         QUEUE dag_rabbit_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR kafka_branch
+        CREATE DEDUPLICATOR kafka_branch
         FROM kafka_ingress
         TO kafka_projected BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON kafka_ingress.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      CREATE DEDUPLICATOR rabbit_branch
+        CREATE DEDUPLICATOR rabbit_branch
         FROM rabbit_ingress
         TO rabbit_projected BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON rabbit_ingress.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      CREATE DEDUPLICATOR kafka_shared
+        CREATE DEDUPLICATOR kafka_shared
         FROM kafka_projected
         TO shared_dispatch BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON kafka_projected.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      CREATE DEDUPLICATOR rabbit_shared
+        CREATE DEDUPLICATOR rabbit_shared
         FROM rabbit_projected
         TO shared_dispatch BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON rabbit_projected.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      CREATE EMITTER kafka_out
+        CREATE EMITTER kafka_out
         FROM kafka_projected
         ENCODE USING notification_codec
         TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      CREATE EMITTER rabbit_out
+        CREATE EMITTER rabbit_out
         FROM rabbit_projected
         ENCODE USING notification_codec
         TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      CREATE EMITTER shared_out
+        CREATE EMITTER shared_out
         FROM shared_dispatch
         ENCODE USING notification_codec
         TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      SUBSCRIBE SESSION TO kafka_projected;
-      SUBSCRIBE SESSION TO rabbit_projected;
-      SUBSCRIBE SESSION TO shared_dispatch;
-      START;
+        SUBSCRIBE SESSION TO kafka_projected;
+        SUBSCRIBE SESSION TO rabbit_projected;
+        SUBSCRIBE SESSION TO shared_dispatch;
+        START;
       """
     When Kafka message is published to topic "dag_kafka_{{test_id}}"
       """

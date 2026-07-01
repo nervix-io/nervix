@@ -2,7 +2,7 @@
 
 Nervix supports several runtime node types that transform or route records between relays.
 
-Processing nodes operate on one parameter group at a time. This keeps tenant-specific, user-specific, or other group-specific state isolated while records move through the graph. A processor receives branch-local relay batches and keeps branch-local buffers or state unless its node type explicitly crosses a branch boundary.
+Processing nodes operate on one concrete branch at a time. This keeps tenant-specific, user-specific, or other group-specific state isolated while records move through the graph. A processor receives branch-local relay batches and keeps branch-local buffers or state unless its node type explicitly crosses a branch boundary.
 
 Every normal processor that consumes relays must declare `BRANCHED BY <branch>`. The branch's schema must match the input and output relays. The declaration is a contract: the processor is materialized once per concrete branch and must not consume the mixed logical relay. Reingestors are different because they reference an explicit branch whose `VALUES` map creates a new downstream branch key. Emitters are terminal drains and do not declare processor branch selection.
 
@@ -20,13 +20,13 @@ Pure runtime processors end with `ON MESSAGE ERROR <policy>` only. `ON GENERAL E
 Branch behavior by node type:
 
 - `INGESTOR` starts a branch
-- `DEDUPLICATOR`, `REORDERER`, `CORRELATOR`, and `JUNCTION` run inside that branch under one concrete parameter group and may fan records out through output routes
-- `WASM PROCESSOR` runs inside that branch under one concrete parameter group
-- `WINDOW PROCESSOR` keeps window state inside that branch under one concrete parameter group
+- `DEDUPLICATOR`, `REORDERER`, `CORRELATOR`, and `JUNCTION` run inside that branch under one concrete branch key and may fan records out through output routes
+- `WASM PROCESSOR` runs inside that branch under one concrete branch key
+- `WINDOW PROCESSOR` keeps window state inside that branch under one concrete branch key
 - `REINGESTOR` is the boundary that consumes from the whole input relay and starts new downstream branches
 - `EMITTER` is the terminal mixed consumer that drains a relay to an external sink
 
-Processors between ingestor and reingestor/emitter are scoped to one parameter group. The isolation covers both the relay batches they handle and the state they keep.
+Processors between ingestor and reingestor/emitter are scoped to one concrete branch. The isolation covers both the relay batches they handle and the state they keep.
 
 Every flush-based runtime node must declare either `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` in its NSPL definition. `FLUSH EACH` uses the duration as the local batch boundary: the node buffers input under one concrete branch group and forwards it downstream on that cadence. `FLUSH IMMEDIATE` forwards each received batch without waiting for a flush deadline. Emitters also declare `FLUSH` and use it to collect a terminal output batch before publishing externally. Window processors use `WIDTH` and `STEP` instead. WASM processors do not declare a flush policy: output emission is controlled by the guest through `process` output and guest-requested timeouts.
 
@@ -82,9 +82,7 @@ Example:
 
 ```nspl
 CREATE BRANCH by_user
-  PARAMETERIZED BY user_branch VALUES {
-    user_id = branch.user_id
-  } TTL 5m;
+  BY user_branch TTL 5m;
 
 CREATE DEDUPLICATOR project_notifications
   FROM notifications WHERE notifications.active
@@ -102,7 +100,7 @@ CREATE DEDUPLICATOR project_notifications
 
 That example keeps the existing branch grouping, filters inactive rows at the source boundary, rewrites `normalized` and `amount`, removes `raw` and `active`, and forwards the surviving rows into `projected_notifications`.
 
-Branch-preserving processor output programs can also read the current parameter group through `branch.<key>`. For example, `SET projected_notifications.tenant = branch.tenant WHERE branch.tenant = notifications.tenant` copies and tests the branch key without requiring the key to be present in the message payload.
+Branch-preserving processor output programs can also read the current branch key through `branch.<key>`. For example, `SET projected_notifications.tenant = branch.tenant WHERE branch.tenant = notifications.tenant` copies and tests the branch key without requiring the key to be present in the message payload.
 
 ## Generator
 
@@ -171,7 +169,7 @@ An inferencer declares a branch-local ONNX model execution node. The model file 
 
 The optional `FILTER WHERE` clause runs before tensor construction. `INPUTS` maps ONNX input tensor names to fields on one of the declared input relays after that arrival filter. `OUTPUTS` maps ONNX output tensor names to fields on the output relay. Inferencers do not pass input fields through automatically; every required output field must come from `OUTPUTS` or a route-level `SET`.
 
-Inferencers preserve the upstream parameter group exactly as received. Runtime ONNX execution is still under implementation; the control plane currently validates the resource/file reference and schema field mappings before accepting the model.
+Inferencers preserve the upstream branch exactly as received. Runtime ONNX execution is still under implementation; the control plane currently validates the resource/file reference and schema field mappings before accepting the model.
 
 ## Deduplicator
 
@@ -217,7 +215,7 @@ A reorderer buffers records for one concrete branch and emits them sorted by the
 
 Ordering is ascending. When two records have identical `BY` keys, arrival order is the tie-breaker.
 
-`MAX TIME` bounds how long the oldest buffered record may wait. `FLUSH EACH` also creates a periodic flush boundary; `FLUSH IMMEDIATE` sorts and emits each received batch immediately. Reorderers preserve the upstream parameter group and do not support `ON GENERAL ERROR`.
+`MAX TIME` bounds how long the oldest buffered record may wait. `FLUSH EACH` also creates a periodic flush boundary; `FLUSH IMMEDIATE` sorts and emits each received batch immediately. Reorderers preserve the upstream branch and do not support `ON GENERAL ERROR`.
 
 `DESCRIBE REORDERER <name>` reports the scheduled owner and replicas, input/output relays, ordering expression list, max time, flush policy, filter-map presence, branch-local execution marker, state persistence markers, and runtime metrics when available.
 
@@ -249,7 +247,7 @@ When a left/right pair matches, the pair is removed from pending state and an ou
 
 `MAX TIME` is evaluated against the domain clock and bounds how long an unmatched record can remain pending. `ON CORRELATION TIMEOUT` has one action for the left input and one for the right input. `DROP` acknowledges and forgets the record. `SEND TO <relay>` forwards the original unmodified record to another schema-compatible relay and acknowledges it after the send succeeds.
 
-Correlators preserve the upstream parameter group. Each concrete branch gets separate pending input state and an output buffer, even when the two inputs receive interleaved records that would match the same predicate in other branches.
+Correlators preserve the upstream branch. Each concrete branch gets separate pending input state and an output buffer, even when the two inputs receive interleaved records that would match the same predicate in other branches.
 
 ## WASM Processor
 
@@ -314,7 +312,7 @@ DESCRIBE WINDOW PROCESSOR <name>;
 
 A window processor consumes one or more same-schema branch-local input relays and emits aggregate records in the first declared output relay's schema before routing them to matching destinations. It does not inherit input fields automatically. The `AGGREGATE` block fully defines the emitted base record shape.
 
-Window processors preserve the upstream parameter group exactly as received. Each concrete branch gets its own independent window state, and each window contains records from one branch group.
+Window processors preserve the upstream branch exactly as received. Each concrete branch gets its own independent window state, and each window contains records from one branch key.
 
 `WIDTH` defines when the current window is ready to emit. It may use message count, duration, or both:
 
@@ -402,9 +400,7 @@ ACK behavior follows branch mode. In `ATTACHED` mode, the aggregate output carri
 
 ```nspl
 CREATE BRANCH by_reingested_tenant
-  PARAMETERIZED BY tenant_branch VALUES {
-    tenant = output_relay.tenant
-  } TTL 5m;
+  BY tenant_branch TTL 5m;
 
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
   FROM <relay> [WHERE <expr>], ...
@@ -417,7 +413,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
 
 For reingestors, `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` declares when the processor flushes buffered output downstream. `FLUSH IMMEDIATE` republishes each received batch without waiting.
 
-A reingestor republishes records from one or more same-schema relays into another and starts downstream branches with a new parameter grouping.
+A reingestor republishes records from one or more same-schema relays into another and starts downstream branches with a new branch mapping.
 
 This is the main tool for changing native branch grouping inside the Nervix graph.
 

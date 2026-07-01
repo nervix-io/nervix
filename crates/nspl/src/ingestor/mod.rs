@@ -9,8 +9,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, branch_parameterization_with_values, channel_ref,
-        client_ref, codec_ref, consumer_group_ref, current_word_prefix, duration_lit, endpoint_ref,
+        ParseError, ParseFromSourceError, branch_initiator_selection, channel_ref, client_ref,
+        codec_ref, consumer_group_ref, current_word_prefix, duration_lit, endpoint_ref,
         error_policies, filter_where_clause, flush_each, if_not_exists_clause, ingestor_name,
         ingestor_outputs, into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter,
         nats_queue_group_ref, queue_ref, relay_ref, string_lit, subscription_ref,
@@ -646,7 +646,7 @@ pub fn create_ingestor_parser<'src>()
         .then(ingestor_outputs())
         .then_ignore(kw_phrase2(Identifier::Decode, Identifier::Using))
         .then(codec_ref())
-        .then(branch_parameterization_with_values())
+        .then(branch_initiator_selection())
         .then(flush_each())
         .then(timestamp_source().or_not())
         .then_ignore(kw(Identifier::From))
@@ -663,7 +663,7 @@ pub fn create_ingestor_parser<'src>()
                                     (((if_not_exists, name), filter_where), output_routes),
                                     decode_using_codec,
                                 ),
-                                parameterized_by,
+                                branched_by,
                             ),
                             flush_each,
                         ),
@@ -679,7 +679,7 @@ pub fn create_ingestor_parser<'src>()
                         name,
                         output_routes,
                         decode_using_codec,
-                        parameterized_by,
+                        branched_by,
                         flush_each,
                         max_batch_size,
                         timestamp_source,
@@ -753,7 +753,7 @@ mod tests {
             CREATE INGESTOR kafka_notifications
                 TO notifications
                 DECODE USING notification_kafka_message
-                BRANCHED BY notification_params
+                BRANCHED BY notification_params VALUES { user_id = notifications.user_id }
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 FROM
                     KAFKA kafka_main
@@ -779,10 +779,7 @@ mod tests {
             "notification_kafka_message"
         );
         assert_eq!(
-            parsed
-                .parameterized_by
-                .branch()
-                .map(|branch| branch.as_str()),
+            parsed.branched_by.branch().map(|branch| branch.as_str()),
             Some("notification_params")
         );
         assert_eq!(parsed.timestamp_source, None);
@@ -829,14 +826,14 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.parameterized_by,
-            nervix_models::BranchParameterization::unbranched()
+            parsed.branched_by,
+            nervix_models::BranchInitiatorSelection::unbranched()
         );
-        assert!(parsed.parameterized_by.is_unbranched());
+        assert!(parsed.branched_by.is_unbranched());
     }
 
     #[test]
-    fn rejects_branched_by_with_values_block() {
+    fn parses_branched_by_with_values_block() {
         let input = r#"
             CREATE INGESTOR i
               TO s
@@ -846,8 +843,31 @@ mod tests {
               FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
+        let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.branched_by.branch().map(|branch| branch.as_str()),
+            Some("u_branch")
+        );
+        assert_eq!(parsed.branched_by.values().len(), 1);
+        assert_eq!(parsed.branched_by.values()[0].field.as_str(), "u");
+        assert_eq!(parsed.branched_by.values()[0].relay.as_str(), "s");
+        assert_eq!(parsed.branched_by.values()[0].relay_field.as_str(), "u");
+    }
+
+    #[test]
+    fn rejects_bare_by() {
+        let input = r#"
+            CREATE INGESTOR i
+              TO s
+              DECODE USING sch
+              BY u_branch
+              FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+              FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        "#;
+
         parse_create_ingestor_tokens(&to_tokens(input))
-            .expect_err("VALUES belongs to CREATE BRANCH");
+            .expect_err("BY is only valid in CREATE BRANCH");
     }
 
     #[test]
@@ -871,7 +891,7 @@ mod tests {
             CREATE INGESTOR i
               TO s
               DECODE USING sch
-              BRANCHED BY u_branch
+              BRANCHED BY u_branch VALUES { u = s.u }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -903,7 +923,7 @@ mod tests {
             CREATE INGESTOR kinesis_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM KINESIS kinesis_main RELAY notifications INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -936,7 +956,7 @@ mod tests {
             CREATE INGESTOR i
               TO s
               DECODE USING sch
-              BRANCHED BY u_branch
+              BRANCHED BY u_branch VALUES { u = s.u }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE NO_ACK PARALLEL MAX 20 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -955,7 +975,7 @@ mod tests {
             CREATE INGESTOR pulsar_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM PULSAR pulsar_main TOPIC notifications SUBSCRIPTION nervix_subscription MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -990,7 +1010,7 @@ mod tests {
             CREATE INGESTOR pulsar_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM PULSAR pulsar_main TOPIC notifications MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1006,7 +1026,7 @@ mod tests {
             CREATE INGESTOR rabbit_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM RABBITMQ rabbit_main QUEUE notifications MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1048,7 +1068,7 @@ mod tests {
             CREATE INGESTOR redis_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM REDIS PUBSUB redis_main CHANNEL notifications MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1075,7 +1095,7 @@ mod tests {
             CREATE INGESTOR redis_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM REDIS redis_main CHANNEL notifications MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1087,8 +1107,8 @@ mod tests {
 
     #[test]
     fn suggests_pubsub_action_after_redis_source() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM REDIS ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM REDIS ";
         let suggestions = suggest_create_ingestor(input, input.len());
 
         assert!(suggestions.contains(&"PUBSUB".to_string()));
@@ -1097,9 +1117,9 @@ mod tests {
 
     #[test]
     fn suggests_mode_options() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g \
-                     MODE ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA t TOPIC top OFFSET BY \
+                     CONSUMER GROUP g MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO_ACK".to_string()));
@@ -1107,8 +1127,8 @@ mod tests {
 
     #[test]
     fn suggests_source_transport_kinds_after_from() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"HTTP".to_string()));
         assert!(suggestions.contains(&"KINESIS".to_string()));
@@ -1125,17 +1145,19 @@ mod tests {
     }
 
     #[test]
-    fn suggests_flush_after_branched_by() {
+    fn suggests_values_after_branched_by() {
         let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch ";
         let suggestions = suggest_create_ingestor(input, input.len());
-        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(suggestions.contains(&"VALUES".to_string()));
+        assert!(!suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(!suggestions.contains(&"TTL".to_string()));
         assert!(!suggestions.contains(&"TIMESTAMP".to_string()));
     }
 
     #[test]
-    fn suggests_flush_after_parameterized_ttl() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch ";
+    fn suggests_flush_after_branch_values_without_transport_leakage() {
+        let input =
+            "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = s.u } ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(!suggestions.contains(&"TIMESTAMP".to_string()));
@@ -1144,8 +1166,9 @@ mod tests {
 
     #[test]
     fn pulsar_mode_context_does_not_offer_kafka_offset_keywords() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM PULSAR p TOPIC top SUBSCRIPTION sub MODE ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM PULSAR p TOPIC top \
+                     SUBSCRIPTION sub MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO_ACK".to_string()));
@@ -1155,8 +1178,9 @@ mod tests {
 
     #[test]
     fn pulsar_subscription_context_expects_subscription_name() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM PULSAR p TOPIC top SUBSCRIPTION ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM PULSAR p TOPIC top \
+                     SUBSCRIPTION ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"subscription_name".to_string()));
         assert!(!suggestions.contains(&"SHARED".to_string()));
@@ -1169,7 +1193,7 @@ mod tests {
             CREATE INGESTOR pulsar_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM PULSAR pulsar_main TOPIC notifications SUBSCRIPTION SHARED nervix_subscription MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1184,7 +1208,7 @@ mod tests {
             CREATE INGESTOR kafka_notifications
                 TO notifications
                 DECODE USING notification_kafka_message
-                BRANCHED BY user_id_kind_branch
+                BRANCHED BY user_id_kind_branch VALUES { user_id = notifications.user_id }
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 FROM
                     KAFKA kafka_main
@@ -1204,7 +1228,7 @@ mod tests {
             CREATE INGESTOR i
               TO s
               DECODE USING sch
-              BRANCHED BY u_branch
+              BRANCHED BY u_branch VALUES { u = s.u }
               FLUSH IMMEDIATE
               FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1263,8 +1287,8 @@ mod tests {
 
     #[test]
     fn rabbitmq_mode_context_does_not_offer_kafka_only_modes() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM RABBITMQ t QUEUE q MODE ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM RABBITMQ t QUEUE q MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(!suggestions.contains(&"NO_ACK".to_string()));
@@ -1273,8 +1297,9 @@ mod tests {
 
     #[test]
     fn redis_pubsub_mode_context_does_not_offer_ack_or_parallel() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM REDIS PUBSUB t CHANNEL c MODE ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM REDIS PUBSUB t CHANNEL c \
+                     MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"NO_ACK".to_string()));
         assert!(!suggestions.contains(&"ACK".to_string()));
@@ -1287,7 +1312,7 @@ mod tests {
             CREATE INGESTOR mqtt_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM MQTT mqtt_main TOPIC notifications MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1317,7 +1342,7 @@ mod tests {
             CREATE INGESTOR mqtt_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM MQTT mqtt_main TOPIC notifications QOS 1 MODE NO_ACK PARALLEL MAX 4 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1346,7 +1371,7 @@ mod tests {
             CREATE INGESTOR mqtt_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM MQTT mqtt_main
               TOPIC 'devices/+/notifications'
@@ -1384,7 +1409,7 @@ mod tests {
             CREATE INGESTOR mqtt_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM MQTT mqtt_main
               TOPIC notifications
@@ -1403,7 +1428,7 @@ mod tests {
             CREATE INGESTOR mqtt_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM MQTT mqtt_main TOPIC notifications SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1431,7 +1456,7 @@ mod tests {
             CREATE INGESTOR mqtt_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM MQTT mqtt_main TOPIC notifications QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1446,7 +1471,7 @@ mod tests {
             CREATE INGESTOR mqtt_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM MQTT mqtt_main TOPIC notifications SESSION PERSISTENT MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1460,7 +1485,7 @@ mod tests {
             CREATE INGESTOR mqtt_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM MQTT mqtt_main TOPIC notifications MODE NO_ACK PARALLEL MAX 0 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1474,7 +1499,7 @@ mod tests {
             CREATE INGESTOR nats_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM NATS nats_main SUBJECT notifications QUEUE GROUP nats_notifications_group INSTANCES 3 MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1503,7 +1528,7 @@ mod tests {
             CREATE INGESTOR nats_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM NATS nats_main SUBJECT notifications MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1518,7 +1543,7 @@ mod tests {
             CREATE INGESTOR nats_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM NATS nats_main SUBJECT notifications QUEUE GROUP nats_notifications_group INSTANCES 0 MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1534,8 +1559,8 @@ mod tests {
 
     #[test]
     fn nats_subject_context_requires_queue_group_before_mode() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM NATS t SUBJECT top ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM NATS t SUBJECT top ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"QUEUE GROUP".to_string()));
         assert!(!suggestions.contains(&"INSTANCES".to_string()));
@@ -1544,8 +1569,8 @@ mod tests {
 
     #[test]
     fn mqtt_mode_context_offers_ack_and_no_ack() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM MQTT t TOPIC top MODE ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM MQTT t TOPIC top MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO_ACK".to_string()));
@@ -1554,8 +1579,8 @@ mod tests {
 
     #[test]
     fn mqtt_session_context_offers_session_values() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM MQTT t TOPIC top SESSION ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM MQTT t TOPIC top SESSION ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"CLEAN".to_string()));
         assert!(suggestions.contains(&"PERSISTENT".to_string()));
@@ -1568,7 +1593,7 @@ mod tests {
             CREATE INGESTOR prom_samples
               TO samples
               DECODE USING sample_codec
-              BRANCHED BY source_branch
+              BRANCHED BY source_branch VALUES { source = samples.source }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM PROMETHEUS prom_main
               QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
@@ -1595,7 +1620,7 @@ mod tests {
             CREATE INGESTOR http_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM HTTP http_main EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1615,8 +1640,8 @@ mod tests {
 
     #[test]
     fn kinesis_mode_context_does_not_offer_no_ack_or_parallel() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM KINESIS c RELAY events MODE ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KINESIS c RELAY events MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(!suggestions.contains(&"NO_ACK".to_string()));
@@ -1629,7 +1654,7 @@ mod tests {
             CREATE INGESTOR http_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               TIMESTAMP AT occurred_at
               FROM HTTP http_main EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1651,7 +1676,7 @@ mod tests {
             CREATE INGESTOR http_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               TIMESTAMP NOW
               FROM HTTP http_main EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1668,7 +1693,7 @@ mod tests {
             CREATE INGESTOR ws_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1692,7 +1717,7 @@ mod tests {
             CREATE INGESTOR ws_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1716,7 +1741,7 @@ mod tests {
             CREATE INGESTOR zmq_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM ZEROMQ zmq_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1740,7 +1765,7 @@ mod tests {
             CREATE INGESTOR sqs_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM SQS sqs_main QUEUE notifications MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1773,7 +1798,7 @@ mod tests {
             CREATE INGESTOR i
               TO s
               DECODE USING sch
-              BRANCHED BY u_branch
+              BRANCHED BY u_branch VALUES { u = s.u }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g INSTANCES 3 MODE NO_ACK PARALLEL MAX 20 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1792,7 +1817,7 @@ mod tests {
             CREATE INGESTOR rabbit_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM RABBITMQ rabbit_main QUEUE notifications INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1811,7 +1836,7 @@ mod tests {
             CREATE INGESTOR sqs_notifications
               TO notifications
               DECODE USING notification_codec
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM SQS sqs_main QUEUE notifications INSTANCES 4 MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1830,7 +1855,7 @@ mod tests {
             CREATE INGESTOR i
               TO s
               DECODE USING sch
-              BRANCHED BY u_branch
+              BRANCHED BY u_branch VALUES { u = s.u }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g INSTANCES 0 MODE NO_ACK PARALLEL MAX 20 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1854,7 +1879,7 @@ mod tests {
                 WHERE message.kind = "audit"
               TO audit_notifications
               DECODE USING notification_kafka_message
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL MAX 10 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
@@ -1888,7 +1913,7 @@ mod tests {
               TO notifications
                 SET notifications.normalized =
               DECODE USING notification_kafka_message
-              BRANCHED BY user_id_branch
+              BRANCHED BY user_id_branch VALUES { user_id = notifications.user_id }
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB
               FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP nervix_consumer MODE NO_ACK PARALLEL MAX 10 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;

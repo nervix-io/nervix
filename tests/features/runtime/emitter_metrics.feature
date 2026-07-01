@@ -13,40 +13,34 @@ Feature: Emitter metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_emitter_metrics_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR emitter_metrics_source
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_emitter_metrics_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_emitter_metrics_source;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics' TYPE HTTP;
+        CREATE INGESTOR emitter_metrics_source
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_emitter_metrics_source
+        BRANCHED BY by_emitter_metrics_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT emitter_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT zeromq_main
+        CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-
-      CREATE EMITTER emitter_metrics_node
+        CREATE EMITTER emitter_metrics_node
         FROM notifications
         ENCODE USING notification_codec
         TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      START;
+        START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/emitter-metrics"
       """

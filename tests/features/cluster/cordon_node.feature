@@ -27,7 +27,7 @@ Feature: Cordon node
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE CLIENT kafka_main
         TYPE KAFKA

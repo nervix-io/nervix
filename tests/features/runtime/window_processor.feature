@@ -12,40 +12,35 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64,
         first_latency I64,
         last_latency I64,
         total_latency I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR tumbling_latency
+        CREATE WINDOW PROCESSOR tumbling_latency
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
@@ -56,9 +51,8 @@ Feature: Window processor runtime behavior
           metric_summaries.first_latency = FIRST(metrics.latency),
           metric_summaries.last_latency = LAST(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -119,8 +113,7 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64,
         first_latency I64,
@@ -130,32 +123,28 @@ Feature: Window processor runtime behavior
         total_latency I64,
         latency_p50 F64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR sliding_latency
+        CREATE WINDOW PROCESSOR sliding_latency
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
@@ -169,9 +158,8 @@ Feature: Window processor runtime behavior
           metric_summaries.max_latency = MAX(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency),
           metric_summaries.latency_p50 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 50, 10, 0, 100, '0ms') ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -235,38 +223,33 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64,
         total_latency I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR restart_latency
+        CREATE WINDOW PROCESSOR restart_latency
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
@@ -275,8 +258,7 @@ Feature: Window processor runtime behavior
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-
-      START;
+        START;
       """
     Then node "node-1" eventually accepts http traffic for host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -326,38 +308,33 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         latency_p50 F64,
         latency_p90 F64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR histogram_latency
+        CREATE WINDOW PROCESSOR histogram_latency
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
@@ -366,9 +343,8 @@ Feature: Window processor runtime behavior
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.latency_p50 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 50, 10, 0, 100, '2s'),
           metric_summaries.latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 90, 10, 0, 100, '2s') ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -412,18 +388,16 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         latency_p90 F64
       );
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS BRANCH by_invalid_histogram_latency
-        PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_invalid_histogram_latency
+        BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_invalid_histogram_latency;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_invalid_histogram_latency;
       """
     When these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration"
       """
@@ -455,8 +429,7 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         first_latency I64,
         last_latency I64,
@@ -467,34 +440,28 @@ Feature: Window processor runtime behavior
         sample_count I64,
         total_latency I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-
-      CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR described_latency
+        CREATE WINDOW PROCESSOR described_latency
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
@@ -509,8 +476,7 @@ Feature: Window processor runtime behavior
           metric_summaries.latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 90, 10, 0, 100, '2s'),
           metric_summaries.sample_count = COUNT(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-
-      DESCRIBE WINDOW PROCESSOR described_latency;
+        DESCRIBE WINDOW PROCESSOR described_latency;
       """
     Then the last command output contains
       """
@@ -573,37 +539,32 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         latency_p0 F64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR delayed_histogram_latency
+        CREATE WINDOW PROCESSOR delayed_histogram_latency
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
@@ -611,9 +572,8 @@ Feature: Window processor runtime behavior
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 0, 10, 0, 100, '2s') ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -655,37 +615,32 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         latency_p0 F64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR delayed_histogram_timeout
+        CREATE WINDOW PROCESSOR delayed_histogram_timeout
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES 5s DURATION
@@ -693,9 +648,8 @@ Feature: Window processor runtime behavior
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 0, 10, 0, 100, '1s') ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -722,7 +676,7 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
-  @parameterized_deadline_cache
+  @branched_deadline_cache
   Scenario Outline: Duration-only windows flush on a scheduled timeout
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -736,38 +690,33 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64,
         total_latency I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR duration_latency
+        CREATE WINDOW PROCESSOR duration_latency
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 300ms DURATION
@@ -776,9 +725,8 @@ Feature: Window processor runtime behavior
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -814,38 +762,33 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64,
         total_latency I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR combined_latency
+        CREATE WINDOW PROCESSOR combined_latency
         FROM metrics
         TO metric_summaries BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES 3s DURATION
@@ -854,9 +797,8 @@ Feature: Window processor runtime behavior
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
-      START;
+        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -900,7 +842,7 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Parameterized window chains preserve concrete branch keys through output routes
+  Scenario Outline: Branched window chains preserve concrete branch keys through output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -913,49 +855,43 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64,
         total_latency I64
       );
-
-      CREATE SCHEMA chain_summary (
+        CREATE SCHEMA chain_summary (
         tenant STRING,
         high_window_count I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY high_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY low_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY chain_summaries SCHEMA chain_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_metric_ingestor PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR metric_ingestor
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE RELAY high_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE RELAY low_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE RELAY chain_summaries SCHEMA chain_summary BRANCHED BY by_metric_ingestor;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE INGESTOR metric_ingestor
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor
+        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR first_window
+        CREATE WINDOW PROCESSOR first_window
         FROM metrics
         TO high_summaries WHERE high_summaries.total_latency >= 100
         TO low_summaries BRANCHED BY by_metric_ingestor
@@ -965,8 +901,7 @@ Feature: Window processor runtime behavior
           high_summaries.tenant = FIRST(metrics.tenant),
           high_summaries.sample_count = COUNT(metrics.latency),
           high_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-
-      CREATE WINDOW PROCESSOR second_window
+        CREATE WINDOW PROCESSOR second_window
         FROM high_summaries
         TO chain_summaries BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
@@ -974,9 +909,8 @@ Feature: Window processor runtime behavior
         AGGREGATE
           chain_summaries.tenant = FIRST(high_summaries.tenant),
           chain_summaries.high_window_count = COUNT(high_summaries.total_latency) ON MESSAGE ERROR LOG;
-
-      START;
-      SUBSCRIBE SESSION TO chain_summaries WHERE chain_summaries.tenant = 'acme';
+        START;
+        SUBSCRIBE SESSION TO chain_summaries WHERE chain_summaries.tenant = 'acme';
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -1029,51 +963,44 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_summary_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_summary_wire (
         tenant string,
         sample_count integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE CODEC metric_summary_codec
+        CREATE CODEC metric_summary_codec
         FROM WIRE JSON SCHEMA metric_summary_wire
         TO SCHEMA metric_summary;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_kafka_metrics BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
+        CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
         'bootstrap.servers' = '127.0.0.1:9092',
         'auto.offset.reset' = 'earliest'
       };
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_kafka_metrics PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR kafka_metrics
+        CREATE INGESTOR kafka_metrics
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_kafka_metrics
+        BRANCHED BY by_kafka_metrics VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC metrics_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE WINDOW PROCESSOR attached_window
+        CREATE WINDOW PROCESSOR attached_window
         FROM metrics
         TO metric_summaries BRANCHED BY by_kafka_metrics
         WIDTH 2 MESSAGES
@@ -1081,14 +1008,12 @@ Feature: Window processor runtime behavior
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency) ON MESSAGE ERROR LOG;
-
-      CREATE EMITTER kafka_forward
+        CREATE EMITTER kafka_forward
         FROM metric_summaries
         ENCODE USING metric_summary_codec
         TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      SUBSCRIBE SESSION TO metrics;
-      START;
+        SUBSCRIBE SESSION TO metrics;
+        START;
       """
     When emitter "kafka_forward" enters fault mode
     And Kafka message is published to topic "metrics_{{test_id}}"
@@ -1126,51 +1051,44 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency I64
       );
-
-      CREATE SCHEMA metric_summary (
+        CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_wire (
         tenant string,
         latency integer
       );
-
-      CREATE STRICT WIRE JSON SCHEMA metric_summary_wire (
+        CREATE STRICT WIRE JSON SCHEMA metric_summary_wire (
         tenant string,
         sample_count integer
       );
-
-      CREATE CODEC metric_codec
+        CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
-
-      CREATE CODEC metric_summary_codec
+        CREATE CODEC metric_summary_codec
         FROM WIRE JSON SCHEMA metric_summary_wire
         TO SCHEMA metric_summary;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metrics SCHEMA metric PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY metric_summaries SCHEMA metric_summary PARAMETERIZED BY tenant_branch;
-
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_kafka_metrics BY tenant_branch TTL 5m;
+        CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
+        CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
+        CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
         'bootstrap.servers' = '127.0.0.1:9092',
         'auto.offset.reset' = 'earliest'
       };
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_kafka_metrics PARAMETERIZED BY tenant_branch VALUES { tenant = metrics.tenant } TTL 5m; CREATE INGESTOR kafka_metrics
+        CREATE INGESTOR kafka_metrics
         TO metrics
         DECODE USING metric_codec
-        BRANCHED BY by_kafka_metrics
+        BRANCHED BY by_kafka_metrics VALUES { tenant = metrics.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC metrics_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DETACHED WINDOW PROCESSOR detached_window
+        CREATE DETACHED WINDOW PROCESSOR detached_window
         FROM metrics
         TO metric_summaries BRANCHED BY by_kafka_metrics
         WIDTH 2 MESSAGES
@@ -1178,14 +1096,12 @@ Feature: Window processor runtime behavior
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency) ON MESSAGE ERROR LOG;
-
-      CREATE EMITTER kafka_forward
+        CREATE EMITTER kafka_forward
         FROM metric_summaries
         ENCODE USING metric_summary_codec
         TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-
-      SUBSCRIBE SESSION TO metrics;
-      START;
+        SUBSCRIBE SESSION TO metrics;
+        START;
       """
     And emitter "kafka_forward" enters fault mode
     And Kafka message is published to topic "metrics_{{test_id}}"

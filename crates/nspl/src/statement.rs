@@ -231,34 +231,42 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 mod tests {
     use bolero::check;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchParameterization,
-        CodecWireFormat, CordonNode, CreateClientAzureBlob, CreateClientGcs,
-        CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt, CreateClientNats,
-        CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator,
-        CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction,
-        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema, CreateWireSchemaStmt,
-        DescribeRelay, DrainNode, DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType,
-        ErrorPolicies, Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, MessageErrorPolicy, Model, ModelKind, MqttIngestMode,
-        MqttQos, MqttSession, NatsIngestMode, ParseAsType, ProcessorInputs, ProcessorOutputs,
-        PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SchemaField,
-        SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
-        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchInitiatorSelection,
+        BranchSelection, BranchValueMapping, CodecWireFormat, CordonNode, CreateClientAzureBlob,
+        CreateClientGcs, CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt,
+        CreateClientNats, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+        CreateClientRedis, CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec,
+        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor,
+        CreateJunction, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema,
+        CreateWireSchemaStmt, DescribeRelay, DrainNode, DropModel, DropNode, EmitSink,
+        EndpointIngestMode, EndpointType, ErrorPolicies, Identifier as ModelIdentifier,
+        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+        MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
+        ParseAsType, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingProtocolOnConnect, SqsIngestMode,
+        Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode, WireSchemaField,
+        ZeroMqIngestMode,
     };
 
     use super::*;
 
-    fn parameterized_by(
-        schema: ModelIdentifier,
+    fn branched_by(
+        branch: ModelIdentifier,
         fields: Vec<ModelIdentifier>,
-    ) -> BranchParameterization {
-        let _ = fields;
-        BranchParameterization::branched_by(schema)
+    ) -> BranchInitiatorSelection {
+        let values = fields
+            .into_iter()
+            .map(|field| BranchValueMapping {
+                relay: branch.clone(),
+                relay_field: field.clone(),
+                field,
+            })
+            .collect();
+        BranchInitiatorSelection::branched_by(branch, values)
     }
 
-    fn processor_parameterized_by(schema: ModelIdentifier) -> BranchParameterization {
-        BranchParameterization::branched_by(schema)
+    fn processor_branched_by(schema: ModelIdentifier) -> BranchSelection {
+        BranchSelection::branched_by(schema)
     }
 
     struct ByteGen<'a> {
@@ -373,7 +381,7 @@ mod tests {
             25 => Model::Generator(CreateGenerator {
                 name: g.ident(),
                 into_relay: g.ident(),
-                parameterized_by: processor_parameterized_by(g.ident()),
+                branched_by: processor_branched_by(g.ident()),
                 each: format!("{}ms", g.bounded_u64(1, 5000)),
                 flush_each: format!("{}ms", g.bounded_u64(1, 5000)),
                 max_batch_size: Some("1MiB".to_string()),
@@ -485,7 +493,7 @@ mod tests {
                 for _ in 0..param_count {
                     params.push(g.ident());
                 }
-                let params = parameterized_by(g.ident(), params);
+                let params = branched_by(g.ident(), params);
 
                 if g.bool() {
                     let mode = match g.next_u8() % 3 {
@@ -515,7 +523,7 @@ mod tests {
                             name: g.ident(),
                             output_routes: ProcessorOutputs::single(g.ident()),
                             decode_using_codec: g.ident(),
-                            parameterized_by: params,
+                            branched_by: params,
                             flush_each: "100ms".to_string(),
                             max_batch_size: Some("1MiB".to_string()),
                             timestamp_source: None,
@@ -534,7 +542,7 @@ mod tests {
                             name: g.ident(),
                             output_routes: ProcessorOutputs::single(g.ident()),
                             decode_using_codec: g.ident(),
-                            parameterized_by: params,
+                            branched_by: params,
                             flush_each: "100ms".to_string(),
                             max_batch_size: Some("1MiB".to_string()),
                             timestamp_source: None,
@@ -576,7 +584,7 @@ mod tests {
                         name: g.ident(),
                         output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
-                        parameterized_by: params,
+                        branched_by: params,
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -617,9 +625,7 @@ mod tests {
                 name: g.ident(),
                 schema: g.ident(),
                 buffer: g.bounded_u64(1, 1024) as usize,
-                parameterization: nervix_models::RelayParameterization::parameterized(
-                    nervix_models::RelayParameters::inferred(),
-                ),
+                branching: nervix_models::RelayBranching::unbranched(),
                 materialized_state: None,
             }),
             8 => Model::ClientMqtt(CreateClientMqtt {
@@ -634,7 +640,7 @@ mod tests {
                 name: g.ident(),
                 from: ProcessorInputs::new(vec![g.ident(), g.ident(), g.ident()], Vec::new()),
                 output_routes: ProcessorOutputs::single(g.ident()),
-                parameterized_by: processor_parameterized_by(g.ident()),
+                branched_by: processor_branched_by(g.ident()),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: if g.bool() {
@@ -649,7 +655,7 @@ mod tests {
                 name: g.ident(),
                 from: ProcessorInputs::single(g.ident()),
                 output_routes: ProcessorOutputs::single(g.ident()),
-                parameterized_by: processor_parameterized_by(g.ident()),
+                branched_by: processor_branched_by(g.ident()),
                 deduplicate_on: g.ident().to_string(),
                 max_time: "10m".to_string(),
                 flush_each: "100ms".to_string(),
@@ -676,13 +682,13 @@ mod tests {
                 for _ in 0..param_count {
                     params.push(g.ident());
                 }
-                let params = parameterized_by(g.ident(), params);
+                let params = branched_by(g.ident(), params);
 
                 Model::Ingestor(CreateIngestor {
                     name: g.ident(),
                     output_routes: ProcessorOutputs::single(g.ident()),
                     decode_using_codec: g.ident(),
-                    parameterized_by: params,
+                    branched_by: params,
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -701,7 +707,7 @@ mod tests {
                         name: g.ident(),
                         output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
-                        parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                        branched_by: branched_by(g.ident(), vec![g.ident()]),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -722,7 +728,7 @@ mod tests {
                         name: g.ident(),
                         output_routes: ProcessorOutputs::single(g.ident()),
                         decode_using_codec: g.ident(),
-                        parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                        branched_by: branched_by(g.ident(), vec![g.ident()]),
                         flush_each: "100ms".to_string(),
                         max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
@@ -830,7 +836,7 @@ mod tests {
                 name: g.ident(),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
-                parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
@@ -863,7 +869,7 @@ mod tests {
                 name: g.ident(),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
-                parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
@@ -895,7 +901,7 @@ mod tests {
                         },
                         nervix_models::ProcessorOutput::new(g.ident()),
                     ]),
-                    parameterized_by: BranchParameterization::unbranched(),
+                    branched_by: BranchInitiatorSelection::unbranched(),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: if g.bool() {
@@ -975,7 +981,7 @@ mod tests {
                 name: g.ident(),
                 output_routes: ProcessorOutputs::single(g.ident()),
                 decode_using_codec: g.ident(),
-                parameterized_by: parameterized_by(g.ident(), vec![g.ident()]),
+                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
@@ -1043,14 +1049,32 @@ mod tests {
 
     #[test]
     fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
-        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch FLUSH EACH \
-                     100ms MAX BATCH SIZE 1MiB FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g \
-                     MODE ";
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BRANCHED BY u_branch VALUES { u = \
+                     s.u } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA t TOPIC top OFFSET BY \
+                     CONSUMER GROUP g MODE ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO_ACK".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
+    }
+
+    #[test]
+    fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
+        let input = "CREATE INGESTOR i TO s DECODE USING sch ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"UNBRANCHED".to_string()));
+        assert!(suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(!suggestions.contains(&"BY".to_string()));
+    }
+
+    #[test]
+    fn ingestor_bare_by_is_rejected() {
+        let input = "CREATE INGESTOR i TO s DECODE USING sch BY u_branch FLUSH EACH 100ms MAX \
+                     BATCH SIZE 1MiB FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG \
+                     ON GENERAL ERROR LOG;";
+
+        parse_statement(input).expect_err("BY is only valid in CREATE BRANCH");
     }
 
     #[test]
@@ -1144,6 +1168,7 @@ mod tests {
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"UNBRANCHED".to_string()));
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(!suggestions.contains(&"BY".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
@@ -1511,7 +1536,8 @@ mod tests {
     fn parses_reingestor_statement_with_flush_each() {
         let parsed = parse_statement(
             "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
-             tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             tenant_branch VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1527,7 +1553,7 @@ mod tests {
     #[test]
     fn parses_reingestor_statement_with_multiple_output_routes() {
         let parsed = parse_statement(
-            r#"CREATE REINGESTOR log_splitter FROM incoming_logs FILTER WHERE incoming_logs.active TO errors_ss SET errors_ss.severity = lower(incoming_logs.level) WHERE incoming_logs.level = "error" TO warnings_ss WHERE incoming_logs.level = "warn" TO info_ss BRANCHED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
+            r#"CREATE REINGESTOR log_splitter FROM incoming_logs FILTER WHERE incoming_logs.active TO errors_ss SET errors_ss.severity = lower(incoming_logs.level) WHERE incoming_logs.level = "error" TO warnings_ss WHERE incoming_logs.level = "warn" TO info_ss BRANCHED BY tenant_branch VALUES { tenant = errors_ss.tenant } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
@@ -1558,8 +1584,8 @@ mod tests {
     fn parses_single_reingestor_output_route_with_filter_map() {
         let parsed = parse_statement(
             "CREATE REINGESTOR fw1 FROM ss1 TO ss3 SET ss3.normalized = lower(ss1.raw) UNSET \
-             ss3.raw WHERE ss1.active BRANCHED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE \
-             1MiB ON MESSAGE ERROR LOG;",
+             ss3.raw WHERE ss1.active BRANCHED BY tenant_branch VALUES { tenant = ss3.tenant } \
+             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1609,8 +1635,9 @@ mod tests {
             (
                 "ingestor",
                 "CREATE INGESTOR http_notifications TO notifications DECODE USING \
-                 notification_codec BRANCHED BY user_id_branch FLUSH EACH 100ms MAX BATCH SIZE \
-                 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL",
+                 notification_codec BRANCHED BY user_id_branch VALUES { user_id = \
+                 notifications.user_id } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT \
+                 http_notifications_endpoint MODE NO_ACK SEQUENTIAL",
                 " ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
@@ -1644,7 +1671,8 @@ mod tests {
             (
                 "reingestor",
                 "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
-                 BRANCHED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB",
+                 BRANCHED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } FLUSH \
+                 EACH 100ms MAX BATCH SIZE 1MiB",
             ),
             (
                 "junction",
@@ -1701,8 +1729,9 @@ mod tests {
     fn message_error_policy_accepts_dlq_but_general_policy_does_not() {
         parse_statement(
             "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications \
-             BRANCHED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR DLQ \
-             error_stream SET error_message = message_error.message;",
+             BRANCHED BY tenant_branch VALUES { tenant = forwarded_notifications.tenant } FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR DLQ error_stream SET error_message = \
+             message_error.message;",
         )
         .expect("message error DLQ policy should parse");
 
@@ -2002,6 +2031,7 @@ mod tests {
                 TO notifications
                 DECODE USING notification_kafka_message
                 BRANCHED BY user_id_kind_branch
+                VALUES { user_id = notifications.user_id, kind = notifications.kind }
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 FROM
                     KAFKA kafka_main
@@ -2026,6 +2056,7 @@ mod tests {
                 TO samples
                 DECODE USING sample_codec
                 BRANCHED BY source_branch
+                VALUES { source = samples.source }
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 FROM PROMETHEUS prom_main
                 QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
@@ -2044,7 +2075,7 @@ mod tests {
     #[test]
     fn canonical_roundtrip_stream() {
         let input = r#"
-            CREATE RELAY p99_latency SCHEMA notification_schema;
+            CREATE RELAY p99_latency SCHEMA notification_schema UNBRANCHED;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");

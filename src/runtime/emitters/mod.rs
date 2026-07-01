@@ -992,7 +992,7 @@ impl SinkEmitter {
                 Err(error) => {
                     let message = iceberg_error_message(&error);
                     context.report_flush_error(sink.label(), &message);
-                    Ok(None)
+                    Err(Report::new(EmitterRuntimeError::PublishBatch).attach_printable(message))
                 }
             };
         }
@@ -1386,8 +1386,8 @@ impl EmitterTask {
         } = build;
         let EmitterTaskDeps {
             input_schema,
-            input_parameterization,
-            input_parameterization_schema,
+            input_branching,
+            input_branching_schema,
             materialized_relay_specs: materialized_stream_specs,
             materialized_relay_owner_nodes: materialized_stream_owner_nodes,
             lookups,
@@ -1416,8 +1416,8 @@ impl EmitterTask {
             RuntimeVmCompileContext {
                 available_materialized_streams: &materialized_stream_specs,
                 available_lookups: &lookups,
-                current_parameterization: &input_parameterization,
-                current_branch_schema: input_parameterization_schema.as_ref(),
+                current_branching: &input_branching,
+                current_branch_schema: input_branching_schema.as_ref(),
                 current_branch_sensitivity: None,
             },
         )?;
@@ -1456,7 +1456,7 @@ impl EmitterTask {
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
                 from_relay: task_from_relay.clone(),
-                branch_schema: input_parameterization_schema.clone(),
+                branch_schema: input_branching_schema.clone(),
                 temp_dir: runtime.temp_dir.clone(),
                 events: task_events.clone(),
             };

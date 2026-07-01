@@ -48,9 +48,12 @@ CREATE CODEC binance_ws_event_codec
     ask_count: (if .e == "depthUpdate" then (.a | length) else null end)
   }';
 
+CREATE BRANCH by_symbol
+  BY symbol_branch TTL 5m;
+
 CREATE RELAY binance_ws_events
   SCHEMA binance_ws_event
-  PARAMETERIZED BY symbol_branch;
+  BRANCHED BY by_symbol;
 
 CREATE SIGNALING PROTOCOL binance_ws_subscribe_to_btcusd
   ON CONNECT
@@ -81,14 +84,10 @@ CREATE IF NOT EXISTS SCHEMA symbol_branch (
   symbol STRING
 );
 
-CREATE BRANCH by_symbol
-  PARAMETERIZED BY symbol_branch VALUES { symbol = binance_ws_events.symbol }
-  TTL 5m;
-
 CREATE INGESTOR ingest_binance_ws
   TO binance_ws_events
   DECODE USING binance_ws_event_codec
-  BRANCHED BY by_symbol
+  BRANCHED BY by_symbol VALUES { symbol = binance_ws_events.symbol }
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

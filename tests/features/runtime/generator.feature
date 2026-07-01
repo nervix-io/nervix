@@ -23,11 +23,11 @@ Feature: Generator node
         TO SCHEMA notification;
 
       CREATE RELAY notifications
-        SCHEMA notification
+        SCHEMA notification UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE RELAY generated_notifications
-        SCHEMA notification;
+        SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -94,11 +94,11 @@ Feature: Generator node
         TO SCHEMA notification;
 
       CREATE RELAY notifications
-        SCHEMA notification
+        SCHEMA notification UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE RELAY generated_notifications
-        SCHEMA notification;
+        SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -165,11 +165,11 @@ Feature: Generator node
         TO SCHEMA notification;
 
       CREATE RELAY notifications
-        SCHEMA notification
+        SCHEMA notification UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE RELAY generated_notifications
-        SCHEMA notification;
+        SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 

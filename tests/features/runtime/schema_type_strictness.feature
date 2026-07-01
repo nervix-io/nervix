@@ -1,19 +1,20 @@
 Feature: Schema type strictness
-  Scenario Outline: Parameterization values must exactly match branch schema field types
+  Scenario Outline: Branching values must exactly match branch schema field types
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "PARAMETERIZED BY value field 'tenant' type mismatch"
+    When these NSPL commands fail with "BY value field 'tenant' type mismatch"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( tenant STRING );
       CREATE STRICT WIRE JSON SCHEMA notification_wire ( tenant string );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
-      CREATE RELAY notifications SCHEMA notification;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE SCHEMA tenant_branch ( tenant U32 );
-      CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR kafka_notifications
+      CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY tenant_branch TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications
+        BRANCHED BY by_kafka_notifications VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP strict_types MODE NO_ACK PARALLEL MAX 10
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

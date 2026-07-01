@@ -14,36 +14,31 @@ Feature: Optional fields
         amount I64 OPTIONAL,
         raw STRING OPTIONAL
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
         raw string OPTIONAL
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -82,39 +77,35 @@ Feature: Optional fields
         amount I64 OPTIONAL,
         raw STRING OPTIONAL
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
         raw string OPTIONAL
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT kafka_main
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY tenant_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR kafka_notifications
+        CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications
+        BRANCHED BY by_kafka_notifications VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         INSTANCES 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
       """
@@ -154,36 +145,31 @@ Feature: Optional fields
         amount I64 OPTIONAL,
         raw STRING OPTIONAL
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
         raw string OPTIONAL
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge ws-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ws_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_ws_notifications BY tenant_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
+        CREATE VHOST edge ws-{{test_id}}.example.com;
+        CREATE ENDPOINT ws_notifications_endpoint
         ON edge
         PATH '/ws'
         TYPE WEBSOCKETS;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR ws_notifications
+        CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications
+        BRANCHED BY by_ws_notifications VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And websocket message is published to host "ws-{{test_id}}.example.com" path "/ws"
       """
@@ -222,37 +208,33 @@ Feature: Optional fields
         amount I64 OPTIONAL,
         raw STRING OPTIONAL
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
         raw string OPTIONAL
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT zeromq_main
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_zeromq_notifications BY tenant_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_zeromq_notifications;
+        CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
         };
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_zeromq_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR zeromq_notifications
+        CREATE INGESTOR zeromq_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_zeromq_notifications
+        BRANCHED BY by_zeromq_notifications VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ZEROMQ zeromq_main
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And ZeroMQ message is published
       """

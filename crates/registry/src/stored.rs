@@ -1,25 +1,25 @@
 use error_stack::Report;
 use nervix_models::{
-    AckMode, AvroType, BranchEviction, BranchParameterization, ClickHouseValueMapping,
-    CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
-    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
-    EndpointType, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, IcebergCatalog,
-    IcebergStorageBackend, Identifier, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-    KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode,
-    ParameterValueMapping, ParseAsType, PostgresConflictAction, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
-    RedisPubSubIngestMode, RelayParameterization, RelayParameters, SchemaField,
+    AckMode, AvroType, BranchEviction, BranchInitiatorSelection, BranchSelection,
+    BranchValueMapping, ClickHouseValueMapping, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+    CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction,
+    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientKinesis, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
+    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
+    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateJunction, CreateLookup, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType,
+    ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend,
+    Identifier, InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
+    MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, NameError, NatsIngestMode, ParseAsType, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
+    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField,
     SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode, WindowBound,
     WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
@@ -441,7 +441,7 @@ pub struct StoredCreateIngestor {
     pub name: String,
     pub output_routes: StoredProcessorOutputs,
     pub decode_using_codec: String,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchInitiatorSelection,
     pub flush_each: String,
     pub max_batch_size: Option<String>,
     pub timestamp_source: Option<StoredIngestTimestampSource>,
@@ -453,8 +453,7 @@ pub struct StoredCreateIngestor {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateBranch {
     pub name: String,
-    pub parameterized_by: String,
-    pub values: Vec<StoredParameterValueMapping>,
+    pub branched_by: String,
     pub ttl: String,
     pub eviction: Option<StoredBranchEviction>,
 }
@@ -468,7 +467,7 @@ pub enum StoredBranchEviction {
 pub struct StoredCreateGenerator {
     pub name: String,
     pub into_relay: String,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchSelection,
     pub each: String,
     pub flush_each: String,
     pub max_batch_size: Option<String>,
@@ -515,7 +514,7 @@ pub struct StoredCreateReingestor {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchInitiatorSelection,
     pub flush_each: String,
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
@@ -528,7 +527,7 @@ pub struct StoredCreateInferencer {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchSelection,
     pub resource: String,
     pub resource_version: Option<u64>,
     pub file: String,
@@ -546,7 +545,7 @@ pub struct StoredCreateWasmProcessor {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchSelection,
     pub resource: String,
     pub resource_version: Option<u64>,
     pub file: String,
@@ -757,32 +756,35 @@ pub struct StoredCreateRelay {
     pub name: String,
     pub schema: String,
     pub buffer: usize,
-    pub parameterization: StoredRelayParameterization,
+    pub branching: StoredRelayBranching,
     pub materialized_state: Option<StoredMaterializedRelayState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredRelayParameterization {
-    Parameterized { parameters: StoredRelayParameters },
+pub enum StoredRelayBranching {
+    BranchedBy { branch: String },
     Unbranched,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredRelayParameters {
-    Inferred,
-    Declared(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredParameterValueMapping {
+pub struct StoredBranchValueMapping {
     pub field: String,
     pub relay: String,
     pub relay_field: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredBranchParameterization {
+pub enum StoredBranchSelection {
     BranchedBy { branch: String },
+    Unbranched,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredBranchInitiatorSelection {
+    BranchedBy {
+        branch: String,
+        values: Vec<StoredBranchValueMapping>,
+    },
     Unbranched,
 }
 
@@ -828,7 +830,7 @@ pub struct StoredCreateJunction {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchSelection,
     pub flush_each: String,
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
@@ -841,7 +843,7 @@ pub struct StoredCreateDeduplicator {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchSelection,
     pub deduplicate_on: String,
     pub max_time: String,
     pub flush_each: String,
@@ -857,7 +859,7 @@ pub struct StoredCreateCorrelator {
     pub left: StoredProcessorInputs,
     pub right: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchSelection,
     pub correlate_where: String,
     pub match_policy: StoredCorrelatorMatchPolicy,
     pub output: String,
@@ -893,7 +895,7 @@ pub struct StoredCreateReorderer {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchSelection,
     pub order_by: String,
     pub max_time: String,
     pub flush_each: String,
@@ -908,7 +910,7 @@ pub struct StoredCreateWindowProcessor {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub parameterized_by: StoredBranchParameterization,
+    pub branched_by: StoredBranchSelection,
     pub width: StoredWindowBound,
     pub step: StoredWindowBound,
     pub aggregate: String,
@@ -2169,7 +2171,7 @@ impl From<CreateGenerator> for StoredCreateGenerator {
         Self {
             name: value.name.to_string(),
             into_relay: value.into_relay.to_string(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             each: value.each,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
@@ -2186,7 +2188,7 @@ impl TryFrom<StoredCreateGenerator> for CreateGenerator {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             into_relay: Identifier::parse(&value.into_relay)?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             each: value.each,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
@@ -2485,7 +2487,7 @@ impl From<CreateIngestor> for StoredCreateIngestor {
             name: value.name.to_string(),
             output_routes: value.output_routes.into(),
             decode_using_codec: value.decode_using_codec.to_string(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             timestamp_source: value.timestamp_source.map(Into::into),
@@ -2496,8 +2498,8 @@ impl From<CreateIngestor> for StoredCreateIngestor {
     }
 }
 
-impl From<ParameterValueMapping> for StoredParameterValueMapping {
-    fn from(value: ParameterValueMapping) -> Self {
+impl From<BranchValueMapping> for StoredBranchValueMapping {
+    fn from(value: BranchValueMapping) -> Self {
         Self {
             field: value.field.to_string(),
             relay: value.relay.to_string(),
@@ -2506,10 +2508,10 @@ impl From<ParameterValueMapping> for StoredParameterValueMapping {
     }
 }
 
-impl TryFrom<StoredParameterValueMapping> for ParameterValueMapping {
+impl TryFrom<StoredBranchValueMapping> for BranchValueMapping {
     type Error = Report<NameError>;
 
-    fn try_from(value: StoredParameterValueMapping) -> Result<Self, Self::Error> {
+    fn try_from(value: StoredBranchValueMapping) -> Result<Self, Self::Error> {
         Ok(Self {
             field: Identifier::parse(&value.field)?,
             relay: Identifier::parse(&value.relay)?,
@@ -2538,8 +2540,7 @@ impl From<CreateBranch> for StoredCreateBranch {
     fn from(value: CreateBranch) -> Self {
         Self {
             name: value.name.to_string(),
-            parameterized_by: value.parameterized_by.to_string(),
-            values: value.values.into_iter().map(Into::into).collect(),
+            branched_by: value.branched_by.to_string(),
             ttl: value.ttl,
             eviction: value.eviction.map(Into::into),
         }
@@ -2552,39 +2553,63 @@ impl TryFrom<StoredCreateBranch> for CreateBranch {
     fn try_from(value: StoredCreateBranch) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
-            parameterized_by: Identifier::parse(&value.parameterized_by)?,
-            values: value
-                .values
-                .into_iter()
-                .map(TryInto::try_into)
-                .collect::<Result<Vec<_>, _>>()?,
+            branched_by: Identifier::parse(&value.branched_by)?,
             ttl: value.ttl,
             eviction: value.eviction.map(Into::into),
         })
     }
 }
 
-impl From<BranchParameterization> for StoredBranchParameterization {
-    fn from(value: BranchParameterization) -> Self {
+impl From<BranchSelection> for StoredBranchSelection {
+    fn from(value: BranchSelection) -> Self {
         match value {
-            BranchParameterization::BranchedBy { branch } => Self::BranchedBy {
+            BranchSelection::BranchedBy { branch } => Self::BranchedBy {
                 branch: branch.to_string(),
             },
-            BranchParameterization::Unbranched => Self::Unbranched,
+            BranchSelection::Unbranched => Self::Unbranched,
         }
     }
 }
 
-impl TryFrom<StoredBranchParameterization> for BranchParameterization {
+impl TryFrom<StoredBranchSelection> for BranchSelection {
     type Error = Report<NameError>;
 
-    fn try_from(value: StoredBranchParameterization) -> Result<Self, Self::Error> {
+    fn try_from(value: StoredBranchSelection) -> Result<Self, Self::Error> {
         Ok(match value {
-            StoredBranchParameterization::BranchedBy { branch } => {
-                BranchParameterization::branched_by(Identifier::parse(&branch)?)
+            StoredBranchSelection::BranchedBy { branch } => {
+                BranchSelection::branched_by(Identifier::parse(&branch)?)
             }
-            StoredBranchParameterization::Unbranched => BranchParameterization::unbranched(),
+            StoredBranchSelection::Unbranched => BranchSelection::unbranched(),
         })
+    }
+}
+
+impl From<BranchInitiatorSelection> for StoredBranchInitiatorSelection {
+    fn from(value: BranchInitiatorSelection) -> Self {
+        match value {
+            BranchInitiatorSelection::BranchedBy { branch, values } => Self::BranchedBy {
+                branch: branch.to_string(),
+                values: values.into_iter().map(Into::into).collect(),
+            },
+            BranchInitiatorSelection::Unbranched => Self::Unbranched,
+        }
+    }
+}
+
+impl TryFrom<StoredBranchInitiatorSelection> for BranchInitiatorSelection {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredBranchInitiatorSelection) -> Result<Self, Self::Error> {
+        match value {
+            StoredBranchInitiatorSelection::BranchedBy { branch, values } => Ok(Self::BranchedBy {
+                branch: Identifier::parse(&branch)?,
+                values: values
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<Vec<_>, _>>()?,
+            }),
+            StoredBranchInitiatorSelection::Unbranched => Ok(Self::Unbranched),
+        }
     }
 }
 
@@ -2690,7 +2715,7 @@ impl TryFrom<StoredCreateIngestor> for CreateIngestor {
             name: Identifier::parse(&value.name)?,
             output_routes: value.output_routes.try_into()?,
             decode_using_codec: Identifier::parse(&value.decode_using_codec)?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             timestamp_source: value.timestamp_source.map(TryInto::try_into).transpose()?,
@@ -2727,7 +2752,7 @@ impl From<CreateReingestor> for StoredCreateReingestor {
             name: value.name.to_string(),
             from: value.from.into(),
             output_routes: value.output_routes.into(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
@@ -2745,7 +2770,7 @@ impl TryFrom<StoredCreateReingestor> for CreateReingestor {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
@@ -2761,7 +2786,7 @@ impl From<CreateInferencer> for StoredCreateInferencer {
             name: value.name.to_string(),
             from: value.from.into(),
             output_routes: value.output_routes.into(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             resource: value.resource.to_string(),
             resource_version: value.resource_version,
             file: value.file,
@@ -2784,7 +2809,7 @@ impl TryFrom<StoredCreateInferencer> for CreateInferencer {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             resource: Identifier::parse(&value.resource)?,
             resource_version: value.resource_version,
             file: value.file,
@@ -2813,7 +2838,7 @@ impl From<CreateWasmProcessor> for StoredCreateWasmProcessor {
             name: value.name.to_string(),
             from: value.from.into(),
             output_routes: value.output_routes.into(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             resource: value.resource.to_string(),
             resource_version: value.resource_version,
             file: value.file,
@@ -2833,7 +2858,7 @@ impl TryFrom<StoredCreateWasmProcessor> for CreateWasmProcessor {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             resource: Identifier::parse(&value.resource)?,
             resource_version: value.resource_version,
             file: value.file,
@@ -3514,23 +3539,17 @@ impl From<StoredWebsocketsIngestMode> for WebsocketsIngestMode {
 
 impl From<CreateRelay> for StoredCreateRelay {
     fn from(value: CreateRelay) -> Self {
-        let parameterization = match value.parameterization {
-            RelayParameterization::Parameterized { parameters } => {
-                let parameters = match parameters {
-                    RelayParameters::Declared(schema) => {
-                        StoredRelayParameters::Declared(schema.to_string())
-                    }
-                    RelayParameters::Inferred => StoredRelayParameters::Inferred,
-                };
-                StoredRelayParameterization::Parameterized { parameters }
-            }
-            RelayParameterization::Unbranched => StoredRelayParameterization::Unbranched,
+        let branching = match value.branching {
+            RelayBranching::BranchedBy { branch } => StoredRelayBranching::BranchedBy {
+                branch: branch.to_string(),
+            },
+            RelayBranching::Unbranched => StoredRelayBranching::Unbranched,
         };
         Self {
             name: value.name.to_string(),
             schema: value.schema.to_string(),
             buffer: value.buffer,
-            parameterization,
+            branching,
             materialized_state: value.materialized_state.map(Into::into),
         }
     }
@@ -3540,23 +3559,17 @@ impl TryFrom<StoredCreateRelay> for CreateRelay {
     type Error = Report<NameError>;
 
     fn try_from(value: StoredCreateRelay) -> Result<Self, Self::Error> {
-        let parameterization = match value.parameterization {
-            StoredRelayParameterization::Parameterized { parameters } => {
-                let parameters = match parameters {
-                    StoredRelayParameters::Declared(schema) => {
-                        RelayParameters::declared(Identifier::parse(&schema)?)
-                    }
-                    StoredRelayParameters::Inferred => RelayParameters::inferred(),
-                };
-                RelayParameterization::parameterized(parameters)
+        let branching = match value.branching {
+            StoredRelayBranching::BranchedBy { branch } => {
+                RelayBranching::branched_by(Identifier::parse(&branch)?)
             }
-            StoredRelayParameterization::Unbranched => RelayParameterization::unbranched(),
+            StoredRelayBranching::Unbranched => RelayBranching::unbranched(),
         };
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             schema: Identifier::parse(&value.schema)?,
             buffer: value.buffer,
-            parameterization,
+            branching,
             materialized_state: value.materialized_state.map(Into::into),
         })
     }
@@ -3610,7 +3623,7 @@ impl From<CreateDeduplicator> for StoredCreateDeduplicator {
             name: value.name.to_string(),
             from: value.from.into(),
             output_routes: value.output_routes.into(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             deduplicate_on: value.deduplicate_on,
             max_time: value.max_time,
             flush_each: value.flush_each,
@@ -3630,7 +3643,7 @@ impl TryFrom<StoredCreateDeduplicator> for CreateDeduplicator {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             deduplicate_on: value.deduplicate_on,
             max_time: value.max_time,
             flush_each: value.flush_each,
@@ -3649,7 +3662,7 @@ impl From<CreateCorrelator> for StoredCreateCorrelator {
             left: value.left.into(),
             right: value.right.into(),
             output_routes: value.output_routes.into(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             correlate_where: value.correlate_where,
             match_policy: value.match_policy.into(),
             output: value.output,
@@ -3673,7 +3686,7 @@ impl TryFrom<StoredCreateCorrelator> for CreateCorrelator {
             left: value.left.try_into()?,
             right: value.right.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             correlate_where: value.correlate_where,
             match_policy: value.match_policy.into(),
             output: value.output,
@@ -3756,7 +3769,7 @@ impl From<CreateReorderer> for StoredCreateReorderer {
             name: value.name.to_string(),
             from: value.from.into(),
             output_routes: value.output_routes.into(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             order_by: value.order_by,
             max_time: value.max_time,
             flush_each: value.flush_each,
@@ -3776,7 +3789,7 @@ impl TryFrom<StoredCreateReorderer> for CreateReorderer {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             order_by: value.order_by,
             max_time: value.max_time,
             flush_each: value.flush_each,
@@ -3794,7 +3807,7 @@ impl From<CreateWindowProcessor> for StoredCreateWindowProcessor {
             name: value.name.to_string(),
             from: value.from.into(),
             output_routes: value.output_routes.into(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             width: value.width.into(),
             step: value.step.into(),
             aggregate: value.aggregate,
@@ -3813,7 +3826,7 @@ impl TryFrom<StoredCreateWindowProcessor> for CreateWindowProcessor {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             width: value.width.into(),
             step: value.step.into(),
             aggregate: value.aggregate,
@@ -3848,7 +3861,7 @@ impl From<CreateJunction> for StoredCreateJunction {
             name: value.name.to_string(),
             from: value.from.into(),
             output_routes: value.output_routes.into(),
-            parameterized_by: value.parameterized_by.into(),
+            branched_by: value.branched_by.into(),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
@@ -3866,7 +3879,7 @@ impl TryFrom<StoredCreateJunction> for CreateJunction {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            parameterized_by: value.parameterized_by.try_into()?,
+            branched_by: value.branched_by.try_into()?,
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
@@ -4284,8 +4297,22 @@ mod tests {
         Identifier::parse(raw).expect("valid identifier")
     }
 
-    fn parameterized_by(schema: &str, _relay: &str, _fields: &[&str]) -> BranchParameterization {
-        BranchParameterization::branched_by(identifier(&format!("by_{schema}")))
+    fn branched_by(schema: &str, relay: &str, fields: &[&str]) -> BranchInitiatorSelection {
+        BranchInitiatorSelection::branched_by(
+            identifier(&format!("by_{schema}")),
+            fields
+                .iter()
+                .map(|field| BranchValueMapping {
+                    field: identifier(field),
+                    relay: identifier(relay),
+                    relay_field: identifier(field),
+                })
+                .collect(),
+        )
+    }
+
+    fn processor_branched_by(schema: &str) -> BranchSelection {
+        BranchSelection::branched_by(identifier(&format!("by_{schema}")))
     }
 
     #[test]
@@ -4339,7 +4366,7 @@ mod tests {
                 name: identifier("events_ingestor"),
                 output_routes: ProcessorOutputs::single(identifier("events_stream")),
                 decode_using_codec: identifier("events_codec"),
-                parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
+                branched_by: branched_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
@@ -4358,7 +4385,7 @@ mod tests {
                     Vec::new(),
                 ),
                 output_routes: ProcessorOutputs::single(identifier("events_stream")),
-                parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
+                branched_by: processor_branched_by("events"),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
@@ -4377,7 +4404,7 @@ mod tests {
                     },
                     ProcessorOutput::new(identifier("events_other")),
                 ]),
-                parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
+                branched_by: branched_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
@@ -4393,7 +4420,7 @@ mod tests {
                         "SET normalized = lower(raw) UNSET raw WHERE active".to_string(),
                     ),
                 }]),
-                parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
+                branched_by: branched_by("events", "events_stream", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Detached,
@@ -4404,7 +4431,7 @@ mod tests {
                 name: identifier("events_window"),
                 from: ProcessorInputs::single(identifier("events_stream")),
                 output_routes: ProcessorOutputs::single(identifier("events_summary")),
-                parameterized_by: parameterized_by("events", "events_stream", &["tenant"]),
+                branched_by: processor_branched_by("events"),
                 width: WindowBound {
                     messages: Some(100),
                     duration: Some("10s".to_string()),

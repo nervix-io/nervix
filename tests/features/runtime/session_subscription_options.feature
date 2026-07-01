@@ -13,37 +13,31 @@ Feature: Session subscription delivery options
         active BOOL,
         reading I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA telemetry_wire (
+        CREATE STRICT WIRE JSON SCHEMA telemetry_wire (
         device string,
         active boolean,
         reading integer
       );
-
-      CREATE CODEC telemetry_codec
+        CREATE CODEC telemetry_codec
         FROM WIRE JSON SCHEMA telemetry_wire
         TO SCHEMA telemetry;
-
-      CREATE RELAY telemetry SCHEMA telemetry;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT telemetry_endpoint
+        CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
+        CREATE IF NOT EXISTS BRANCH by_telemetry_http BY device_branch TTL 5m;
+        CREATE RELAY telemetry SCHEMA telemetry BRANCHED BY by_telemetry_http;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT telemetry_endpoint
         ON edge
         PATH '/telemetry'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE IF NOT EXISTS BRANCH by_telemetry_http PARAMETERIZED BY device_branch VALUES { device = telemetry.device } TTL 5m; CREATE INGESTOR telemetry_http
+        CREATE INGESTOR telemetry_http
         TO telemetry
         DECODE USING telemetry_codec
-        BRANCHED BY by_telemetry_http
+        BRANCHED BY by_telemetry_http VALUES { device = telemetry.device }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO telemetry DROPPING BATCH SAMPLE RATE 0.0 WHERE telemetry.active;
-
-      START;
+        SUBSCRIBE SESSION TO telemetry DROPPING BATCH SAMPLE RATE 0.0 WHERE telemetry.active;
+        START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/telemetry"
       """
@@ -70,37 +64,31 @@ Feature: Session subscription delivery options
         active BOOL,
         reading I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA telemetry_wire (
+        CREATE STRICT WIRE JSON SCHEMA telemetry_wire (
         device string,
         active boolean,
         reading integer
       );
-
-      CREATE CODEC telemetry_codec
+        CREATE CODEC telemetry_codec
         FROM WIRE JSON SCHEMA telemetry_wire
         TO SCHEMA telemetry;
-
-      CREATE RELAY telemetry SCHEMA telemetry;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT telemetry_endpoint
+        CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
+        CREATE IF NOT EXISTS BRANCH by_telemetry_http BY device_branch TTL 5m;
+        CREATE RELAY telemetry SCHEMA telemetry BRANCHED BY by_telemetry_http;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT telemetry_endpoint
         ON edge
         PATH '/telemetry'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING ); CREATE IF NOT EXISTS BRANCH by_telemetry_http PARAMETERIZED BY device_branch VALUES { device = telemetry.device } TTL 5m; CREATE INGESTOR telemetry_http
+        CREATE INGESTOR telemetry_http
         TO telemetry
         DECODE USING telemetry_codec
-        BRANCHED BY by_telemetry_http
+        BRANCHED BY by_telemetry_http VALUES { device = telemetry.device }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO telemetry BLOCKING BATCH SAMPLE RATE 1.0 WHERE telemetry.active;
-
-      START;
+        SUBSCRIBE SESSION TO telemetry BLOCKING BATCH SAMPLE RATE 1.0 WHERE telemetry.active;
+        START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/telemetry"
       """

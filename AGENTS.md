@@ -68,7 +68,7 @@ Primary goals:
    - `UnknownWord` should not be used for language keywords.
 
 6. Composed keywords:
-   - Multi-word logical keywords (e.g. `PARAMETERIZED BY`) should be represented as composed grammar units.
+   - Multi-word logical keywords (e.g. `BRANCHED BY`) should be represented as composed grammar units.
    - Use `kw_phrase2(...)` (or future phrase helpers) so parser and autocomplete treat them as one logical item.
    - `kw_phrase2` must derive its completion label from identifiers (`FIRST SECOND`); do not pass custom label literals.
    - Autocomplete is allowed to return multi-word suggestions when grammar expects a composed keyword.
@@ -77,23 +77,23 @@ Primary goals:
    - Do not use ad-hoc `word_raw().labelled(...)` at grammar call sites.
    - Add and use dedicated helper parsers in `parser_support` for each semantic reference kind (e.g. `schema_ref`, `relay_ref`, `transport_ref`).
    - Labels must use underscore style (`field_name`, `string_literal`, `config_key`) and never spaces.
-   - Exception: composed keyword phrase labels used for completion (`kw_phrase2`) should be human phrase form with spaces (e.g. `PARAMETERIZED BY`, `STEP BY`), and underscore variants must not be suggested.
+   - Exception: composed keyword phrase labels used for completion (`kw_phrase2`) should be human phrase form with spaces (e.g. `BRANCHED BY`, `STEP BY`), and underscore variants must not be suggested.
 
 8. Parser code reuse:
    - Do not duplicate parser logic across statement modules.
    - When a grammar pattern appears in multiple statements, extract it into a shared helper (typically in `parser_support` or a focused shared submodule) and reuse it.
 
-9. Branch parameterization is explicit and must be preserved:
+9. Branch selection is explicit and must be preserved:
    - Empty schemas are not valid NSPL, so an empty branch key is impossible.
    - Model non-branched execution as an absent branch key and branched execution as a non-empty typed key. Do not encode non-branched execution as an empty string, empty map, zero-field schema, or synthetic root branch.
    - There are exactly two node families that may erase or cross branch boundaries:
-     `REINGESTOR` may change/repartition branch parameterization, and `EMITTER` may fan in records for external output.
+     `REINGESTOR` may change branch grouping, and `EMITTER` may fan in records for external output.
    - Every other processing node (`DEDUPLICATOR`, `ROUTER`, `JUNCTION`, `WINDOW PROCESSOR`, and future processing nodes unless explicitly promoted to this list) must execute inside one concrete branch at a time.
-   - Non-reingestor/non-emitter processors must consume concrete relay instances and publish concrete relay instances for the same branch parameterization. They must not subscribe to the logical/global relay, mix branch keys, aggregate across branches, or use a shared processor state for multiple concrete branches.
-   - `DEDUPLICATOR`, `ROUTER`, `JUNCTION`, and `WINDOW PROCESSOR` must preserve the branch parameterization they receive.
+   - Non-reingestor/non-emitter processors must consume concrete relay instances and publish concrete relay instances for the same branch fields. They must not subscribe to the logical/global relay, mix branch keys, aggregate across branches, or use a shared processor state for multiple concrete branches.
+   - `DEDUPLICATOR`, `ROUTER`, `JUNCTION`, and `WINDOW PROCESSOR` must preserve the branch fields they receive.
    - A global mixed-consumer implementation for a normal processor is a correctness bug, even if it is simpler or appears to work for singleton cases. Do not implement fallback paths that bypass concrete branch routing.
    - Runtime code should make this invariant obvious in names, types, and comments. Processor templates/nodes should carry concrete branch context; any logical-stream registration path must explicitly reject or skip normal processors that are handled by branch materialization.
-   - Tests and cucumber scenarios for processors must explicitly prove branch isolation/parameterization preservation, including interleaved records from at least two branches when stateful behavior is involved.
+   - Tests and cucumber scenarios for processors must explicitly prove branch isolation and branch-field preservation, including interleaved records from at least two branches when stateful behavior is involved.
 
 10. Flush policy is an explicit node contract:
    - Any runtime node that buffers records behind a flush boundary must require either `FLUSH EACH <duration>` or `FLUSH IMMEDIATE` in its NSPL grammar and typed model.
@@ -128,7 +128,7 @@ Primary goals:
 - Always regenerate `./docs/src` when changing the public interface or documented NSPL surface.
 - Prefer explicit, typed ASTs over ad-hoc maps except where pass-through is intentional.
 - Error types must be semantic and typed. Use `thiserror` for domain error enums and carry context with `error-stack::Report`; use `anyhow` only in narrow places where callers cannot make a semantic decision from the error. Do not introduce `String` as an error type.
-- All schemaful operations are type-strict. A value flowing into a schema field, parameterization field, relay, codec, processor input/output, lookup key, materialized state, or emitted payload must have exactly the declared type unless the user wrote an explicit operation that performs conversion. Type mismatch is a hard error. Do not add implicit casts, coercions, parsing, stringification, numeric widening/narrowing, datetime/string interchange, wire/internal compatibility shortcuts, or fallback code paths that make mismatched types work.
+- All schemaful operations are type-strict. A value flowing into a schema field, branch field, relay, codec, processor input/output, lookup key, materialized state, or emitted payload must have exactly the declared type unless the user wrote an explicit operation that performs conversion. Type mismatch is a hard error. Do not add implicit casts, coercions, parsing, stringification, numeric widening/narrowing, datetime/string interchange, wire/internal compatibility shortcuts, or fallback code paths that make mismatched types work.
 - Do not preserve legacy behavior unless the user explicitly requests a compatibility path for the current change. If an old syntax, implicit fallback, compatibility shim, migration shortcut, synthetic legacy identifier, or parallel legacy code path conflicts with the requested model, remove it rather than routing around it.
 - When refactoring, prefer a narrower and more compact architecture. Collapse duplicated logic into the owning parser/model/runtime path, delete obsolete layers, and make invariants explicit in the smallest surface that can own them. Avoid adding wrappers, adapters, helper layers, or extra lines unless they clearly reduce total complexity or isolate a real boundary.
 - Do not encode internal behavior with magic/reserved user-facing identifiers (for example synthetic relay names, field names, model names, or namespaces such as `__nervix_*`). If runtime/compiler/parser internals need a special path, model it with explicit typed variants or internal-only structures so user-defined identifiers cannot collide with it.
@@ -192,7 +192,7 @@ When writing cucumber scenarios:
 - `When` performs the action or event under test.
 - `Then` asserts the observable outcome.
 - Keep step keywords semantically aligned with their purpose so scenarios stay readable and step matching stays unambiguous.
-- Tests responsible for runtime behavior must be written as `Scenario Outline` and parameterized by cluster size.
+- Tests responsible for runtime behavior must be written as `Scenario Outline` and run against cluster-size examples.
 - Runtime cucumber scenarios should run against at least `1`-node and `3`-node examples unless the behavior is explicitly topology-specific.
 - Topology-specific behavior such as scheduling, leader/follower restrictions, and inter-node mechanics should use dedicated scenarios or lower-level tests instead of being baked into generic runtime scenarios.
 
@@ -201,7 +201,6 @@ After each development cycle:
 - If new tests were added, run those tests explicitly as part of the cycle.
 - Use `just test` for the full test suite because it sets required test environment variables such as `ORT_DYLIB_PATH`.
 - For targeted cucumber/scenario runs, use `just test-scenarios --input <feature> ...` so the same test environment setup is applied. If a more specific targeted test command is needed, add a `justfile` task for it instead of running `cargo test --test scenarios` directly.
-- Check the roadmap in `docs/src/roadmap.md`, and if the implemented work completed a listed roadmap item, remove that item from the roadmap as part of the same change.
 
 ## Error Reporting Requirements
 - Parse errors should surface exact expected/found tokens when possible.

@@ -13,39 +13,34 @@ Feature: Deduplicator metrics
         tenant STRING,
         transaction_id STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
         tenant string,
         transaction_id string
       );
-
-      CREATE CODEC transaction_codec
+        CREATE CODEC transaction_codec
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY raw_txns SCHEMA transaction PARAMETERIZED BY tenant_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY deduped_txns SCHEMA transaction PARAMETERIZED BY tenant_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT dedup_metrics_ingress ON edge PATH '/dedup-metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_dedup_metrics_source PARAMETERIZED BY tenant_branch VALUES { tenant = raw_txns.tenant } TTL 5m; CREATE INGESTOR dedup_metrics_source
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_dedup_metrics_source BY tenant_branch TTL 5m;
+        CREATE RELAY raw_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
+        CREATE RELAY deduped_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT dedup_metrics_ingress ON edge PATH '/dedup-metrics' TYPE HTTP;
+        CREATE INGESTOR dedup_metrics_source
         TO raw_txns
         DECODE USING transaction_codec
-        BRANCHED BY by_dedup_metrics_source
+        BRANCHED BY by_dedup_metrics_source VALUES { tenant = raw_txns.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT dedup_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_metrics_node
+        CREATE DEDUPLICATOR dedup_metrics_node
         FROM raw_txns TO deduped_txns BRANCHED BY by_dedup_metrics_source
         DEDUPLICATE ON raw_txns.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO deduped_txns;
-      START;
+        SUBSCRIBE SESSION TO deduped_txns;
+        START;
       """
     And http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/dedup-metrics"
       """

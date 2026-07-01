@@ -13,16 +13,16 @@ use arc_swap::ArcSwapOption;
 use fjall::Database;
 use nervix_interconnect::{RelayPayload, RelayPayloadKind};
 use nervix_models::{
-    AckMode, BranchParameterization, ClientConfigEntry, ClusterSchedule, CodecWireFormat,
-    CreateBranch, CreateClientHttp, CreateClientMqtt, CreateClientPrometheus,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
-    CreateGenerator, CreateInferencer, CreateIngestor, CreateJsonWireSchema, CreateJunction,
-    CreateLookup, CreateReingestor, CreateRelay, CreateSchema, CreateWasmProcessor,
-    CreateWindowProcessor, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState,
-    DomainStatus, DomainTick, EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType, MessageErrorPolicy,
-    ModelKind, MqttIngestMode, MqttQos, MqttSession, ParameterValueMapping, ParseAsType,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayParameterization,
+    AckMode, BranchInitiatorSelection, BranchSelection, BranchValueMapping, ClientConfigEntry,
+    ClusterSchedule, CodecWireFormat, CreateBranch, CreateClientHttp, CreateClientMqtt,
+    CreateClientPrometheus, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
+    CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor,
+    CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
+    CreateSchema, CreateWasmProcessor, CreateWindowProcessor, Domain, DomainConfig, DomainPace,
+    DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink, ErrorPolicies,
+    GeneralErrorPolicy, Identifier, InferencerTensorMapping, IngestSource, IngestTimestampSource,
+    JsonType, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos, MqttSession, ParseAsType,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
     RemoteAckOutcome, RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus,
     RetryPolicy, ScheduledNode, SchemaField, Timestamp, WindowBound, WireSchemaField,
     ZeroMqIngestMode,
@@ -40,7 +40,7 @@ use tokio::{
 };
 
 use super::{
-    BranchKey, ParameterizedProcessorOperationSpec, ParametrizerRegistry, RelayMessage,
+    BranchInstanceRegistry, BranchKey, BranchedProcessorOperationSpec, RelayMessage,
     RuntimeStateKind, RuntimeStatePlacement, RuntimeStateStore, STUPID_CHANNEL_CAPACITY_REMOVE_ME,
     WindowAggregateFunction, WindowProcessorState, advance_window, evaluate_window_aggregate,
     message_timestamp, parse_aggregate_program, window_output_metadata,
@@ -93,18 +93,29 @@ fn nonzero_capacity(capacity: usize) -> NonZeroUsize {
     NonZeroUsize::new(capacity).expect("test relay capacity must be nonzero")
 }
 
-fn parameterized_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchParameterization {
+fn branched_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchInitiatorSelection {
     if fields.is_empty() {
-        BranchParameterization::unbranched()
+        BranchInitiatorSelection::unbranched()
     } else {
-        BranchParameterization::branched_by(identifier(&format!("by_{relay}")))
+        BranchInitiatorSelection::branched_by(
+            identifier(&format!("by_{relay}")),
+            branch_mappings(relay, fields),
+        )
     }
 }
 
-fn parameter_mappings(relay: &str, fields: &[&str]) -> Vec<ParameterValueMapping> {
+fn processor_branched_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchSelection {
+    if fields.is_empty() {
+        BranchSelection::unbranched()
+    } else {
+        BranchSelection::branched_by(identifier(&format!("by_{relay}")))
+    }
+}
+
+fn branch_mappings(relay: &str, fields: &[&str]) -> Vec<BranchValueMapping> {
     fields
         .iter()
-        .map(|field| ParameterValueMapping {
+        .map(|field| BranchValueMapping {
             field: identifier(field),
             relay: identifier(relay),
             relay_field: identifier(field),
@@ -115,7 +126,7 @@ fn parameter_mappings(relay: &str, fields: &[&str]) -> Vec<ParameterValueMapping
 fn branch_model_tuple(
     schema: &str,
     relay: &str,
-    fields: &[&str],
+    _fields: &[&str],
 ) -> (
     ModelKind,
     Identifier,
@@ -128,8 +139,7 @@ fn branch_model_tuple(
         branch.clone(),
         nervix_models::Model::Branch(CreateBranch {
             name: branch,
-            parameterized_by: identifier(schema),
-            values: parameter_mappings(relay, fields),
+            branched_by: identifier(schema),
             ttl: "5m".to_string(),
             eviction: None,
         }),
@@ -167,7 +177,7 @@ async fn memory_pressure_pause_stops_registered_ingestors() {
         key.clone(),
         super::IngestorRuntime::Background {
             shutdown: shutdown_tx,
-            parameterized: Vec::new(),
+            branched: Vec::new(),
             tasks: vec![task],
         },
     );
@@ -1196,7 +1206,8 @@ fn scheduled_model(
         identifier,
         kind,
         config: Box::new(model),
-        effective_parameterization: None,
+        effective_branching: None,
+        effective_branching_schema: None,
         kafka_partition_schedule: None,
         primary_node: Some("node-1".to_string()),
         assigned_nodes: vec!["node-1".to_string()],
@@ -1281,7 +1292,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                                 name: relay.clone(),
                                 schema: schema.clone(),
                                 buffer: 2,
-                                parameterization: RelayParameterization::unbranched(),
+                                branching: RelayBranching::unbranched(),
                                 materialized_state: None,
                             }),
                         ),
@@ -1310,7 +1321,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                                 name: ingestor.clone(),
                                 output_routes: ProcessorOutputs::single(relay.clone()),
                                 decode_using_codec: codec.clone(),
-                                parameterized_by: BranchParameterization::unbranched(),
+                                branched_by: BranchInitiatorSelection::unbranched(),
                                 flush_each: "100ms".to_string(),
                                 max_batch_size: Some("1MiB".to_string()),
                                 timestamp_source: None,
@@ -1429,7 +1440,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                                 name: relay.clone(),
                                 schema: schema.clone(),
                                 buffer: 2,
-                                parameterization: RelayParameterization::unbranched(),
+                                branching: RelayBranching::unbranched(),
                                 materialized_state: None,
                             }),
                         ),
@@ -1452,7 +1463,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                                 name: ingestor.clone(),
                                 output_routes: ProcessorOutputs::single(relay.clone()),
                                 decode_using_codec: codec.clone(),
-                                parameterized_by: BranchParameterization::unbranched(),
+                                branched_by: BranchInitiatorSelection::unbranched(),
                                 flush_each: "100ms".to_string(),
                                 max_batch_size: Some("1MiB".to_string()),
                                 timestamp_source: None,
@@ -1515,7 +1526,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 name: identifier("dedup_orders"),
                 from: ProcessorInputs::single(identifier("orders")),
                 output_routes: ProcessorOutputs::single(identifier("projected_orders")),
-                parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                 deduplicate_on: "orders.order_id".to_string(),
                 max_time: "10m".to_string(),
                 flush_each: "100ms".to_string(),
@@ -1536,7 +1547,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                     Vec::new(),
                 ),
                 output_routes: ProcessorOutputs::single(identifier("joined_orders")),
-                parameterized_by: parameterized_by("tenant", "left_orders", &["tenant"]),
+                branched_by: processor_branched_by("tenant", "left_orders", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
@@ -1552,7 +1563,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 name: identifier("orders_window"),
                 from: ProcessorInputs::single(identifier("orders")),
                 output_routes: ProcessorOutputs::single(identifier("order_summaries")),
-                parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                 width: WindowBound {
                     messages: Some(10),
                     duration: None,
@@ -1575,7 +1586,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 name: identifier("score_orders"),
                 from: ProcessorInputs::single(identifier("orders")),
                 output_routes: ProcessorOutputs::single(identifier("scores")),
-                parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                 resource: identifier("score_model"),
                 resource_version: None,
                 file: "models/score.onnx".to_string(),
@@ -2380,7 +2391,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
                             name: relay.clone(),
                             schema,
                             buffer: STUPID_CHANNEL_CAPACITY_REMOVE_ME,
-                            parameterization: RelayParameterization::unbranched(),
+                            branching: RelayBranching::unbranched(),
                             materialized_state: None,
                         }),
                     ),
@@ -2709,12 +2720,12 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             relay_registries,
             relay_schemas,
             relay_services,
-            relay_parameterizations: HashMap::default(),
-            relay_parameterization_schemas: HashMap::default(),
+            relay_branchings: HashMap::default(),
+            relay_branching_schemas: HashMap::default(),
             materialized_stream_specs: HashMap::default(),
             materialized_stream_owner_nodes: HashMap::default(),
-            parameterized_ingestors: HashMap::default(),
-            parameterized_entrypoints: HashMap::default(),
+            branched_ingestors: HashMap::default(),
+            branched_entrypoints: HashMap::default(),
             codecs: HashMap::default(),
             signaling_protocols: HashMap::default(),
             lookups: HashMap::default(),
@@ -2781,12 +2792,12 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 relay_registries: HashMap::default(),
                 relay_schemas: HashMap::default(),
                 relay_services: HashMap::default(),
-                relay_parameterizations: HashMap::default(),
-                relay_parameterization_schemas: HashMap::default(),
+                relay_branchings: HashMap::default(),
+                relay_branching_schemas: HashMap::default(),
                 materialized_stream_specs: HashMap::default(),
                 materialized_stream_owner_nodes: HashMap::default(),
-                parameterized_ingestors: HashMap::default(),
-                parameterized_entrypoints: HashMap::default(),
+                branched_ingestors: HashMap::default(),
+                branched_entrypoints: HashMap::default(),
                 codecs: HashMap::default(),
                 signaling_protocols: HashMap::default(),
                 lookups: HashMap::default(),
@@ -2838,12 +2849,12 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             relay_registries: HashMap::default(),
             relay_schemas: HashMap::default(),
             relay_services: HashMap::default(),
-            relay_parameterizations: HashMap::default(),
-            relay_parameterization_schemas: HashMap::default(),
+            relay_branchings: HashMap::default(),
+            relay_branching_schemas: HashMap::default(),
             materialized_stream_specs: HashMap::default(),
             materialized_stream_owner_nodes: HashMap::default(),
-            parameterized_ingestors: HashMap::default(),
-            parameterized_entrypoints: HashMap::default(),
+            branched_ingestors: HashMap::default(),
+            branched_entrypoints: HashMap::default(),
             codecs: HashMap::default(),
             signaling_protocols: HashMap::default(),
             lookups: HashMap::default(),
@@ -3200,7 +3211,7 @@ async fn relay_boundary_fanout_resize_preserves_existing_subscription_receiver()
 }
 
 #[test]
-fn resolve_concrete_branch_returns_root_for_empty_parameterization() {
+fn resolve_concrete_branch_returns_root_for_empty_branching() {
     let record = RuntimeRecord::from_fields([
         (
             "tenant".to_string(),
@@ -3217,7 +3228,7 @@ fn resolve_concrete_branch_returns_root_for_empty_parameterization() {
 }
 
 #[test]
-fn resolve_concrete_branch_uses_parameter_values() {
+fn resolve_concrete_branch_uses_branch_values() {
     let record = RuntimeRecord::from_fields([
         (
             "tenant".to_string(),
@@ -3258,7 +3269,7 @@ fn resolve_concrete_branch_mapping_can_read_branch_key() {
         super::resolve_concrete_branch_from_mappings(
             &record,
             Some(&branch_key),
-            &[ParameterValueMapping {
+            &[BranchValueMapping {
                 field: identifier("tenant"),
                 relay: identifier("branch"),
                 relay_field: identifier("tenant"),
@@ -3274,7 +3285,7 @@ fn resolve_concrete_branch_mapping_can_read_branch_key() {
 }
 
 #[test]
-fn resolve_concrete_branch_errors_when_parameter_field_is_missing() {
+fn resolve_concrete_branch_errors_when_branch_field_is_missing() {
     let record = RuntimeRecord::from_fields([(
         "tenant".to_string(),
         RuntimeValue::String("acme".to_string()),
@@ -3282,9 +3293,9 @@ fn resolve_concrete_branch_errors_when_parameter_field_is_missing() {
 
     let error =
         super::resolve_concrete_branch(&record, &[identifier("user_id")], &identifier("ing"))
-            .expect_err("missing parameterized field should fail");
+            .expect_err("missing branch field should fail");
 
-    assert!(error.contains("parameterized field 'user_id' is missing"));
+    assert!(error.contains("branch field 'user_id' is missing"));
     assert!(error.contains("'ing'"));
 }
 
@@ -3958,8 +3969,8 @@ fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_capture_downstream_processing_tree() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             branch_model_tuple("tenant", "orders", &["tenant"]),
             branch_model_tuple("tenant", "projected_orders", &["tenant"]),
@@ -3970,7 +3981,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                     name: identifier("orders_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    branched_by: branched_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -3990,7 +4001,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "projected_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4008,7 +4019,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
                     name: identifier("dedup_projected_orders"),
                     from: ProcessorInputs::single(identifier("projected_orders")),
                     output_routes: ProcessorOutputs::single(identifier("aggregated_orders")),
-                    parameterized_by: parameterized_by("tenant", "projected_orders", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "projected_orders", &["tenant"]),
                     deduplicate_on: "tenant_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4047,7 +4058,7 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
     assert_eq!(spec.root_relay, identifier("orders"));
     assert_eq!(spec.roots.len(), 1);
     assert_eq!(spec.roots[0].processor, identifier("dedup_orders"));
-    let ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+    let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
         &spec.roots[0].operation
     else {
         panic!("expected deduplicator output");
@@ -4064,8 +4075,8 @@ fn parameterized_ingestor_specs_capture_downstream_processing_tree() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             branch_model_tuple("host", "metrics", &["host"]),
             branch_model_tuple("host", "metric_summary", &["host"]),
@@ -4076,7 +4087,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                     name: identifier("metrics_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("metrics")),
                     decode_using_codec: identifier("metrics_codec"),
-                    parameterized_by: parameterized_by("host", "metrics", &["host"]),
+                    branched_by: branched_by("host", "metrics", &["host"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4096,7 +4107,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                     name: identifier("metric_window"),
                     from: ProcessorInputs::single(identifier("metrics")),
                     output_routes: ProcessorOutputs::single(identifier("metric_summary")),
-                    parameterized_by: parameterized_by("host", "metrics", &["host"]),
+                    branched_by: processor_branched_by("host", "metrics", &["host"]),
                     width: WindowBound {
                         messages: Some(100),
                         duration: None,
@@ -4119,7 +4130,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
                     name: identifier("dedup_summary"),
                     from: ProcessorInputs::single(identifier("metric_summary")),
                     output_routes: ProcessorOutputs::single(identifier("projected_summary")),
-                    parameterized_by: parameterized_by("host", "metric_summary", &["host"]),
+                    branched_by: processor_branched_by("host", "metric_summary", &["host"]),
                     deduplicate_on: "metric_summary.count".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4139,7 +4150,7 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
     assert_eq!(spec.root_relay, identifier("metrics"));
     assert_eq!(spec.roots.len(), 1);
     assert_eq!(spec.roots[0].processor, identifier("metric_window"));
-    let ParameterizedProcessorOperationSpec::WindowProcessor {
+    let BranchedProcessorOperationSpec::WindowProcessor {
         output_routes,
         width,
         step,
@@ -4161,8 +4172,8 @@ fn parameterized_ingestor_specs_capture_window_processor_as_branch_node() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             branch_model_tuple("tenant", "features", &["tenant"]),
             branch_model_tuple("tenant", "scores", &["tenant"]),
@@ -4173,7 +4184,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                     name: identifier("features_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("features")),
                     decode_using_codec: identifier("features_codec"),
-                    parameterized_by: parameterized_by("tenant", "features", &["tenant"]),
+                    branched_by: branched_by("tenant", "features", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4193,7 +4204,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                     name: identifier("score_model"),
                     from: ProcessorInputs::single(identifier("features")),
                     output_routes: ProcessorOutputs::single(identifier("scores")),
-                    parameterized_by: parameterized_by("tenant", "features", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "features", &["tenant"]),
                     resource: identifier("fraud_model"),
                     resource_version: Some(3),
                     file: "models/fraud.onnx".to_string(),
@@ -4222,7 +4233,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
                     name: identifier("dedup_scores"),
                     from: ProcessorInputs::single(identifier("scores")),
                     output_routes: ProcessorOutputs::single(identifier("projected_scores")),
-                    parameterized_by: parameterized_by("tenant", "scores", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "scores", &["tenant"]),
                     deduplicate_on: "scores.score".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4242,7 +4253,7 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
     assert_eq!(spec.root_relay, identifier("features"));
     assert_eq!(spec.roots.len(), 1);
     assert_eq!(spec.roots[0].processor, identifier("score_model"));
-    let ParameterizedProcessorOperationSpec::Inferencer {
+    let BranchedProcessorOperationSpec::Inferencer {
         output_routes,
         resource,
         resource_version,
@@ -4272,8 +4283,8 @@ fn parameterized_ingestor_specs_capture_inferencer_as_branch_node() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             branch_model_tuple("tenant", "tenant_orders", &["tenant"]),
             (
@@ -4283,7 +4294,7 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
                     name: identifier("tenant_partition"),
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
-                    parameterized_by: parameterized_by("tenant", "tenant_orders", &["tenant"]),
+                    branched_by: branched_by("tenant", "tenant_orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
@@ -4299,7 +4310,7 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("tenant_orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
-                    parameterized_by: parameterized_by("tenant", "tenant_orders", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "tenant_orders", &["tenant"]),
                     deduplicate_on: "urgent_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4324,8 +4335,8 @@ fn parameterized_ingestor_specs_capture_reingestor_entrypoint_tree() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_capture_processor_output_route_tree() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             branch_model_tuple("tenant", "orders", &["tenant"]),
             branch_model_tuple("tenant", "urgent_orders", &["tenant"]),
@@ -4337,7 +4348,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                     name: identifier("orders_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    branched_by: branched_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4366,7 +4377,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                             filter_map: None,
                         },
                     ]),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4384,7 +4395,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                     name: identifier("dedup_urgent"),
                     from: ProcessorInputs::single(identifier("urgent_orders")),
                     output_routes: ProcessorOutputs::single(identifier("urgent_projected")),
-                    parameterized_by: parameterized_by("tenant", "urgent_orders", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "urgent_orders", &["tenant"]),
                     deduplicate_on: "default_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4402,7 +4413,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
                     name: identifier("dedup_default"),
                     from: ProcessorInputs::single(identifier("default_orders")),
                     output_routes: ProcessorOutputs::single(identifier("default_projected")),
-                    parameterized_by: parameterized_by("tenant", "default_orders", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "default_orders", &["tenant"]),
                     deduplicate_on: "projected_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4421,7 +4432,7 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
     let spec = &specs[0];
     assert_eq!(spec.roots.len(), 1);
     assert_eq!(spec.roots[0].processor, identifier("orders_splitter"));
-    let ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+    let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
         &spec.roots[0].operation
     else {
         panic!("expected deduplicator output routes");
@@ -4447,8 +4458,8 @@ fn parameterized_ingestor_specs_capture_processor_output_route_tree() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             branch_model_tuple("tenant", "left_stream", &["tenant"]),
             branch_model_tuple("tenant", "right_stream", &["tenant"]),
@@ -4460,7 +4471,7 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
                     name: identifier("left_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("left_stream")),
                     decode_using_codec: identifier("notification_codec"),
-                    parameterized_by: parameterized_by("tenant", "left_stream", &["tenant"]),
+                    branched_by: branched_by("tenant", "left_stream", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4481,7 +4492,7 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
                     name: identifier("right_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("right_stream")),
                     decode_using_codec: identifier("notification_codec"),
-                    parameterized_by: parameterized_by("tenant", "right_stream", &["tenant"]),
+                    branched_by: branched_by("tenant", "right_stream", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4505,7 +4516,7 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
                         Vec::new(),
                     ),
                     output_routes: ProcessorOutputs::single(identifier("joined_stream")),
-                    parameterized_by: parameterized_by("tenant", "left_stream", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "left_stream", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
@@ -4521,7 +4532,7 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
                     name: identifier("dedup_joined"),
                     from: ProcessorInputs::single(identifier("joined_stream")),
                     output_routes: ProcessorOutputs::single(identifier("projected_joined")),
-                    parameterized_by: parameterized_by("tenant", "joined_stream", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "joined_stream", &["tenant"]),
                     deduplicate_on: "joined_stream.tenant".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4554,8 +4565,7 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
             junction.input_relays,
             vec![identifier("left_stream"), identifier("right_stream")]
         );
-        let ParameterizedProcessorOperationSpec::Junction { output_routes, .. } =
-            &junction.operation
+        let BranchedProcessorOperationSpec::Junction { output_routes, .. } = &junction.operation
         else {
             panic!("expected junction processor");
         };
@@ -4573,8 +4583,8 @@ fn parameterized_ingestor_specs_capture_junction_as_single_branch_processor() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             branch_model_tuple("tenant", "orders", &["tenant"]),
             branch_model_tuple("tenant", "projected_orders", &["tenant"]),
@@ -4585,7 +4595,7 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
                     name: identifier("orders_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    branched_by: branched_by("tenant", "orders", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4612,7 +4622,7 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
                         }],
                     ),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
-                    parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4630,7 +4640,7 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
                     name: identifier("dedup_projected"),
                     from: ProcessorInputs::single(identifier("projected_orders")),
                     output_routes: ProcessorOutputs::single(identifier("aggregated_orders")),
-                    parameterized_by: parameterized_by("tenant", "projected_orders", &["tenant"]),
+                    branched_by: processor_branched_by("tenant", "projected_orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4653,7 +4663,7 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
         spec.roots[0].from_where.get(&identifier("orders")),
         Some(&"WHERE orders.active".to_string())
     );
-    let ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. } =
+    let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
         &spec.roots[0].operation
     else {
         panic!("expected processor output routes");
@@ -4672,8 +4682,8 @@ fn parameterized_ingestor_specs_capture_single_processor_output_route_tree() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterization() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             (
                 ModelKind::Ingestor,
@@ -4682,7 +4692,7 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
                     name: identifier("orders_ingestor"),
                     output_routes: ProcessorOutputs::single(identifier("orders")),
                     decode_using_codec: identifier("orders_codec"),
-                    parameterized_by: parameterized_by("root", "orders", &[]),
+                    branched_by: branched_by("root", "orders", &[]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
@@ -4703,7 +4713,7 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
-                    parameterized_by: parameterized_by("root", "orders", &[]),
+                    branched_by: processor_branched_by("root", "orders", &[]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4726,8 +4736,8 @@ fn parameterized_ingestor_specs_include_singleton_branch_for_empty_parameterizat
 }
 
 #[test]
-fn parameterized_ingestor_specs_use_explicit_unbranched_relay_as_root() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_use_explicit_unbranched_relay_as_root() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             (
                 ModelKind::Relay,
@@ -4736,7 +4746,7 @@ fn parameterized_ingestor_specs_use_explicit_unbranched_relay_as_root() {
                     name: identifier("orders"),
                     schema: identifier("order_event"),
                     buffer: 1,
-                    parameterization: RelayParameterization::unbranched(),
+                    branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
                 Some(Vec::new()),
@@ -4748,7 +4758,7 @@ fn parameterized_ingestor_specs_use_explicit_unbranched_relay_as_root() {
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("projected_orders")),
-                    parameterized_by: BranchParameterization::unbranched(),
+                    branched_by: BranchSelection::unbranched(),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
                     flush_each: "100ms".to_string(),
@@ -4772,8 +4782,8 @@ fn parameterized_ingestor_specs_use_explicit_unbranched_relay_as_root() {
 }
 
 #[test]
-fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_wasm_processor_specs_preserve_global_error_policy() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             (
                 ModelKind::Relay,
@@ -4782,7 +4792,7 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
                     name: identifier("orders"),
                     schema: identifier("order_event"),
                     buffer: 1,
-                    parameterization: RelayParameterization::unbranched(),
+                    branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
                 Some(Vec::new()),
@@ -4794,7 +4804,7 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
                     name: identifier("filter_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: ProcessorOutputs::single(identifier("filtered_orders")),
-                    parameterized_by: BranchParameterization::unbranched(),
+                    branched_by: BranchSelection::unbranched(),
                     resource: identifier("filter_resource"),
                     resource_version: None,
                     file: "filter.wasm".to_string(),
@@ -4822,8 +4832,8 @@ fn parameterized_wasm_processor_specs_preserve_global_error_policy() {
 }
 
 #[test]
-fn parameterized_ingestor_specs_include_reingestor_with_declared_parameterization() {
-    let specs = super::parameterized_ingestor_specs_from_models(
+fn branched_ingestor_specs_include_reingestor_with_declared_branching() {
+    let specs = super::branched_ingestor_specs_from_models(
         [
             branch_model_tuple("tenant", "tenant_notifications", &["tenant"]),
             (
@@ -4833,11 +4843,7 @@ fn parameterized_ingestor_specs_include_reingestor_with_declared_parameterizatio
                     name: identifier("tenant_partition"),
                     from: ProcessorInputs::single(identifier("notifications")),
                     output_routes: ProcessorOutputs::single(identifier("tenant_notifications")),
-                    parameterized_by: parameterized_by(
-                        "tenant",
-                        "tenant_notifications",
-                        &["tenant"],
-                    ),
+                    branched_by: branched_by("tenant", "tenant_notifications", &["tenant"]),
                     flush_each: "100ms".to_string(),
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
@@ -4856,7 +4862,7 @@ fn parameterized_ingestor_specs_include_reingestor_with_declared_parameterizatio
 }
 
 #[tokio::test]
-async fn parameterized_root_without_children_acks_success() {
+async fn branched_root_without_children_acks_success() {
     let runtime = super::Runtime::default();
     let root_domain = domain("default");
     let root_relay = identifier("tenant_orders");
@@ -4921,7 +4927,7 @@ async fn parameterized_root_without_children_acks_success() {
 }
 
 #[tokio::test]
-async fn reingestor_parameterized_entrypoint_splits_batches_with_arrow_filters() {
+async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let root_relay = identifier("tenant_orders");
@@ -4938,15 +4944,15 @@ async fn reingestor_parameterized_entrypoint_splits_batches_with_arrow_filters()
         remote_dispatcher: None,
     });
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
-    let template = super::ParametrizerTemplate {
+    let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Reingestor,
         source: identifier("tenant_partition"),
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
         entrypoint_schema: schema.clone(),
-        entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
-        entrypoint_ack_boundary: super::ParametrizerAckBoundary::Reingestor(AckMode::Attached),
+        entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+        entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
@@ -5003,10 +5009,10 @@ async fn reingestor_parameterized_entrypoint_splits_batches_with_arrow_filters()
     .expect("batch should build");
     let graph = Arc::new(ArcSwapOption::from(None));
     let mut instances =
-        ParametrizerRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
+        BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
 
-    super::ParameterizedIngestorRuntime::dispatch_entrypoint_inputs(
-        super::ParameterizedBranchDispatchContext {
+    super::BranchedIngestorRuntime::dispatch_entrypoint_inputs(
+        super::BranchedBranchDispatchContext {
             runtime_handle: &runtime,
             domain: &domain,
             ingestor: &identifier("tenant_partition"),
@@ -5015,7 +5021,7 @@ async fn reingestor_parameterized_entrypoint_splits_batches_with_arrow_filters()
             now: Timestamp::from_unix_nanos(1_000_000_000),
         },
         &mut instances,
-        vec![super::ParameterizedEntrypointInput::PendingParameterizationBatch(input)],
+        vec![super::BranchedEntrypointInput::PendingBranchingBatch(input)],
     )
     .await;
 
@@ -5038,7 +5044,7 @@ async fn reingestor_parameterized_entrypoint_splits_batches_with_arrow_filters()
 }
 
 #[tokio::test]
-async fn reingestor_parameterized_entrypoint_reuses_existing_branches() {
+async fn reingestor_branched_entrypoint_reuses_existing_branches() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let root_relay = identifier("tenant_orders");
@@ -5050,15 +5056,15 @@ async fn reingestor_parameterized_entrypoint_reuses_existing_branches() {
         remote_dispatcher: None,
     });
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
-    let template = super::ParametrizerTemplate {
+    let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Reingestor,
         source: identifier("tenant_partition"),
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
         entrypoint_schema: schema.clone(),
-        entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
-        entrypoint_ack_boundary: super::ParametrizerAckBoundary::Reingestor(AckMode::Detached),
+        entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+        entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Detached),
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
@@ -5076,7 +5082,7 @@ async fn reingestor_parameterized_entrypoint_reuses_existing_branches() {
     };
     let graph = Arc::new(ArcSwapOption::from(None));
     let mut instances =
-        ParametrizerRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
+        BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
 
     for round in 0..3 {
         let messages = (0..64)
@@ -5095,8 +5101,8 @@ async fn reingestor_parameterized_entrypoint_reuses_existing_branches() {
         let input = super::RelayRecordBatch::from_messages(schema.clone(), messages)
             .expect("batch should build");
 
-        super::ParameterizedIngestorRuntime::dispatch_entrypoint_inputs(
-            super::ParameterizedBranchDispatchContext {
+        super::BranchedIngestorRuntime::dispatch_entrypoint_inputs(
+            super::BranchedBranchDispatchContext {
                 runtime_handle: &runtime,
                 domain: &domain,
                 ingestor: &identifier("tenant_partition"),
@@ -5105,7 +5111,7 @@ async fn reingestor_parameterized_entrypoint_reuses_existing_branches() {
                 now: Timestamp::from_unix_nanos(1_000_000_000 + i64::from(round)),
             },
             &mut instances,
-            vec![super::ParameterizedEntrypointInput::PendingParameterizationBatch(input)],
+            vec![super::BranchedEntrypointInput::PendingBranchingBatch(input)],
         )
         .await;
 
@@ -5114,7 +5120,7 @@ async fn reingestor_parameterized_entrypoint_reuses_existing_branches() {
 }
 
 #[tokio::test]
-async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
+async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let relay = identifier("tenant_orders");
@@ -5125,20 +5131,22 @@ async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
         ("tenant", ParseAsType::String),
         ("user_id", ParseAsType::U32),
     ]);
-    let parameterized_runtime = super::ParameterizedIngestorRuntime::new(
+    let branched_runtime = super::BranchedIngestorRuntime::new(
         runtime.clone(),
         domain.clone(),
         identifier("tenant_partition"),
         Arc::new(ArcSwapOption::from(None)),
-        super::ParametrizerTemplate {
+        super::BranchInstanceTemplate {
             source_kind: ModelKind::Reingestor,
             source: identifier("tenant_partition"),
             root_relay: relay.clone(),
             branch_ttl: Some(Duration::from_secs(30)),
             branch_max_instances: None,
             entrypoint_schema: schema.clone(),
-            entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
-            entrypoint_ack_boundary: super::ParametrizerAckBoundary::Reingestor(AckMode::Attached),
+            entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+            entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(
+                AckMode::Attached,
+            ),
             entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             relays: [(
@@ -5157,25 +5165,25 @@ async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
         Duration::from_secs(30),
     );
     assert_eq!(
-        parameterized_runtime.sender().max_capacity(),
+        branched_runtime.sender().max_capacity(),
         super::STUPID_CHANNEL_CAPACITY_REMOVE_ME
     );
     let (shutdown_tx, _) = watch::channel(false);
     let broadcast =
         super::RelayBroadcast::with_capacity(nonzero_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME));
     let fan_in = super::RelayRuntimeFanIn::new(broadcast.new_receiver());
-    let mut parameterized_entrypoint_senders = HashMap::default();
-    parameterized_entrypoint_senders.insert(relay, parameterized_runtime.sender());
+    let mut branched_entrypoint_senders = HashMap::default();
+    branched_entrypoint_senders.insert(relay, branched_runtime.sender());
     let task = runtime
         .spawn_reingestor_task(
             &domain,
             &shutdown_tx,
-            &parameterized_entrypoint_senders,
+            &branched_entrypoint_senders,
             CreateReingestor {
                 name: identifier("tenant_partition"),
                 from: ProcessorInputs::single(identifier("orders")),
                 output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
-                parameterized_by: parameterized_by("tenant", "orders", &["tenant"]),
+                branched_by: branched_by("tenant", "orders", &["tenant"]),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
@@ -5266,7 +5274,7 @@ async fn reingestor_propagates_attached_ack_into_parameterized_entrypoint() {
 
     let _ = shutdown_tx.send(true);
     let _ = task.await;
-    parameterized_runtime.shutdown().await;
+    branched_runtime.shutdown().await;
 }
 
 #[test]
@@ -5336,26 +5344,26 @@ fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_st
 }
 
 #[tokio::test]
-async fn parameterized_runtime_shutdown_evicts_branch_relay_presence() {
+async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let root_relay = identifier("tenant_orders");
     let registry = super::RelayRegistry::new();
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
-    let parameterized_runtime = super::ParameterizedIngestorRuntime::new(
+    let branched_runtime = super::BranchedIngestorRuntime::new(
         runtime,
         domain.clone(),
         identifier("tenant_ingestor"),
         Arc::new(ArcSwapOption::from(None)),
-        super::ParametrizerTemplate {
+        super::BranchInstanceTemplate {
             source_kind: ModelKind::Ingestor,
             source: identifier("tenant_ingestor"),
             root_relay: root_relay.clone(),
             branch_ttl: Some(Duration::from_secs(30)),
             branch_max_instances: None,
             entrypoint_schema: schema,
-            entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
-            entrypoint_ack_boundary: super::ParametrizerAckBoundary::Preserve,
+            entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+            entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Preserve,
             entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             relays: [(
@@ -5375,9 +5383,9 @@ async fn parameterized_runtime_shutdown_evicts_branch_relay_presence() {
     );
     let branch_key = string_branch_key("tenant", "acme");
 
-    parameterized_runtime
+    branched_runtime
         .sender()
-        .send(super::ParameterizedEntrypointInput::UnresolvedRecord {
+        .send(super::BranchedEntrypointInput::UnresolvedRecord {
             record: RuntimeRecord::from_fields([(
                 "tenant".to_string(),
                 RuntimeValue::String("acme".to_string()),
@@ -5385,7 +5393,7 @@ async fn parameterized_runtime_shutdown_evicts_branch_relay_presence() {
             acks: AckSet::empty(),
         })
         .await
-        .expect("parameterized runtime should accept input");
+        .expect("branched runtime should accept input");
 
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
@@ -5400,16 +5408,16 @@ async fn parameterized_runtime_shutdown_evicts_branch_relay_presence() {
         sleep(Duration::from_millis(10)).await;
     }
 
-    parameterized_runtime.shutdown().await;
+    branched_runtime.shutdown().await;
 
     assert!(
         !registry.contains_key(&branch_key),
-        "parameterized runtime shutdown must evict concrete branch relay presence"
+        "branched runtime shutdown must evict concrete branch relay presence"
     );
 }
 
 #[tokio::test]
-async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() {
+async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let root_relay = identifier("tenant_orders");
@@ -5424,15 +5432,15 @@ async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() 
         remote_dispatcher: None,
     });
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
-    let template = super::ParametrizerTemplate {
+    let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Ingestor,
         source: identifier("metric_ingestor"),
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
         entrypoint_schema: schema.clone(),
-        entrypoint_parameter_mappings: parameter_mappings("orders", &["tenant"]),
-        entrypoint_ack_boundary: super::ParametrizerAckBoundary::Preserve,
+        entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+        entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Preserve,
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
@@ -5449,15 +5457,13 @@ async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() 
         processors_by_input: HashMap::default(),
     };
     let inputs = (0..8)
-        .map(
-            |index| super::ParameterizedEntrypointInput::UnresolvedRecord {
-                record: RuntimeRecord::from_fields([(
-                    "tenant".to_string(),
-                    RuntimeValue::String(format!("tenant-{index}")),
-                )]),
-                acks: AckSet::empty(),
-            },
-        )
+        .map(|index| super::BranchedEntrypointInput::UnresolvedRecord {
+            record: RuntimeRecord::from_fields([(
+                "tenant".to_string(),
+                RuntimeValue::String(format!("tenant-{index}")),
+            )]),
+            acks: AckSet::empty(),
+        })
         .collect::<Vec<_>>();
     let graph = Arc::new(ArcSwapOption::from(None));
     let dispatch_task = tokio::spawn({
@@ -5467,9 +5473,9 @@ async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() 
         let template = template.clone();
         async move {
             let mut instances =
-                ParametrizerRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
-            super::ParameterizedIngestorRuntime::dispatch_entrypoint_inputs(
-                super::ParameterizedBranchDispatchContext {
+                BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
+            super::BranchedIngestorRuntime::dispatch_entrypoint_inputs(
+                super::BranchedBranchDispatchContext {
                     runtime_handle: &runtime,
                     domain: &domain,
                     ingestor: &ingestor,
@@ -5492,7 +5498,7 @@ async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() 
         }
         assert!(
             Instant::now() < deadline,
-            "parameterized dispatch should fill the bounded runtime consumer buffer"
+            "branched dispatch should fill the bounded runtime consumer buffer"
         );
         sleep(Duration::from_millis(10)).await;
     }
@@ -5509,7 +5515,7 @@ async fn canceled_parameterized_dispatch_does_not_leave_detached_branch_tasks() 
         timeout(Duration::from_millis(100), fan_in.recv())
             .await
             .is_err(),
-        "cancelled parameterized dispatch must not keep detached branch tasks that publish after \
+        "cancelled branched dispatch must not keep detached branch tasks that publish after \
          receiver capacity is freed"
     );
 }
@@ -5590,7 +5596,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &lookups,
-            current_parameterization: &[],
+            current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
         },
@@ -5676,7 +5682,7 @@ async fn filter_map_can_read_branch_namespace() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_parameterization: &[identifier("tenant")],
+            current_branching: &[identifier("tenant")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
         },
@@ -5763,7 +5769,7 @@ async fn filter_map_with_unset_can_read_branch_namespace() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_parameterization: &[identifier("tenant")],
+            current_branching: &[identifier("tenant")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
         },
@@ -5837,7 +5843,7 @@ fn filter_map_rejects_branch_namespace_without_branch_schema() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_parameterization: &[],
+            current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
         },
@@ -5867,7 +5873,7 @@ fn filter_map_rejects_missing_branch_key() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_parameterization: &[identifier("region")],
+            current_branching: &[identifier("region")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
         },
@@ -6023,7 +6029,7 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_parameterization: &[],
+            current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
         },
@@ -6306,7 +6312,7 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_parameterization: &[],
+            current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
         },
@@ -6405,7 +6411,7 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_parameterization: &[],
+            current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
         },
@@ -6471,7 +6477,7 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
     let generator = CreateGenerator {
         name: identifier("synth_notifications"),
         into_relay: identifier("generated_notifications"),
-        parameterized_by: parameterized_by("tenant", "generated_notifications", &["tenant"]),
+        branched_by: processor_branched_by("tenant", "generated_notifications", &["tenant"]),
         each: "100ms".to_string(),
         flush_each: "100ms".to_string(),
         max_batch_size: Some("1MiB".to_string()),

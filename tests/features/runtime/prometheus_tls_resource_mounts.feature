@@ -22,38 +22,34 @@ Feature: Prometheus TLS resource mounts
         value F64,
         timestamp STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA sample_wire (
+        CREATE STRICT WIRE JSON SCHEMA sample_wire (
         source string,
         value number,
         timestamp string
       );
-
-      CREATE CODEC sample_codec
+        CREATE CODEC sample_codec
         FROM WIRE JSON SCHEMA sample_wire
         TO SCHEMA sample;
-
-      CREATE RELAY samples SCHEMA sample;
-
-      CREATE CLIENT prom_tls
+        CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
+        CREATE IF NOT EXISTS BRANCH by_prom_samples BY source_branch TTL 5m;
+        CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
+        CREATE CLIENT prom_tls
         TYPE PROMETHEUS
         MOUNT dev_tls
         CONFIG {
           'addr' = 'https://127.0.0.1:9443',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-
-      CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING ); CREATE IF NOT EXISTS BRANCH by_prom_samples PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m; CREATE INGESTOR prom_samples
+        CREATE INGESTOR prom_samples
         TO samples
         DECODE USING sample_codec
-        BRANCHED BY by_prom_samples
+        BRANCHED BY by_prom_samples VALUES { source = samples.source }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM PROMETHEUS prom_tls
         QUERY 'label_replace(vector(42.5), "source", "prometheus", "", "")'
         EVERY 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO samples;
-      START;
+        SUBSCRIBE SESSION TO samples;
+        START;
       """
     Then the relay subscription receives a payload
       """

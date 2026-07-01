@@ -435,59 +435,50 @@ CREATE IF NOT EXISTS SCHEMA device_branch (
 );
 
 CREATE BRANCH by_device
-  PARAMETERIZED BY device_branch VALUES {
-    tenant_id = device_activity_landing.tenant_id,
-    device_id = device_activity_landing.device_id
-  } TTL 30m;
+  BY device_branch TTL 30m;
 
 CREATE BRANCH by_edge_device
-  PARAMETERIZED BY device_branch VALUES {
-    tenant_id = edge_activity_landing.tenant_id,
-    device_id = edge_activity_landing.device_id
-  } TTL 30m;
+  BY device_branch TTL 30m;
 
 CREATE BRANCH by_auth_device
-  PARAMETERIZED BY device_branch VALUES {
-    tenant_id = auth_activity_landing.tenant_id,
-    device_id = auth_activity_landing.device_id
-  } TTL 30m;
+  BY device_branch TTL 30m;
 
-CREATE RELAY device_activity_landing SCHEMA device_activity PARAMETERIZED BY device_branch CAPACITY 1024;
-CREATE RELAY edge_activity_landing SCHEMA edge_activity PARAMETERIZED BY device_branch CAPACITY 1024;
-CREATE RELAY auth_activity_landing SCHEMA auth_activity PARAMETERIZED BY device_branch CAPACITY 1024;
-CREATE RELAY edge_activity_enriched_landing SCHEMA edge_activity_enriched PARAMETERIZED BY device_branch CAPACITY 1024;
+CREATE RELAY device_activity_landing SCHEMA device_activity BRANCHED BY by_device CAPACITY 1024;
+CREATE RELAY edge_activity_landing SCHEMA edge_activity BRANCHED BY by_device CAPACITY 1024;
+CREATE RELAY auth_activity_landing SCHEMA auth_activity BRANCHED BY by_device CAPACITY 1024;
+CREATE RELAY edge_activity_enriched_landing SCHEMA edge_activity_enriched BRANCHED BY by_device CAPACITY 1024;
 
-CREATE RELAY device_connect_events SCHEMA device_activity PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY device_location_events SCHEMA device_activity PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY device_disconnect_events SCHEMA device_activity PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY edge_connect_events SCHEMA edge_activity_enriched PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY edge_disconnect_events SCHEMA edge_activity_enriched PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY auth_authorized_events SCHEMA auth_activity PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY auth_denied_events SCHEMA auth_activity PARAMETERIZED BY device_branch CAPACITY 256;
+CREATE RELAY device_connect_events SCHEMA device_activity BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_location_events SCHEMA device_activity BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_disconnect_events SCHEMA device_activity BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY edge_connect_events SCHEMA edge_activity_enriched BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY edge_disconnect_events SCHEMA edge_activity_enriched BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY auth_authorized_events SCHEMA auth_activity BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY auth_denied_events SCHEMA auth_activity BRANCHED BY by_device CAPACITY 256;
 
-CREATE RELAY device_location_geo_events SCHEMA device_location_geo PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY device_location_geo_audit_events SCHEMA device_location_geo PARAMETERIZED BY device_branch CAPACITY 256;
-CREATE RELAY device_location_checked_events SCHEMA device_location_checked PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY device_edge_connect_events SCHEMA device_edge_connect PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY device_edge_connect_scored_events SCHEMA device_edge_connect PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY connected_sessions SCHEMA connected_session PARAMETERIZED BY device_branch CAPACITY 512;
-CREATE RELAY connect_without_auth_events SCHEMA device_edge_connect PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY uncorrelated_auth_events SCHEMA auth_activity PARAMETERIZED BY device_branch CAPACITY 128;
+CREATE RELAY device_location_geo_events SCHEMA device_location_geo BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_location_geo_audit_events SCHEMA device_location_geo BRANCHED BY by_device CAPACITY 256;
+CREATE RELAY device_location_checked_events SCHEMA device_location_checked BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_edge_connect_events SCHEMA device_edge_connect BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_edge_connect_scored_events SCHEMA device_edge_connect BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY connected_sessions SCHEMA connected_session BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY connect_without_auth_events SCHEMA device_edge_connect BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY uncorrelated_auth_events SCHEMA auth_activity BRANCHED BY by_device CAPACITY 128;
 
-CREATE RELAY disconnect_events_matched SCHEMA disconnect_event_matched PARAMETERIZED BY device_branch CAPACITY 256;
-CREATE RELAY device_disconnect_unmatched SCHEMA device_activity PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY edge_disconnect_unmatched SCHEMA edge_activity_enriched PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY disconnect_events_device_only SCHEMA disconnect_event_device_only PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY disconnect_events_edge_only SCHEMA disconnect_event_edge_only PARAMETERIZED BY device_branch CAPACITY 128;
+CREATE RELAY disconnect_events_matched SCHEMA disconnect_event_matched BRANCHED BY by_device CAPACITY 256;
+CREATE RELAY device_disconnect_unmatched SCHEMA device_activity BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY edge_disconnect_unmatched SCHEMA edge_activity_enriched BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY disconnect_events_device_only SCHEMA disconnect_event_device_only BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY disconnect_events_edge_only SCHEMA disconnect_event_edge_only BRANCHED BY by_device CAPACITY 128;
 
-CREATE RELAY security_auth_denied_events SCHEMA security_event PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY security_uncorrelated_auth_events SCHEMA security_event PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY security_connect_without_auth_events SCHEMA security_event PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY security_events SCHEMA security_event PARAMETERIZED BY device_branch CAPACITY 512;
+CREATE RELAY security_auth_denied_events SCHEMA security_event BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY security_uncorrelated_auth_events SCHEMA security_event BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY security_connect_without_auth_events SCHEMA security_event BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY security_events SCHEMA security_event BRANCHED BY by_device CAPACITY 512;
 
-CREATE RELAY location_distance_alerts SCHEMA distance_alert PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY connection_distance_alerts SCHEMA distance_alert PARAMETERIZED BY device_branch CAPACITY 128;
-CREATE RELAY distance_alerts SCHEMA distance_alert PARAMETERIZED BY device_branch CAPACITY 256;
+CREATE RELAY location_distance_alerts SCHEMA distance_alert BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY connection_distance_alerts SCHEMA distance_alert BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY distance_alerts SCHEMA distance_alert BRANCHED BY by_device CAPACITY 256;
 
 CREATE CLIENT kafka_auth
   TYPE KAFKA
@@ -538,7 +529,10 @@ CREATE INGESTOR iot_device_activity
         device_activity_landing.edge_id = lower(trim(message.edge_id)),
         device_activity_landing.firmware = lower(trim(message.firmware))
   DECODE USING device_activity_cbor_codec
-  BRANCHED BY by_device
+  BRANCHED BY by_device VALUES {
+    tenant_id = device_activity_landing.tenant_id,
+    device_id = device_activity_landing.device_id
+  }
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   TIMESTAMP AT ts
   FROM MQTT mqtt_devices
@@ -555,7 +549,10 @@ CREATE INGESTOR edge_server_activity
         edge_activity_landing.edge_name = lower(trim(message.edge_name)),
         edge_activity_landing.protocol = lower(trim(message.protocol))
   DECODE USING edge_activity_protobuf_codec
-  BRANCHED BY by_edge_device
+  BRANCHED BY by_edge_device VALUES {
+    tenant_id = edge_activity_landing.tenant_id,
+    device_id = edge_activity_landing.device_id
+  }
   FLUSH EACH 250ms MAX BATCH SIZE 512kb
   TIMESTAMP AT ts
   FROM NATS nats_edge
@@ -572,7 +569,10 @@ CREATE INGESTOR auth_server_activity
         auth_activity_landing.auth_result = lower(trim(message.auth_result)),
         auth_activity_landing.edge_id = lower(trim(message.edge_id))
   DECODE USING auth_activity_json_codec
-  BRANCHED BY by_auth_device
+  BRANCHED BY by_auth_device VALUES {
+    tenant_id = auth_activity_landing.tenant_id,
+    device_id = auth_activity_landing.device_id
+  }
   FLUSH EACH 250ms MAX BATCH SIZE 1MiB
   TIMESTAMP AT ts
   FROM KAFKA kafka_auth

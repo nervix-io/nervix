@@ -2643,7 +2643,7 @@ fn GraphPanel(
                             aria-hidden="true"
                             focusable="false"
                         >
-                            <For each={move || current_graph().parameterization_groups()} key=|group| group.id.clone() children={move |group| {
+                            <For each={move || current_graph().branching_groups()} key=|group| group.id.clone() children={move |group| {
                                 let callouts = group.callout_paths();
                                 view! {
                                     <g class="graph-branch-group">
@@ -2810,7 +2810,7 @@ fn GraphPanel(
                             }} />
                         </svg>
                         <div class="graph-branch-label-layer">
-                            <For each={move || current_graph().parameterization_groups()} key=|group| (group.id.clone(), group.active_branches) children={move |group| {
+                            <For each={move || current_graph().branching_groups()} key=|group| (group.id.clone(), group.active_branches) children={move |group| {
                                 view! {
                                     <BranchHeader group=group selected_branch_group=selected_branch_group />
                                 }
@@ -3189,7 +3189,7 @@ fn format_timer_millis(millis: u64) -> String {
 
 #[component]
 fn BranchHeader(
-    group: GraphParameterizationGroup,
+    group: GraphBranchGroup,
     selected_branch_group: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let group_id = group.id.clone();
@@ -3217,7 +3217,7 @@ fn BranchDetailsDialog(
     let selected_group = move || {
         let selected_id = selected_branch_group.get()?;
         domain()
-            .parameterization_groups()
+            .branching_groups()
             .into_iter()
             .find(|group| group.id == selected_id)
     };
@@ -3236,7 +3236,7 @@ fn BranchDetailsDialog(
                     <strong>{move || selected_group().map(|group| group.schema).unwrap_or_default()}</strong>
                 </header>
                 <div class="subscribe-block">
-                    <p>"PARAMETERIZATION"</p>
+                    <p>"BRANCH KEY"</p>
                     <div class="schema-row">
                         <span>"schema"</span>
                         <em>{move || selected_group().map(|group| group.schema).unwrap_or_default()}</em>
@@ -3764,7 +3764,7 @@ impl GraphView {
                         .into_iter()
                         .map(GraphSchemaField::from)
                         .collect(),
-                    parameterization_schema: node.parameterization_schema,
+                    branching_schema: node.branching_schema,
                     statistics: GraphStatistics::from(node.statistics),
                     branches: node
                         .branches
@@ -3785,7 +3785,7 @@ impl GraphView {
                     reconnect_wait_millis: node.reconnect_wait_millis,
                     x: node.x,
                     y: node.y,
-                    parameterization_schema: node.parameterization_schema,
+                    branching_schema: node.branching_schema,
                     branches: node
                         .branches
                         .into_iter()
@@ -4027,7 +4027,7 @@ impl GraphView {
             )
             .collect::<Vec<_>>();
         obstacles.extend(
-            self.parameterization_groups()
+            self.branching_groups()
                 .into_iter()
                 .filter(|group| group.is_obstacle_for_edge(source, target))
                 .map(|group| GraphRouteRect::from_branch_group(&group)),
@@ -4098,7 +4098,7 @@ impl GraphView {
             .max(GRAPH_MIN_HEIGHT)
     }
 
-    fn parameterization_groups(&self) -> Vec<GraphParameterizationGroup> {
+    fn branching_groups(&self) -> Vec<GraphBranchGroup> {
         let mut adjacency = BTreeMap::<&str, Vec<&str>>::new();
         for edge in &self.edges {
             adjacency
@@ -4117,9 +4117,9 @@ impl GraphView {
             .iter()
             .map(|relay| (relay.id.as_str(), relay))
             .collect::<BTreeMap<_, _>>();
-        let mut candidates = Vec::<GraphParameterizationGroupCandidate>::new();
+        let mut candidates = Vec::<GraphBranchGroupCandidate>::new();
         for start in self.nodes.iter().filter(|node| node.starts_branch_group()) {
-            let Some(schema) = &start.parameterization_schema else {
+            let Some(schema) = &start.branching_schema else {
                 continue;
             };
             let mut members = BTreeSet::<String>::new();
@@ -4138,7 +4138,7 @@ impl GraphView {
                     continue;
                 }
                 if let Some(relay) = relay_by_id.get(id) {
-                    if relay.parameterization_schema.as_ref() != Some(schema) {
+                    if relay.branching_schema.as_ref() != Some(schema) {
                         continue;
                     }
                     metric_node_ids.insert(relay.id.clone());
@@ -4158,7 +4158,7 @@ impl GraphView {
                 members.insert(node.id.clone());
                 pending.extend(adjacency.get(id).into_iter().flatten().copied());
             }
-            candidates.push(GraphParameterizationGroupCandidate {
+            candidates.push(GraphBranchGroupCandidate {
                 schema: schema.clone(),
                 start_id: start.id.clone(),
                 members,
@@ -4168,10 +4168,10 @@ impl GraphView {
                 finalizers,
             });
         }
-        GraphParameterizationGroupCandidate::merge(candidates)
+        GraphBranchGroupCandidate::merge(candidates)
             .into_iter()
             .filter_map(|candidate| {
-                GraphParameterizationGroup::from_members(
+                GraphBranchGroup::from_members(
                     &candidate.schema,
                     &candidate.start_id,
                     &candidate.members,
@@ -4225,7 +4225,7 @@ struct GraphNodeTopologyKey {
     subtype: String,
     x: i32,
     y: i32,
-    parameterization_schema: Option<String>,
+    branching_schema: Option<String>,
 }
 
 impl From<&GraphViewNode> for GraphNodeTopologyKey {
@@ -4237,7 +4237,7 @@ impl From<&GraphViewNode> for GraphNodeTopologyKey {
             subtype: node.subtype.clone(),
             x: node.x,
             y: node.y,
-            parameterization_schema: node.parameterization_schema.clone(),
+            branching_schema: node.branching_schema.clone(),
         }
     }
 }
@@ -4250,7 +4250,7 @@ struct GraphRelayTopologyKey {
     y: i32,
     schema: Option<String>,
     schema_fields: Vec<GraphSchemaFieldTopologyKey>,
-    parameterization_schema: Option<String>,
+    branching_schema: Option<String>,
 }
 
 impl From<&GraphViewRelay> for GraphRelayTopologyKey {
@@ -4266,7 +4266,7 @@ impl From<&GraphViewRelay> for GraphRelayTopologyKey {
                 .iter()
                 .map(GraphSchemaFieldTopologyKey::from)
                 .collect(),
-            parameterization_schema: relay.parameterization_schema.clone(),
+            branching_schema: relay.branching_schema.clone(),
         }
     }
 }
@@ -4361,7 +4361,7 @@ struct GraphViewNode {
     reconnect_wait_millis: Option<u64>,
     x: i32,
     y: i32,
-    parameterization_schema: Option<String>,
+    branching_schema: Option<String>,
     branches: Vec<GraphBranchStatistics>,
 }
 
@@ -4538,7 +4538,7 @@ struct GraphViewRelay {
     y: i32,
     schema: Option<String>,
     schema_fields: Vec<GraphSchemaField>,
-    parameterization_schema: Option<String>,
+    branching_schema: Option<String>,
     statistics: GraphStatistics,
     branches: Vec<GraphBranchStatistics>,
 }
@@ -4646,7 +4646,7 @@ impl GraphViewRelay {
 }
 
 #[derive(Clone)]
-struct GraphParameterizationGroup {
+struct GraphBranchGroup {
     id: String,
     schema: String,
     members: BTreeSet<String>,
@@ -4660,7 +4660,7 @@ struct GraphParameterizationGroup {
     finalizers: Vec<GraphAnchor>,
 }
 
-struct GraphParameterizationGroupCandidate {
+struct GraphBranchGroupCandidate {
     schema: String,
     start_id: String,
     members: BTreeSet<String>,
@@ -4670,7 +4670,7 @@ struct GraphParameterizationGroupCandidate {
     finalizers: Vec<GraphAnchor>,
 }
 
-struct MergedGraphParameterizationGroupCandidate {
+struct MergedGraphBranchGroupCandidate {
     schema: String,
     start_id: String,
     members: BTreeSet<String>,
@@ -4680,11 +4680,9 @@ struct MergedGraphParameterizationGroupCandidate {
     finalizers: Vec<GraphAnchor>,
 }
 
-impl GraphParameterizationGroupCandidate {
-    fn merge(
-        candidates: Vec<GraphParameterizationGroupCandidate>,
-    ) -> Vec<MergedGraphParameterizationGroupCandidate> {
-        let mut merged = Vec::<MergedGraphParameterizationGroupCandidate>::new();
+impl GraphBranchGroupCandidate {
+    fn merge(candidates: Vec<GraphBranchGroupCandidate>) -> Vec<MergedGraphBranchGroupCandidate> {
+        let mut merged = Vec::<MergedGraphBranchGroupCandidate>::new();
         for candidate in candidates {
             let Some(entry) = merged.iter_mut().find(|entry| {
                 entry.schema == candidate.schema
@@ -4693,7 +4691,7 @@ impl GraphParameterizationGroupCandidate {
                         .iter()
                         .any(|member| candidate.members.contains(member))
             }) else {
-                merged.push(MergedGraphParameterizationGroupCandidate {
+                merged.push(MergedGraphBranchGroupCandidate {
                     schema: candidate.schema,
                     start_id: candidate.start_id,
                     members: candidate.members,
@@ -4738,7 +4736,7 @@ impl GraphParameterizationGroupCandidate {
     }
 }
 
-impl GraphParameterizationGroup {
+impl GraphBranchGroup {
     fn is_obstacle_for_edge(&self, source: &str, target: &str) -> bool {
         let source_member = self.members.contains(source);
         let target_member = self.members.contains(target);
@@ -5051,7 +5049,7 @@ impl GraphRouteRect {
         )
     }
 
-    fn from_branch_group(group: &GraphParameterizationGroup) -> Self {
+    fn from_branch_group(group: &GraphBranchGroup) -> Self {
         Self::new(
             group.x,
             group.y,
@@ -6151,7 +6149,7 @@ mod tests {
             ],
         });
 
-        let groups = graph.parameterization_groups();
+        let groups = graph.branching_groups();
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         assert_eq!(group.schema, "device_branch");
@@ -6167,12 +6165,12 @@ mod tests {
         );
         assert_eq!(
             group.x - GRAPH_NODE_WIDTH,
-            GraphParameterizationGroup::CALLOUT_CLEARANCE,
+            GraphBranchGroup::CALLOUT_CLEARANCE,
             "branch body should start close to the initiating node border"
         );
         assert_eq!(
             1040 - (group.x + group.width),
-            GraphParameterizationGroup::CALLOUT_CLEARANCE,
+            GraphBranchGroup::CALLOUT_CLEARANCE,
             "branch body should end close to the finalizing node borders"
         );
         let callouts = group.callout_paths();
@@ -6243,7 +6241,7 @@ mod tests {
             ],
         });
 
-        let groups = graph.parameterization_groups();
+        let groups = graph.branching_groups();
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         assert!(
@@ -6360,7 +6358,7 @@ mod tests {
             ],
         });
 
-        let groups = graph.parameterization_groups();
+        let groups = graph.branching_groups();
         let device_group = groups
             .iter()
             .find(|group| group.schema == "device_branch")
@@ -6469,7 +6467,7 @@ mod tests {
             ],
         });
 
-        let groups = graph.parameterization_groups();
+        let groups = graph.branching_groups();
         assert_eq!(groups.len(), 2);
         assert!(groups.iter().all(|group| group.schema == "device_branch"));
         assert_ne!(groups[0].id, groups[1].id);
@@ -6515,7 +6513,7 @@ mod tests {
             ],
         });
 
-        let groups = graph.parameterization_groups();
+        let groups = graph.branching_groups();
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         assert_eq!(group.schema, "site_branch");
@@ -6568,7 +6566,7 @@ mod tests {
             ],
         });
 
-        let groups = graph.parameterization_groups();
+        let groups = graph.branching_groups();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].active_branches, 3);
         assert_eq!(groups[0].subtitle(), "3 br · keys site".to_string());
@@ -7461,8 +7459,8 @@ mod tests {
         x: i32,
         y: i32,
     ) -> DataflowNode {
-        let mut node = DataflowNode::new(id, label, kind, subtype)
-            .with_parameterization_schema(schema.to_string());
+        let mut node =
+            DataflowNode::new(id, label, kind, subtype).with_branching_schema(schema.to_string());
         node.x = x;
         node.y = y;
         node

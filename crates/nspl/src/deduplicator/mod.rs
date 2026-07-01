@@ -4,7 +4,7 @@ use nervix_models::{AckMode, CreateDeduplicator, CreateStatement};
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         deduplicator_name, duration_lit, filter_where_clause, flush_each, from_relay_clauses,
         if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, message_error_policy,
         processor_outputs, suggestions_from_errors, tok,
@@ -103,7 +103,7 @@ pub fn create_deduplicator_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then(deduplicate_on_exprs())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
@@ -121,7 +121,7 @@ pub fn create_deduplicator_parser<'src>()
                                     ((((if_not_exists, mode), name), from_input), filter_where),
                                     outputs,
                                 ),
-                                parameterized_by,
+                                branched_by,
                             ),
                             deduplicate_on,
                         ),
@@ -137,7 +137,7 @@ pub fn create_deduplicator_parser<'src>()
                         name,
                         from: from_input,
                         output_routes: outputs,
-                        parameterized_by,
+                        branched_by,
                         deduplicate_on,
                         max_time,
                         flush_each,

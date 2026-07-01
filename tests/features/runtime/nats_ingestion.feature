@@ -11,36 +11,32 @@ Feature: NATS ingestion
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT nats_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_nats_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
+        CREATE CLIENT nats_main
         TYPE NATS
         CONFIG {
           'addr' = 'nats://127.0.0.1:4222'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_nats_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR nats_notifications
+        CREATE INGESTOR nats_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_nats_notifications
+        BRANCHED BY by_nats_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM NATS nats_main
         SUBJECT notifications_{{test_id}}
         QUEUE GROUP nats_notifications_group_{{test_id}}
         INSTANCES <instances>
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And NATS message is published to subject "notifications_{{test_id}}"
       """
@@ -75,37 +71,32 @@ Feature: NATS ingestion
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT nats_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_nats_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
+        CREATE CLIENT nats_main
         TYPE NATS
         CONFIG {
           'addr' = 'nats://127.0.0.1:4222'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_nats_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR nats_notifications
+        CREATE INGESTOR nats_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_nats_notifications
+        BRANCHED BY by_nats_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM NATS nats_main
         SUBJECT notifications_reconnect_{{test_id}}
         QUEUE GROUP nats_notifications_reconnect_group_{{test_id}}
         INSTANCES 1
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     Then within "5s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
       """

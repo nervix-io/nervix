@@ -11,35 +11,29 @@ Feature: HTTP ingestor domain pacing
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -68,33 +62,28 @@ Feature: HTTP ingestor domain pacing
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
+        SUBSCRIBE SESSION TO notifications;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest" and fails
       """
@@ -129,36 +118,31 @@ Feature: HTTP ingestor domain pacing
         user_id I64,
         occurred_at DATETIME
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         occurred_at string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -188,35 +172,30 @@ Feature: HTTP ingestor domain pacing
         user_id I64,
         occurred_at DATETIME
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         occurred_at string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
+        SUBSCRIBE SESSION TO notifications;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest" and fails
       """

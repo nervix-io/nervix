@@ -6,7 +6,7 @@ use nervix_models::{AckMode, CreateStatement, CreateWindowProcessor, WindowBound
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         duration_lit, filter_where_clause, from_relay_clauses, if_not_exists_clause,
         into_parse_error, kw, lex_input, message_error_policy, processor_outputs,
         suggestions_from_errors, tok, window_processor_name,
@@ -209,7 +209,7 @@ pub fn create_window_processor_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then_ignore(kw(Identifier::Width))
         .then(window_bound())
         .then_ignore(kw(Identifier::Step))
@@ -227,7 +227,7 @@ pub fn create_window_processor_parser<'src>()
                                     ((((if_not_exists, mode), name), from_input), filter_where),
                                     outputs,
                                 ),
-                                parameterized_by,
+                                branched_by,
                             ),
                             width,
                         ),
@@ -244,7 +244,7 @@ pub fn create_window_processor_parser<'src>()
                         name,
                         from: from_input,
                         output_routes: outputs,
-                        parameterized_by,
+                        branched_by,
                         width,
                         step,
                         aggregate,

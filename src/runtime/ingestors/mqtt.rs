@@ -27,9 +27,9 @@ struct MqttTaskContext {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    parameterization: Vec<Identifier>,
-    parameter_value_mappings: Vec<ParameterValueMapping>,
-    parameterized_senders: HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+    branching: Vec<Identifier>,
+    branch_value_mappings: Vec<BranchValueMapping>,
+    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
     events: broadcast::Sender<RuntimeEvent>,
 }
 
@@ -145,22 +145,22 @@ impl MqttIngestor {
                 key,
                 IngestorRuntime::Background {
                     shutdown: shutdown_tx,
-                    parameterized: Vec::new(),
+                    branched: Vec::new(),
                     tasks: vec![task],
                 },
             );
             return Ok(());
         }
-        let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
+        let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
             &ingestor.name,
-            dependencies.parameterized_templates,
+            dependencies.branched_templates,
         );
-        let parameterized_senders = parameterized_runtime.senders.clone();
+        let branched_senders = branched_runtime.senders.clone();
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let parameterization = dependencies.parameterization;
+        let branching = dependencies.branching;
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -181,9 +181,9 @@ impl MqttIngestor {
                 output_routes: output_routes.clone(),
                 filter_where: filter_where.clone(),
                 codec: codec.clone(),
-                parameterization: parameterization.clone(),
-                parameter_value_mappings: dependencies.parameter_value_mappings.clone(),
-                parameterized_senders: parameterized_senders.clone(),
+                branching: branching.clone(),
+                branch_value_mappings: dependencies.branch_value_mappings.clone(),
+                branched_senders: branched_senders.clone(),
                 events: runtime.events.clone(),
             };
             let task_topic = topic.clone();
@@ -449,7 +449,7 @@ impl MqttIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime.runtimes,
+                branched: branched_runtime.runtimes,
                 tasks,
             },
         );
@@ -610,7 +610,7 @@ impl MqttIngestor {
             let dispatched = Self::dispatch_entry(
                 context,
                 entry.record.clone(),
-                if !context.parameterized_senders.is_empty() {
+                if !context.branched_senders.is_empty() {
                     acks.attached()
                 } else {
                     acks.clone()
@@ -696,7 +696,7 @@ impl MqttIngestor {
                 let dispatched = Self::dispatch_entry(
                     context,
                     entry.record.clone(),
-                    if !context.parameterized_senders.is_empty() {
+                    if !context.branched_senders.is_empty() {
                         acks.attached()
                     } else {
                         acks.clone()
@@ -842,11 +842,11 @@ impl MqttIngestor {
                 domain: &context.domain,
                 ingestor: &context.ingestor,
                 timestamp_source: context.timestamp_source.as_ref(),
-                parameterization: &context.parameterization,
-                parameter_value_mappings: Some(&context.parameter_value_mappings),
+                branching: &context.branching,
+                branch_value_mappings: Some(&context.branch_value_mappings),
                 output_routes: &mut output_routes,
                 filter_where: context.filter_where.as_ref(),
-                parameterized_senders: &context.parameterized_senders,
+                branched_senders: &context.branched_senders,
                 record,
                 filter_map_metadata: None,
                 ingested_at: current_timestamp(),

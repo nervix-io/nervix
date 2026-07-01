@@ -65,7 +65,7 @@ Example enrichment:
 
 ```nspl
 CREATE BRANCH by_zip
-  PARAMETERIZED BY zip_branch VALUES { zip = inbound.zip } TTL 5m;
+  BY zip_branch TTL 5m;
 
 CREATE DEDUPLICATOR enrich_zip
   FROM inbound

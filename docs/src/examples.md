@@ -44,7 +44,7 @@ CREATE CODEC notification_codec
   TO SCHEMA notification
   ENCODE created_at AS RFC3339;
 
-CREATE RELAY notifications SCHEMA notification CAPACITY 1;
+CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 1;
 
 CREATE CLIENT kafka_main
   TYPE KAFKA
@@ -53,12 +53,12 @@ CREATE CLIENT kafka_main
     'group.id' = 'nervix-dev'
   };
 
-CREATE BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m;
+CREATE BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
 
 CREATE INGESTOR kafka_notifications
   TO notifications
   DECODE USING notification_codec
-  BRANCHED BY by_kafka_notifications
+  BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM KAFKA kafka_main
   TOPIC notifications
@@ -81,12 +81,12 @@ CREATE CLIENT kafka_tls
     'ssl.ca.location' = '{{ dev_tls }}/ca.pem'
   };
 
-CREATE BRANCH by_kafka_notifications_tls PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m;
+CREATE BRANCH by_kafka_notifications_tls BY user_id_branch TTL 5m;
 
 CREATE INGESTOR kafka_notifications_tls
   TO notifications
   DECODE USING notification_codec
-  BRANCHED BY by_kafka_notifications_tls
+  BRANCHED BY by_kafka_notifications_tls VALUES { user_id = notifications.user_id }
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM KAFKA kafka_tls
   TOPIC notifications_tls
@@ -103,12 +103,12 @@ CREATE CLIENT pulsar_main
     'addr' = 'pulsar://127.0.0.1:6650'
   };
 
-CREATE BRANCH by_pulsar_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m;
+CREATE BRANCH by_pulsar_notifications BY user_id_branch TTL 5m;
 
 CREATE INGESTOR pulsar_notifications
   TO notifications
   DECODE USING notification_codec
-  BRANCHED BY by_pulsar_notifications
+  BRANCHED BY by_pulsar_notifications VALUES { user_id = notifications.user_id }
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM PULSAR pulsar_main
   TOPIC notifications
@@ -146,12 +146,12 @@ CREATE CLIENT pulsar_tls
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'
   };
 
-CREATE BRANCH by_pulsar_notifications_tls PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m;
+CREATE BRANCH by_pulsar_notifications_tls BY user_id_branch TTL 5m;
 
 CREATE INGESTOR pulsar_notifications_tls
   TO notifications
   DECODE USING notification_codec
-  BRANCHED BY by_pulsar_notifications_tls
+  BRANCHED BY by_pulsar_notifications_tls VALUES { user_id = notifications.user_id }
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM PULSAR pulsar_tls
   TOPIC notifications_tls
@@ -243,7 +243,9 @@ CREATE CODEC sample_codec
   TO SCHEMA sample
   ENCODE timestamp AS RFC3339;
 
-CREATE RELAY samples SCHEMA sample CAPACITY 1;
+CREATE BRANCH by_prom_samples BY source_branch TTL 5m;
+
+CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples CAPACITY 1;
 
 CREATE CLIENT prom_main
   TYPE PROMETHEUS
@@ -251,12 +253,10 @@ CREATE CLIENT prom_main
     'addr' = 'http://127.0.0.1:9090'
   };
 
-CREATE BRANCH by_prom_samples PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m;
-
 CREATE INGESTOR prom_samples
   TO samples
   DECODE USING sample_codec
-  BRANCHED BY by_prom_samples
+  BRANCHED BY by_prom_samples VALUES { source = samples.source }
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM PROMETHEUS prom_main
   QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
@@ -290,14 +290,11 @@ CREATE SCHEMA user_branch (
   user_id U32
 );
 
-CREATE RELAY notifications SCHEMA notification_in PARAMETERIZED BY user_branch;
-CREATE RELAY projected_notifications SCHEMA notification_out PARAMETERIZED BY user_branch;
-
 CREATE BRANCH by_user
-  PARAMETERIZED BY user_branch VALUES {
-    tenant = branch.tenant,
-    user_id = branch.user_id
-  } TTL 5m;
+  BY user_branch TTL 5m;
+
+CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_user;
+CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_user;
 
 CREATE DEDUPLICATOR project_notifications
   FROM notifications WHERE notifications.active
@@ -322,7 +319,7 @@ CREATE RELAY notifications
   WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
 CREATE RELAY generated_notifications
-  SCHEMA notification;
+  SCHEMA notification UNBRANCHED;
 
 CREATE GENERATOR synth_notifications
   TO generated_notifications

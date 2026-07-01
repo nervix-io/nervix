@@ -36,20 +36,17 @@ pub fn create_branch_parser<'src>()
         .then(branch_definition_header())
         .then(max_instances().or_not())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(
-            |(((if_not_exists, name), (parameterized_by, values, ttl)), eviction)| {
-                CreateStatement::new(
-                    CreateBranch {
-                        name,
-                        parameterized_by,
-                        values,
-                        ttl,
-                        eviction,
-                    },
-                    if_not_exists,
-                )
-            },
-        )
+        .map(|(((if_not_exists, name), (branched_by, ttl)), eviction)| {
+            CreateStatement::new(
+                CreateBranch {
+                    name,
+                    branched_by,
+                    ttl,
+                    eviction,
+                },
+                if_not_exists,
+            )
+        })
 }
 
 pub fn parse_create_branch_tokens(
@@ -108,17 +105,12 @@ mod tests {
 
     #[test]
     fn parses_create_branch_with_lru_eviction() {
-        let input = "CREATE BRANCH by_tenant PARAMETRIZED BY tenant_branch VALUES { tenant = \
-                     notifications.tenant } TTL 5m MAX INSTANCES 1000 EVICT LRU;";
+        let input = "CREATE BRANCH by_tenant BY tenant_branch TTL 5m MAX INSTANCES 1000 EVICT LRU;";
 
         let parsed = parse_create_branch_tokens(&to_tokens(input)).expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), "by_tenant");
-        assert_eq!(parsed.parameterized_by.as_str(), "tenant_branch");
-        assert_eq!(parsed.values.len(), 1);
-        assert_eq!(parsed.values[0].field.as_str(), "tenant");
-        assert_eq!(parsed.values[0].relay.as_str(), "notifications");
-        assert_eq!(parsed.values[0].relay_field.as_str(), "tenant");
+        assert_eq!(parsed.branched_by.as_str(), "tenant_branch");
         assert_eq!(parsed.ttl, "5m");
         assert_eq!(
             parsed.eviction,
@@ -130,8 +122,7 @@ mod tests {
 
     #[test]
     fn parses_create_branch_without_eviction() {
-        let input = "CREATE BRANCH by_tenant PARAMETERIZED BY tenant_branch VALUES { tenant = \
-                     notifications.tenant } TTL 5m;";
+        let input = "CREATE BRANCH by_tenant BY tenant_branch TTL 5m;";
 
         let parsed = parse_create_branch_tokens(&to_tokens(input)).expect("parse should succeed");
 
@@ -139,25 +130,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_values_block() {
+        let input = "CREATE BRANCH by_tenant BY tenant_branch VALUES { tenant = \
+                     notifications.tenant } TTL 5m;";
+
+        parse_create_branch_tokens(&to_tokens(input)).expect_err("VALUES belongs to initiators");
+    }
+
+    #[test]
     fn rejects_lru_without_max_instances() {
-        let input = "CREATE BRANCH by_tenant PARAMETERIZED BY tenant_branch VALUES { tenant = \
-                     notifications.tenant } TTL 5m EVICT LRU;";
+        let input = "CREATE BRANCH by_tenant BY tenant_branch TTL 5m EVICT LRU;";
 
         parse_create_branch_tokens(&to_tokens(input)).expect_err("MAX INSTANCES is required");
     }
 
     #[test]
-    fn suggests_parameterized_by_as_compound_keyword() {
-        let input = "CREATE BRANCH by_tenant PAR";
+    fn suggests_by_after_branch_name() {
+        let input = "CREATE BRANCH by_tenant ";
         let suggestions = suggest_create_branch(input, input.len());
-        assert!(suggestions.contains(&"PARAMETERIZED BY".to_string()));
-        assert!(suggestions.contains(&"PARAMETRIZED BY".to_string()));
+        assert!(suggestions.contains(&"BY".to_string()));
     }
 
     #[test]
     fn suggests_evict_after_max_instances() {
-        let input = "CREATE BRANCH by_tenant PARAMETERIZED BY tenant_branch VALUES { tenant = \
-                     notifications.tenant } TTL 5m MAX INSTANCES 1000 ";
+        let input = "CREATE BRANCH by_tenant BY tenant_branch TTL 5m MAX INSTANCES 1000 ";
         let suggestions = suggest_create_branch(input, input.len());
         assert!(suggestions.contains(&"EVICT".to_string()));
     }

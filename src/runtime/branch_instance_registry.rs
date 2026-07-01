@@ -3,25 +3,25 @@ use std::{hash::Hash, sync::Arc, time::Duration};
 use indexmap::IndexMap;
 use nervix_models::Timestamp;
 
-pub(super) struct ParametrizerRegistry<K, V>
+pub(super) struct BranchInstanceRegistry<K, V>
 where
     K: Clone + Eq + Hash,
 {
-    entries: IndexMap<K, ParametrizerEntry<V>, ahash::RandomState>,
+    entries: IndexMap<K, BranchInstanceEntry<V>, ahash::RandomState>,
     version: u64,
 }
 
-struct ParametrizerEntry<V> {
+struct BranchInstanceEntry<V> {
     last_ingestion: Timestamp,
     state: Arc<V>,
 }
 
-pub(super) struct GetOrCreateParametrizer<V> {
+pub(super) struct GetOrCreateBranchInstance<V> {
     pub(super) state: Arc<V>,
     pub(super) created: bool,
 }
 
-impl<K, V> ParametrizerRegistry<K, V>
+impl<K, V> BranchInstanceRegistry<K, V>
 where
     K: Clone + Eq + Hash,
 {
@@ -69,7 +69,7 @@ where
         let state = Arc::new(state);
         self.entries.insert(
             key,
-            ParametrizerEntry {
+            BranchInstanceEntry {
                 last_ingestion,
                 state: state.clone(),
             },
@@ -83,10 +83,10 @@ where
         key: K,
         now: Timestamp,
         create: impl FnOnce(&K) -> V,
-    ) -> GetOrCreateParametrizer<V> {
+    ) -> GetOrCreateBranchInstance<V> {
         match self.get_or_try_create_with(key, now, |key| Ok::<_, ()>(create(key))) {
             Ok(result) => result,
-            Err(()) => unreachable!("infallible parametrizer constructor cannot fail"),
+            Err(()) => unreachable!("infallible branch_instance constructor cannot fail"),
         }
     }
 
@@ -95,7 +95,7 @@ where
         key: K,
         now: Timestamp,
         create: impl FnOnce(&K) -> Result<V, E>,
-    ) -> Result<GetOrCreateParametrizer<V>, E> {
+    ) -> Result<GetOrCreateBranchInstance<V>, E> {
         if let Some(index) = self.entries.get_index_of(&key) {
             let state = {
                 let entry = self
@@ -111,7 +111,7 @@ where
             if index != last_index {
                 self.entries.move_index(index, last_index);
             }
-            return Ok(GetOrCreateParametrizer {
+            return Ok(GetOrCreateBranchInstance {
                 state,
                 created: false,
             });
@@ -120,13 +120,13 @@ where
         let state = Arc::new(create(&key)?);
         self.entries.insert(
             key,
-            ParametrizerEntry {
+            BranchInstanceEntry {
                 last_ingestion: now,
                 state: state.clone(),
             },
         );
         self.bump_version();
-        Ok(GetOrCreateParametrizer {
+        Ok(GetOrCreateBranchInstance {
             state,
             created: true,
         })
@@ -200,7 +200,7 @@ where
     }
 }
 
-impl<K, V> Default for ParametrizerRegistry<K, V>
+impl<K, V> Default for BranchInstanceRegistry<K, V>
 where
     K: Clone + Eq + Hash,
 {
@@ -218,7 +218,7 @@ mod tests {
 
     use nervix_models::Timestamp;
 
-    use super::ParametrizerRegistry;
+    use super::BranchInstanceRegistry;
 
     #[derive(Debug)]
     struct DropCounter(std::sync::Arc<AtomicUsize>);
@@ -229,7 +229,7 @@ mod tests {
         }
     }
 
-    impl<K, V> ParametrizerRegistry<K, V>
+    impl<K, V> BranchInstanceRegistry<K, V>
     where
         K: Clone + Eq + std::hash::Hash,
     {
@@ -243,8 +243,8 @@ mod tests {
     }
 
     #[test]
-    fn reusing_parametrizer_promotes_it_to_the_back() {
-        let mut registry = ParametrizerRegistry::<String, usize>::new();
+    fn reusing_branch_instance_promotes_it_to_the_back() {
+        let mut registry = BranchInstanceRegistry::<String, usize>::new();
         let now = timestamp(1, 0);
 
         registry.get_or_create_with("acme".to_string(), now, |_| 1);
@@ -260,9 +260,9 @@ mod tests {
     }
 
     #[test]
-    fn expire_removes_the_oldest_idle_parametrizers() {
+    fn expire_removes_the_oldest_idle_branch_instances() {
         let base = timestamp(31, 0);
-        let mut registry = ParametrizerRegistry::<String, usize>::new();
+        let mut registry = BranchInstanceRegistry::<String, usize>::new();
 
         registry.get_or_create_with("acme".to_string(), timestamp(0, 0), |_| 1);
         registry.get_or_create_with("globex".to_string(), timestamp(26, 0), |_| 2);
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn evict_lru_to_capacity_removes_front_entries() {
-        let mut registry = ParametrizerRegistry::<String, usize>::new();
+        let mut registry = BranchInstanceRegistry::<String, usize>::new();
 
         registry.get_or_create_with("acme".to_string(), timestamp(1, 0), |_| 1);
         registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn evict_lru_to_capacity_keeps_recently_touched_entries() {
-        let mut registry = ParametrizerRegistry::<String, usize>::new();
+        let mut registry = BranchInstanceRegistry::<String, usize>::new();
 
         registry.get_or_create_with("acme".to_string(), timestamp(1, 0), |_| 1);
         registry.get_or_create_with("globex".to_string(), timestamp(2, 0), |_| 2);
@@ -328,7 +328,7 @@ mod tests {
         let drops = std::sync::Arc::new(AtomicUsize::new(0));
 
         {
-            let mut registry = ParametrizerRegistry::<String, DropCounter>::new();
+            let mut registry = BranchInstanceRegistry::<String, DropCounter>::new();
             registry.get_or_create_with("acme".to_string(), timestamp(1, 0), |_| {
                 DropCounter(drops.clone())
             });

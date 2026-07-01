@@ -43,16 +43,16 @@ impl NatsIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
                 reason,
             })?;
-        let parameterized_runtime = runtime.start_parameterized_ingestor_runtime(
+        let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
             &ingestor.name,
-            dependencies.parameterized_templates,
+            dependencies.branched_templates,
         );
-        let parameterized_senders = parameterized_runtime.senders.clone();
+        let branched_senders = branched_runtime.senders.clone();
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let parameterization = dependencies.parameterization;
+        let branching = dependencies.branching;
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -62,7 +62,7 @@ impl NatsIngestor {
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
             let task_timestamp_source = ingestor.timestamp_source.clone();
-            let task_parameter_value_mappings = dependencies.parameter_value_mappings.clone();
+            let task_branch_value_mappings = dependencies.branch_value_mappings.clone();
             let task_subject = subject.clone();
             let task_queue_group = queue_group.clone();
             let task_events = runtime.events.clone();
@@ -71,8 +71,8 @@ impl NatsIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
-            let task_parameterization = parameterization.clone();
-            let task_parameterized_senders = parameterized_senders.clone();
+            let task_branching = branching.clone();
+            let task_branched_senders = branched_senders.clone();
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 let mut backoff = RuntimeReconnectBackoff::default();
@@ -201,12 +201,12 @@ impl NatsIngestor {
                                                         domain: &task_domain,
                                                         ingestor: &task_ingestor,
                                                         timestamp_source: task_timestamp_source.as_ref(),
-                                                        parameterization: &task_parameterization,
-                                                        parameter_value_mappings: Some(&task_parameter_value_mappings),
+                                                        branching: &task_branching,
+                                                        branch_value_mappings: Some(&task_branch_value_mappings),
                                                         output_routes: &mut output_routes,
                                                         filter_where: task_filter_where.as_ref(),
-                                                        parameterized_senders:
-                                                            &task_parameterized_senders,
+                                                        branched_senders:
+                                                            &task_branched_senders,
                                                         record,
                                                         filter_map_metadata: Some(
                                                             IngestFilterMapMetadata::from_headers(
@@ -280,7 +280,7 @@ impl NatsIngestor {
             key,
             IngestorRuntime::Background {
                 shutdown: shutdown_tx,
-                parameterized: parameterized_runtime.runtimes,
+                branched: branched_runtime.runtimes,
                 tasks,
             },
         );

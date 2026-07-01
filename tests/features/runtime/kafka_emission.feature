@@ -44,19 +44,19 @@ Feature: Kafka emission
         TO SCHEMA emitted_notification;
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_branch;
+
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY tenant_branch TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
 
       CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
-        };
-
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m; CREATE INGESTOR mqtt_notifications
+        }; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_headers_in_{{test_id}}
@@ -113,44 +113,39 @@ Feature: Kafka emission
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT kafka_main
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE EMITTER kafka_notifications
+        CREATE EMITTER kafka_notifications
         FROM notifications
         ENCODE USING notification_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 2s MAX BATCH SIZE 1MiB;
-      START;
+        START;
       """
     And emitter "kafka_notifications" enters stall mode
     And MQTT message is published to topic "notifications_in_{{test_id}}"

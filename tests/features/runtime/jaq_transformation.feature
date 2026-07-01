@@ -12,30 +12,26 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -66,32 +62,29 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT kafka_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
+        CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications
+        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
       """
@@ -124,31 +117,28 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT rabbit_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
+        CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
           'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_rabbit_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR rabbit_notifications
+        CREATE INGESTOR rabbit_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_rabbit_notifications
+        BRANCHED BY by_rabbit_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM RABBITMQ rabbit_main
         QUEUE notifications_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     Then RabbitMQ queue "notifications_{{test_id}}" eventually has 1 consumers
     When RabbitMQ message is published to queue "notifications_{{test_id}}"
@@ -180,31 +170,28 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT redis_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_redis_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
+        CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
           'addr' = 'redis://127.0.0.1:6379/'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_redis_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR redis_notifications
+        CREATE INGESTOR redis_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_redis_notifications
+        BRANCHED BY by_redis_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And Redis message is published to channel "notifications_{{test_id}}"
       """
@@ -235,32 +222,29 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-jaq-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And MQTT message is published to topic "notifications_{{test_id}}"
       """
@@ -291,33 +275,30 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT nats_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_nats_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
+        CREATE CLIENT nats_main
         TYPE NATS
         CONFIG {
           'addr' = 'nats://127.0.0.1:4222'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_nats_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR nats_notifications
+        CREATE INGESTOR nats_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_nats_notifications
+        BRANCHED BY by_nats_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM NATS nats_main
         SUBJECT notifications_{{test_id}}
         QUEUE GROUP nats_notifications_group_{{test_id}}
         INSTANCES 1
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And NATS message is published to subject "notifications_{{test_id}}"
       """
@@ -348,31 +329,28 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT zeromq_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_zeromq_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_zeromq_notifications;
+        CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_zeromq_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR zeromq_notifications
+        CREATE INGESTOR zeromq_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_zeromq_notifications
+        BRANCHED BY by_zeromq_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ZEROMQ zeromq_main
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And ZeroMQ message is published
       """
@@ -404,32 +382,29 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT sqs_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_sqs_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
+        CREATE CLIENT sqs_main
         TYPE SQS
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9324',
           'region' = 'us-east-1'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_sqs_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR sqs_notifications
+        CREATE INGESTOR sqs_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_sqs_notifications
+        BRANCHED BY by_sqs_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM SQS sqs_main
         QUEUE notifications_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And SQS message is published to queue "notifications_{{test_id}}"
       """
@@ -460,30 +435,26 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge ws-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ws_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
+        CREATE VHOST edge ws-{{test_id}}.example.com;
+        CREATE ENDPOINT ws_notifications_endpoint
         ON edge
         PATH '/ws'
         TYPE WEBSOCKETS;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
+        CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications
+        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And websocket message is published to host "ws-{{test_id}}.example.com" path "/ws"
       """
@@ -514,31 +485,28 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT http_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE CLIENT http_main
         TYPE HTTP
         CONFIG {
           'endpoint' = 'http://127.0.0.1:18080/http/{{test_id}}',
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM HTTP http_main EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     Then within "30s" the relay subscription receives a payload
       """
@@ -565,29 +533,26 @@ Feature: JAQ transformation
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM JSON
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT ws_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
+        CREATE CLIENT ws_main
         TYPE WEBSOCKETS
         CONFIG {
           'endpoint' = 'ws://127.0.0.1:18080/ws/{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
+        CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications
+        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     Then within "30s" the relay subscription receives a payload
       """
@@ -615,32 +580,29 @@ Feature: JAQ transformation
         value F64,
         timestamp STRING
       );
-
-      CREATE CODEC sample_codec
+        CREATE CODEC sample_codec
         FROM JSON
         TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source, value: (.value * 2), timestamp}';
-
-      CREATE RELAY samples SCHEMA sample;
-
-      CREATE CLIENT prom_main
+        CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
+        CREATE IF NOT EXISTS BRANCH by_prom_samples BY source_branch TTL 5m;
+        CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
+        CREATE CLIENT prom_main
         TYPE PROMETHEUS
         CONFIG {
           'addr' = 'http://127.0.0.1:9090',
           'timeout_ms' = 5000
         };
-
-      CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING ); CREATE IF NOT EXISTS BRANCH by_prom_samples PARAMETERIZED BY source_branch VALUES { source = samples.source } TTL 5m; CREATE INGESTOR prom_samples
+        CREATE INGESTOR prom_samples
         TO samples
         DECODE USING sample_codec
-        BRANCHED BY by_prom_samples
+        BRANCHED BY by_prom_samples VALUES { source = samples.source }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
         EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO samples;
-      START;
+        SUBSCRIBE SESSION TO samples;
+        START;
       """
     Then the relay subscription receives a payload
       """

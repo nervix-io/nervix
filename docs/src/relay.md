@@ -5,28 +5,29 @@
 ```nspl
 CREATE [IF NOT EXISTS] RELAY notifications
   SCHEMA notification
+  UNBRANCHED
   CAPACITY 1;
 ```
 
-## Streams, Parameter Groups, And Branches
+## Streams, Branch Keys, And Branches
 
-External feeds commonly contain records for many tenants, users, devices, accounts, or other business groups. Nervix parameter grouping lets one declared graph process those groups independently.
+External feeds commonly contain records for many tenants, users, devices, accounts, or other business groups. Nervix branching lets one declared graph process those groups independently.
 
-Parameterization is defined by a schema name, and concrete branch creation is defined by a named branch:
+Branching is defined by a schema name on a named branch:
 
-- `CREATE BRANCH by_user PARAMETERIZED BY user_branch VALUES { user_id = notifications.user_id } TTL 5m` isolates each user
-- `CREATE BRANCH by_tenant PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m` isolates each tenant
-- `CREATE BRANCH by_tenant_user PARAMETERIZED BY tenant_user_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m` isolates each tenant/user pair
+- `CREATE BRANCH by_user BY user_branch TTL 5m` isolates each user
+- `CREATE BRANCH by_tenant BY tenant_branch TTL 5m` isolates each tenant
+- `CREATE BRANCH by_tenant_user BY tenant_user_branch TTL 5m` isolates each tenant/user pair
 - `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
 
-Relays declare their branch-key shape without values:
+Relays select an explicit branch or declare unbranched execution:
 
 ```nspl
-CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY tenant_user_branch;
+CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
 CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 ```
 
-An ingestor or reingestor uses `BRANCHED BY <branch>` to compute the parameter group for each record. When records for a group arrive, Nervix uses a branch instance for that group. A branch instance is the runtime execution path for one concrete group.
+An ingestor or reingestor uses `BRANCHED BY <branch>` to compute the branch key for each record. When records for a key arrive, Nervix uses a branch instance for that key. A branch instance is the runtime execution path for one concrete key.
 
 Inside a branch, records move through relay instances. Each relay instance has:
 
@@ -39,14 +40,14 @@ Processing node state also belongs to the branch. That gives each group independ
 
 Runtime branch rules:
 
-- an `INGESTOR` starts a branch for one concrete parameter group through `BRANCHED BY <branch>`
+- an `INGESTOR` starts a branch for one concrete branch key through `BRANCHED BY <branch>`
 - normal downstream processors keep the same branch group
 - output routes and forwarders send records to downstream relay names inside the same branch
 - stateful processors keep branch-local state for that group
 - a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <branch>`
 - an `EMITTER` consumes records across the whole input relay and terminates the branch at an external sink
 
-`branch` is a reserved namespace, so a relay cannot be named `branch`. Inside a parameterized branch, filter-map and parameter mapping expressions can read the current parameter group with `branch.<key>`. The key must exist in the branch schema, and unbranched execution has no `branch.<key>` fields.
+`branch` is a reserved namespace, so a relay cannot be named `branch`. Inside a branched branch, filter-map and branch mapping expressions can read the current branch key with `branch.<key>`. The key must exist in the branch schema, and unbranched execution has no `branch.<key>` fields.
 
 ## Internal Payload Model
 
@@ -72,7 +73,7 @@ Relay batches and their per-row ACK metadata are hot-path runtime data. They are
 ## Capacity
 
 `CAPACITY <n>` controls the relay buffer size for the relay runtime. For
-parameterized relays, the capacity applies to each concrete branch-local relay
+branched relays, the capacity applies to each concrete branch-local relay
 instance. It is an active backpressure boundary: if downstream runtime
 consumers such as reingestors, emitters, or branch processors cannot drain a
 relay quickly enough, upstream dispatch waits once the relay buffer is full.
@@ -85,7 +86,7 @@ ALTER RELAY notifications SET CAPACITY 5;
 
 The updated capacity is persisted in the relay definition and applied to active
 runtime fan-outs for the relay, including fan-outs used by existing concrete
-branches of a parameterized relay. Existing subscriptions and runtime consumers
+branches of a branched relay. Existing subscriptions and runtime consumers
 remain attached while the fan-out buffers are resized.
 
 Increasing capacity is applied in place without reducing buffered data. When
@@ -102,7 +103,7 @@ across every branch. If omitted, Nervix uses the default relay buffer.
 
 ## TTL
 
-TTL is a branch contract, not a relay-local setting. `CREATE BRANCH` declares `TTL <duration>` after its `VALUES { ... }` map. `UNBRANCHED` branch roots do not declare TTL because there are no concrete parameter groups to expire.
+TTL is a branch contract, not a relay-local setting. `CREATE BRANCH` declares `TTL <duration>` after `BY <schema>`. `UNBRANCHED` branch roots do not declare TTL because there are no concrete branch instances to expire.
 
 TTL controls:
 
@@ -128,7 +129,7 @@ CREATE [IF NOT EXISTS] RELAY notifications
 
 Current semantics:
 
-- materialized state is keyed by the branch parameter group
+- materialized state is keyed by the branch key
 - a branch grouped by nothing has one root entry
 - Nervix keeps the latest full record per branch group according to record metadata watermarks
 - materialized state is persisted to Fjall
@@ -148,7 +149,7 @@ Materialized state is also the readable snapshot surface for `GENERATOR` nodes. 
 
 `SHOW RELAY <relay> MATERIALIZED STATE` includes the scheduled materializer owner and replicas before the materialized entries or empty-state message. This matches the placement visibility exposed by other state-holding runtime nodes.
 
-`DESCRIBE RELAY <relay>` reports the logical relay definition, including schema, parameterization, capacity, materialized-state marker, and relay buffer-utilization metrics when available. Traffic metrics are reported on the producing or consuming runtime node edge instead of on the relay itself.
+`DESCRIBE RELAY <relay>` reports the logical relay definition, including schema, branch selection, capacity, materialized-state marker, and relay buffer-utilization metrics when available. Traffic metrics are reported on the producing or consuming runtime node edge instead of on the relay itself.
 
 `DESCRIBE RELAY <relay> WHERE (...)` includes branch-local relay existence and buffer metrics for the matching concrete branch when metrics exist. These summaries are part of runtime state and are preserved through snapshot replication and node drain. Prometheus uses a separate live registry and exports aggregate relay metrics without branch labels; see [Metrics And Observability](metrics-and-observability.md).
 

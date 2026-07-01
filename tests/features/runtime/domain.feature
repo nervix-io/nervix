@@ -5,7 +5,7 @@ Feature: Domain lifecycle
     When this NSPL command batch is executed on the leader node
       """
       CREATE DOMAIN {{domain}};
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SCHEMA notification (
         user_id I64
       )
@@ -24,7 +24,7 @@ Feature: Domain lifecycle
       """
     Then the last command output contains
       """
-      CREATE RELAY notifications SCHEMA notification CAPACITY 1;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 1;
       """
     When these NSPL commands are executed on the leader node
       """
@@ -117,32 +117,27 @@ Feature: Domain lifecycle
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
+        SUBSCRIBE SESSION TO notifications;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest" and fails
@@ -185,34 +180,30 @@ Feature: Domain lifecycle
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT kafka_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
+        CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_kafka_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR kafka_notifications
+        CREATE INGESTOR kafka_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications
+        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
+        SUBSCRIBE SESSION TO notifications;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -241,32 +232,27 @@ Feature: Domain lifecycle
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge ws-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ws_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
+        CREATE VHOST edge ws-{{test_id}}.example.com;
+        CREATE ENDPOINT ws_notifications_endpoint
         ON edge
         PATH '/ws'
         TYPE WEBSOCKETS;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
+        CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications
+        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
+        SUBSCRIBE SESSION TO notifications;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When websocket message is published to host "ws-{{test_id}}.example.com" path "/ws" and fails

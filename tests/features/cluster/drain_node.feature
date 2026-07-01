@@ -22,9 +22,14 @@ Feature: Drain node
         TO SCHEMA transaction;
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY inbound SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
+
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE RELAY deduped SCHEMA transaction PARAMETERIZED BY transaction_id_branch;
+
+      CREATE IF NOT EXISTS BRANCH by_source_txns BY transaction_id_branch TTL 5m;
+
+      CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_source_txns;
+
+      CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_source_txns;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -33,10 +38,10 @@ Feature: Drain node
         PATH '/dedup'
         TYPE HTTP;
 
-      CREATE IF NOT EXISTS BRANCH by_source_txns PARAMETERIZED BY transaction_id_branch VALUES { transaction_id = inbound.transaction_id } TTL 5m; CREATE INGESTOR source_txns
+      CREATE INGESTOR source_txns
         TO inbound
         DECODE USING transaction_codec
-        BRANCHED BY by_source_txns
+        BRANCHED BY by_source_txns VALUES { transaction_id = inbound.transaction_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -75,7 +80,7 @@ Feature: Drain node
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE CLIENT kafka_main
         TYPE KAFKA

@@ -22,35 +22,31 @@ Feature: ClickHouse TLS resource mounts
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-clickhouse-tls-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC tls_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT clickhouse_client
+        CREATE CLIENT clickhouse_client
         TYPE CLICKHOUSE
         MOUNT dev_tls
         CONFIG {
@@ -59,8 +55,7 @@ Feature: ClickHouse TLS resource mounts
           'password' = 'nervix',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-
-      CREATE EMITTER to_ch
+        CREATE EMITTER to_ch
         FROM notifications
         TO CLICKHOUSE clickhouse_client INSERT TO TABLE tls_notifications_out_{{test_id}}
         VALUES {
@@ -71,8 +66,8 @@ Feature: ClickHouse TLS resource mounts
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     Then within "10s" repeatedly publishing MQTT message to topic "tls_notifications_in_{{test_id}}" yields a relay subscription payload
       """

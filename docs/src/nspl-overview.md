@@ -159,13 +159,13 @@ General filter-map rules:
 - there is no implicit cast insertion; type mismatches must be resolved with explicit `AS ...`
 - ingestor filter-map programs read decoded payload fields as `message.<field>` and, for supported sources, transport headers as optional string fields under `headers.<field>`; see [Ingestors](ingestors.md#header-context)
 - emitter filter-map programs write encoded payload fields through `message.<field>` and may write string headers through `headers.<field>` for Kafka, Pulsar, RabbitMQ, NATS, and SQS sinks; see [Emitters](emitters.md#filter-map-programs)
-- branch-local processors, reingestors, and emitters can read the current parameter group as `branch.<key>` when the current relay is parameterized; `branch` is a reserved namespace and cannot be used as a relay name
+- branch-local processors, reingestors, and emitters can read the current branch key as `branch.<key>` when the current relay is branched; `branch` is a reserved namespace and cannot be used as a relay name
 
 Example:
 
 ```nspl
 CREATE BRANCH by_tenant
-  PARAMETERIZED BY tenant_branch VALUES { tenant = notifications.tenant } TTL 5m;
+  BY tenant_branch TTL 5m;
 
 CREATE INGESTOR notifications_in
   FILTER WHERE message.active
@@ -173,7 +173,7 @@ CREATE INGESTOR notifications_in
     SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
     UNSET notifications.raw
   DECODE USING notification_codec
-  BRANCHED BY by_tenant
+  BRANCHED BY by_tenant VALUES { tenant = notifications.tenant }
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -326,5 +326,5 @@ General notes:
 - transport/client configs are generally preserved as pass-through string key/value pairs
 - native schema fields may use the `SENSITIVE` modifier; session subscription output masks those values as `<masked>`, while emitters may send sensitive values to their configured external sink
 - `SUBSCRIBE SESSION` and `UNSUBSCRIBE SESSION` are not persisted in the registry
-- `RELAY` names a connection between runtime nodes; ingestors and reingestors create parameter-group branches with runtime relay instances inside them
+- `RELAY` names a connection between runtime nodes; ingestors and reingestors create branch instances with runtime relay instances inside them
 - `DESCRIBE INGESTOR` exposes runtime-facing ingestor state, including memory-backpressure state and committed Kafka `OFFSET BY DOMAIN` partition assignment

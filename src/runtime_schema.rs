@@ -433,7 +433,7 @@ impl CompiledSchema {
                 &context,
             ),
             (ParseAsType::Array { .. } | ParseAsType::Vec { .. }, _) => Err(format!(
-                "field '{field_name}' cannot be used for Arrow parametrization equality because \
+                "field '{field_name}' cannot be used for Arrow branch equality because \
                  list-valued branch fields are not supported"
             )),
             (expected, actual) => Err(format!(

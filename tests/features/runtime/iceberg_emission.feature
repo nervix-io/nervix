@@ -13,7 +13,7 @@ Feature: Iceberg emission
         action STRING
       );
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE CLIENT gcs_main
         TYPE GCS
@@ -69,7 +69,7 @@ Feature: Iceberg emission
         action STRING
       );
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
       CREATE CLIENT azure_main
         TYPE AZURE_BLOB
@@ -131,37 +131,33 @@ Feature: Iceberg emission
         action STRING,
         created_at DATETIME
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string,
         created_at string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE created_at AS RFC3339;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-iceberg-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC iceberg_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT s3_main
+        CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9900',
@@ -170,15 +166,13 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-
-      CREATE CLIENT iceberg_catalog
+        CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-
-      CREATE EMITTER iceberg_notifications
+        CREATE EMITTER iceberg_notifications
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE notifications_{{test_id}}
         VALUES {
@@ -192,7 +186,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-      START;
+        START;
       """
     And MQTT message is published to topic "iceberg_notifications_in_{{test_id}}"
       """
@@ -231,36 +225,31 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-iceberg-missing-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC iceberg_missing_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT s3_main
+        CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9900',
@@ -269,15 +258,13 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-
-      CREATE CLIENT iceberg_catalog
+        CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-
-      CREATE DETACHED EMITTER iceberg_notifications
+        CREATE DETACHED EMITTER iceberg_notifications
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE missing_notifications_{{test_id}}
         VALUES {
@@ -290,7 +277,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-      START;
+        START;
       """
     And MQTT message is published to topic "iceberg_missing_notifications_in_{{test_id}}"
       """
@@ -343,36 +330,31 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-iceberg-namespace-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC iceberg_namespace_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT s3_main
+        CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9900',
@@ -381,15 +363,13 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-
-      CREATE CLIENT iceberg_catalog
+        CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-
-      CREATE EMITTER iceberg_notifications_a
+        CREATE EMITTER iceberg_notifications_a
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE namespace_notifications_a_{{test_id}}
         VALUES {
@@ -402,8 +382,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-
-      CREATE EMITTER iceberg_notifications_b
+        CREATE EMITTER iceberg_notifications_b
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE namespace_notifications_b_{{test_id}}
         VALUES {
@@ -416,8 +395,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-
-      CREATE EMITTER iceberg_notifications_c
+        CREATE EMITTER iceberg_notifications_c
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE namespace_notifications_c_{{test_id}}
         VALUES {
@@ -430,8 +408,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-
-      CREATE EMITTER iceberg_notifications_d
+        CREATE EMITTER iceberg_notifications_d
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE namespace_notifications_d_{{test_id}}
         VALUES {
@@ -444,7 +421,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-      START;
+        START;
       """
     And MQTT message is published to topic "iceberg_namespace_notifications_in_{{test_id}}"
       """
@@ -491,36 +468,31 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-iceberg-temp-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC iceberg_temp_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT s3_main
+        CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9900',
@@ -529,15 +501,13 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-
-      CREATE CLIENT iceberg_catalog
+        CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-
-      CREATE EMITTER iceberg_notifications
+        CREATE EMITTER iceberg_notifications
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE temp_notifications_{{test_id}}
         VALUES {
@@ -550,7 +520,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 10s MAX SIZE 512MiB;
-      START;
+        START;
       """
     And MQTT message is published to topic "iceberg_temp_notifications_in_{{test_id}}"
       """
@@ -592,36 +562,31 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-iceberg-shutdown-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC iceberg_shutdown_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT s3_main
+        CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9900',
@@ -630,15 +595,13 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-
-      CREATE CLIENT iceberg_catalog
+        CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-
-      CREATE EMITTER iceberg_notifications
+        CREATE EMITTER iceberg_notifications
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE shutdown_notifications_{{test_id}}
         VALUES {
@@ -651,7 +614,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 1h MAX SIZE 512MiB;
-      START;
+        START;
       """
     And MQTT message is published to topic "iceberg_shutdown_notifications_in_{{test_id}}"
       """
@@ -686,36 +649,31 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-iceberg-init-{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC iceberg_init_notifications_in_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE CLIENT s3_main
+        CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9900',
@@ -724,15 +682,13 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-
-      CREATE CLIENT iceberg_catalog
+        CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-
-      CREATE DETACHED EMITTER iceberg_notifications
+        CREATE DETACHED EMITTER iceberg_notifications
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE init_notifications_{{test_id}}
         VALUES {
@@ -745,7 +701,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-      START;
+        START;
       """
     And MQTT message is published to topic "iceberg_init_notifications_in_{{test_id}}"
       """
@@ -783,26 +739,23 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         action string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT mqtt_ingress
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-iceberg-ack-{{test_id}}'
         };
-
-      CREATE CLIENT s3_main
+        CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9900',
@@ -811,27 +764,23 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-
-      CREATE CLIENT iceberg_catalog
+        CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR mqtt_notifications
+        CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications
+        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM MQTT mqtt_ingress
         TOPIC iceberg_ack_notifications_in_{{test_id}}
         SESSION PERSISTENT QOS 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE EMITTER iceberg_notifications
+        CREATE EMITTER iceberg_notifications
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE ack_notifications_{{test_id}}
         VALUES {
@@ -844,9 +793,8 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And emitter "iceberg_notifications" enters stall mode
     And MQTT QoS 1 message is published to topic "iceberg_ack_notifications_in_{{test_id}}"

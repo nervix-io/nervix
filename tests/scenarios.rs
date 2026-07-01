@@ -853,13 +853,13 @@ fn build_ingestor_logic_commands(
         FROM WIRE JSON SCHEMA logic_notification_list_operations_ingest_wire
         TO SCHEMA logic_notification_list_operations_ingest;
 
-      CREATE RELAY logic_notifications SCHEMA {};
-      {}
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_logic_ingestor
-        PARAMETERIZED BY tenant_branch
+        BY tenant_branch
         VALUES {{ tenant = logic_notifications.tenant }}
         TTL 5m;
+      CREATE RELAY logic_notifications SCHEMA {} BRANCHED BY by_logic_ingestor;
+      {}
       CREATE INGESTOR logic_ingestor
         TO logic_notifications
         {}
@@ -1218,8 +1218,8 @@ fn parse_internal_transport_mode(value: &str) -> InternalTransportMode {
     }
 }
 
-#[given(expr = "parameterized relay expiration scan interval is configured as {string}")]
-async fn given_parameterized_stream_expiration_scan_interval_is_configured(
+#[given(expr = "branched relay expiration scan interval is configured as {string}")]
+async fn given_branched_relay_expiration_scan_interval_is_configured(
     world: &mut ScenarioWorld,
     scan_interval: String,
 ) {
@@ -1229,7 +1229,7 @@ async fn given_parameterized_stream_expiration_scan_interval_is_configured(
     );
     world
         .runtime_test_hooks
-        .parametrizer_expiration_scan_interval = Some(
+        .branch_instance_expiration_scan_interval = Some(
         humantime::parse_duration(&scan_interval).expect("scan interval must be a valid duration"),
     );
 }

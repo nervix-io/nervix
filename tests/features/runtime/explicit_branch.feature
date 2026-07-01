@@ -1,6 +1,6 @@
 Feature: Explicit branches
   Scenario Outline: Explicit branch LRU eviction removes the least recently used concrete branch
-    Given parameterized relay expiration scan interval is configured as "100ms"
+    Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -26,14 +26,13 @@ Feature: Explicit branches
 
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
+      CREATE BRANCH by_tenant
+        BY tenant_branch TTL 5m MAX INSTANCES 1 EVICT LRU;
+
       CREATE RELAY notifications
         SCHEMA notification
-        PARAMETERIZED BY tenant_branch
+        BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-
-      CREATE BRANCH by_tenant
-        PARAMETRIZED BY tenant_branch VALUES { tenant = notifications.tenant }
-        TTL 5m MAX INSTANCES 1 EVICT LRU;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -45,7 +44,7 @@ Feature: Explicit branches
       CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_tenant
+        BRANCHED BY by_tenant VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 

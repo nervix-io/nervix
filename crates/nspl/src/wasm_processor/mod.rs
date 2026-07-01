@@ -7,7 +7,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
         lex_input, message_error_policy, output_filter_map_program, relay_ref, resource_ref,
         string_lit, suggestions_from_errors, tok, wasm_processor_name,
@@ -89,7 +89,7 @@ pub fn create_wasm_processor_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(wasm_processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then(message_error_policy())
         .then(global_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -113,7 +113,7 @@ pub fn create_wasm_processor_parser<'src>()
                             ),
                             outputs,
                         ),
-                        parameterized_by,
+                        branched_by,
                     ),
                     message_error_policy,
                 ),
@@ -124,7 +124,7 @@ pub fn create_wasm_processor_parser<'src>()
                         name,
                         from: from_input,
                         output_routes: outputs,
-                        parameterized_by,
+                        branched_by,
                         resource,
                         resource_version,
                         file,
@@ -228,10 +228,7 @@ mod tests {
         );
         assert_eq!(parsed.global_error_policy, GeneralErrorPolicy::Ignore);
         assert_eq!(
-            parsed
-                .parameterized_by
-                .branch()
-                .map(|branch| branch.as_str()),
+            parsed.branched_by.branch().map(|branch| branch.as_str()),
             Some("tenant_branch")
         );
     }

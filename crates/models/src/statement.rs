@@ -686,7 +686,7 @@ impl CreateEmitter {
 pub struct CreateGenerator {
     pub name: Identifier,
     pub into_relay: Identifier,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchSelection,
     pub each: String,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1134,7 +1134,7 @@ pub type AzureBlobConfigEntry = ClientConfigEntry;
 pub type IcebergRestConfigEntry = ClientConfigEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ParameterValueMapping {
+pub struct BranchValueMapping {
     pub field: Identifier,
     pub relay: Identifier,
     pub relay_field: Identifier,
@@ -1143,8 +1143,7 @@ pub struct ParameterValueMapping {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateBranch {
     pub name: Identifier,
-    pub parameterized_by: Identifier,
-    pub values: Vec<ParameterValueMapping>,
+    pub branched_by: Identifier,
     pub ttl: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eviction: Option<BranchEviction>,
@@ -1164,12 +1163,12 @@ impl BranchEviction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BranchParameterization {
+pub enum BranchSelection {
     BranchedBy { branch: Identifier },
     Unbranched,
 }
 
-impl BranchParameterization {
+impl BranchSelection {
     pub fn branched_by(branch: Identifier) -> Self {
         Self::BranchedBy { branch }
     }
@@ -1194,11 +1193,51 @@ impl BranchParameterization {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BranchInitiatorSelection {
+    BranchedBy {
+        branch: Identifier,
+        values: Vec<BranchValueMapping>,
+    },
+    Unbranched,
+}
+
+impl BranchInitiatorSelection {
+    pub fn branched_by(branch: Identifier, values: Vec<BranchValueMapping>) -> Self {
+        Self::BranchedBy { branch, values }
+    }
+
+    pub fn unbranched() -> Self {
+        Self::Unbranched
+    }
+
+    pub fn branch(&self) -> Option<&Identifier> {
+        match self {
+            Self::BranchedBy { branch, .. } => Some(branch),
+            Self::Unbranched => None,
+        }
+    }
+
+    pub fn values(&self) -> &[BranchValueMapping] {
+        match self {
+            Self::BranchedBy { values, .. } => values,
+            Self::Unbranched => &[],
+        }
+    }
+
+    pub fn is_unbranched(&self) -> bool {
+        match self {
+            Self::BranchedBy { .. } => false,
+            Self::Unbranched => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateIngestor {
     pub name: Identifier,
     pub output_routes: ProcessorOutputs,
     pub decode_using_codec: Identifier,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchInitiatorSelection,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
@@ -1309,7 +1348,7 @@ pub struct CreateReingestor {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchInitiatorSelection,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
@@ -1324,7 +1363,7 @@ pub struct CreateInferencer {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchSelection,
     pub resource: Identifier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_version: Option<u64>,
@@ -1346,7 +1385,7 @@ pub struct CreateWasmProcessor {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchSelection,
     pub resource: Identifier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_version: Option<u64>,
@@ -1679,7 +1718,7 @@ pub struct CreateRelay {
     pub schema: Identifier,
     #[serde(default = "default_relay_buffer")]
     pub buffer: usize,
-    pub parameterization: RelayParameterization,
+    pub branching: RelayBranching,
     #[serde(default)]
     pub materialized_state: Option<MaterializedRelayState>,
 }
@@ -1710,46 +1749,23 @@ pub const fn default_relay_buffer() -> usize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RelayParameterization {
-    Parameterized { parameters: RelayParameters },
+pub enum RelayBranching {
+    BranchedBy { branch: Identifier },
     Unbranched,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RelayParameters {
-    Inferred,
-    Declared(Identifier),
-}
-
-impl RelayParameters {
-    pub fn inferred() -> Self {
-        Self::Inferred
-    }
-
-    pub fn declared(schema: Identifier) -> Self {
-        Self::Declared(schema)
-    }
-
-    pub fn declared_schema(&self) -> Option<&Identifier> {
-        match self {
-            Self::Declared(schema) => Some(schema),
-            Self::Inferred => None,
-        }
-    }
-}
-
-impl RelayParameterization {
-    pub fn parameterized(parameters: RelayParameters) -> Self {
-        Self::Parameterized { parameters }
+impl RelayBranching {
+    pub fn branched_by(branch: Identifier) -> Self {
+        Self::BranchedBy { branch }
     }
 
     pub fn unbranched() -> Self {
         Self::Unbranched
     }
 
-    pub fn parameterized_by(&self) -> Option<&Identifier> {
+    pub fn branch(&self) -> Option<&Identifier> {
         match self {
-            Self::Parameterized { parameters } => parameters.declared_schema(),
+            Self::BranchedBy { branch } => Some(branch),
             Self::Unbranched => None,
         }
     }
@@ -1757,7 +1773,7 @@ impl RelayParameterization {
     pub fn is_unbranched(&self) -> bool {
         match self {
             Self::Unbranched => true,
-            Self::Parameterized { .. } => false,
+            Self::BranchedBy { .. } => false,
         }
     }
 }
@@ -1816,7 +1832,8 @@ pub struct ScheduledNode {
     pub identifier: Identifier,
     pub kind: ModelKind,
     pub config: Box<Model>,
-    pub effective_parameterization: Option<Vec<Identifier>>,
+    pub effective_branching: Option<Vec<Identifier>>,
+    pub effective_branching_schema: Option<Identifier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_partition_schedule: Option<KafkaPartitionSchedule>,
     #[serde(default)]
@@ -1906,7 +1923,7 @@ pub struct CreateJunction {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchSelection,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
@@ -1922,7 +1939,7 @@ pub struct CreateDeduplicator {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchSelection,
     pub deduplicate_on: String,
     pub max_time: String,
     pub flush_each: String,
@@ -1941,7 +1958,7 @@ pub struct CreateCorrelator {
     pub left: ProcessorInputs,
     pub right: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchSelection,
     pub correlate_where: String,
     pub match_policy: CorrelatorMatchPolicy,
     pub output: String,
@@ -1983,7 +2000,7 @@ pub struct CreateReorderer {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchSelection,
     pub order_by: String,
     pub max_time: String,
     pub flush_each: String,
@@ -2001,7 +2018,7 @@ pub struct CreateWindowProcessor {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub parameterized_by: BranchParameterization,
+    pub branched_by: BranchSelection,
     pub width: WindowBound,
     pub step: WindowBound,
     pub aggregate: String,
@@ -2064,8 +2081,9 @@ pub enum AckMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        AckMode, BranchParameterization, ClusterSchedule, CreateSchema, DomainSchedule,
-        ErrorPolicies, KafkaPartitionSchedule, MessageErrorPolicy, Model, ModelKind, ScheduledNode,
+        AckMode, BranchInitiatorSelection, BranchSelection, ClusterSchedule, CreateSchema,
+        DomainSchedule, ErrorPolicies, KafkaPartitionSchedule, MessageErrorPolicy, Model,
+        ModelKind, ScheduledNode,
     };
     use crate::{
         CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Identifier, IngestSource,
@@ -2142,7 +2160,8 @@ mod tests {
                     sensitive: false,
                 }],
             })),
-            effective_parameterization: Some(vec![identifier("tenant")]),
+            effective_branching: Some(vec![identifier("tenant")]),
+            effective_branching_schema: None,
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string()],
@@ -2173,7 +2192,8 @@ mod tests {
                     sensitive: false,
                 }],
             })),
-            effective_parameterization: None,
+            effective_branching: None,
+            effective_branching_schema: None,
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string()],
@@ -2217,7 +2237,8 @@ mod tests {
                     sensitive: false,
                 }],
             })),
-            effective_parameterization: None,
+            effective_branching: None,
+            effective_branching_schema: None,
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec![
@@ -2245,14 +2266,15 @@ mod tests {
                     Vec::new(),
                 ),
                 output_routes: ProcessorOutputs::single(identifier("orders_out")),
-                parameterized_by: BranchParameterization::unbranched(),
+                branched_by: BranchSelection::unbranched(),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
                 message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             })),
-            effective_parameterization: None,
+            effective_branching: None,
+            effective_branching_schema: None,
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
@@ -2264,7 +2286,7 @@ mod tests {
                 name: identifier("orders_http"),
                 output_routes: ProcessorOutputs::single(identifier("orders_out")),
                 decode_using_codec: identifier("codec"),
-                parameterized_by: BranchParameterization::unbranched(),
+                branched_by: BranchInitiatorSelection::unbranched(),
                 flush_each: "100ms".to_string(),
                 max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
@@ -2276,7 +2298,8 @@ mod tests {
 
                 filter_where: None,
             })),
-            effective_parameterization: None,
+            effective_branching: None,
+            effective_branching_schema: None,
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],

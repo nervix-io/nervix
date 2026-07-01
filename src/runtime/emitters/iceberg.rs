@@ -115,6 +115,7 @@ struct IcebergCommitPolicy {
 struct IcebergPendingBatch {
     batch: RuntimeRecordBatch,
     metadata: Vec<RuntimeRecordMetadata>,
+    keys: Vec<Option<BranchKey>>,
     acks: Vec<AckSet>,
     domain_timestamp: Timestamp,
 }
@@ -508,6 +509,7 @@ impl IcebergEmitter {
         self.pending_batches.push(IcebergPendingBatch {
             batch: batch.batch,
             metadata: batch.metadata,
+            keys: batch.keys,
             acks: batch.acks,
             domain_timestamp,
         });
@@ -572,8 +574,13 @@ impl IcebergEmitter {
             .iter()
             .flat_map(|batch| batch.metadata.iter().cloned())
             .collect::<Vec<_>>();
+        let keys = self
+            .pending_batches
+            .iter()
+            .flat_map(|batch| batch.keys.iter().cloned())
+            .collect::<Vec<_>>();
         let batch = match self
-            .mapped_arrow_batch_from_runtime_batch(&input_batch, metadata)
+            .mapped_arrow_batch_from_runtime_batch(&input_batch, metadata, keys)
             .await
         {
             Ok(batch) => batch,
@@ -690,6 +697,7 @@ impl IcebergEmitter {
         &self,
         batch: &RuntimeRecordBatch,
         metadata: Vec<RuntimeRecordMetadata>,
+        keys: Vec<Option<BranchKey>>,
     ) -> IcebergEmitterResult<RecordBatch> {
         let decoded = self
             .input_schema
@@ -704,11 +712,22 @@ impl IcebergEmitter {
                 )),
             );
         }
+        if decoded.len() != keys.len() {
+            return Err(
+                Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
+                    "branch key count {} does not match row count {}",
+                    keys.len(),
+                    decoded.len()
+                )),
+            );
+        }
         let records = decoded
             .into_iter()
             .zip(metadata)
             .map(|(record, metadata)| record.into_runtime_record(metadata))
             .collect::<Vec<_>>();
+        let records = augment_runtime_records_with_branch_keys(records, &keys)
+            .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
         let input =
             vm_typed_batch_from_runtime_records(&records, &self.program.program.input_schema)
                 .map_err(|error| {

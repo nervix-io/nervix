@@ -27,33 +27,29 @@ Feature: Protobuf codec
         user_id I64,
         payload STRING
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM PROTOBUF
         USING RESOURCE proto_bundle VERSION 1
         CONFIG {'file' = 'notification.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Notification'
         TO SCHEMA notification
         WITH JAQ TRANSFORMATION '{user_id: .user_id, payload: .payload}';
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT http_notifications_endpoint
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT http_notifications_endpoint
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And protobuf payload fixture "notification" is posted to host "http-{{test_id}}.example.com" path "/ingest"
     Then the relay subscription receives a payload

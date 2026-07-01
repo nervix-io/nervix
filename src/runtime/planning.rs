@@ -1,22 +1,22 @@
 use nervix_models::{
-    BranchParameterization, CorrelationTimeoutAction, CreateBranch, ParameterValueMapping,
+    BranchInitiatorSelection, BranchValueMapping, CorrelationTimeoutAction, CreateBranch,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
     ProcessorOutputs as ModelProcessorOutputs,
 };
 
 use super::*;
 
-fn parameterized_output(output: &ModelProcessorOutput) -> ParameterizedProcessorOutputSpec {
-    ParameterizedProcessorOutputSpec {
+fn branched_output(output: &ModelProcessorOutput) -> BranchedProcessorOutputSpec {
+    BranchedProcessorOutputSpec {
         relay: output.relay.clone(),
         filter_map: output.filter_map.clone(),
         children: Vec::new(),
     }
 }
 
-fn parameterized_outputs(outputs: &ModelProcessorOutputs) -> ParameterizedProcessorOutputsSpec {
-    ParameterizedProcessorOutputsSpec {
-        routes: outputs.routes.iter().map(parameterized_output).collect(),
+fn branched_outputs(outputs: &ModelProcessorOutputs) -> BranchedProcessorOutputsSpec {
+    BranchedProcessorOutputsSpec {
+        routes: outputs.routes.iter().map(branched_output).collect(),
     }
 }
 
@@ -41,14 +41,14 @@ fn processor_input_where_by_inputs(inputs: &ProcessorInputs) -> HashMap<Identifi
 struct BranchEntrypoint {
     ttl: Option<String>,
     max_instances: Option<u64>,
-    values: Vec<ParameterValueMapping>,
+    values: Vec<BranchValueMapping>,
 }
 
 fn branch_entrypoint(
-    parameterized_by: &BranchParameterization,
+    branched_by: &BranchInitiatorSelection,
     branches: &HashMap<Identifier, CreateBranch>,
 ) -> BranchEntrypoint {
-    let Some(branch_ref) = parameterized_by.branch() else {
+    let Some(branch_ref) = branched_by.branch() else {
         return BranchEntrypoint {
             ttl: None,
             max_instances: None,
@@ -64,39 +64,39 @@ fn branch_entrypoint(
             .eviction
             .as_ref()
             .map(|eviction| eviction.max_instances()),
-        values: branch.values.clone(),
+        values: branched_by.values().to_vec(),
     }
 }
 
-pub(in crate::runtime) fn parameterized_ingestor_specs_from_scheduled_nodes(
+pub(in crate::runtime) fn branched_ingestor_specs_from_scheduled_nodes(
     nodes: &[ScheduledNode],
-) -> Vec<ParameterizedIngestorSpec> {
-    parameterized_ingestor_specs_from_models(nodes.iter().map(|node| {
+) -> Vec<BranchedIngestorSpec> {
+    branched_ingestor_specs_from_models(nodes.iter().map(|node| {
         (
             node.kind,
             node.identifier.clone(),
             (*node.config).clone(),
-            node.effective_parameterization.clone(),
+            node.effective_branching.clone(),
         )
     }))
 }
 
-pub(in crate::runtime) fn parameterized_ingestor_specs_from_active_graph(
+pub(in crate::runtime) fn branched_ingestor_specs_from_active_graph(
     graph: &ActiveGraph,
-) -> Vec<ParameterizedIngestorSpec> {
-    parameterized_ingestor_specs_from_models(graph.nodes().into_iter().map(|node| {
+) -> Vec<BranchedIngestorSpec> {
+    branched_ingestor_specs_from_models(graph.nodes().into_iter().map(|node| {
         (
             node.kind,
             node.identifier,
             (*node.config).clone(),
-            node.effective_parameterization,
+            node.effective_branching,
         )
     }))
 }
 
-pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
+pub(in crate::runtime) fn branched_ingestor_specs_from_models(
     nodes: impl Iterator<Item = (ModelKind, Identifier, Model, Option<Vec<Identifier>>)>,
-) -> Vec<ParameterizedIngestorSpec> {
+) -> Vec<BranchedIngestorSpec> {
     let nodes = nodes.collect::<Vec<_>>();
     let branches = nodes
         .iter()
@@ -108,17 +108,17 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
             }
         })
         .collect::<HashMap<_, _>>();
-    let mut processors_by_input = HashMap::<Identifier, Vec<ParameterizedProcessorSpec>>::new();
+    let mut processors_by_input = HashMap::<Identifier, Vec<BranchedProcessorSpec>>::new();
     let mut ingestors = Vec::new();
     let mut relay_roots = Vec::new();
 
-    for (kind, identifier, model, effective_parameterization) in nodes {
+    for (kind, identifier, model, effective_branching) in nodes {
         match &model {
             Model::Deduplicator(deduplicator) => {
                 if deduplicator.from.first().is_none() {
                     continue;
                 }
-                let spec = ParameterizedProcessorSpec {
+                let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
                     input_relays: deduplicator.from.relays().to_vec(),
@@ -126,8 +126,8 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     error_policies: message_only_error_policies(&deduplicator.message_error_policy),
                     from_where: processor_input_where_by_inputs(&deduplicator.from),
                     filter_where: deduplicator.filter_where.clone(),
-                    operation: ParameterizedProcessorOperationSpec::Deduplicator {
-                        output_routes: parameterized_outputs(&deduplicator.output_routes),
+                    operation: BranchedProcessorOperationSpec::Deduplicator {
+                        output_routes: branched_outputs(&deduplicator.output_routes),
                         deduplicate_on: deduplicator.deduplicate_on.clone(),
                         max_time: deduplicator.max_time.clone(),
                     },
@@ -143,7 +143,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 if reorderer.from.first().is_none() {
                     continue;
                 }
-                let spec = ParameterizedProcessorSpec {
+                let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
                     input_relays: reorderer.from.relays().to_vec(),
@@ -151,8 +151,8 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     error_policies: message_only_error_policies(&reorderer.message_error_policy),
                     from_where: processor_input_where_by_inputs(&reorderer.from),
                     filter_where: reorderer.filter_where.clone(),
-                    operation: ParameterizedProcessorOperationSpec::Reorderer {
-                        output_routes: parameterized_outputs(&reorderer.output_routes),
+                    operation: BranchedProcessorOperationSpec::Reorderer {
+                        output_routes: branched_outputs(&reorderer.output_routes),
                         order_by: reorderer.order_by.clone(),
                         max_time: reorderer.max_time.clone(),
                         flush_each: reorderer.flush_each.clone(),
@@ -174,7 +174,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 input_relays.extend(correlator.right.relays().iter().cloned());
                 let mut from_where = processor_input_where_by_inputs(&correlator.left);
                 from_where.extend(processor_input_where_by_inputs(&correlator.right));
-                let spec = ParameterizedProcessorSpec {
+                let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
                     input_relays: input_relays.clone(),
@@ -182,8 +182,8 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     error_policies: message_only_error_policies(&correlator.message_error_policy),
                     from_where,
                     filter_where: correlator.filter_where.clone(),
-                    operation: ParameterizedProcessorOperationSpec::Correlator {
-                        output_routes: parameterized_outputs(&correlator.output_routes),
+                    operation: BranchedProcessorOperationSpec::Correlator {
+                        output_routes: branched_outputs(&correlator.output_routes),
                         left_relays: correlator.left.relays().to_vec(),
                         right_relays: correlator.right.relays().to_vec(),
                         correlate_where: correlator.correlate_where.clone(),
@@ -206,7 +206,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 if window_processor.from.first().is_none() {
                     continue;
                 }
-                let spec = ParameterizedProcessorSpec {
+                let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
                     input_relays: window_processor.from.relays().to_vec(),
@@ -216,8 +216,8 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     ),
                     from_where: processor_input_where_by_inputs(&window_processor.from),
                     filter_where: window_processor.filter_where.clone(),
-                    operation: ParameterizedProcessorOperationSpec::WindowProcessor {
-                        output_routes: parameterized_outputs(&window_processor.output_routes),
+                    operation: BranchedProcessorOperationSpec::WindowProcessor {
+                        output_routes: branched_outputs(&window_processor.output_routes),
                         width: window_processor.width.clone(),
                         step: window_processor.step.clone(),
                         aggregate: window_processor.aggregate.clone(),
@@ -234,7 +234,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 if junction.from.first().is_none() {
                     continue;
                 }
-                let spec = ParameterizedProcessorSpec {
+                let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
                     input_relays: junction.from.relays().to_vec(),
@@ -242,8 +242,8 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     error_policies: message_only_error_policies(&junction.message_error_policy),
                     from_where: processor_input_where_by_inputs(&junction.from),
                     filter_where: junction.filter_where.clone(),
-                    operation: ParameterizedProcessorOperationSpec::Junction {
-                        output_routes: parameterized_outputs(&junction.output_routes),
+                    operation: BranchedProcessorOperationSpec::Junction {
+                        output_routes: branched_outputs(&junction.output_routes),
                         flush_each: junction.flush_each.clone(),
                         max_batch_size: junction.max_batch_size.clone(),
                     },
@@ -259,7 +259,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 if inferencer.from.first().is_none() {
                     continue;
                 }
-                let spec = ParameterizedProcessorSpec {
+                let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
                     input_relays: inferencer.from.relays().to_vec(),
@@ -267,8 +267,8 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     error_policies: message_only_error_policies(&inferencer.message_error_policy),
                     from_where: processor_input_where_by_inputs(&inferencer.from),
                     filter_where: inferencer.filter_where.clone(),
-                    operation: ParameterizedProcessorOperationSpec::Inferencer {
-                        output_routes: parameterized_outputs(&inferencer.output_routes),
+                    operation: BranchedProcessorOperationSpec::Inferencer {
+                        output_routes: branched_outputs(&inferencer.output_routes),
                         resource: inferencer.resource.clone(),
                         resource_version: inferencer.resource_version,
                         file: inferencer.file.clone(),
@@ -289,7 +289,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 if processor.from.first().is_none() {
                     continue;
                 }
-                let spec = ParameterizedProcessorSpec {
+                let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
                     input_relays: processor.from.relays().to_vec(),
@@ -300,8 +300,8 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                     ),
                     from_where: processor_input_where_by_inputs(&processor.from),
                     filter_where: processor.filter_where.clone(),
-                    operation: ParameterizedProcessorOperationSpec::WasmProcessor {
-                        output_routes: parameterized_outputs(&processor.output_routes),
+                    operation: BranchedProcessorOperationSpec::WasmProcessor {
+                        output_routes: branched_outputs(&processor.output_routes),
                         resource: processor.resource.clone(),
                         resource_version: processor.resource_version,
                         file: processor.file.clone(),
@@ -316,15 +316,15 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
             }
             Model::Ingestor(ingestor) => {
                 for output in ingestor.output_routes.outputs() {
-                    let branch = branch_entrypoint(&ingestor.parameterized_by, &branches);
+                    let entrypoint = branch_entrypoint(&ingestor.branched_by, &branches);
                     ingestors.push((
                         kind,
                         identifier.clone(),
                         output.relay.clone(),
-                        branch.ttl,
-                        branch.max_instances,
-                        branch.values,
-                        ParametrizerAckBoundary::Preserve,
+                        entrypoint.ttl,
+                        entrypoint.max_instances,
+                        entrypoint.values,
+                        BranchInstanceAckBoundary::Preserve,
                         ingestor.flush_each.clone(),
                         ingestor.max_batch_size.clone(),
                         ingestor.error_policies.clone(),
@@ -333,22 +333,22 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
             }
             Model::Reingestor(reingestor) => {
                 for output in reingestor.output_routes.outputs() {
-                    let branch = branch_entrypoint(&reingestor.parameterized_by, &branches);
+                    let entrypoint = branch_entrypoint(&reingestor.branched_by, &branches);
                     ingestors.push((
                         kind,
                         identifier.clone(),
                         output.relay.clone(),
-                        branch.ttl,
-                        branch.max_instances,
-                        branch.values,
-                        ParametrizerAckBoundary::Reingestor(reingestor.mode),
+                        entrypoint.ttl,
+                        entrypoint.max_instances,
+                        entrypoint.values,
+                        BranchInstanceAckBoundary::Reingestor(reingestor.mode),
                         reingestor.flush_each.clone(),
                         reingestor.max_batch_size.clone(),
                         message_only_error_policies(&reingestor.message_error_policy),
                     ));
                 }
             }
-            Model::Relay(_) if effective_parameterization.is_some() => {
+            Model::Relay(_) if effective_branching.is_some() => {
                 relay_roots.push((kind, identifier.clone(), identifier));
             }
             _ => {}
@@ -357,8 +357,8 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
 
     fn build_nodes(
         relay: &Identifier,
-        processors_by_input: &HashMap<Identifier, Vec<ParameterizedProcessorSpec>>,
-    ) -> Vec<ParameterizedProcessorSpec> {
+        processors_by_input: &HashMap<Identifier, Vec<BranchedProcessorSpec>>,
+    ) -> Vec<BranchedProcessorSpec> {
         let mut nodes = Vec::new();
 
         if let Some(processors) = processors_by_input.get(relay) {
@@ -366,17 +366,13 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
             processors.sort_by(|left, right| left.processor.cmp(&right.processor));
             for mut processor in processors {
                 match &mut processor.operation {
-                    ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::WindowProcessor {
-                        output_routes, ..
-                    }
-                    | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
-                    | ParameterizedProcessorOperationSpec::WasmProcessor {
-                        output_routes, ..
-                    } => {
+                    BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
+                    | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+                    | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
+                    | BranchedProcessorOperationSpec::Correlator { output_routes, .. }
+                    | BranchedProcessorOperationSpec::Junction { output_routes, .. }
+                    | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
+                    | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
                         for output in output_routes.outputs_mut() {
                             output.children = build_nodes(&output.relay, processors_by_input);
                         }
@@ -406,7 +402,7 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 None,
                 None,
                 Vec::new(),
-                ParametrizerAckBoundary::Preserve,
+                BranchInstanceAckBoundary::Preserve,
                 "IMMEDIATE".to_string(),
                 None,
                 ErrorPolicies::handled_by_log(),
@@ -423,19 +419,19 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
                 root_relay,
                 branch_ttl,
                 branch_max_instances,
-                entrypoint_parameter_mappings,
+                entrypoint_branch_mappings,
                 entrypoint_ack_boundary,
                 entrypoint_flush_each,
                 entrypoint_max_batch_size,
                 error_policies,
             )| {
-                ParameterizedIngestorSpec {
+                BranchedIngestorSpec {
                     kind,
                     identifier,
                     root_relay: root_relay.clone(),
                     branch_ttl,
                     branch_max_instances,
-                    entrypoint_parameter_mappings,
+                    entrypoint_branch_mappings,
                     entrypoint_ack_boundary,
                     entrypoint_flush_each,
                     entrypoint_max_batch_size,
@@ -450,13 +446,13 @@ pub(in crate::runtime) fn parameterized_ingestor_specs_from_models(
 
 pub(in crate::runtime) fn collect_reachable_processors(
     root_relay: &Identifier,
-    processors_by_input: &HashMap<Identifier, Vec<ParameterizedProcessorSpec>>,
-) -> Vec<ParameterizedProcessorSpec> {
+    processors_by_input: &HashMap<Identifier, Vec<BranchedProcessorSpec>>,
+) -> Vec<BranchedProcessorSpec> {
     fn visit_stream(
         relay: &Identifier,
-        processors_by_input: &HashMap<Identifier, Vec<ParameterizedProcessorSpec>>,
+        processors_by_input: &HashMap<Identifier, Vec<BranchedProcessorSpec>>,
         seen_processors: &mut HashSet<Identifier>,
-        out: &mut Vec<ParameterizedProcessorSpec>,
+        out: &mut Vec<BranchedProcessorSpec>,
     ) {
         let Some(processors) = processors_by_input.get(relay) else {
             return;
@@ -468,13 +464,13 @@ pub(in crate::runtime) fn collect_reachable_processors(
                 continue;
             }
             match &processor.operation {
-                ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Correlator { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
-                | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
+                BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
+                | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
+                | BranchedProcessorOperationSpec::Correlator { output_routes, .. }
+                | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+                | BranchedProcessorOperationSpec::Junction { output_routes, .. }
+                | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
+                | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
                     for output in output_routes.outputs() {
                         visit_stream(&output.relay, processors_by_input, seen_processors, out);
                     }
@@ -496,8 +492,8 @@ pub(in crate::runtime) fn collect_reachable_processors(
     out
 }
 
-pub(in crate::runtime) fn parameterized_processor_ids(
-    specs: &[ParameterizedIngestorSpec],
+pub(in crate::runtime) fn branched_processor_ids(
+    specs: &[BranchedIngestorSpec],
 ) -> HashSet<Identifier> {
     let mut ids = HashSet::default();
     for spec in specs {
@@ -506,13 +502,13 @@ pub(in crate::runtime) fn parameterized_processor_ids(
     ids
 }
 
-pub(in crate::runtime) fn materialize_parametrizer_template(
-    spec: &ParameterizedIngestorSpec,
+pub(in crate::runtime) fn materialize_branch_instance_template(
+    spec: &BranchedIngestorSpec,
     model_index: &HashMap<(ModelKind, Identifier), Model>,
     relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
     relay_registries: &HashMap<Identifier, RelayRegistry>,
     relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
-) -> Result<ParametrizerTemplate, String> {
+) -> Result<BranchInstanceTemplate, String> {
     fn parse_optional_window_duration(
         processor: &Identifier,
         setting: &str,
@@ -534,7 +530,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
     }
 
     fn materialize_output(
-        output: &ParameterizedProcessorOutputSpec,
+        output: &BranchedProcessorOutputSpec,
     ) -> Result<RelayProcessorOutputTemplate, String> {
         Ok(RelayProcessorOutputTemplate {
             output_relay: output.relay.clone(),
@@ -543,7 +539,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
     }
 
     fn materialize_outputs(
-        outputs: &ParameterizedProcessorOutputsSpec,
+        outputs: &BranchedProcessorOutputsSpec,
     ) -> Result<RelayProcessorOutputsTemplate, String> {
         Ok(RelayProcessorOutputsTemplate {
             routes: outputs
@@ -595,7 +591,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
     }
 
     fn materialize_nodes(
-        nodes: &[ParameterizedProcessorSpec],
+        nodes: &[BranchedProcessorSpec],
     ) -> Result<Vec<RelayProcessorTemplate>, String> {
         let mut out = Vec::new();
         for node in nodes {
@@ -608,7 +604,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                 from_where: node.from_where.clone(),
                 filter_where: node.filter_where.clone(),
                 operation: match &node.operation {
-                    ParameterizedProcessorOperationSpec::Deduplicator {
+                    BranchedProcessorOperationSpec::Deduplicator {
                         output_routes,
                         deduplicate_on,
                         max_time,
@@ -624,7 +620,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                             )
                         })?,
                     },
-                    ParameterizedProcessorOperationSpec::WindowProcessor {
+                    BranchedProcessorOperationSpec::WindowProcessor {
                         output_routes,
                         width,
                         step,
@@ -653,7 +649,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                             })?
                             .inner,
                     },
-                    ParameterizedProcessorOperationSpec::Reorderer {
+                    BranchedProcessorOperationSpec::Reorderer {
                         output_routes,
                         order_by,
                         max_time,
@@ -677,7 +673,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                             max_batch_size.as_deref(),
                         )?,
                     },
-                    ParameterizedProcessorOperationSpec::Correlator {
+                    BranchedProcessorOperationSpec::Correlator {
                         output_routes,
                         left_relays,
                         right_relays,
@@ -711,7 +707,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                         )?,
                         timeout_policy: timeout_policy.clone(),
                     },
-                    ParameterizedProcessorOperationSpec::Junction {
+                    BranchedProcessorOperationSpec::Junction {
                         output_routes,
                         flush_each,
                         max_batch_size,
@@ -724,7 +720,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                             max_batch_size.as_deref(),
                         )?,
                     },
-                    ParameterizedProcessorOperationSpec::Inferencer {
+                    BranchedProcessorOperationSpec::Inferencer {
                         output_routes,
                         resource,
                         resource_version,
@@ -747,7 +743,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                             max_batch_size.as_deref(),
                         )?,
                     },
-                    ParameterizedProcessorOperationSpec::WasmProcessor {
+                    BranchedProcessorOperationSpec::WasmProcessor {
                         output_routes,
                         resource,
                         resource_version,
@@ -769,15 +765,15 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
     for processor in &spec.processors {
         branch_relay_ids.extend(processor.input_relays.iter().cloned());
         match &processor.operation {
-            ParameterizedProcessorOperationSpec::Deduplicator { output_routes, .. }
-            | ParameterizedProcessorOperationSpec::Reorderer { output_routes, .. }
-            | ParameterizedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-            | ParameterizedProcessorOperationSpec::Junction { output_routes, .. }
-            | ParameterizedProcessorOperationSpec::Inferencer { output_routes, .. }
-            | ParameterizedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
+            BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
+            | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
+            | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+            | BranchedProcessorOperationSpec::Junction { output_routes, .. }
+            | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
+            | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
                 branch_relay_ids.extend(output_routes.outputs().map(|output| output.relay.clone()));
             }
-            ParameterizedProcessorOperationSpec::Correlator {
+            BranchedProcessorOperationSpec::Correlator {
                 output_routes,
                 timeout_policy,
                 ..
@@ -816,21 +812,17 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
                     ));
                 }
                 None => {
-                    return Err(format!(
-                        "missing parameterized branch relay '{}'",
-                        relay.as_str()
-                    ));
+                    return Err(format!("missing branched relay '{}'", relay.as_str()));
                 }
             }
-            let registry = relay_registries.get(&relay).cloned().ok_or_else(|| {
-                format!("missing parameterized branch relay '{}'", relay.as_str())
-            })?;
-            let services = relay_services.get(&relay).cloned().ok_or_else(|| {
-                format!(
-                    "missing parameterized branch relay services '{}'",
-                    relay.as_str()
-                )
-            })?;
+            let registry = relay_registries
+                .get(&relay)
+                .cloned()
+                .ok_or_else(|| format!("missing branched relay '{}'", relay.as_str()))?;
+            let services = relay_services
+                .get(&relay)
+                .cloned()
+                .ok_or_else(|| format!("missing branched relay services '{}'", relay.as_str()))?;
             Ok((relay, RelayProcessorRelayTemplate { registry, services }))
         })
         .collect::<Result<HashMap<_, _>, String>>()?;
@@ -883,7 +875,7 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
         .cloned()
         .ok_or_else(|| {
             format!(
-                "missing parameterized ingestor entrypoint relay schema '{}'",
+                "missing branched ingestor entrypoint relay schema '{}'",
                 entrypoint_schema_relay.as_str()
             )
         })?;
@@ -904,14 +896,14 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
         processors.sort();
         processors.dedup();
     }
-    Ok(ParametrizerTemplate {
+    Ok(BranchInstanceTemplate {
         source_kind: spec.kind,
         source: spec.identifier.clone(),
         root_relay: spec.root_relay.clone(),
         branch_ttl,
         branch_max_instances,
         entrypoint_schema,
-        entrypoint_parameter_mappings: spec.entrypoint_parameter_mappings.clone(),
+        entrypoint_branch_mappings: spec.entrypoint_branch_mappings.clone(),
         entrypoint_ack_boundary: spec.entrypoint_ack_boundary,
         entrypoint_flush_each: parse_branch_flush_policy(
             spec.kind.as_str(),
@@ -929,18 +921,18 @@ pub(in crate::runtime) fn materialize_parametrizer_template(
 
 pub(in crate::runtime) fn resolve_concrete_branch(
     record: &RuntimeRecord,
-    parameterized_by: &[Identifier],
+    branched_by: &[Identifier],
     owner: &Identifier,
 ) -> Result<ConcreteBranch, String> {
-    if parameterized_by.is_empty() {
+    if branched_by.is_empty() {
         return Ok(ConcreteBranch::Root);
     }
 
-    let mut fields = Vec::with_capacity(parameterized_by.len());
-    for field_name in parameterized_by {
+    let mut fields = Vec::with_capacity(branched_by.len());
+    for field_name in branched_by {
         let Some(value) = record.value(field_name.as_str()) else {
             return Err(format!(
-                "parameterized field '{}' is missing for '{}'",
+                "branch field '{}' is missing for '{}'",
                 field_name.as_str(),
                 owner.as_str()
             ));
@@ -954,7 +946,7 @@ pub(in crate::runtime) fn resolve_concrete_branch(
 pub(in crate::runtime) fn resolve_concrete_branch_from_mappings(
     record: &RuntimeRecord,
     branch_key: Option<&BranchKey>,
-    mappings: &[ParameterValueMapping],
+    mappings: &[BranchValueMapping],
     owner: &Identifier,
 ) -> Result<ConcreteBranch, String> {
     if mappings.is_empty() {
@@ -970,7 +962,7 @@ pub(in crate::runtime) fn resolve_concrete_branch_from_mappings(
         };
         let Some(value) = value else {
             return Err(format!(
-                "parameterized source field '{}.{}' is missing for '{}'",
+                "branch source field '{}.{}' is missing for '{}'",
                 mapping.relay.as_str(),
                 mapping.relay_field.as_str(),
                 owner.as_str()
@@ -982,13 +974,13 @@ pub(in crate::runtime) fn resolve_concrete_branch_from_mappings(
     BranchKey::from_fields(fields).map(ConcreteBranch::Key)
 }
 
-pub(in crate::runtime) fn format_parameterized_by(parameterized_by: &[Identifier]) -> String {
-    if parameterized_by.is_empty() {
+pub(in crate::runtime) fn format_branched_by(branched_by: &[Identifier]) -> String {
+    if branched_by.is_empty() {
         "()".to_string()
     } else {
         format!(
             "({})",
-            parameterized_by
+            branched_by
                 .iter()
                 .map(|field| field.as_str())
                 .collect::<Vec<_>>()

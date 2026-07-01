@@ -11,45 +11,38 @@ Feature: Inferencer resources
       """
       CREATE RESOURCE fraud_model;
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_model}}';
-
       CREATE SCHEMA features (
         tenant STRING,
         vector <vector_type>
       );
-
       CREATE SCHEMA scored (
         tenant STRING,
         score <score_type>
       );
-
       CREATE STRICT WIRE JSON SCHEMA features_wire (
         tenant string,
         vector array
       );
-
       CREATE CODEC features_codec
         FROM WIRE JSON SCHEMA features_wire
         TO SCHEMA features;
-
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY features SCHEMA features PARAMETERIZED BY tenant_branch;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY scored SCHEMA scored PARAMETERIZED BY tenant_branch;
-
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+      CREATE IF NOT EXISTS BRANCH by_feature_source BY tenant_branch TTL 5m;
+      CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
+      CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
-
       CREATE ENDPOINT ingress
         ON edge
         PATH '/features'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_feature_source PARAMETERIZED BY tenant_branch VALUES { tenant = features.tenant } TTL 5m; CREATE INGESTOR feature_source
+      CREATE INGESTOR feature_source
         TO features
         DECODE USING features_codec
-        BRANCHED BY by_feature_source
+        BRANCHED BY by_feature_source VALUES { tenant = features.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
       CREATE INFERENCER score_model
         FROM features
         TO scored SET scored.tenant = features.tenant
@@ -82,45 +75,38 @@ Feature: Inferencer resources
       """
       CREATE RESOURCE fraud_model;
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_model}}';
-
       CREATE SCHEMA features (
         tenant STRING,
         vector <vector_type>
       );
-
       CREATE SCHEMA scored (
         tenant STRING,
         score <score_type>
       );
-
       CREATE STRICT WIRE JSON SCHEMA features_wire (
         tenant string,
         vector array
       );
-
       CREATE CODEC features_codec
         FROM WIRE JSON SCHEMA features_wire
         TO SCHEMA features;
-
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY features SCHEMA features PARAMETERIZED BY tenant_branch;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE RELAY scored SCHEMA scored PARAMETERIZED BY tenant_branch;
-
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+      CREATE IF NOT EXISTS BRANCH by_feature_source BY tenant_branch TTL 5m;
+      CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
+      CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
-
       CREATE ENDPOINT ingress
         ON edge
         PATH '/features'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_feature_source PARAMETERIZED BY tenant_branch VALUES { tenant = features.tenant } TTL 5m; CREATE INGESTOR feature_source
+      CREATE INGESTOR feature_source
         TO features
         DECODE USING features_codec
-        BRANCHED BY by_feature_source
+        BRANCHED BY by_feature_source VALUES { tenant = features.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
       CREATE INFERENCER score_model
         FROM features
         TO scored SET scored.tenant = features.tenant

@@ -12,36 +12,32 @@ Feature: SQS ingestion
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT sqs_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_sqs_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
+        CREATE CLIENT sqs_main
         TYPE SQS
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9324',
           'region' = 'us-east-1'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_sqs_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR sqs_notifications
+        CREATE INGESTOR sqs_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_sqs_notifications
+        BRANCHED BY by_sqs_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM SQS sqs_main
         QUEUE notifications_{{test_id}}
         INSTANCES <instances>
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And SQS message is published to queue "notifications_{{test_id}}"
       """
@@ -76,36 +72,31 @@ Feature: SQS ingestion
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT sqs_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_sqs_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
+        CREATE CLIENT sqs_main
         TYPE SQS
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9324',
           'region' = 'us-east-1'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_sqs_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR sqs_notifications
+        CREATE INGESTOR sqs_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_sqs_notifications
+        BRANCHED BY by_sqs_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM SQS sqs_main
         QUEUE notifications_reconnect_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     Then within "5s" DESCRIBE INGESTOR "sqs_notifications" on the leader node contains
       """

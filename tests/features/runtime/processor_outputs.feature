@@ -103,56 +103,51 @@ Feature: Processor output routing
         level STRING,
         urgent BOOL
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         id string,
         active boolean,
         level string,
         urgent boolean
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY incoming_logs_a SCHEMA notification PARAMETERIZED BY id_branch;
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY incoming_logs_b SCHEMA notification PARAMETERIZED BY id_branch;
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY errors_ss SCHEMA notification PARAMETERIZED BY id_branch;
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY warnings_ss SCHEMA notification PARAMETERIZED BY id_branch;
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY info_ss SCHEMA notification PARAMETERIZED BY id_branch;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress_a
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_logs_a BY id_branch TTL 5m;
+        CREATE RELAY incoming_logs_a SCHEMA notification BRANCHED BY by_source_logs_a;
+        CREATE IF NOT EXISTS BRANCH by_source_logs_b BY id_branch TTL 5m;
+        CREATE RELAY incoming_logs_b SCHEMA notification BRANCHED BY by_source_logs_b;
+        CREATE RELAY errors_ss SCHEMA notification BRANCHED BY by_source_logs_a;
+        CREATE RELAY warnings_ss SCHEMA notification BRANCHED BY by_source_logs_a;
+        CREATE RELAY info_ss SCHEMA notification BRANCHED BY by_source_logs_a;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress_a
         ON edge
         PATH '/route-a'
         TYPE HTTP;
-
-      CREATE ENDPOINT ingress_b
+        CREATE ENDPOINT ingress_b
         ON edge
         PATH '/route-b'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE IF NOT EXISTS BRANCH by_source_logs_a PARAMETERIZED BY id_branch VALUES { id = incoming_logs_a.id } TTL 5m; CREATE INGESTOR source_logs_a
+        CREATE INGESTOR source_logs_a
         TO incoming_logs_a
         DECODE USING notification_codec
-        BRANCHED BY by_source_logs_a
+        BRANCHED BY by_source_logs_a VALUES { id = incoming_logs_a.id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE IF NOT EXISTS BRANCH by_source_logs_b PARAMETERIZED BY id_branch VALUES { id = incoming_logs_b.id } TTL 5m; CREATE INGESTOR source_logs_b
+        CREATE INGESTOR source_logs_b
         TO incoming_logs_b
         DECODE USING notification_codec
-        BRANCHED BY by_source_logs_b
+        BRANCHED BY by_source_logs_b VALUES { id = incoming_logs_b.id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR log_splitter
+        CREATE DEDUPLICATOR log_splitter
         FROM incoming_logs_a WHERE incoming_logs_a.level != "skip",
              incoming_logs_b WHERE incoming_logs_b.level != "hold"
         FILTER WHERE incoming_logs_a.active
@@ -163,12 +158,10 @@ Feature: Processor output routing
         DEDUPLICATE ON incoming_logs_a.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO errors_ss;
-      SUBSCRIBE SESSION TO warnings_ss;
-      SUBSCRIBE SESSION TO info_ss;
-
-      START;
+        SUBSCRIBE SESSION TO errors_ss;
+        SUBSCRIBE SESSION TO warnings_ss;
+        SUBSCRIBE SESSION TO info_ss;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route-a"
       """
@@ -210,7 +203,7 @@ Feature: Processor output routing
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: Single processor output route preserves parameterization and applies destination rewrites
+  Scenario Outline: Single processor output route preserves branching and applies destination rewrites
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -226,46 +219,40 @@ Feature: Processor output routing
         amount I64,
         raw STRING
       );
-
-      CREATE SCHEMA notification_out (
+        CREATE SCHEMA notification_out (
         tenant STRING,
         user_id I64,
         amount I64,
         normalized STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer,
         active boolean,
         amount integer,
         raw string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification_in;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-      CREATE RELAY notifications SCHEMA notification_in PARAMETERIZED BY tenant_user_id_branch;
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-      CREATE RELAY projected_notifications SCHEMA notification_out PARAMETERIZED BY tenant_user_id_branch;
-
-      CREATE VHOST edge http-output-route-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_http_notifications;
+        CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_http_notifications;
+        CREATE VHOST edge http-output-route-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/output-route'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 ); CREATE IF NOT EXISTS BRANCH by_http_notifications PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR http_notifications
+        CREATE INGESTOR http_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications
+        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR project_notifications
+        CREATE DEDUPLICATOR project_notifications
         FROM notifications
         FILTER WHERE notifications.active
         TO projected_notifications
@@ -275,9 +262,8 @@ Feature: Processor output routing
         DEDUPLICATE ON notifications.tenant, notifications.user_id
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO projected_notifications;
-      START;
+        SUBSCRIBE SESSION TO projected_notifications;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-output-route-{{test_id}}.example.com" path "/output-route"
       """
@@ -323,48 +309,42 @@ Feature: Processor output routing
         level STRING,
         legacy STRING
       );
-
-      CREATE SCHEMA notification_out (
+        CREATE SCHEMA notification_out (
         id STRING,
         active BOOL,
         severity STRING
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         id string,
         active boolean,
         level string,
         legacy string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification_in;
-
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY incoming_logs SCHEMA notification_in PARAMETERIZED BY id_branch;
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY errors_ss SCHEMA notification_out PARAMETERIZED BY id_branch;
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY warnings_ss SCHEMA notification_out PARAMETERIZED BY id_branch;
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-      CREATE RELAY info_ss SCHEMA notification_out PARAMETERIZED BY id_branch;
-
-      CREATE VHOST edge http-project-output-{{test_id}}.example.com;
-
-      CREATE ENDPOINT ingress
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
+        CREATE IF NOT EXISTS BRANCH by_source_logs BY id_branch TTL 5m;
+        CREATE RELAY incoming_logs SCHEMA notification_in BRANCHED BY by_source_logs;
+        CREATE RELAY errors_ss SCHEMA notification_out BRANCHED BY by_source_logs;
+        CREATE RELAY warnings_ss SCHEMA notification_out BRANCHED BY by_source_logs;
+        CREATE RELAY info_ss SCHEMA notification_out BRANCHED BY by_source_logs;
+        CREATE VHOST edge http-project-output-{{test_id}}.example.com;
+        CREATE ENDPOINT ingress
         ON edge
         PATH '/project-output'
         TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING ); CREATE IF NOT EXISTS BRANCH by_source_logs PARAMETERIZED BY id_branch VALUES { id = incoming_logs.id } TTL 5m; CREATE INGESTOR source_logs
+        CREATE INGESTOR source_logs
         TO incoming_logs
         DECODE USING notification_codec
-        BRANCHED BY by_source_logs
+        BRANCHED BY by_source_logs VALUES { id = incoming_logs.id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR project_by_destination
+        CREATE DEDUPLICATOR project_by_destination
         FROM incoming_logs
         FILTER WHERE incoming_logs.active
         TO errors_ss
@@ -382,12 +362,10 @@ Feature: Processor output routing
         DEDUPLICATE ON incoming_logs.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO errors_ss;
-      SUBSCRIBE SESSION TO warnings_ss;
-      SUBSCRIBE SESSION TO info_ss;
-
-      START;
+        SUBSCRIBE SESSION TO errors_ss;
+        SUBSCRIBE SESSION TO warnings_ss;
+        SUBSCRIBE SESSION TO info_ss;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-project-output-{{test_id}}.example.com" path "/project-output"
       """

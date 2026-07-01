@@ -4,7 +4,7 @@ use nervix_models::{AckMode, CreateReingestor, CreateStatement};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization_with_values,
+        ParseError, ParseFromSourceError, ack_mode, branch_initiator_selection,
         current_word_prefix, filter_where_clause, flush_each, from_relay_clauses,
         if_not_exists_clause, into_parse_error, kw, lex_input, message_error_policy,
         processor_outputs, reingestor_name, suggestions_from_errors, tok,
@@ -23,7 +23,7 @@ pub fn create_reingestor_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization_with_values())
+        .then(branch_initiator_selection())
         .then(flush_each())
         .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -32,7 +32,7 @@ pub fn create_reingestor_parser<'src>()
                 (
                     (
                         (((((if_not_exists, mode), name), from_input), filter_where), outputs),
-                        parameterized_by,
+                        branched_by,
                     ),
                     flush_each,
                 ),
@@ -44,7 +44,7 @@ pub fn create_reingestor_parser<'src>()
                         name,
                         from: from_input,
                         output_routes: outputs,
-                        parameterized_by,
+                        branched_by,
                         flush_each,
                         max_batch_size,
                         mode: mode.unwrap_or(AckMode::Attached),
@@ -115,7 +115,8 @@ mod tests {
     fn parses_create_reingestor() {
         let tokens = to_tokens(
             "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
-             tenant_user FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             tenant_user VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "repartition");
@@ -131,10 +132,7 @@ mod tests {
             "tenant_notifications"
         );
         assert_eq!(
-            parsed
-                .parameterized_by
-                .branch()
-                .map(|branch| branch.as_str()),
+            parsed.branched_by.branch().map(|branch| branch.as_str()),
             Some("tenant_user")
         );
         assert_eq!(parsed.mode, AckMode::Attached);
@@ -144,14 +142,12 @@ mod tests {
     fn parses_branched_by() {
         let tokens = to_tokens(
             "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
-             tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             tenant_branch VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(
-            parsed
-                .parameterized_by
-                .branch()
-                .map(|branch| branch.as_str()),
+            parsed.branched_by.branch().map(|branch| branch.as_str()),
             Some("tenant_branch")
         );
     }
@@ -164,19 +160,34 @@ mod tests {
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(
-            parsed.parameterized_by,
-            nervix_models::BranchParameterization::unbranched()
+            parsed.branched_by,
+            nervix_models::BranchInitiatorSelection::unbranched()
         );
     }
 
     #[test]
-    fn rejects_branched_by_with_values_block() {
+    fn parses_branched_by_with_values_block() {
         let input = "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
                      BRANCHED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } \
                      FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;";
 
+        let parsed =
+            parse_create_reingestor_tokens(&to_tokens(input)).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.branched_by.branch().map(|branch| branch.as_str()),
+            Some("tenant_branch")
+        );
+        assert_eq!(parsed.branched_by.values().len(), 1);
+    }
+
+    #[test]
+    fn rejects_bare_by() {
+        let input = "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BY \
+                     tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;";
+
         parse_create_reingestor_tokens(&to_tokens(input))
-            .expect_err("VALUES belongs to CREATE BRANCH");
+            .expect_err("BY is only valid in CREATE BRANCH");
     }
 
     #[test]
@@ -192,7 +203,8 @@ mod tests {
     fn parses_create_reingestor_detached() {
         let tokens = to_tokens(
             "CREATE DETACHED REINGESTOR repartition FROM notifications TO tenant_notifications \
-             BRANCHED BY tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             BRANCHED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } FLUSH EACH \
+             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.mode, AckMode::Detached);
@@ -202,7 +214,8 @@ mod tests {
     fn parses_reingestor_flush_each() {
         let tokens = to_tokens(
             "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
-             tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             tenant_branch VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reingestor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.flush_each, "100ms");
@@ -225,17 +238,18 @@ mod tests {
     }
 
     #[test]
-    fn suggests_unbranched_as_parameterization_choice() {
+    fn suggests_unbranched_as_branch_selection_choice() {
         let input = "CREATE REINGESTOR r FROM a TO b ";
         let suggestions = suggest_create_reingestor(input, input.len());
         assert!(suggestions.contains(&"UNBRANCHED".to_string()));
     }
 
     #[test]
-    fn suggests_flush_after_branched_by() {
+    fn suggests_values_after_branched_by() {
         let input = "CREATE REINGESTOR r FROM input TO output BRANCHED BY tenant_branch ";
         let suggestions = suggest_create_reingestor(input, input.len());
-        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(suggestions.contains(&"VALUES".to_string()));
+        assert!(!suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(!suggestions.contains(&"TTL".to_string()));
     }
 
@@ -247,8 +261,9 @@ mod tests {
     }
 
     #[test]
-    fn suggests_flush_after_parameterized_by() {
-        let input = "CREATE REINGESTOR r FROM input TO output BRANCHED BY tenant_branch FL";
+    fn suggests_flush_after_branched_by() {
+        let input = "CREATE REINGESTOR r FROM input TO output BRANCHED BY tenant_branch VALUES { \
+                     tenant = output.tenant } FL";
         let suggestions = suggest_create_reingestor(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
     }

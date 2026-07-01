@@ -25,7 +25,7 @@ pub(super) enum EmitterFaultMode {
 pub struct RuntimeTestHooks {
     pub emitter_faults: Arc<EmitterFaultInjector>,
     pub ingestor_faults: Arc<IngestorFaultInjector>,
-    pub parametrizer_expiration_scan_interval: Option<Duration>,
+    pub branch_instance_expiration_scan_interval: Option<Duration>,
     pub leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
 }
 
@@ -41,7 +41,7 @@ impl Default for RuntimeTestHooks {
         Self {
             emitter_faults: Arc::default(),
             ingestor_faults: Arc::default(),
-            parametrizer_expiration_scan_interval: None,
+            branch_instance_expiration_scan_interval: None,
             leadership_transfers,
         }
     }

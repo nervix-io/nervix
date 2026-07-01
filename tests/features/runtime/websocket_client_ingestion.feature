@@ -21,7 +21,9 @@ Feature: Websocket client ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE RELAY notifications SCHEMA notification;
+      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+      CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
 
       CREATE CLIENT kafka_main
         TYPE KAFKA
@@ -43,11 +45,10 @@ Feature: Websocket client ingestion
       """
     And these NSPL commands are executed
       """
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
+      CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications
+        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -76,33 +77,28 @@ Feature: Websocket client ingestion
       CREATE SCHEMA notification (
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE CLIENT ws_main
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
+        CREATE CLIENT ws_main
         TYPE WEBSOCKETS
         CONFIG {
           'endpoint' = 'ws://127.0.0.1:18080/ws/{{test_id}}'
         };
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_ws_notifications PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR ws_notifications
+        CREATE INGESTOR ws_notifications
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications
+        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     Then within "5s" DESCRIBE INGESTOR "ws_notifications" on the leader node contains
       """

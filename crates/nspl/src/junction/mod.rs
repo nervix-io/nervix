@@ -4,7 +4,7 @@ use nervix_models::{AckMode, CreateJunction, CreateStatement};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause,
         into_parse_error, junction_name, kw, lex_input, message_error_policy, processor_outputs,
         suggestions_from_errors, tok,
@@ -23,7 +23,7 @@ pub fn create_junction_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then(flush_each())
         .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -32,7 +32,7 @@ pub fn create_junction_parser<'src>()
                 (
                     (
                         (((((if_not_exists, mode), name), from_inputs), filter_where), outputs),
-                        parameterized_by,
+                        branched_by,
                     ),
                     flush_each,
                 ),
@@ -44,7 +44,7 @@ pub fn create_junction_parser<'src>()
                         name,
                         from: from_inputs,
                         output_routes: outputs,
-                        parameterized_by,
+                        branched_by,
                         flush_each,
                         max_batch_size,
                         message_error_policy,

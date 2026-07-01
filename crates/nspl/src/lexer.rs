@@ -113,8 +113,6 @@ pub enum Identifier {
     Path,
     Http,
     Websockets,
-    Parameterized,
-    Parametrized,
     KafkaBroker,
     Addresses,
     With,

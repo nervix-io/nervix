@@ -4,7 +4,7 @@ use nervix_models::{AckMode, CreateInferencer, CreateStatement, InferencerTensor
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, current_word_prefix,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause, inferencer_name,
         into_parse_error, kw, lex_input, message_error_policy, processor_outputs, relay_ref,
         resource_ref, string_lit, suggestions_from_errors, tok, word_raw,
@@ -61,7 +61,7 @@ pub fn create_inferencer_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then_ignore(kw(Identifier::Using))
         .then_ignore(kw(Identifier::Resource))
         .then(resource_ref())
@@ -83,7 +83,7 @@ pub fn create_inferencer_parser<'src>()
             ) = value;
             let (
                 (((((if_not_exists, mode), name), from_input), filter_where), processor_outputs),
-                parameterized_by,
+                branched_by,
             ) = base;
             let (flush_each, max_batch_size) = flush_each;
             CreateStatement::new(
@@ -91,7 +91,7 @@ pub fn create_inferencer_parser<'src>()
                     name,
                     from: from_input,
                     output_routes: processor_outputs,
-                    parameterized_by,
+                    branched_by,
                     resource,
                     resource_version,
                     file,

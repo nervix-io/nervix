@@ -5,9 +5,9 @@ use chumsky::{
     prelude::*,
 };
 use nervix_models::{
-    AckMode, BranchParameterization, Domain, ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy,
-    Identifier as ModelIdentifier, MessageErrorPolicy, ParameterValueMapping, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    AckMode, BranchInitiatorSelection, BranchSelection, BranchValueMapping, Domain,
+    ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, Identifier as ModelIdentifier,
+    MessageErrorPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
 };
 use sorted_vec::SortedSet;
 
@@ -137,17 +137,8 @@ pub fn schema_ref<'src>()
     parse_identifier("ref:schema")
 }
 
-fn parameterized_by_phrase<'src>()
--> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        kw_phrase2(Identifier::Parameterized, Identifier::By),
-        kw_phrase2(Identifier::Parametrized, Identifier::By),
-    ))
-}
-
-pub fn parameter_value_mappings<'src>()
--> impl Parser<'src, &'src [Token], Vec<ParameterValueMapping>, extra::Err<ParseError<'src>>> + Clone
-{
+pub fn branch_value_mappings<'src>()
+-> impl Parser<'src, &'src [Token], Vec<BranchValueMapping>, extra::Err<ParseError<'src>>> + Clone {
     let ident = parse_identifier("field_name");
     let source = parse_identifier("relay_ref")
         .then_ignore(tok(Token::Dot))
@@ -157,7 +148,7 @@ pub fn parameter_value_mappings<'src>()
         ident
             .then_ignore(tok(Token::Eq))
             .then(source)
-            .map(|(field, (relay, relay_field))| ParameterValueMapping {
+            .map(|(field, (relay, relay_field))| BranchValueMapping {
                 field,
                 relay,
                 relay_field,
@@ -171,33 +162,35 @@ pub fn parameter_value_mappings<'src>()
     )
 }
 
-pub fn branch_definition_header<'src>() -> impl Parser<
-    'src,
-    &'src [Token],
-    (ModelIdentifier, Vec<ParameterValueMapping>, String),
-    extra::Err<ParseError<'src>>,
-> + Clone {
-    parameterized_by_phrase()
+pub fn branch_definition_header<'src>()
+-> impl Parser<'src, &'src [Token], (ModelIdentifier, String), extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::By)
         .ignore_then(schema_ref())
-        .then(parameter_value_mappings())
         .then_ignore(kw(Identifier::Ttl))
         .then(duration_lit())
-        .map(|((schema, values), ttl)| (schema, values, ttl))
 }
 
-pub fn branch_parameterization<'src>()
--> impl Parser<'src, &'src [Token], BranchParameterization, extra::Err<ParseError<'src>>> + Clone {
+pub fn branch_selection<'src>()
+-> impl Parser<'src, &'src [Token], BranchSelection, extra::Err<ParseError<'src>>> + Clone {
     let branched = kw_phrase2(Identifier::Branched, Identifier::By)
         .ignore_then(branch_ref())
-        .map(BranchParameterization::branched_by);
-    let unbranched = kw(Identifier::Unbranched).to(BranchParameterization::unbranched());
+        .map(BranchSelection::branched_by);
+    let unbranched = kw(Identifier::Unbranched).to(BranchSelection::unbranched());
 
     choice((branched, unbranched))
 }
 
-pub fn branch_parameterization_with_values<'src>()
--> impl Parser<'src, &'src [Token], BranchParameterization, extra::Err<ParseError<'src>>> + Clone {
-    branch_parameterization()
+pub fn branch_initiator_selection<'src>()
+-> impl Parser<'src, &'src [Token], BranchInitiatorSelection, extra::Err<ParseError<'src>>> + Clone
+{
+    let branched = kw_phrase2(Identifier::Branched, Identifier::By)
+        .ignore_then(branch_ref())
+        .then(branch_value_mappings())
+        .map(|(branch, values)| BranchInitiatorSelection::branched_by(branch, values));
+    let unbranched = kw(Identifier::Unbranched).to(BranchInitiatorSelection::unbranched());
+
+    choice((branched, unbranched))
 }
 
 pub fn domain_name<'src>()
@@ -607,8 +600,6 @@ fn processor_output_boundary_token(token: &Token) -> bool {
         Token::Semicolon
             | Token::Word(Word::KnownWord {
                 iden: Identifier::To
-                    | Identifier::Parameterized
-                    | Identifier::Parametrized
                     | Identifier::Branched
                     | Identifier::Unbranched
                     | Identifier::Flush

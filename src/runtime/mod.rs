@@ -28,23 +28,23 @@ use nervix_interconnect::{
     Envelope, RelayPayload, RelayPayloadKind, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AckMode, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule, CodecProtobufConfig,
-    CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientKinesis, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint,
-    CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSignalingProtocol, CreateWireSchemaStmt, Domain, DomainConfig, DomainPace,
+    AckMode, BranchValueMapping, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
+    CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy,
+    CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientKinesis, CreateClientMqtt, CreateClientNats,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
+    CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor,
+    CreateRelay, CreateSignalingProtocol, CreateWireSchemaStmt, Domain, DomainConfig, DomainPace,
     DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorFieldMapping,
     ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
     Identifier, IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode,
     KafkaPartitionSchedule, KinesisIngestMode, MessageErrorPolicy, Model, ModelKind,
     MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, ParameterValueMapping, PostgresConflictAction,
-    PostgresValueMapping, PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome,
-    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus,
-    RetryPolicy, ScheduledNode, SqsIngestMode, Timestamp,
+    MySqlConflictAction, MySqlValueMapping, PostgresConflictAction, PostgresValueMapping,
+    PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, ScheduledNode,
+    SqsIngestMode, Timestamp,
 };
 use nervix_nspl::{
     vm_program::{
@@ -106,6 +106,7 @@ use crate::{
 };
 
 mod branch_aggregated_state;
+mod branch_instance_registry;
 mod branch_lru_state;
 mod client_config;
 mod deduplicator;
@@ -114,7 +115,6 @@ mod http_client;
 mod ingestors;
 mod kafka_offset_state;
 mod materialized_state;
-mod parametrizer_registry;
 mod planning;
 mod processors;
 mod relay_batch;
@@ -133,6 +133,7 @@ use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, encode_branch_aggregated_snapshot,
 };
 use branch_aggregated_state::{ReplicatedBranchAggregatedState, decode_branch_aggregated_snapshot};
+use branch_instance_registry::BranchInstanceRegistry;
 use branch_lru_state::{decode_branch_lru_snapshot, encode_branch_lru_snapshot};
 use client_config::{client_tls_paths, read_tls_file, render_client_config_template};
 use deduplicator::{
@@ -145,25 +146,23 @@ use materialized_state::{
     ReplicatedMaterializedRelayState, decode_materialized_stream_snapshot,
     encode_materialized_stream_snapshot_entries,
 };
-use parametrizer_registry::ParametrizerRegistry;
 use planning::{
-    format_parameterized_by, materialize_parametrizer_template,
-    parameterized_ingestor_specs_from_active_graph, parameterized_ingestor_specs_from_models,
-    parameterized_ingestor_specs_from_scheduled_nodes, parameterized_processor_ids,
-    resolve_concrete_branch, resolve_concrete_branch_from_mappings,
+    branched_ingestor_specs_from_active_graph, branched_ingestor_specs_from_models,
+    branched_ingestor_specs_from_scheduled_nodes, branched_processor_ids, format_branched_by,
+    materialize_branch_instance_template, resolve_concrete_branch,
+    resolve_concrete_branch_from_mappings,
 };
 use processors::{
-    CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram, CompiledReordererProgram,
-    CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
-    JunctionFlushContext, ParameterizedIngestorSpec, ParameterizedProcessorOperationSpec,
-    ParameterizedProcessorOutputSpec, ParameterizedProcessorOutputsSpec,
-    ParameterizedProcessorSpec, ParametrizerAckBoundary, ParametrizerTemplate, PlannedGeneralError,
-    PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
-    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
-    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
-    RelayProcessorTemplate, ReorderKeyPart, ReordererPendingMessage, SharedCorrelatorBranchState,
-    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
-    WindowFlushContext,
+    BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec,
+    BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
+    BranchedProcessorSpec, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
+    CompiledReordererProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
+    InferencerFlushContext, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
+    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
+    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
+    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
+    ReorderKeyPart, ReordererPendingMessage, SharedCorrelatorBranchState, WasmAckContext,
+    WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -189,7 +188,7 @@ use window_state::{
 #[cfg(test)]
 const STUPID_CHANNEL_CAPACITY_REMOVE_ME: usize = 1;
 const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
-const PARAMETRIZER_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
@@ -272,12 +271,12 @@ impl RuntimeKey {
 enum IngestorRuntime {
     Background {
         shutdown: watch::Sender<bool>,
-        parameterized: Vec<Arc<ParameterizedIngestorRuntime>>,
+        branched: Vec<Arc<BranchedIngestorRuntime>>,
         tasks: Vec<JoinHandle<()>>,
     },
     Endpoint {
         route_keys: Vec<HttpRouteKey>,
-        parameterized: Vec<Arc<ParameterizedIngestorRuntime>>,
+        branched: Vec<Arc<BranchedIngestorRuntime>>,
     },
 }
 
@@ -415,12 +414,12 @@ struct DomainExecution {
     relay_schemas: HashMap<Identifier, Arc<CompiledSchema>>,
     relay_services: HashMap<Identifier, Arc<RelayBoundaryServices>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,
-    relay_parameterizations: HashMap<Identifier, Vec<Identifier>>,
-    relay_parameterization_schemas: HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
+    relay_branchings: HashMap<Identifier, Vec<Identifier>>,
+    relay_branching_schemas: HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
     materialized_stream_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_stream_owner_nodes: HashMap<Identifier, Option<String>>,
-    parameterized_ingestors: HashMap<Identifier, Vec<ParameterizedIngestorSpec>>,
-    parameterized_entrypoints: HashMap<Identifier, Vec<Arc<ParameterizedIngestorRuntime>>>,
+    branched_ingestors: HashMap<Identifier, Vec<BranchedIngestorSpec>>,
+    branched_entrypoints: HashMap<Identifier, Vec<Arc<BranchedIngestorRuntime>>>,
     codecs: HashMap<Identifier, Arc<CompiledCodec>>,
     signaling_protocols: HashMap<Identifier, Arc<CreateSignalingProtocol>>,
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
@@ -578,29 +577,29 @@ struct EndpointIngestBinding {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    parameterization: Vec<Identifier>,
-    parameter_value_mappings: Vec<ParameterValueMapping>,
-    parameterized_senders: HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+    branching: Vec<Identifier>,
+    branch_value_mappings: Vec<BranchValueMapping>,
+    branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
 }
 
 struct IngestorDependencies {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    parameterization: Vec<Identifier>,
-    parameter_value_mappings: Vec<ParameterValueMapping>,
-    parameterized_templates: HashMap<Identifier, (SharedActiveGraph, ParametrizerTemplate)>,
+    branching: Vec<Identifier>,
+    branch_value_mappings: Vec<BranchValueMapping>,
+    branched_templates: HashMap<Identifier, (SharedActiveGraph, BranchInstanceTemplate)>,
 }
 
 struct IngestDispatch<'a> {
     domain: &'a Domain,
     ingestor: &'a Identifier,
     timestamp_source: Option<&'a IngestTimestampSource>,
-    parameterization: &'a [Identifier],
-    parameter_value_mappings: Option<&'a [ParameterValueMapping]>,
+    branching: &'a [Identifier],
+    branch_value_mappings: Option<&'a [BranchValueMapping]>,
     output_routes: &'a mut RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    parameterized_senders: &'a HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+    branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
     record: DecodedRecord,
     filter_map_metadata: Option<IngestFilterMapMetadata>,
     ingested_at: Timestamp,
@@ -608,27 +607,27 @@ struct IngestDispatch<'a> {
 }
 
 #[derive(Clone, Default)]
-struct ParameterizedIngestorRuntimes {
-    runtimes: Vec<Arc<ParameterizedIngestorRuntime>>,
-    senders: HashMap<Identifier, mpsc::Sender<ParameterizedEntrypointInput>>,
+struct BranchedIngestorRuntimes {
+    runtimes: Vec<Arc<BranchedIngestorRuntime>>,
+    senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
 }
 
 struct IngestBatchSelection<'a> {
     domain: &'a Domain,
     ingestor: &'a Identifier,
-    parameterization: &'a [Identifier],
-    parameter_value_mappings: Option<&'a [ParameterValueMapping]>,
+    branching: &'a [Identifier],
+    branch_value_mappings: Option<&'a [BranchValueMapping]>,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     records: &'a [RuntimeRecord],
     filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
 }
 
-enum ParameterizedEntrypointInput {
-    PendingParameterizationBatch(RelayRecordBatch),
+enum BranchedEntrypointInput {
+    PendingBranchingBatch(RelayRecordBatch),
     UnresolvedRecord { record: RuntimeRecord, acks: AckSet },
 }
 
-struct ParameterizedEntrypointBatch {
+struct BranchedEntrypointBatch {
     schema: Arc<CompiledSchema>,
     batch: RuntimeRecordBatch,
     records: Vec<RuntimeRecord>,
@@ -638,36 +637,36 @@ struct ParameterizedEntrypointBatch {
 }
 
 #[derive(Clone)]
-struct ParameterizedBranchSelection {
+struct BranchedBranchSelection {
     key: Option<BranchKey>,
     filters: Vec<(Identifier, RuntimeValue)>,
 }
 
-struct ParameterizedEntrypointRowError {
+struct BranchedEntrypointRowError {
     record: RuntimeRecord,
     acks: AckSet,
     reason: String,
 }
 
-struct ParameterizedBranchPlan {
-    selections: Vec<ParameterizedBranchSelection>,
-    row_errors: Vec<ParameterizedEntrypointRowError>,
+struct BranchedBranchPlan {
+    selections: Vec<BranchedBranchSelection>,
+    row_errors: Vec<BranchedEntrypointRowError>,
     valid_rows: Vec<(Option<BranchKey>, usize)>,
 }
 
-impl ParameterizedEntrypointInput {
+impl BranchedEntrypointInput {
     fn estimated_bytes(&self) -> u64 {
         match self {
-            Self::PendingParameterizationBatch(batch) => batch.estimated_bytes(),
+            Self::PendingBranchingBatch(batch) => batch.estimated_bytes(),
             Self::UnresolvedRecord { record, .. } => record.estimated_bytes(),
         }
     }
 }
 
-impl ParameterizedEntrypointBatch {
+impl BranchedEntrypointBatch {
     fn from_inputs(
         schema: Arc<CompiledSchema>,
-        inputs: Vec<ParameterizedEntrypointInput>,
+        inputs: Vec<BranchedEntrypointInput>,
     ) -> Result<Self, (String, Vec<AckSet>)> {
         let mut batches = Vec::<RuntimeRecordBatch>::new();
         let mut records = Vec::<RuntimeRecord>::new();
@@ -680,7 +679,7 @@ impl ParameterizedEntrypointBatch {
         for input in inputs {
             had_input = true;
             match input {
-                ParameterizedEntrypointInput::PendingParameterizationBatch(batch) => {
+                BranchedEntrypointInput::PendingBranchingBatch(batch) => {
                     Self::push_pending_record_batch(
                         &schema,
                         &mut batches,
@@ -695,7 +694,7 @@ impl ParameterizedEntrypointBatch {
                     keys.extend(batch_keys);
                     acks.extend(batch_acks);
                 }
-                ParameterizedEntrypointInput::UnresolvedRecord {
+                BranchedEntrypointInput::UnresolvedRecord {
                     record,
                     acks: record_acks,
                 } => {
@@ -710,7 +709,7 @@ impl ParameterizedEntrypointBatch {
 
         if !had_input {
             return Err((
-                "cannot build parametrization batch from zero inputs".to_string(),
+                "cannot build branch batch from zero inputs".to_string(),
                 acks,
             ));
         }
@@ -718,7 +717,7 @@ impl ParameterizedEntrypointBatch {
         let batch_refs = batches.iter().collect::<Vec<_>>();
         let batch = RuntimeRecordBatch::concat(&batch_refs).map_err(|error| {
             (
-                format!("failed to concatenate parametrization input batches: {error}"),
+                format!("failed to concatenate branch input batches: {error}"),
                 acks.clone(),
             )
         })?;
@@ -730,8 +729,8 @@ impl ParameterizedEntrypointBatch {
         {
             return Err((
                 format!(
-                    "parametrization input batch row count {row_count} does not match records {}, \
-                     metadata {}, branch keys {}, acks {}",
+                    "branch input batch row count {row_count} does not match records {}, metadata \
+                     {}, branch keys {}, acks {}",
                     records.len(),
                     metadata.len(),
                     keys.len(),
@@ -763,7 +762,7 @@ impl ParameterizedEntrypointBatch {
         let pending = std::mem::take(records);
         batches.push(schema.arrow_batch_from_records(&pending).map_err(|error| {
             (
-                format!("failed to build parametrization input batch: {error}"),
+                format!("failed to build branch input batch: {error}"),
                 acks.to_vec(),
             )
         })?);
@@ -772,11 +771,11 @@ impl ParameterizedEntrypointBatch {
 
     fn branch_selections(
         &self,
-        mappings: &[ParameterValueMapping],
+        mappings: &[BranchValueMapping],
         source: &Identifier,
         root_relay: &Identifier,
-    ) -> ParameterizedBranchPlan {
-        let mut selections = Vec::<ParameterizedBranchSelection>::new();
+    ) -> BranchedBranchPlan {
+        let mut selections = Vec::<BranchedBranchSelection>::new();
         let mut positions = HashMap::default();
         let mut row_errors = Vec::new();
         let mut valid_rows = Vec::new();
@@ -804,15 +803,14 @@ impl ParameterizedEntrypointBatch {
                         })
                         .collect::<Vec<_>>();
                     positions.insert(key.clone(), selections.len());
-                    selections.push(ParameterizedBranchSelection { key, filters });
+                    selections.push(BranchedBranchSelection { key, filters });
                 }
                 Err(error) => {
-                    row_errors.push(ParameterizedEntrypointRowError {
+                    row_errors.push(BranchedEntrypointRowError {
                         record: record.clone(),
                         acks: self.acks[index].clone(),
                         reason: format!(
-                            "parametrization entrypoint '{}' failed to resolve branch for relay \
-                             '{}': {}",
+                            "branch entrypoint '{}' failed to resolve branch for relay '{}': {}",
                             source.as_str(),
                             root_relay.as_str(),
                             error
@@ -822,7 +820,7 @@ impl ParameterizedEntrypointBatch {
             }
         }
 
-        ParameterizedBranchPlan {
+        BranchedBranchPlan {
             selections,
             row_errors,
             valid_rows,
@@ -831,8 +829,8 @@ impl ParameterizedEntrypointBatch {
 
     fn filter_branch(
         &self,
-        selection: ParameterizedBranchSelection,
-        ack_boundary: ParametrizerAckBoundary,
+        selection: BranchedBranchSelection,
+        ack_boundary: BranchInstanceAckBoundary,
     ) -> Result<RelayRecordBatch, (String, Vec<AckSet>)> {
         let predicate = self
             .branch_predicate(&selection)
@@ -849,13 +847,13 @@ impl ParameterizedEntrypointBatch {
             records.push(self.records[row].clone());
             metadata.push(self.metadata[row].clone());
             acks.push(match ack_boundary {
-                ParametrizerAckBoundary::Preserve => self.acks[row].clone(),
-                ParametrizerAckBoundary::Reingestor(AckMode::Attached) => {
+                BranchInstanceAckBoundary::Preserve => self.acks[row].clone(),
+                BranchInstanceAckBoundary::Reingestor(AckMode::Attached) => {
                     let forwarded = self.acks[row].attached();
                     self.acks[row].ack_success();
                     forwarded
                 }
-                ParametrizerAckBoundary::Reingestor(AckMode::Detached) => {
+                BranchInstanceAckBoundary::Reingestor(AckMode::Detached) => {
                     self.acks[row].ack_success();
                     AckSet::empty()
                 }
@@ -873,7 +871,7 @@ impl ParameterizedEntrypointBatch {
 
     fn branch_predicate(
         &self,
-        selection: &ParameterizedBranchSelection,
+        selection: &BranchedBranchSelection,
     ) -> Result<BooleanArray, String> {
         let row_count = self.batch.batch().num_rows();
         let mut predicate = None::<BooleanArray>;
@@ -1383,20 +1381,20 @@ fn wasm_error_policies(
     }
 }
 
-struct ParameterizedIngestorRuntime {
+struct BranchedIngestorRuntime {
     domain: Domain,
     ingestor: Identifier,
-    sender: mpsc::Sender<ParameterizedEntrypointInput>,
+    sender: mpsc::Sender<BranchedEntrypointInput>,
     shutdown: watch::Sender<bool>,
     task: parking_lot::Mutex<Option<JoinHandle<()>>>,
 }
 
-struct ParameterizedBranchDispatchContext<'a> {
+struct BranchedBranchDispatchContext<'a> {
     runtime_handle: &'a Runtime,
     domain: &'a Domain,
     ingestor: &'a Identifier,
     graph: &'a SharedActiveGraph,
-    template: &'a ParametrizerTemplate,
+    template: &'a BranchInstanceTemplate,
     now: Timestamp,
 }
 
@@ -1520,21 +1518,21 @@ fn relay_batches_into_batched_input(batches: Vec<RelayRecordBatch>) -> BatchedIn
     )
 }
 
-fn parameterized_entrypoint_inputs_estimated_bytes(inputs: &[ParameterizedEntrypointInput]) -> u64 {
+fn branched_entrypoint_inputs_estimated_bytes(inputs: &[BranchedEntrypointInput]) -> u64 {
     inputs
         .iter()
-        .map(ParameterizedEntrypointInput::estimated_bytes)
+        .map(BranchedEntrypointInput::estimated_bytes)
         .fold(0_u64, u64::saturating_add)
 }
 
-fn parameterized_entrypoint_inputs_acks(inputs: &[ParameterizedEntrypointInput]) -> Vec<AckSet> {
+fn branched_entrypoint_inputs_acks(inputs: &[BranchedEntrypointInput]) -> Vec<AckSet> {
     let mut acks = Vec::new();
     for input in inputs {
         match input {
-            ParameterizedEntrypointInput::PendingParameterizationBatch(batch) => {
+            BranchedEntrypointInput::PendingBranchingBatch(batch) => {
                 acks.extend(batch.acks.iter().cloned());
             }
-            ParameterizedEntrypointInput::UnresolvedRecord {
+            BranchedEntrypointInput::UnresolvedRecord {
                 acks: record_acks, ..
             } => {
                 acks.push(record_acks.clone());
@@ -1544,29 +1542,27 @@ fn parameterized_entrypoint_inputs_acks(inputs: &[ParameterizedEntrypointInput])
     acks
 }
 
-async fn parameterized_entrypoint_batch_from_inputs_blocking(
+async fn branched_entrypoint_batch_from_inputs_blocking(
     schema: Arc<CompiledSchema>,
-    inputs: Vec<ParameterizedEntrypointInput>,
-) -> Result<Arc<ParameterizedEntrypointBatch>, (String, Vec<AckSet>)> {
-    let acks = parameterized_entrypoint_inputs_acks(&inputs);
-    match tokio::task::spawn_blocking(move || {
-        ParameterizedEntrypointBatch::from_inputs(schema, inputs)
-    })
-    .await
+    inputs: Vec<BranchedEntrypointInput>,
+) -> Result<Arc<BranchedEntrypointBatch>, (String, Vec<AckSet>)> {
+    let acks = branched_entrypoint_inputs_acks(&inputs);
+    match tokio::task::spawn_blocking(move || BranchedEntrypointBatch::from_inputs(schema, inputs))
+        .await
     {
         Ok(Ok(batch)) => Ok(Arc::new(batch)),
         Ok(Err(error)) => Err(error),
         Err(error) => Err((
-            format!("parameterized input batch build task failed: {error}"),
+            format!("branch input batch build task failed: {error}"),
             acks,
         )),
     }
 }
 
-async fn parameterized_branch_filter_blocking(
-    input: Arc<ParameterizedEntrypointBatch>,
-    selection: ParameterizedBranchSelection,
-    ack_boundary: ParametrizerAckBoundary,
+async fn branched_branch_filter_blocking(
+    input: Arc<BranchedEntrypointBatch>,
+    selection: BranchedBranchSelection,
+    ack_boundary: BranchInstanceAckBoundary,
 ) -> Result<(Option<BranchKey>, RelayRecordBatch), (String, Vec<AckSet>)> {
     let failure_input = input.clone();
     let key = selection.key.clone();
@@ -1579,7 +1575,7 @@ async fn parameterized_branch_filter_blocking(
     {
         Ok(result) => result,
         Err(error) => Err((
-            format!("parameterized branch filter task failed: {error}"),
+            format!("branch filter task failed: {error}"),
             failure_input.acks.clone(),
         )),
     }
@@ -1594,8 +1590,8 @@ struct ExpiringRelayState {
 struct ExecutionBuildDeps<'a> {
     domain: &'a Domain,
     relay_schemas: &'a HashMap<Identifier, Arc<CompiledSchema>>,
-    relay_parameterizations: &'a HashMap<Identifier, Vec<Identifier>>,
-    relay_parameterization_schemas: &'a HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
+    relay_branchings: &'a HashMap<Identifier, Vec<Identifier>>,
+    relay_branching_schemas: &'a HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
     materialized_relay_specs: &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_relay_owner_nodes: &'a HashMap<Identifier, Option<String>>,
     lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
@@ -1604,8 +1600,8 @@ struct ExecutionBuildDeps<'a> {
 #[derive(Debug, Clone)]
 struct EmitterTaskDeps {
     input_schema: Arc<CompiledSchema>,
-    input_parameterization: Vec<Identifier>,
-    input_parameterization_schema: Option<Arc<arrow_schema::Schema>>,
+    input_branching: Vec<Identifier>,
+    input_branching_schema: Option<Arc<arrow_schema::Schema>>,
     materialized_relay_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_relay_owner_nodes: HashMap<Identifier, Option<String>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,
@@ -1625,7 +1621,7 @@ struct GeneratorTaskSpec {
     program: Arc<CompiledFilterMapProgram>,
     source_relays: Vec<Identifier>,
     source_nodes: HashMap<Identifier, Option<String>>,
-    output_parameterization: Vec<Identifier>,
+    output_branching: Vec<Identifier>,
     output_schema: Arc<CompiledSchema>,
     output_registry: RelayRegistry,
     output_services: Arc<RelayBoundaryServices>,
@@ -1713,7 +1709,7 @@ pub(crate) struct MaterializedProgramInterest {
 pub(crate) struct RuntimeMaterializedRelaySpec {
     pub(crate) schema: Arc<arrow_schema::Schema>,
     pub(crate) sensitivity: VmSchemaSensitivity,
-    pub(crate) parameterization: Vec<Identifier>,
+    pub(crate) branching: Vec<Identifier>,
 }
 
 #[derive(Debug, Clone)]
@@ -1738,7 +1734,7 @@ pub(crate) struct RuntimeVmCompileContext<'a> {
     pub(crate) available_materialized_streams:
         &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     pub(crate) available_lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
-    pub(crate) current_parameterization: &'a [Identifier],
+    pub(crate) current_branching: &'a [Identifier],
     pub(crate) current_branch_schema: Option<&'a Arc<arrow_schema::Schema>>,
     pub(crate) current_branch_sensitivity: Option<&'a VmSchemaSensitivity>,
 }
@@ -1831,7 +1827,7 @@ pub struct Runtime {
     correlator_states:
         Arc<DashMap<RuntimeStatePlacement, SharedCorrelatorBranchState, RandomState>>,
     wasm_runtime: Arc<WasmRuntime>,
-    parametrizer_expiration_scan_interval: Duration,
+    branch_instance_expiration_scan_interval: Duration,
     state_store: Option<Arc<RuntimeStateStore>>,
     state_snapshot_interval: Duration,
     state_replication_poll_interval: Duration,
@@ -2432,16 +2428,11 @@ impl RelayProcessorNode {
                 };
             let materialized_stream_specs =
                 materialized_stream_specs_for_graph(&branch.runtime, &branch.domain, graph);
-            let current_parameterization = branch
+            let current_branching = branch
                 .runtime
                 .executions
                 .get(&branch.domain)
-                .and_then(|execution| {
-                    execution
-                        .relay_parameterizations
-                        .get(incoming_relay)
-                        .cloned()
-                })
+                .and_then(|execution| execution.relay_branchings.get(incoming_relay).cloned())
                 .unwrap_or_default();
             let current_branch_schema =
                 relay_branch_schema_for_runtime(&branch.runtime, &branch.domain, incoming_relay);
@@ -2467,7 +2458,7 @@ impl RelayProcessorNode {
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &available_lookups,
-                    current_parameterization: &current_parameterization,
+                    current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
                 },
@@ -2716,7 +2707,7 @@ impl RelayProcessorNode {
                             processor = self.processor.as_str(),
                             payload = message.record.to_json_string(),
                             operator = "deduplicator",
-                            "parameterized relay operator received message"
+                            "branched relay operator received message"
                         );
 
                         let dedup_key = (0..key_program.key_count)
@@ -2741,7 +2732,7 @@ impl RelayProcessorNode {
                                     deduplicator = self.processor.as_str(),
                                     deduplicate_on = deduplicate_on.as_str(),
                                     key = dedup_key.as_str(),
-                                    "parameterized deduplicator dropped duplicate message"
+                                    "branched deduplicator dropped duplicate message"
                                 );
                                 acks.ack_success();
                             }
@@ -4326,7 +4317,7 @@ impl RelayProcessorTemplate {
     }
 }
 
-impl ParametrizerTemplate {
+impl BranchInstanceTemplate {
     fn instantiate(
         &self,
         runtime: &Runtime,
@@ -4504,7 +4495,7 @@ impl BranchRuntime {
             .await
             .is_err()
         {
-            let reason = "parameterized root relay dispatch failed".to_string();
+            let reason = "branched root relay dispatch failed".to_string();
             if self.source_kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
                     &self.domain,
@@ -4696,13 +4687,13 @@ impl BranchRuntime {
     }
 }
 
-impl ParameterizedIngestorRuntime {
+impl BranchedIngestorRuntime {
     async fn dispatch_entrypoint_inputs(
-        context: ParameterizedBranchDispatchContext<'_>,
-        instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
-        inputs: Vec<ParameterizedEntrypointInput>,
+        context: BranchedBranchDispatchContext<'_>,
+        instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+        inputs: Vec<BranchedEntrypointInput>,
     ) -> Option<Timestamp> {
-        let ParameterizedBranchDispatchContext {
+        let BranchedBranchDispatchContext {
             runtime_handle,
             domain,
             ingestor,
@@ -4714,7 +4705,7 @@ impl ParameterizedIngestorRuntime {
             return None;
         }
 
-        let input_batch = match parameterized_entrypoint_batch_from_inputs_blocking(
+        let input_batch = match branched_entrypoint_batch_from_inputs_blocking(
             template.entrypoint_schema.clone(),
             inputs,
         )
@@ -4723,7 +4714,7 @@ impl ParameterizedIngestorRuntime {
             Ok(batch) => batch,
             Err((error, acks)) => {
                 let reason = format!(
-                    "parameterized entrypoint '{}' failed to build input batch: {}",
+                    "branched entrypoint '{}' failed to build input batch: {}",
                     ingestor.as_str(),
                     error
                 );
@@ -4750,7 +4741,7 @@ impl ParameterizedIngestorRuntime {
             }
         };
         let branch_plan = input_batch.branch_selections(
-            &template.entrypoint_parameter_mappings,
+            &template.entrypoint_branch_mappings,
             &template.source,
             &template.root_relay,
         );
@@ -4799,7 +4790,7 @@ impl ParameterizedIngestorRuntime {
         let mut batch_builds = FuturesUnordered::new();
         for selection in branch_plan.selections {
             tokio::task::consume_budget().await;
-            batch_builds.push(parameterized_branch_filter_blocking(
+            batch_builds.push(branched_branch_filter_blocking(
                 input_batch.clone(),
                 selection,
                 template.entrypoint_ack_boundary,
@@ -4819,7 +4810,7 @@ impl ParameterizedIngestorRuntime {
                         Ok(output) => output,
                         Err((error, acks)) => {
                             let reason = format!(
-                                "parameterized entrypoint '{}' failed to filter branch batch: {}",
+                                "branched entrypoint '{}' failed to filter branch batch: {}",
                                 ingestor.as_str(),
                                 error
                             );
@@ -4851,7 +4842,7 @@ impl ParameterizedIngestorRuntime {
                         Ok(instance) => instance,
                         Err(error) => {
                             let reason = format!(
-                                "failed to instantiate parameterized branch '{}': {}",
+                                "failed to instantiate branch '{}': {}",
                                 branch_key_display(&key),
                                 error
                             );
@@ -4882,11 +4873,11 @@ impl ParameterizedIngestorRuntime {
                             domain = domain.as_str(),
                             ingestor = ingestor.as_str(),
                             key = branch_key_display(&key),
-                            "created parameterized branch runtime"
+                            "created branch runtime"
                         );
                     }
                     if let Some(max_instances) = template.branch_max_instances {
-                        evict_parametrizer_instances_to_capacity(
+                        evict_branch_instance_instances_to_capacity(
                             domain,
                             ingestor,
                             max_instances,
@@ -4913,7 +4904,7 @@ impl ParameterizedIngestorRuntime {
                     };
                     match result {
                         Ok(deadline) => {
-                            record_next_parametrizer_branch_deadline(
+                            record_next_branch_instance_branch_deadline(
                                 &mut next_deadline,
                                 deadline,
                             );
@@ -4926,7 +4917,7 @@ impl ParameterizedIngestorRuntime {
                                 &template.error_policies,
                                 acks.iter(),
                                 format!(
-                                    "parameterized branch '{}' dispatch task failed: {}",
+                                    "branch '{}' dispatch task failed: {}",
                                     branch_key_display(&key),
                                     error
                                 ),
@@ -4945,7 +4936,7 @@ impl ParameterizedIngestorRuntime {
         domain: Domain,
         ingestor: Identifier,
         graph: SharedActiveGraph,
-        template: ParametrizerTemplate,
+        template: BranchInstanceTemplate,
         expiration_scan_interval: Duration,
     ) -> Arc<Self> {
         // input from ingestor/re-ingestor
@@ -4961,8 +4952,8 @@ impl ParameterizedIngestorRuntime {
 
         let task = tokio::spawn(async move {
             let mut instances =
-                ParametrizerRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
-            let mut last_persisted_lru_lsm = match restore_parametrizer_lru_snapshot(
+                BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
+            let mut last_persisted_lru_lsm = match restore_branch_instance_lru_snapshot(
                 &runtime_handle,
                 &domain,
                 &template,
@@ -4980,7 +4971,7 @@ impl ParameterizedIngestorRuntime {
                 }
             };
             if let Some(max_instances) = template.branch_max_instances {
-                evict_parametrizer_instances_to_capacity(
+                evict_branch_instance_instances_to_capacity(
                     &domain,
                     &ingestor,
                     max_instances,
@@ -4990,7 +4981,7 @@ impl ParameterizedIngestorRuntime {
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
-            let mut pending_inputs = Vec::<ParameterizedEntrypointInput>::new();
+            let mut pending_inputs = Vec::<BranchedEntrypointInput>::new();
             let mut pending_flush_at = None::<Instant>;
             let now = runtime_handle
                 .current_stream_expiration_time(&domain)
@@ -4998,7 +4989,7 @@ impl ParameterizedIngestorRuntime {
                 .flatten()
                 .unwrap_or_else(current_timestamp);
             let mut next_branch_deadline =
-                tick_due_parametrizer_branches(&graph, now, &instances).await;
+                tick_due_branch_instance_branches(&graph, now, &instances).await;
 
             loop {
                 tokio::task::consume_budget().await;
@@ -5012,10 +5003,10 @@ impl ParameterizedIngestorRuntime {
                 {
                     let ready = std::mem::take(&mut pending_inputs);
                     pending_flush_at = None;
-                    record_next_parametrizer_branch_deadline(
+                    record_next_branch_instance_branch_deadline(
                         &mut next_branch_deadline,
                         Self::dispatch_entrypoint_inputs(
-                            ParameterizedBranchDispatchContext {
+                            BranchedBranchDispatchContext {
                                 runtime_handle: &runtime_handle,
                                 domain: &domain,
                                 ingestor: &ingestor,
@@ -5033,7 +5024,7 @@ impl ParameterizedIngestorRuntime {
                 let mut did_scheduled_work = false;
                 if Instant::now() >= next_expiration_scan {
                     if let Some(branch_ttl) = template.branch_ttl {
-                        expire_parametrizer_instances(
+                        expire_branch_instance_instances(
                             &domain,
                             &ingestor,
                             now,
@@ -5046,7 +5037,7 @@ impl ParameterizedIngestorRuntime {
                     did_scheduled_work = true;
                 }
                 if Instant::now() >= next_lru_snapshot {
-                    if let Err(error) = persist_parametrizer_lru_snapshot(
+                    if let Err(error) = persist_branch_instance_lru_snapshot(
                         &runtime_handle,
                         &domain,
                         &template,
@@ -5065,7 +5056,7 @@ impl ParameterizedIngestorRuntime {
                 }
                 if next_branch_deadline.is_some_and(|deadline| deadline <= now) {
                     next_branch_deadline =
-                        tick_due_parametrizer_branches(&graph, now, &instances).await;
+                        tick_due_branch_instance_branches(&graph, now, &instances).await;
                     did_scheduled_work = true;
                 }
                 if did_scheduled_work {
@@ -5100,10 +5091,10 @@ impl ParameterizedIngestorRuntime {
                     message = input.recv() => {
                         let Some(message) = message else {
                             let ready = std::mem::take(&mut pending_inputs);
-                            record_next_parametrizer_branch_deadline(
+                            record_next_branch_instance_branch_deadline(
                                 &mut next_branch_deadline,
                                 Self::dispatch_entrypoint_inputs(
-                                    ParameterizedBranchDispatchContext {
+                                    BranchedBranchDispatchContext {
                                         runtime_handle: &runtime_handle,
                                         domain: &domain,
                                         ingestor: &ingestor,
@@ -5120,10 +5111,10 @@ impl ParameterizedIngestorRuntime {
                         };
                         match template.entrypoint_flush_each {
                             RuntimeFlushPolicy::Immediate => {
-                                record_next_parametrizer_branch_deadline(
+                                record_next_branch_instance_branch_deadline(
                                     &mut next_branch_deadline,
                                     Self::dispatch_entrypoint_inputs(
-                                        ParameterizedBranchDispatchContext {
+                                        BranchedBranchDispatchContext {
                                             runtime_handle: &runtime_handle,
                                             domain: &domain,
                                             ingestor: &ingestor,
@@ -5145,15 +5136,15 @@ impl ParameterizedIngestorRuntime {
                                 if pending_flush_at.is_none() {
                                     pending_flush_at = Some(Instant::now() + flush_each);
                                 }
-                                if parameterized_entrypoint_inputs_estimated_bytes(&pending_inputs)
+                                if branched_entrypoint_inputs_estimated_bytes(&pending_inputs)
                                     >= max_batch_size
                                 {
                                     let ready = std::mem::take(&mut pending_inputs);
                                     pending_flush_at = None;
-                                    record_next_parametrizer_branch_deadline(
+                                    record_next_branch_instance_branch_deadline(
                                         &mut next_branch_deadline,
                                         Self::dispatch_entrypoint_inputs(
-                                            ParameterizedBranchDispatchContext {
+                                            BranchedBranchDispatchContext {
                                                 runtime_handle: &runtime_handle,
                                                 domain: &domain,
                                                 ingestor: &ingestor,
@@ -5173,10 +5164,10 @@ impl ParameterizedIngestorRuntime {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             let ready = std::mem::take(&mut pending_inputs);
-                            record_next_parametrizer_branch_deadline(
+                            record_next_branch_instance_branch_deadline(
                                 &mut next_branch_deadline,
                                 Self::dispatch_entrypoint_inputs(
-                                    ParameterizedBranchDispatchContext {
+                                    BranchedBranchDispatchContext {
                                         runtime_handle: &runtime_handle,
                                         domain: &domain,
                                         ingestor: &ingestor,
@@ -5196,7 +5187,7 @@ impl ParameterizedIngestorRuntime {
                 }
             }
 
-            if let Err(error) = persist_parametrizer_lru_snapshot(
+            if let Err(error) = persist_branch_instance_lru_snapshot(
                 &runtime_handle,
                 &domain,
                 &template,
@@ -5210,13 +5201,13 @@ impl ParameterizedIngestorRuntime {
                     "failed to persist final branch lru snapshot"
                 );
             }
-            shutdown_all_parametrizer_instances(&domain, &ingestor, &mut instances).await;
+            shutdown_all_branch_instance_instances(&domain, &ingestor, &mut instances).await;
         });
         *runtime.task.lock() = Some(task);
         runtime
     }
 
-    fn sender(&self) -> mpsc::Sender<ParameterizedEntrypointInput> {
+    fn sender(&self) -> mpsc::Sender<BranchedEntrypointInput> {
         self.sender.clone()
     }
 
@@ -5235,14 +5226,14 @@ impl ParameterizedIngestorRuntime {
                     warn!(
                         domain = self.domain.as_str(),
                         ingestor = self.ingestor.as_str(),
-                        "parameterized ingestor task was cancelled"
+                        "branched ingestor task was cancelled"
                     );
                 } else {
                     warn!(
                         domain = self.domain.as_str(),
                         ingestor = self.ingestor.as_str(),
                         error = %error,
-                        "parameterized ingestor task join failed"
+                        "branched ingestor task join failed"
                     );
                 }
             }
@@ -5251,7 +5242,7 @@ impl ParameterizedIngestorRuntime {
                     domain = self.domain.as_str(),
                     ingestor = self.ingestor.as_str(),
                     grace_period = %humantime::format_duration(SHUTDOWN_GRACE_PERIOD),
-                    "parameterized ingestor task exceeded shutdown grace period; aborting"
+                    "branched ingestor task exceeded shutdown grace period; aborting"
                 );
                 task.abort();
                 if let Err(error) = task.await
@@ -5261,7 +5252,7 @@ impl ParameterizedIngestorRuntime {
                         domain = self.domain.as_str(),
                         ingestor = self.ingestor.as_str(),
                         error = %error,
-                        "aborted parameterized ingestor task join failed"
+                        "aborted branched ingestor task join failed"
                     );
                 }
             }
@@ -5269,12 +5260,12 @@ impl ParameterizedIngestorRuntime {
     }
 }
 
-async fn expire_parametrizer_instances(
+async fn expire_branch_instance_instances(
     domain: &Domain,
     ingestor: &Identifier,
     now: Timestamp,
     expiration_after: Duration,
-    instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
     for (key, state) in instances.expire(now, expiration_after) {
         let mut branch = state.lock().await;
@@ -5283,16 +5274,16 @@ async fn expire_parametrizer_instances(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
             key = branch_key_display(&key),
-            "expired parameterized processor root"
+            "expired branched processor root"
         );
     }
 }
 
-async fn evict_parametrizer_instances_to_capacity(
+async fn evict_branch_instance_instances_to_capacity(
     domain: &Domain,
     ingestor: &Identifier,
     max_instances: usize,
-    instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
     for (key, state) in instances.evict_lru_to_capacity(max_instances) {
         let mut branch = state.lock().await;
@@ -5302,15 +5293,15 @@ async fn evict_parametrizer_instances_to_capacity(
             ingestor = ingestor.as_str(),
             key = branch_key_display(&key),
             max_instances,
-            "evicted parameterized branch runtime by lru"
+            "evicted branch runtime by lru"
         );
     }
 }
 
-async fn shutdown_all_parametrizer_instances(
+async fn shutdown_all_branch_instance_instances(
     domain: &Domain,
     ingestor: &Identifier,
-    instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
     for (key, state) in instances.drain() {
         let branch = state.lock().await;
@@ -5319,12 +5310,15 @@ async fn shutdown_all_parametrizer_instances(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
             key = branch_key_display(&key),
-            "stopped parameterized branch runtime"
+            "stopped branch runtime"
         );
     }
 }
 
-fn branch_lru_placement(domain: &Domain, template: &ParametrizerTemplate) -> RuntimeStatePlacement {
+fn branch_lru_placement(
+    domain: &Domain,
+    template: &BranchInstanceTemplate,
+) -> RuntimeStatePlacement {
     RuntimeStatePlacement {
         domain: domain.clone(),
         state: RuntimeStateKind::BranchLru,
@@ -5334,11 +5328,11 @@ fn branch_lru_placement(domain: &Domain, template: &ParametrizerTemplate) -> Run
     }
 }
 
-fn restore_parametrizer_lru_snapshot(
+fn restore_branch_instance_lru_snapshot(
     runtime: &Runtime,
     domain: &Domain,
-    template: &ParametrizerTemplate,
-    instances: &mut ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    template: &BranchInstanceTemplate,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Result<u64, String> {
     let Some(store) = &runtime.state_store else {
         return Ok(0);
@@ -5358,11 +5352,11 @@ fn restore_parametrizer_lru_snapshot(
     Ok(snapshot.lsm)
 }
 
-fn persist_parametrizer_lru_snapshot(
+fn persist_branch_instance_lru_snapshot(
     runtime: &Runtime,
     domain: &Domain,
-    template: &ParametrizerTemplate,
-    instances: &ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    template: &BranchInstanceTemplate,
+    instances: &BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
     last_persisted_lsm: &mut u64,
 ) -> Result<(), String> {
     let Some(store) = &runtime.state_store else {
@@ -5381,10 +5375,10 @@ fn persist_parametrizer_lru_snapshot(
     Ok(())
 }
 
-async fn tick_due_parametrizer_branches(
+async fn tick_due_branch_instance_branches(
     graph: &SharedActiveGraph,
     now: Timestamp,
-    instances: &ParametrizerRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Option<Timestamp> {
     let mut next = None;
     for instance in instances.states() {
@@ -5395,12 +5389,12 @@ async fn tick_due_parametrizer_branches(
         {
             branch.tick(graph, now).await;
         }
-        record_next_parametrizer_branch_deadline(&mut next, branch.next_deadline());
+        record_next_branch_instance_branch_deadline(&mut next, branch.next_deadline());
     }
     next
 }
 
-fn record_next_parametrizer_branch_deadline(
+fn record_next_branch_instance_branch_deadline(
     next: &mut Option<Timestamp>,
     candidate: Option<Timestamp>,
 ) {
@@ -5854,7 +5848,7 @@ fn referenced_materialized_stream_bindings(
     parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     writable_namespaces: &HashSet<String>,
     available_materialized_streams: &HashMap<Identifier, RuntimeMaterializedRelaySpec>,
-    current_parameterization: &[Identifier],
+    current_branching: &[Identifier],
 ) -> Result<(Vec<VmCompileBinding>, MaterializedProgramInterest), String> {
     let mut fields_by_relay = HashMap::<Identifier, HashSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
@@ -5871,12 +5865,12 @@ fn referenced_materialized_stream_bindings(
         let Some(spec) = available_materialized_streams.get(&relay) else {
             continue;
         };
-        if !spec.parameterization.is_empty() && spec.parameterization != current_parameterization {
+        if !spec.branching.is_empty() && spec.branching != current_branching {
             return Err(format!(
-                "materialized relay '{}' uses parameterization ({}) but current input uses ({})",
+                "materialized relay '{}' uses branch fields ({}) but current input uses ({})",
                 relay.as_str(),
-                format_parameterized_by(&spec.parameterization),
-                format_parameterized_by(current_parameterization),
+                format_branched_by(&spec.branching),
+                format_branched_by(current_branching),
             ));
         }
         fields_by_relay.entry(relay).or_default().insert(field);
@@ -5913,7 +5907,7 @@ fn referenced_materialized_stream_bindings(
         interest.push(MaterializedRelayInterest {
             relay,
             fields: ordered_fields,
-            key_mode: if spec.parameterization.is_empty() {
+            key_mode: if spec.branching.is_empty() {
                 MaterializedLookupKeyMode::Root
             } else {
                 MaterializedLookupKeyMode::CurrentBranch
@@ -6180,7 +6174,7 @@ pub(crate) fn compile_processor_output_filter_map_program(
         &original_parsed,
         &local_namespaces,
         context.available_materialized_streams,
-        context.current_parameterization,
+        context.current_branching,
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -6313,7 +6307,7 @@ fn compile_wasm_output_filter_map_program(
         &original_parsed,
         &local_namespaces,
         context.available_materialized_streams,
-        context.current_parameterization,
+        context.current_branching,
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -6536,7 +6530,7 @@ fn compile_emitter_filter_map_part(
         original_parsed,
         &local_namespaces,
         context.available_materialized_streams,
-        context.current_parameterization,
+        context.current_branching,
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -6693,7 +6687,7 @@ fn prepare_filter_map_program(
         &parsed,
         &local_namespaces,
         context.available_materialized_streams,
-        context.current_parameterization,
+        context.current_branching,
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -7816,7 +7810,7 @@ fn compile_ingestor_filter_map_program(
         &parsed,
         &writable_namespaces,
         context.available_materialized_streams,
-        context.current_parameterization,
+        context.current_branching,
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -8140,7 +8134,7 @@ async fn evaluate_processor_output_events(
             &context.branch.domain,
             context.graph,
         );
-        let current_parameterization = input_relays
+        let current_branching = input_relays
             .first()
             .and_then(|relay| {
                 context
@@ -8148,7 +8142,7 @@ async fn evaluate_processor_output_events(
                     .runtime
                     .executions
                     .get(&context.branch.domain)
-                    .and_then(|execution| execution.relay_parameterizations.get(relay).cloned())
+                    .and_then(|execution| execution.relay_branchings.get(relay).cloned())
             })
             .unwrap_or_default();
         let current_branch_schema = input_relays.first().and_then(|relay| {
@@ -8188,7 +8182,7 @@ async fn evaluate_processor_output_events(
             RuntimeVmCompileContext {
                 available_materialized_streams: &materialized_stream_specs,
                 available_lookups: &available_lookups,
-                current_parameterization: &current_parameterization,
+                current_branching: &current_branching,
                 current_branch_schema: current_branch_schema.as_ref(),
                 current_branch_sensitivity: None,
             },
@@ -11650,7 +11644,7 @@ fn relay_branch_schema_for_runtime(
     runtime
         .executions
         .get(domain)
-        .and_then(|execution| execution.relay_parameterization_schemas.get(relay).cloned())
+        .and_then(|execution| execution.relay_branching_schemas.get(relay).cloned())
         .flatten()
 }
 
@@ -12443,17 +12437,12 @@ async fn dispatch_wasm_output_route(
             &context.branch.domain,
             context.graph,
         );
-        let current_parameterization = context
+        let current_branching = context
             .branch
             .runtime
             .executions
             .get(&context.branch.domain)
-            .and_then(|execution| {
-                execution
-                    .relay_parameterizations
-                    .get(primary_input_relay)
-                    .cloned()
-            })
+            .and_then(|execution| execution.relay_branchings.get(primary_input_relay).cloned())
             .unwrap_or_default();
         let current_branch_schema = relay_branch_schema_for_runtime(
             &context.branch.runtime,
@@ -12501,7 +12490,7 @@ async fn dispatch_wasm_output_route(
             RuntimeVmCompileContext {
                 available_materialized_streams: &materialized_stream_specs,
                 available_lookups: &available_lookups,
-                current_parameterization: &current_parameterization,
+                current_branching: &current_branching,
                 current_branch_schema: current_branch_schema.as_ref(),
                 current_branch_sensitivity: None,
             },
@@ -13621,16 +13610,16 @@ async fn encode_emitted_payload(
         })?
 }
 
-pub(crate) fn scheduled_parametrized_stream_owner_nodes(
+pub(crate) fn scheduled_branched_stream_owner_nodes(
     schedule: &DomainSchedule,
     relay: &Identifier,
 ) -> Vec<String> {
-    let specs = parameterized_ingestor_specs_from_models(schedule.nodes.iter().map(|node| {
+    let specs = branched_ingestor_specs_from_models(schedule.nodes.iter().map(|node| {
         (
             node.kind,
             node.identifier.clone(),
             (*node.config).clone(),
-            node.effective_parameterization.clone(),
+            node.effective_branching.clone(),
         )
     }));
     let mut owners = BTreeSet::new();

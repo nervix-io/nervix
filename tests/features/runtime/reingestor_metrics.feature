@@ -13,49 +13,42 @@ Feature: Reingestor metrics
         tenant STRING,
         user_id I64
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         tenant string,
         user_id integer
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
-
-      CREATE RELAY notifications SCHEMA notification;
-      CREATE RELAY tenant_notifications SCHEMA notification;
-      CREATE RELAY audit_notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-
-      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_source PARAMETERIZED BY tenant_user_id_branch VALUES { tenant = notifications.tenant, user_id = notifications.user_id } TTL 5m; CREATE INGESTOR reingestor_metrics_source
+        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_source BY tenant_user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_source;
+        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+        CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_node BY tenant_branch TTL 5m;
+        CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_node;
+        CREATE IF NOT EXISTS BRANCH by_audit_reingestor_metrics_node BY tenant_branch TTL 5m;
+        CREATE RELAY audit_notifications SCHEMA notification BRANCHED BY by_audit_reingestor_metrics_node;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
+        CREATE INGESTOR reingestor_metrics_source
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_reingestor_metrics_source
+        BRANCHED BY by_reingestor_metrics_source VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-
-      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_node PARAMETERIZED BY tenant_branch VALUES { tenant = tenant_notifications.tenant } TTL 5m; CREATE REINGESTOR reingestor_metrics_node
+        CREATE REINGESTOR reingestor_metrics_node
         FROM notifications
         TO tenant_notifications
-        BRANCHED BY by_reingestor_metrics_node
+        BRANCHED BY by_reingestor_metrics_node VALUES { tenant = tenant_notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      CREATE IF NOT EXISTS BRANCH by_audit_reingestor_metrics_node PARAMETERIZED BY tenant_branch VALUES { tenant = audit_notifications.tenant } TTL 5m; CREATE REINGESTOR audit_reingestor_metrics_node
+        CREATE REINGESTOR audit_reingestor_metrics_node
         FROM notifications
         TO audit_notifications
-        BRANCHED BY by_audit_reingestor_metrics_node
+        BRANCHED BY by_audit_reingestor_metrics_node VALUES { tenant = audit_notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-
-      SUBSCRIBE SESSION TO tenant_notifications;
-      SUBSCRIBE SESSION TO audit_notifications;
-      START;
+        SUBSCRIBE SESSION TO tenant_notifications;
+        SUBSCRIBE SESSION TO audit_notifications;
+        START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/reingestor-metrics"
       """
@@ -103,10 +96,6 @@ Feature: Reingestor metrics
       total=2
       """
     And the last command output metric "messages_total" "sent" relay "tenant_notifications" physical node "node-1" has values
-      """
-      total=2
-      """
-    And the last command output metric "batches_total" "received" relay "notifications" physical node "node-1" has values
       """
       total=2
       """

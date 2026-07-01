@@ -13,32 +13,28 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         occurred_at string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT relay_metrics_ingress ON edge PATH '/relay-metrics' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_relay_metrics_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR relay_metrics_source
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_relay_metrics_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_source;
+        CREATE VHOST edge http-{{test_id}}.example.com;
+        CREATE ENDPOINT relay_metrics_ingress ON edge PATH '/relay-metrics' TYPE HTTP;
+        CREATE INGESTOR relay_metrics_source
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_relay_metrics_source
+        BRANCHED BY by_relay_metrics_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT relay_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      SUBSCRIBE SESSION TO notifications;
-      START;
+        SUBSCRIBE SESSION TO notifications;
+        START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/relay-metrics"
       """
@@ -63,7 +59,7 @@ Feature: Relay metrics
       """
     And the last command output contains
       """
-      parameter fields: user_id
+      branch fields: user_id
       """
     And the last command output contains
       """
@@ -151,16 +147,16 @@ Feature: Relay metrics
         TO SCHEMA notification;
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE RELAY notifications SCHEMA notification PARAMETERIZED BY user_id_branch CAPACITY 3;
-      CREATE RELAY forwarded_notifications SCHEMA notification PARAMETERIZED BY user_id_branch;
+
+      CREATE IF NOT EXISTS BRANCH by_relay_buffer_source BY user_id_branch TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_buffer_source CAPACITY 3;
+      CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_relay_buffer_source;
 
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
-      CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP;
-
-      CREATE IF NOT EXISTS BRANCH by_relay_buffer_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR relay_buffer_source
+      CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE INGESTOR relay_buffer_source
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_relay_buffer_source
+        BRANCHED BY by_relay_buffer_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -209,31 +205,27 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         occurred_at string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}-drain.example.com;
-      CREATE ENDPOINT relay_metrics_drain_ingress ON edge PATH '/relay-metrics-drain' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_relay_metrics_drain_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR relay_metrics_drain_source
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_relay_metrics_drain_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_drain_source;
+        CREATE VHOST edge http-{{test_id}}-drain.example.com;
+        CREATE ENDPOINT relay_metrics_drain_ingress ON edge PATH '/relay-metrics-drain' TYPE HTTP;
+        CREATE INGESTOR relay_metrics_drain_source
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_relay_metrics_drain_source
+        BRANCHED BY by_relay_metrics_drain_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT relay_metrics_drain_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      START;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}-drain.example.com" path "/relay-metrics-drain"
       """
@@ -283,31 +275,27 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
         user_id integer,
         occurred_at string
       );
-
-      CREATE CODEC notification_codec
+        CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification
         ENCODE occurred_at AS RFC3339;
-
-      CREATE RELAY notifications SCHEMA notification;
-
-      CREATE VHOST edge http-{{test_id}}-restart.example.com;
-      CREATE ENDPOINT relay_metrics_restart_ingress ON edge PATH '/relay-metrics-restart' TYPE HTTP;
-
-      CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 ); CREATE IF NOT EXISTS BRANCH by_relay_metrics_restart_source PARAMETERIZED BY user_id_branch VALUES { user_id = notifications.user_id } TTL 5m; CREATE INGESTOR relay_metrics_restart_source
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_relay_metrics_restart_source BY user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_metrics_restart_source;
+        CREATE VHOST edge http-{{test_id}}-restart.example.com;
+        CREATE ENDPOINT relay_metrics_restart_ingress ON edge PATH '/relay-metrics-restart' TYPE HTTP;
+        CREATE INGESTOR relay_metrics_restart_source
         TO notifications
         DECODE USING notification_codec
-        BRANCHED BY by_relay_metrics_restart_source
+        BRANCHED BY by_relay_metrics_restart_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT relay_metrics_restart_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-
-      START;
+        START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}-restart.example.com" path "/relay-metrics-restart"
       """

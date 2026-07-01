@@ -7,7 +7,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_parameterization, correlator_name,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, correlator_name,
         current_word_prefix, duration_lit, filter_where_clause, flush_each,
         from_relay_clause_with_boundary, from_where_boundary_token, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, message_error_policy,
@@ -164,7 +164,7 @@ pub fn create_correlator_parser<'src>()
         .then(match_policy())
         .then(filter_where_clause().or_not())
         .then(processor_outputs())
-        .then(branch_parameterization())
+        .then(branch_selection())
         .then(flush_each())
         .then(output_assignments())
         .then_ignore(kw(Identifier::Max))
@@ -184,7 +184,7 @@ pub fn create_correlator_parser<'src>()
                                         (((base, correlate_where), match_policy), filter_where),
                                         output_routes,
                                     ),
-                                    parameterized_by,
+                                    branched_by,
                                 ),
                                 flush_each,
                             ),
@@ -204,7 +204,7 @@ pub fn create_correlator_parser<'src>()
                     left,
                     right,
                     output_routes,
-                    parameterized_by,
+                    branched_by,
                     correlate_where,
                     match_policy,
                     output,
