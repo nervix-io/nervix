@@ -867,7 +867,7 @@ mod tests {
         "#;
 
         parse_create_ingestor_tokens(&to_tokens(input))
-            .expect_err("BY is only valid in CREATE BRANCH");
+            .expect_err("bare BY is not a branch selection mode");
     }
 
     #[test]

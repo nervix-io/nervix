@@ -139,7 +139,7 @@ fn branch_model_tuple(
         branch.clone(),
         nervix_models::Model::Branch(CreateBranch {
             name: branch,
-            branched_by: identifier(schema),
+            schema: identifier(schema),
             ttl: "5m".to_string(),
             eviction: None,
         }),

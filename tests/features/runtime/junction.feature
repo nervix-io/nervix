@@ -32,9 +32,9 @@ Feature: Relay junction
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_source_one BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
-        CREATE IF NOT EXISTS BRANCH by_source_two BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_two SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
         CREATE RELAY ss10 SCHEMA notification_projection BRANCHED BY by_source_one;
         CREATE RELAY ss20 SCHEMA notification_projection BRANCHED BY by_source_one;
@@ -121,9 +121,9 @@ Feature: Relay junction
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_one BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
-        CREATE IF NOT EXISTS BRANCH by_source_two BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_two SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -213,13 +213,13 @@ Feature: Relay junction
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_state_source BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_state_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY state_notifications
         SCHEMA notification BRANCHED BY by_state_source
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-        CREATE IF NOT EXISTS BRANCH by_source_one BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
-        CREATE IF NOT EXISTS BRANCH by_source_two BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_two SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_state_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -304,7 +304,7 @@ Feature: Relay junction
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_join_streams BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_join_streams SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_join_streams;
         CREATE RELAY ss2 SCHEMA wide_notification BRANCHED BY by_join_streams;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_join_streams;

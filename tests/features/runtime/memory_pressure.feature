@@ -20,7 +20,7 @@ Feature: Memory pressure
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_memory_pressure_source BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_memory_pressure_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_memory_pressure_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT memory_pressure_ingress

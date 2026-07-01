@@ -53,7 +53,7 @@ CREATE CLIENT kafka_main
     'group.id' = 'nervix-dev'
   };
 
-CREATE BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
+CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
 
 CREATE INGESTOR kafka_notifications
   TO notifications
@@ -81,7 +81,7 @@ CREATE CLIENT kafka_tls
     'ssl.ca.location' = '{{ dev_tls }}/ca.pem'
   };
 
-CREATE BRANCH by_kafka_notifications_tls BY user_id_branch TTL 5m;
+CREATE BRANCH by_kafka_notifications_tls SCHEMA user_id_branch TTL 5m;
 
 CREATE INGESTOR kafka_notifications_tls
   TO notifications
@@ -103,7 +103,7 @@ CREATE CLIENT pulsar_main
     'addr' = 'pulsar://127.0.0.1:6650'
   };
 
-CREATE BRANCH by_pulsar_notifications BY user_id_branch TTL 5m;
+CREATE BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
 
 CREATE INGESTOR pulsar_notifications
   TO notifications
@@ -146,7 +146,7 @@ CREATE CLIENT pulsar_tls
     'tls_ca_file' = '{{ dev_tls }}/ca.pem'
   };
 
-CREATE BRANCH by_pulsar_notifications_tls BY user_id_branch TTL 5m;
+CREATE BRANCH by_pulsar_notifications_tls SCHEMA user_id_branch TTL 5m;
 
 CREATE INGESTOR pulsar_notifications_tls
   TO notifications
@@ -243,7 +243,7 @@ CREATE CODEC sample_codec
   TO SCHEMA sample
   ENCODE timestamp AS RFC3339;
 
-CREATE BRANCH by_prom_samples BY source_branch TTL 5m;
+CREATE BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
 
 CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples CAPACITY 1;
 
@@ -291,7 +291,7 @@ CREATE SCHEMA user_branch (
 );
 
 CREATE BRANCH by_user
-  BY user_branch TTL 5m;
+  SCHEMA user_branch TTL 5m;
 
 CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_user;
 CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_user;

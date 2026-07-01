@@ -26,7 +26,7 @@ Feature: Window processor metrics
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_window_metrics_source BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_window_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics_input SCHEMA metric BRANCHED BY by_window_metrics_source;
         CREATE RELAY metrics_summary SCHEMA metric_summary BRANCHED BY by_window_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;

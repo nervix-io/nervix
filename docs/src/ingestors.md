@@ -6,7 +6,7 @@ A typical ingestor:
 
 ```nspl
 CREATE BRANCH by_user
-  BY user_branch TTL 5m;
+  SCHEMA user_branch TTL 5m;
 
 CREATE [IF NOT EXISTS] INGESTOR kafka_notifications
   TO notifications
@@ -48,7 +48,7 @@ At runtime, the ingestor:
 
 Ingestors are where external mixed flows enter branch-isolated processing. The ingestor references an explicit branch and owns the record-to-key value mapping. The branch declaration owns the key schema, TTL, and optional LRU eviction policy:
 
-- `CREATE BRANCH <branch> BY <schema> TTL <duration>` declares the branch key schema and lifetime
+- `CREATE BRANCH <branch> SCHEMA <schema> TTL <duration>` declares the branch key schema and lifetime
 - `BRANCHED BY <branch> VALUES { field = relay.field, ... }` computes the group from direct values on the outgoing relay record
 - `MAX INSTANCES <n> EVICT LRU` may be added to cap active concrete branch instances and evict the least recently used branch when capacity is reached
 - `BRANCHED BY <branch>` tells the ingestor to use that explicit branch
@@ -72,7 +72,7 @@ Ingestors may declare an optional arrival filter and per-route filter-map clause
 
 ```nspl
 CREATE BRANCH by_tenant
-  BY tenant_branch TTL 5m;
+  SCHEMA tenant_branch TTL 5m;
 
 CREATE [IF NOT EXISTS] INGESTOR notifications_in
   FILTER WHERE message.active

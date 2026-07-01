@@ -20,10 +20,10 @@ Feature: Reingestor repartitioning
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -91,10 +91,10 @@ Feature: Reingestor repartitioning
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
 
-      CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
 
       CREATE VHOST edge http-{{test_id}}-fan-in.example.com;
@@ -254,10 +254,10 @@ Feature: Reingestor repartitioning
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE CLIENT kafka_main
         TYPE KAFKA
@@ -326,10 +326,10 @@ Feature: Reingestor repartitioning
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE CLIENT kafka_main
         TYPE KAFKA

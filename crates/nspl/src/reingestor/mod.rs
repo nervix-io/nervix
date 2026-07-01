@@ -187,7 +187,7 @@ mod tests {
                      tenant_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;";
 
         parse_create_reingestor_tokens(&to_tokens(input))
-            .expect_err("BY is only valid in CREATE BRANCH");
+            .expect_err("bare BY is not a branch selection mode");
     }
 
     #[test]

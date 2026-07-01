@@ -31,7 +31,7 @@ Feature: Ingestor branch consistency
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY tenant_user_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
 
@@ -58,7 +58,7 @@ Feature: Ingestor branch consistency
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE IF NOT EXISTS BRANCH by_redis_notifications BY user_branch TTL 5m; CREATE INGESTOR redis_notifications
+      CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_branch TTL 5m; CREATE INGESTOR redis_notifications
         TO notifications
         DECODE USING notification_codec
         BRANCHED BY by_redis_notifications VALUES {
@@ -104,7 +104,7 @@ Feature: Ingestor branch consistency
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
 
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications_secondary BY tenant_user_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications_secondary SCHEMA tenant_user_branch TTL 5m;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications_secondary;
 
@@ -122,7 +122,7 @@ Feature: Ingestor branch consistency
           'client_id' = 'nervix-cucumber-branched-mqtt-b-{{test_id}}'
         };
 
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY tenant_user_branch TTL 5m; CREATE INGESTOR mqtt_notifications
+      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m; CREATE INGESTOR mqtt_notifications
         TO notifications
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES {

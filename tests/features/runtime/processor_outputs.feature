@@ -119,9 +119,9 @@ Feature: Processor output routing
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_logs_a BY id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_logs_a SCHEMA id_branch TTL 5m;
         CREATE RELAY incoming_logs_a SCHEMA notification BRANCHED BY by_source_logs_a;
-        CREATE IF NOT EXISTS BRANCH by_source_logs_b BY id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_logs_b SCHEMA id_branch TTL 5m;
         CREATE RELAY incoming_logs_b SCHEMA notification BRANCHED BY by_source_logs_b;
         CREATE RELAY errors_ss SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE RELAY warnings_ss SCHEMA notification BRANCHED BY by_source_logs_a;
@@ -238,7 +238,7 @@ Feature: Processor output routing
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_http_notifications;
         CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-output-route-{{test_id}}.example.com;
@@ -328,7 +328,7 @@ Feature: Processor output routing
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_logs BY id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
         CREATE RELAY incoming_logs SCHEMA notification_in BRANCHED BY by_source_logs;
         CREATE RELAY errors_ss SCHEMA notification_out BRANCHED BY by_source_logs;
         CREATE RELAY warnings_ss SCHEMA notification_out BRANCHED BY by_source_logs;

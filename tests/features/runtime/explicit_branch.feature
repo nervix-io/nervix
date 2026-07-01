@@ -27,7 +27,7 @@ Feature: Explicit branches
       CREATE SCHEMA tenant_branch ( tenant STRING );
 
       CREATE BRANCH by_tenant
-        BY tenant_branch TTL 5m MAX INSTANCES 1 EVICT LRU;
+        SCHEMA tenant_branch TTL 5m MAX INSTANCES 1 EVICT LRU;
 
       CREATE RELAY notifications
         SCHEMA notification

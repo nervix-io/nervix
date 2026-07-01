@@ -453,7 +453,7 @@ pub struct StoredCreateIngestor {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateBranch {
     pub name: String,
-    pub branched_by: String,
+    pub schema: String,
     pub ttl: String,
     pub eviction: Option<StoredBranchEviction>,
 }
@@ -2540,7 +2540,7 @@ impl From<CreateBranch> for StoredCreateBranch {
     fn from(value: CreateBranch) -> Self {
         Self {
             name: value.name.to_string(),
-            branched_by: value.branched_by.to_string(),
+            schema: value.schema.to_string(),
             ttl: value.ttl,
             eviction: value.eviction.map(Into::into),
         }
@@ -2553,7 +2553,7 @@ impl TryFrom<StoredCreateBranch> for CreateBranch {
     fn try_from(value: StoredCreateBranch) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
-            branched_by: Identifier::parse(&value.branched_by)?,
+            schema: Identifier::parse(&value.schema)?,
             ttl: value.ttl,
             eviction: value.eviction.map(Into::into),
         })

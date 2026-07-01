@@ -102,7 +102,7 @@ CREATE IF NOT EXISTS SCHEMA asset_signal_branch (
 );
 
 CREATE BRANCH by_site
-  BY site_branch TTL 5m;
+  SCHEMA site_branch TTL 5m;
 
 CREATE RELAY signals_by_site SCHEMA machine_signal BRANCHED BY by_site CAPACITY 256;
 CREATE RELAY rejected_signals SCHEMA machine_signal BRANCHED BY by_site CAPACITY 64;
@@ -110,7 +110,7 @@ CREATE RELAY battery_alerts SCHEMA machine_signal BRANCHED BY by_site CAPACITY 6
 CREATE RELAY clean_signals SCHEMA machine_signal BRANCHED BY by_site CAPACITY 256;
 
 CREATE BRANCH by_asset_signal
-  BY asset_signal_branch TTL 5m;
+  SCHEMA asset_signal_branch TTL 5m;
 CREATE RELAY signals_by_asset SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 256;
 CREATE RELAY signals_ordered SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 256;
 CREATE RELAY critical_signals SCHEMA machine_signal BRANCHED BY by_asset_signal CAPACITY 64;
@@ -119,7 +119,7 @@ CREATE RELAY normal_signals SCHEMA machine_signal BRANCHED BY by_asset_signal CA
 CREATE RELAY signal_windows SCHEMA signal_window BRANCHED BY by_asset_signal CAPACITY 64;
 
 CREATE BRANCH by_site_critical
-  BY site_branch TTL 5m;
+  SCHEMA site_branch TTL 5m;
 CREATE RELAY site_critical_signals SCHEMA machine_signal BRANCHED BY by_site_critical CAPACITY 64;
 
 CREATE CLIENT nats_edge

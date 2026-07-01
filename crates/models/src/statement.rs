@@ -1143,7 +1143,7 @@ pub struct BranchValueMapping {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateBranch {
     pub name: Identifier,
-    pub branched_by: Identifier,
+    pub schema: Identifier,
     pub ttl: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eviction: Option<BranchEviction>,

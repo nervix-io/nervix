@@ -35,7 +35,7 @@ Feature: Graceful shutdown
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_source_txns BY transaction_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
 
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_source_txns;
 

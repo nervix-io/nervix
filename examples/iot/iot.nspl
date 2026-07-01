@@ -56,7 +56,7 @@ CREATE IF NOT EXISTS SCHEMA device_branch (
 );
 
 CREATE BRANCH by_site
-  BY site_branch TTL 5m;
+  SCHEMA site_branch TTL 5m;
 
 CREATE RELAY telemetry_by_site SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
 CREATE RELAY telemetry_rejected SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
@@ -64,7 +64,7 @@ CREATE RELAY battery_alerts SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
 CREATE RELAY telemetry_clean SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
 
 CREATE BRANCH by_device
-  BY device_branch TTL 5m;
+  SCHEMA device_branch TTL 5m;
 CREATE RELAY telemetry_by_device SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
 CREATE RELAY telemetry_ordered SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
 CREATE RELAY critical_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
@@ -73,7 +73,7 @@ CREATE RELAY maintenance_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPAC
 CREATE RELAY normal_telemetry SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
 
 CREATE BRANCH by_site_critical
-  BY site_branch TTL 5m;
+  SCHEMA site_branch TTL 5m;
 CREATE RELAY site_critical_alerts SCHEMA iot_telemetry BRANCHED BY by_site_critical CAPACITY 2;
 
 CREATE CLIENT mqtt_edge

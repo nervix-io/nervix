@@ -735,9 +735,9 @@ fn codec_encoding_to_nspl(encoding: CodecEncoding) -> &'static str {
 impl CreateBranch {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let mut rendered = format!(
-            "CREATE BRANCH {} BY {} TTL {}",
+            "CREATE BRANCH {} SCHEMA {} TTL {}",
             self.name.as_str(),
-            self.branched_by.as_str(),
+            self.schema.as_str(),
             self.ttl
         );
         if let Some(eviction) = &self.eviction {

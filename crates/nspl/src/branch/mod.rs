@@ -36,11 +36,11 @@ pub fn create_branch_parser<'src>()
         .then(branch_definition_header())
         .then(max_instances().or_not())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(((if_not_exists, name), (branched_by, ttl)), eviction)| {
+        .map(|(((if_not_exists, name), (schema, ttl)), eviction)| {
             CreateStatement::new(
                 CreateBranch {
                     name,
-                    branched_by,
+                    schema,
                     ttl,
                     eviction,
                 },
@@ -105,12 +105,13 @@ mod tests {
 
     #[test]
     fn parses_create_branch_with_lru_eviction() {
-        let input = "CREATE BRANCH by_tenant BY tenant_branch TTL 5m MAX INSTANCES 1000 EVICT LRU;";
+        let input =
+            "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m MAX INSTANCES 1000 EVICT LRU;";
 
         let parsed = parse_create_branch_tokens(&to_tokens(input)).expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), "by_tenant");
-        assert_eq!(parsed.branched_by.as_str(), "tenant_branch");
+        assert_eq!(parsed.schema.as_str(), "tenant_branch");
         assert_eq!(parsed.ttl, "5m");
         assert_eq!(
             parsed.eviction,
@@ -122,7 +123,7 @@ mod tests {
 
     #[test]
     fn parses_create_branch_without_eviction() {
-        let input = "CREATE BRANCH by_tenant BY tenant_branch TTL 5m;";
+        let input = "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;";
 
         let parsed = parse_create_branch_tokens(&to_tokens(input)).expect("parse should succeed");
 
@@ -131,7 +132,7 @@ mod tests {
 
     #[test]
     fn rejects_values_block() {
-        let input = "CREATE BRANCH by_tenant BY tenant_branch VALUES { tenant = \
+        let input = "CREATE BRANCH by_tenant SCHEMA tenant_branch VALUES { tenant = \
                      notifications.tenant } TTL 5m;";
 
         parse_create_branch_tokens(&to_tokens(input)).expect_err("VALUES belongs to initiators");
@@ -139,21 +140,21 @@ mod tests {
 
     #[test]
     fn rejects_lru_without_max_instances() {
-        let input = "CREATE BRANCH by_tenant BY tenant_branch TTL 5m EVICT LRU;";
+        let input = "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m EVICT LRU;";
 
         parse_create_branch_tokens(&to_tokens(input)).expect_err("MAX INSTANCES is required");
     }
 
     #[test]
-    fn suggests_by_after_branch_name() {
+    fn suggests_schema_after_branch_name() {
         let input = "CREATE BRANCH by_tenant ";
         let suggestions = suggest_create_branch(input, input.len());
-        assert!(suggestions.contains(&"BY".to_string()));
+        assert!(suggestions.contains(&"SCHEMA".to_string()));
     }
 
     #[test]
     fn suggests_evict_after_max_instances() {
-        let input = "CREATE BRANCH by_tenant BY tenant_branch TTL 5m MAX INSTANCES 1000 ";
+        let input = "CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m MAX INSTANCES 1000 ";
         let suggestions = suggest_create_branch(input, input.len());
         assert!(suggestions.contains(&"EVICT".to_string()));
     }

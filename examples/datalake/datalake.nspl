@@ -435,13 +435,13 @@ CREATE IF NOT EXISTS SCHEMA device_branch (
 );
 
 CREATE BRANCH by_device
-  BY device_branch TTL 30m;
+  SCHEMA device_branch TTL 30m;
 
 CREATE BRANCH by_edge_device
-  BY device_branch TTL 30m;
+  SCHEMA device_branch TTL 30m;
 
 CREATE BRANCH by_auth_device
-  BY device_branch TTL 30m;
+  SCHEMA device_branch TTL 30m;
 
 CREATE RELAY device_activity_landing SCHEMA device_activity BRANCHED BY by_device CAPACITY 1024;
 CREATE RELAY edge_activity_landing SCHEMA edge_activity BRANCHED BY by_device CAPACITY 1024;

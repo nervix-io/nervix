@@ -25,7 +25,7 @@ Feature: Materialized relay state
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_state_notifications BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_state_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_state
         SCHEMA notification
         BRANCHED BY by_state_notifications
@@ -127,7 +127,7 @@ Feature: Materialized relay state
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -200,7 +200,7 @@ Feature: Materialized relay state
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -263,7 +263,7 @@ Feature: Materialized relay state
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 500ms;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 500ms;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;

@@ -23,7 +23,7 @@ Feature: Deduplicator state replication
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_txns BY transaction_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;

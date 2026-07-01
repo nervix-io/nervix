@@ -50,13 +50,13 @@ Feature: Relay correlation
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
-        CREATE IF NOT EXISTS BRANCH by_left_profile_alias_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_left_profile_alias_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY left_profile_aliases SCHEMA left_profile BRANCHED BY by_left_profile_alias_ingestor;
-        CREATE IF NOT EXISTS BRANCH by_right_profile_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_right_profile_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_right_profile_ingestor;
-        CREATE IF NOT EXISTS BRANCH by_right_profile_alias_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_right_profile_alias_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY right_profile_aliases SCHEMA right_profile BRANCHED BY by_right_profile_alias_ingestor;
         CREATE RELAY correlated_profiles SCHEMA correlated_profile BRANCHED BY by_left_profile_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;

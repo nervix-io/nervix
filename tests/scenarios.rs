@@ -855,7 +855,7 @@ fn build_ingestor_logic_commands(
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_logic_ingestor
-        BY tenant_branch
+        SCHEMA tenant_branch
         TTL 5m;
       CREATE RELAY logic_notifications SCHEMA {} BRANCHED BY by_logic_ingestor;
       {}

@@ -24,7 +24,7 @@ Feature: Reorderer
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -109,7 +109,7 @@ Feature: Reorderer
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -189,7 +189,7 @@ Feature: Reorderer
       );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_order_notifications BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_order_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_order_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_order_notifications;
         CREATE REORDERER order_notifications

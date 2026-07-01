@@ -1074,7 +1074,7 @@ mod tests {
                      BATCH SIZE 1MiB FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG \
                      ON GENERAL ERROR LOG;";
 
-        parse_statement(input).expect_err("BY is only valid in CREATE BRANCH");
+        parse_statement(input).expect_err("bare BY is not a branch selection mode");
     }
 
     #[test]

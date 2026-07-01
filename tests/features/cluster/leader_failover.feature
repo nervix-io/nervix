@@ -84,8 +84,8 @@ Feature: Cluster leader failover
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m;
-      CREATE IF NOT EXISTS BRANCH by_notification_source BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_notification_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_notification_source WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY source_only SCHEMA notification UNBRANCHED;
       CREATE RELAY generated_notifications SCHEMA notification BRANCHED BY by_notification_source;
@@ -95,19 +95,19 @@ Feature: Cluster leader failover
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_notification_source;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_notifications_a_source BY user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_notifications_a_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_a SCHEMA notification BRANCHED BY by_notifications_a_source;
-      CREATE IF NOT EXISTS BRANCH by_notifications_b_source BY user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_notifications_b_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_b_source;
       CREATE RELAY notifications_all SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE IF NOT EXISTS BRANCH by_transaction_source BY transaction_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_transaction_source SCHEMA transaction_id_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_transaction_source;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_transaction_source;
-      CREATE IF NOT EXISTS BRANCH by_metric_source BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_metric_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_source;
       CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_source;
-      CREATE IF NOT EXISTS BRANCH by_feature_source BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_feature_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -168,7 +168,7 @@ Feature: Cluster leader failover
     Examples:
       | node_kind        | node_name           | vector_type   | score_type    | create_statement                                                                                                                                                                                                                                                                                                                                                                                                       |
       | ingestor         | source_ingestor     | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE INGESTOR source_ingestor TO source_only DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG |
-      | reingestor       | tenant_partition    | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m; CREATE REINGESTOR tenant_partition FROM notifications TO tenant_notifications BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                       |
+      | reingestor       | tenant_partition    | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m; CREATE REINGESTOR tenant_partition FROM notifications TO tenant_notifications BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                   |
       | junction         | join_streams        | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO notifications_all BRANCHED BY by_notifications_a_source FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                                                                                |
       | deduplicator     | dedup_txns          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped BRANCHED BY by_transaction_source DEDUPLICATE ON inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                                                                  |
       | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics TO metric_summaries BRANCHED BY by_metric_source WIDTH 10s DURATION STEP 5s DURATION AGGREGATE metric_summaries.tenant = FIRST(metrics.tenant), metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG                                                                                                                                         |
@@ -245,8 +245,8 @@ Feature: Cluster leader failover
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m;
-      CREATE IF NOT EXISTS BRANCH by_notification_source BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_notification_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_notification_source WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY source_only SCHEMA notification UNBRANCHED;
       CREATE RELAY generated_notifications SCHEMA notification BRANCHED BY by_notification_source;
@@ -256,19 +256,19 @@ Feature: Cluster leader failover
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_notification_source;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_notifications_a_source BY user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_notifications_a_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_a SCHEMA notification BRANCHED BY by_notifications_a_source;
-      CREATE IF NOT EXISTS BRANCH by_notifications_b_source BY user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_notifications_b_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_b_source;
       CREATE RELAY notifications_all SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-      CREATE IF NOT EXISTS BRANCH by_transaction_source BY transaction_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_transaction_source SCHEMA transaction_id_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_transaction_source;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_transaction_source;
-      CREATE IF NOT EXISTS BRANCH by_metric_source BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_metric_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_source;
       CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_source;
-      CREATE IF NOT EXISTS BRANCH by_feature_source BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_feature_source SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_feature_source;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_feature_source;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -327,12 +327,12 @@ Feature: Cluster leader failover
     And within "20s" node "{{query_node}}" eventually reports scheduled "<node_kind>" "<node_name>" owner different from placeholder "failed_primary_node"
 
     Examples:
-      | node_kind        | node_name           | vector_type   | score_type    | create_statement                                                                                                                                                                                                                                                                                                                                              |
-      | ingestor         | source_ingestor     | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INGESTOR source_ingestor TO source_only DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG     |
-      | reingestor       | tenant_partition    | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m; CREATE REINGESTOR tenant_partition FROM notifications TO tenant_notifications BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG |
-      | junction         | join_streams        | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO notifications_all BRANCHED BY by_notifications_a_source FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                       |
-      | deduplicator     | dedup_txns          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped BRANCHED BY by_transaction_source DEDUPLICATE ON inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                         |
-      | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics TO metric_summaries BRANCHED BY by_metric_source WIDTH 10s DURATION STEP 5s DURATION AGGREGATE metric_summaries.tenant = FIRST(metrics.tenant), metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG                                                                                |
-      | generator        | synth_notifications | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE GENERATOR synth_notifications TO generated_notifications BRANCHED BY by_notification_source EACH 100ms FLUSH IMMEDIATE SET generated_notifications.user_id = notifications.user_id, generated_notifications.tenant = notifications.tenant, generated_notifications.level = notifications.level ON MESSAGE ERROR LOG                                    |
-      | inferencer       | score_model         | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INFERENCER score_model FROM features TO scored SET scored.tenant = features.tenant BRANCHED BY by_feature_source USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { "features" = features.vector } OUTPUTS { "score" = scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                  |
-      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                                       |
+      | node_kind        | node_name           | vector_type   | score_type    | create_statement                                                                                                                                                                                                                                                                                                                                                  |
+      | ingestor         | source_ingestor     | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INGESTOR source_ingestor TO source_only DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG         |
+      | reingestor       | tenant_partition    | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING ); CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m; CREATE REINGESTOR tenant_partition FROM notifications TO tenant_notifications BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG |
+      | junction         | join_streams        | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO notifications_all BRANCHED BY by_notifications_a_source FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                                           |
+      | deduplicator     | dedup_txns          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped BRANCHED BY by_transaction_source DEDUPLICATE ON inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG                                                                                                                                                             |
+      | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics TO metric_summaries BRANCHED BY by_metric_source WIDTH 10s DURATION STEP 5s DURATION AGGREGATE metric_summaries.tenant = FIRST(metrics.tenant), metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG                                                                                    |
+      | generator        | synth_notifications | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE GENERATOR synth_notifications TO generated_notifications BRANCHED BY by_notification_source EACH 100ms FLUSH IMMEDIATE SET generated_notifications.user_id = notifications.user_id, generated_notifications.tenant = notifications.tenant, generated_notifications.level = notifications.level ON MESSAGE ERROR LOG                                        |
+      | inferencer       | score_model         | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INFERENCER score_model FROM features TO scored SET scored.tenant = features.tenant BRANCHED BY by_feature_source USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { "features" = features.vector } OUTPUTS { "score" = scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                      |
+      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                                           |

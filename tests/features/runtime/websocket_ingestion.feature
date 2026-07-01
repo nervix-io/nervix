@@ -18,7 +18,7 @@ Feature: Websocket endpoint ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE ENDPOINT ws_notifications_endpoint
@@ -78,7 +78,7 @@ Feature: Websocket endpoint ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
       CREATE VHOST edge ws-{{test_id}}.example.com WITH TLS tls_bundle;
       CREATE ENDPOINT ws_notifications_endpoint

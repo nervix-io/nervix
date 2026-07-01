@@ -20,9 +20,9 @@ Feature: Branched branch expiration
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 500ms;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 500ms;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-        CREATE IF NOT EXISTS BRANCH by_reproject_notifications BY user_id_branch TTL 500ms;
+        CREATE IF NOT EXISTS BRANCH by_reproject_notifications SCHEMA user_id_branch TTL 500ms;
         CREATE RELAY reingested_notifications SCHEMA notification BRANCHED BY by_reproject_notifications;
         CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -114,7 +114,7 @@ Feature: Branched branch expiration
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 200ms;
+      CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 200ms;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
 

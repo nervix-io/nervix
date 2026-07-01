@@ -19,7 +19,7 @@ Feature: ZeroMQ emission
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
@@ -95,11 +95,11 @@ Feature: ZeroMQ emission
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_state_source BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_state_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY state_notifications
         SCHEMA notification BRANCHED BY by_state_source
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-        CREATE IF NOT EXISTS BRANCH by_notifications_source BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_notifications_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_notifications_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT state_ingress

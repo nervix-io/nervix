@@ -17,7 +17,7 @@ Feature: JAQ native codec
         TO SCHEMA notification
         WITH JAQ TRANSFORMATION '<transformation>';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -80,7 +80,7 @@ Feature: JAQ native codec
         WITH JAQ TRANSFORMATIONS
           ON EMITTING '{t: "notification", c: [{t: "user_id", c: [(.user_id | tostring)]}, {t: "payload", c: [.payload]}]}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
