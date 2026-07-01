@@ -20,7 +20,7 @@ Feature: Branched session subscriptions
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE CLIENT mqtt_main
         TYPE MQTT
@@ -86,7 +86,7 @@ Feature: Branched session subscriptions
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE CLIENT mqtt_main
         TYPE MQTT

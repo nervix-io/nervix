@@ -19,7 +19,7 @@ Feature: RabbitMQ ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
@@ -79,7 +79,7 @@ Feature: RabbitMQ ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ

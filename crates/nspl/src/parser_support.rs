@@ -165,7 +165,7 @@ pub fn branch_value_mappings<'src>()
 pub fn branch_definition_header<'src>()
 -> impl Parser<'src, &'src [Token], (ModelIdentifier, String), extra::Err<ParseError<'src>>> + Clone
 {
-    kw(Identifier::By)
+    kw(Identifier::Schema)
         .ignore_then(schema_ref())
         .then_ignore(kw(Identifier::Ttl))
         .then(duration_lit())

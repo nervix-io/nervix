@@ -348,9 +348,9 @@ Feature: Web console NSPL REPL
       CREATE CODEC left_profile_codec FROM WIRE JSON SCHEMA left_profile_wire TO SCHEMA left_profile;
       CREATE CODEC right_profile_codec FROM WIRE JSON SCHEMA right_profile_wire TO SCHEMA right_profile;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
       CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
-      CREATE IF NOT EXISTS BRANCH by_right_profile_ingestor BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_right_profile_ingestor SCHEMA tenant_branch TTL 5m;
       CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_right_profile_ingestor;
       CREATE RELAY correlated_profiles SCHEMA correlated_profile BRANCHED BY by_left_profile_ingestor;
       CREATE RELAY uncorrelated_left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
@@ -491,7 +491,7 @@ Feature: Web console NSPL REPL
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
       CREATE STRICT WIRE JSON SCHEMA notification_wire ( tenant string, user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
-      CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -815,11 +815,11 @@ Feature: Web console NSPL REPL
       );
       CREATE CODEC activity_codec FROM WIRE JSON SCHEMA activity_wire TO SCHEMA activity;
       CREATE IF NOT EXISTS SCHEMA device_branch ( tenant_id STRING, device_id STRING );
-      CREATE IF NOT EXISTS BRANCH by_iot_device_activity BY device_branch TTL 30m;
+      CREATE IF NOT EXISTS BRANCH by_iot_device_activity SCHEMA device_branch TTL 30m;
       CREATE RELAY device_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
-      CREATE IF NOT EXISTS BRANCH by_edge_server_activity BY device_branch TTL 30m;
+      CREATE IF NOT EXISTS BRANCH by_edge_server_activity SCHEMA device_branch TTL 30m;
       CREATE RELAY edge_activity_landing SCHEMA activity BRANCHED BY by_edge_server_activity;
-      CREATE IF NOT EXISTS BRANCH by_auth_server_activity BY device_branch TTL 30m;
+      CREATE IF NOT EXISTS BRANCH by_auth_server_activity SCHEMA device_branch TTL 30m;
       CREATE RELAY auth_activity_landing SCHEMA activity BRANCHED BY by_auth_server_activity;
       CREATE RELAY edge_activity_enriched_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
       CREATE RELAY edge_connect_events SCHEMA activity BRANCHED BY by_iot_device_activity;
@@ -1000,7 +1000,7 @@ Feature: Web console NSPL REPL
       CREATE STRICT WIRE JSON SCHEMA telemetry_wire ( site string, value string );
       CREATE CODEC telemetry_codec FROM WIRE JSON SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
-      CREATE IF NOT EXISTS BRANCH by_primary_telemetry BY site_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_primary_telemetry SCHEMA site_branch TTL 5m;
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_primary_telemetry;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT primary_telemetry_endpoint ON edge PATH '/primary' TYPE HTTP;
@@ -1015,7 +1015,7 @@ Feature: Web console NSPL REPL
     When these NSPL commands are executed on the leader node
       """
       CREATE ENDPOINT backup_telemetry_endpoint ON edge PATH '/backup' TYPE HTTP;
-      CREATE IF NOT EXISTS BRANCH by_backup_telemetry BY site_branch TTL 5m; CREATE INGESTOR backup_telemetry TO telemetry_by_site DECODE USING telemetry_codec BRANCHED BY by_backup_telemetry VALUES { site = telemetry_by_site.site } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT backup_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE IF NOT EXISTS BRANCH by_backup_telemetry SCHEMA site_branch TTL 5m; CREATE INGESTOR backup_telemetry TO telemetry_by_site DECODE USING telemetry_codec BRANCHED BY by_backup_telemetry VALUES { site = telemetry_by_site.site } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT backup_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then selector ".graph-hit-layer" contains "backup_telemetry"
@@ -1045,7 +1045,7 @@ Feature: Web console NSPL REPL
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
-      CREATE IF NOT EXISTS BRANCH by_ingest_events BY value_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_ingest_events SCHEMA value_branch TTL 5m;
       CREATE RELAY raw_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE RELAY deduped_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE VHOST edge api.example.com;
@@ -1112,11 +1112,11 @@ Feature: Web console NSPL REPL
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_source BY tenant_user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_source SCHEMA tenant_user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_source;
       CREATE RELAY validated_notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_source;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_node BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_reingestor_metrics_node SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingestor_metrics_node;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
@@ -1178,11 +1178,11 @@ Feature: Web console NSPL REPL
       CREATE CODEC telemetry_codec FROM WIRE JSON SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
       CREATE IF NOT EXISTS SCHEMA device_branch ( device_id STRING );
-      CREATE IF NOT EXISTS BRANCH by_http_telemetry BY site_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_http_telemetry SCHEMA site_branch TTL 5m;
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_http_telemetry;
       CREATE RELAY battery_alerts SCHEMA telemetry BRANCHED BY by_http_telemetry;
       CREATE RELAY telemetry_clean SCHEMA telemetry BRANCHED BY by_http_telemetry;
-      CREATE IF NOT EXISTS BRANCH by_device_repartition BY device_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_device_repartition SCHEMA device_branch TTL 5m;
       CREATE RELAY telemetry_by_device SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE RELAY maintenance_alerts SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE RELAY normal_telemetry SCHEMA telemetry BRANCHED BY by_device_repartition;
@@ -1259,7 +1259,7 @@ Feature: Web console NSPL REPL
       );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-      CREATE IF NOT EXISTS BRANCH by_relay_buffer_source BY user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_relay_buffer_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_buffer_source CAPACITY 3;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_relay_buffer_source;
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
@@ -1330,7 +1330,7 @@ Feature: Web console NSPL REPL
       CREATE CODEC txn_codec FROM WIRE JSON SCHEMA txn_wire TO SCHEMA txn;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
-      CREATE IF NOT EXISTS BRANCH by_source_txns BY value_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA value_branch TTL 5m;
       CREATE RELAY ss1 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE RELAY ss2 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE VHOST edge api.example.com;
@@ -1343,7 +1343,7 @@ Feature: Web console NSPL REPL
     When these NSPL commands are executed on the leader node
       """
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
-      CREATE IF NOT EXISTS BRANCH by_state_txns_ingestor BY value_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_state_txns_ingestor SCHEMA value_branch TTL 5m;
       CREATE RELAY state_txns SCHEMA txn BRANCHED BY by_state_txns_ingestor WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY rr1 SCHEMA txn BRANCHED BY by_state_txns_ingestor;
       CREATE ENDPOINT state_txns_endpoint ON edge PATH '/state' TYPE HTTP;

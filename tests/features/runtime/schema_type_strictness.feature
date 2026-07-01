@@ -8,7 +8,7 @@ Feature: Schema type strictness
       CREATE STRICT WIRE JSON SCHEMA notification_wire ( tenant string );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_branch ( tenant U32 );
-      CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE INGESTOR kafka_notifications

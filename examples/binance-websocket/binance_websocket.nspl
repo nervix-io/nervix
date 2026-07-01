@@ -49,7 +49,7 @@ CREATE CODEC binance_ws_event_codec
   }';
 
 CREATE BRANCH by_symbol
-  BY symbol_branch TTL 5m;
+  SCHEMA symbol_branch TTL 5m;
 
 CREATE RELAY binance_ws_events
   SCHEMA binance_ws_event

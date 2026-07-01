@@ -215,7 +215,7 @@ mod tests {
     fn rejects_bare_by_stream() {
         let error =
             parse_create_stream("CREATE RELAY notifications SCHEMA event_schema BY tenant_branch;")
-                .expect_err("BY is only valid in CREATE BRANCH");
+                .expect_err("bare BY is not a relay branch mode");
 
         let ParseFromSourceError::Parse { diagnostics, .. } = error else {
             panic!("expected parse error");

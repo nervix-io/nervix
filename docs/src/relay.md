@@ -15,9 +15,9 @@ External feeds commonly contain records for many tenants, users, devices, accoun
 
 Branching is defined by a schema name on a named branch:
 
-- `CREATE BRANCH by_user BY user_branch TTL 5m` isolates each user
-- `CREATE BRANCH by_tenant BY tenant_branch TTL 5m` isolates each tenant
-- `CREATE BRANCH by_tenant_user BY tenant_user_branch TTL 5m` isolates each tenant/user pair
+- `CREATE BRANCH by_user SCHEMA user_branch TTL 5m` isolates each user
+- `CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m` isolates each tenant
+- `CREATE BRANCH by_tenant_user SCHEMA tenant_user_branch TTL 5m` isolates each tenant/user pair
 - `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
 
 Relays select an explicit branch or declare unbranched execution:
@@ -103,7 +103,7 @@ across every branch. If omitted, Nervix uses the default relay buffer.
 
 ## TTL
 
-TTL is a branch contract, not a relay-local setting. `CREATE BRANCH` declares `TTL <duration>` after `BY <schema>`. `UNBRANCHED` branch roots do not declare TTL because there are no concrete branch instances to expire.
+TTL is a branch contract, not a relay-local setting. `CREATE BRANCH` declares `TTL <duration>` after `SCHEMA <schema>`. `UNBRANCHED` branch roots do not declare TTL because there are no concrete branch instances to expire.
 
 TTL controls:
 

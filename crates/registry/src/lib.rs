@@ -746,9 +746,9 @@ impl DomainState {
                                 domain,
                                 &key.identifier,
                                 models,
-                                &branch.branched_by,
+                                &branch.schema,
                             )?),
-                            Some(branch.branched_by.clone()),
+                            Some(branch.schema.clone()),
                         )
                     } else {
                         (Some(Vec::new()), None)
@@ -809,7 +809,7 @@ impl DomainState {
                         identifier,
                         models,
                         &indices,
-                        &branch.branched_by,
+                        &branch.schema,
                         ModelKind::Schema,
                     )?;
                     graph.add_edge(branch_schema, source, EdgeKind::RequiredBy);
@@ -2665,15 +2665,14 @@ fn ensure_branch_schema_exists(
     models: &HashMap<RegistryKey, Model>,
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(Model::Schema(_)) = models.get(&RegistryKey::new(
-        ModelKind::Schema,
-        branch.branched_by.clone(),
-    )) else {
+    let Some(Model::Schema(_)) =
+        models.get(&RegistryKey::new(ModelKind::Schema, branch.schema.clone()))
+    else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             expected_kind: ModelKind::Schema.as_str(),
-            reference: branch.branched_by.as_str().to_string(),
+            reference: branch.schema.as_str().to_string(),
         }));
     };
 
@@ -6098,7 +6097,7 @@ fn ensure_ingestor_output_branching_source(
             domain,
             identifier,
             models,
-            &branch.branched_by,
+            &branch.schema,
             ingestor.branched_by.values(),
             schema,
             output_relay,
@@ -6165,7 +6164,7 @@ fn ensure_reingestor_branching_target(
             domain,
             identifier,
             models,
-            &branch.branched_by,
+            &branch.schema,
             reingestor.branched_by.values(),
             schema,
             output_relay,
@@ -6195,15 +6194,14 @@ fn relay_declared_branch_schema<'a>(
         return Ok(None);
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
-    let Some(Model::Schema(schema)) = models.get(&RegistryKey::new(
-        ModelKind::Schema,
-        branch.branched_by.clone(),
-    )) else {
+    let Some(Model::Schema(schema)) =
+        models.get(&RegistryKey::new(ModelKind::Schema, branch.schema.clone()))
+    else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             expected_kind: ModelKind::Schema.as_str(),
-            reference: branch.branched_by.as_str().to_string(),
+            reference: branch.schema.as_str().to_string(),
         }));
     };
     Ok(Some(schema))
@@ -6929,8 +6927,8 @@ fn resolved_branch_selection(
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
     Ok(ResolvedBranching {
-        schema: Some(branch.branched_by.clone()),
-        fields: branching_schema_fields(domain, identifier, models, &branch.branched_by)?,
+        schema: Some(branch.schema.clone()),
+        fields: branching_schema_fields(domain, identifier, models, &branch.schema)?,
     })
 }
 
@@ -7733,7 +7731,7 @@ mod tests {
     fn branch(name: &str, schema: &str, _relay: &str, _fields: &[&str]) -> Model {
         Model::Branch(CreateBranch {
             name: identifier(name),
-            branched_by: identifier(schema),
+            schema: identifier(schema),
             ttl: "5m".to_string(),
             eviction: None,
         })
@@ -7742,7 +7740,7 @@ mod tests {
     fn branch_for_relay(relay: &str, schema: &str, _fields: &[&str]) -> Model {
         Model::Branch(CreateBranch {
             name: branch_name_for_relay(relay),
-            branched_by: identifier(schema),
+            schema: identifier(schema),
             ttl: "5m".to_string(),
             eviction: None,
         })
@@ -8617,7 +8615,7 @@ mod tests {
             CREATE RELAY features SCHEMA features BRANCHED BY by_tenant_branch;
             CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant_branch;
             CREATE BRANCH by_tenant_branch
-              BY tenant_branch TTL 5m;
+              SCHEMA tenant_branch TTL 5m;
 
             CREATE INFERENCER score_model
               FROM features
@@ -8659,7 +8657,7 @@ mod tests {
             CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant_branch;
             CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
             CREATE BRANCH by_tenant_branch
-              BY tenant_branch TTL 5m;
+              SCHEMA tenant_branch TTL 5m;
 
             CREATE WINDOW PROCESSOR latency_window
               FROM metrics
@@ -8700,7 +8698,7 @@ mod tests {
             CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant_branch;
             CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
             CREATE BRANCH by_tenant_branch
-              BY tenant_branch TTL 5m;
+              SCHEMA tenant_branch TTL 5m;
 
             CREATE WINDOW PROCESSOR latency_window
               FROM metrics
@@ -8747,7 +8745,7 @@ mod tests {
             CREATE RELAY high_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
             CREATE RELAY low_summaries SCHEMA metric_summary BRANCHED BY by_tenant_branch;
             CREATE BRANCH by_tenant_branch
-              BY tenant_branch TTL 5m;
+              SCHEMA tenant_branch TTL 5m;
 
             CREATE WINDOW PROCESSOR first_window
               FROM metrics
@@ -10705,7 +10703,7 @@ mod tests {
             CREATE RELAY right_events SCHEMA event BRANCHED BY by_tenant_branch;
             CREATE RELAY correlated_events SCHEMA correlated_event BRANCHED BY by_tenant_branch;
             CREATE BRANCH by_tenant_branch
-              BY tenant_branch TTL 5m;
+              SCHEMA tenant_branch TTL 5m;
 
             CREATE CORRELATOR correlate_events
               LEFT FROM left_events

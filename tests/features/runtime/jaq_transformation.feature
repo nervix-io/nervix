@@ -17,7 +17,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -67,7 +67,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE CLIENT kafka_main
         TYPE KAFKA
@@ -122,7 +122,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
@@ -175,7 +175,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_redis_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
         CREATE CLIENT redis_main
         TYPE REDIS
@@ -227,7 +227,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE CLIENT mqtt_main
         TYPE MQTT
@@ -280,7 +280,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_nats_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_nats_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
         CREATE CLIENT nats_main
         TYPE NATS
@@ -334,7 +334,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_zeromq_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_zeromq_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_zeromq_notifications;
         CREATE CLIENT zeromq_main
         TYPE ZEROMQ
@@ -387,7 +387,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_sqs_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_sqs_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
         CREATE CLIENT sqs_main
         TYPE SQS
@@ -440,7 +440,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE ENDPOINT ws_notifications_endpoint
@@ -490,7 +490,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE CLIENT http_main
         TYPE HTTP
@@ -538,7 +538,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_ws_notifications BY user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE CLIENT ws_main
         TYPE WEBSOCKETS
@@ -585,7 +585,7 @@ Feature: JAQ transformation
         TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source, value: (.value * 2), timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
-        CREATE IF NOT EXISTS BRANCH by_prom_samples BY source_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE CLIENT prom_main
         TYPE PROMETHEUS

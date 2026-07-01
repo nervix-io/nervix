@@ -165,7 +165,7 @@ Example:
 
 ```nspl
 CREATE BRANCH by_tenant
-  BY tenant_branch TTL 5m;
+  SCHEMA tenant_branch TTL 5m;
 
 CREATE INGESTOR notifications_in
   FILTER WHERE message.active

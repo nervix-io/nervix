@@ -29,7 +29,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -133,7 +133,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -238,7 +238,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -323,7 +323,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -395,7 +395,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_invalid_histogram_latency
-        BY tenant_branch TTL 5m;
+        SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_invalid_histogram_latency;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_invalid_histogram_latency;
       """
@@ -450,7 +450,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -553,7 +553,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -629,7 +629,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -705,7 +705,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -777,7 +777,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -877,7 +877,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE RELAY high_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
@@ -984,7 +984,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_kafka_metrics BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_kafka_metrics SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
         CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
@@ -1072,7 +1072,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_kafka_metrics BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_kafka_metrics SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
         CREATE CLIENT kafka_main TYPE KAFKA CONFIG {

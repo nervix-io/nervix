@@ -30,7 +30,7 @@ Feature: Branched branch behavior
         user_id U32
       );
 
-      CREATE IF NOT EXISTS BRANCH by_source_notifications BY tenant_user_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_source_notifications SCHEMA tenant_user_branch TTL 5m;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_source_notifications;
 
@@ -88,7 +88,7 @@ Feature: Branched branch behavior
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_txns BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -166,7 +166,7 @@ Feature: Branched branch behavior
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_metric_ingestor BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -240,9 +240,9 @@ Feature: Branched branch behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_one BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
-        CREATE IF NOT EXISTS BRANCH by_source_two BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_source_two SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -317,10 +317,10 @@ Feature: Branched branch behavior
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_partition BY tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress

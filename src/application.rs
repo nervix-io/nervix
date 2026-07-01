@@ -8386,26 +8386,23 @@ impl SessionServiceImpl {
                         ));
                     }
                 };
-                match self
-                    .registry
-                    .get(domain, ModelKind::Schema, &branch.branched_by)
-                {
+                match self.registry.get(domain, ModelKind::Schema, &branch.schema) {
                     Ok(Some(Model::Schema(schema))) => {
                         Ok(Some(runtime_schema::compile_schema(&schema).arrow_schema()))
                     }
                     Ok(Some(_)) => Err(format!(
                         "stream '{}' references non-schema branch schema '{}'",
                         relay.as_str(),
-                        branch.branched_by.as_str()
+                        branch.schema.as_str()
                     )),
                     Ok(None) => Err(format!(
                         "stream '{}' references missing branch schema '{}'",
                         relay.as_str(),
-                        branch.branched_by.as_str()
+                        branch.schema.as_str()
                     )),
                     Err(err) => Err(format!(
                         "failed to resolve branch schema '{}' for relay '{}': {err}",
-                        branch.branched_by.as_str(),
+                        branch.schema.as_str(),
                         relay.as_str()
                     )),
                 }
@@ -8456,13 +8453,15 @@ impl SessionServiceImpl {
             let Model::Branch(branch) = branch_node.config.as_ref() else {
                 return Err("scheduled branch node has invalid model kind".to_string());
             };
-            let Some(schema_node) = domain_schedule.nodes.iter().find(|node| {
-                node.kind == ModelKind::Schema && node.identifier == branch.branched_by
-            }) else {
+            let Some(schema_node) = domain_schedule
+                .nodes
+                .iter()
+                .find(|node| node.kind == ModelKind::Schema && node.identifier == branch.schema)
+            else {
                 return Err(format!(
                     "stream '{}' references missing scheduled branch schema '{}'",
                     relay.as_str(),
-                    branch.branched_by.as_str()
+                    branch.schema.as_str()
                 ));
             };
             let Model::Schema(schema) = schema_node.config.as_ref() else {

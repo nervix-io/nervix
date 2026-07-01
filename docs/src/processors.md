@@ -82,7 +82,7 @@ Example:
 
 ```nspl
 CREATE BRANCH by_user
-  BY user_branch TTL 5m;
+  SCHEMA user_branch TTL 5m;
 
 CREATE DEDUPLICATOR project_notifications
   FROM notifications WHERE notifications.active
@@ -400,7 +400,7 @@ ACK behavior follows branch mode. In `ATTACHED` mode, the aggregate output carri
 
 ```nspl
 CREATE BRANCH by_reingested_tenant
-  BY tenant_branch TTL 5m;
+  SCHEMA tenant_branch TTL 5m;
 
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
   FROM <relay> [WHERE <expr>], ...

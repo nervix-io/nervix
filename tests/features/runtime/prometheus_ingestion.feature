@@ -22,7 +22,7 @@ Feature: Prometheus ingestion
         FROM WIRE JSON SCHEMA sample_wire
         TO SCHEMA sample;
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
-        CREATE IF NOT EXISTS BRANCH by_prom_samples BY source_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE CLIENT prom_main
         TYPE PROMETHEUS
@@ -77,7 +77,7 @@ Feature: Prometheus ingestion
         FROM WIRE JSON SCHEMA sample_wire
         TO SCHEMA sample;
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
-        CREATE IF NOT EXISTS BRANCH by_prom_samples BY source_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE CLIENT prom_main
         TYPE PROMETHEUS
@@ -138,7 +138,7 @@ Feature: Prometheus ingestion
         FROM WIRE JSON SCHEMA sample_wire
         TO SCHEMA sample;
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
-        CREATE IF NOT EXISTS BRANCH by_prom_samples BY source_branch TTL 5m;
+        CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE CLIENT prom_main
         TYPE PROMETHEUS

@@ -63,7 +63,7 @@ Feature: Relay capacity
         tenant STRING
       );
 
-      CREATE IF NOT EXISTS BRANCH by_relay_capacity_source BY tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS BRANCH by_relay_capacity_source SCHEMA tenant_branch TTL 5m;
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_capacity_source CAPACITY 2;
 
