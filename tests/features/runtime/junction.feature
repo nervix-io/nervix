@@ -138,13 +138,13 @@ Feature: Relay junction
         CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        BRANCHED BY by_source_one VALUES { user_id = ss1.user_id }
+        BRANCHED BY by_source_one VALUES { tenant = ss1.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        BRANCHED BY by_source_two VALUES { user_id = ss2.user_id }
+        BRANCHED BY by_source_two VALUES { tenant = ss2.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams

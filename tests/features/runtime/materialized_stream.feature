@@ -30,8 +30,7 @@ Feature: Materialized relay state
         SCHEMA notification
         BRANCHED BY by_state_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-        CREATE IF NOT EXISTS BRANCH by_http_notifications BY tenant_branch TTL 5m;
-        CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
+        CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_state_notifications;
         CREATE RELAY enriched_notifications SCHEMA notification BRANCHED BY by_state_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT state_ingress
@@ -51,7 +50,7 @@ Feature: Materialized relay state
         CREATE INGESTOR http_notifications
         TO incoming_notifications
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
+        BRANCHED BY by_state_notifications VALUES { tenant = incoming_notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR enrich_notifications
