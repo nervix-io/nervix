@@ -9,6 +9,7 @@ The current top-level surface includes:
 - create/alter/drop model statements
 - resource lifecycle statements
 - session subscription statements
+- explicit transaction controls: `BEGIN`, `COMMIT`, and `REVERT`
 - describe and show commands
 
 Core create statements:
@@ -83,6 +84,22 @@ The rest of the graph is built with:
 - `CREATE HASH MAP`
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
+
+Multiple NSPL statements in one request must be wrapped in an explicit
+transaction. `BEGIN` starts a session-local transaction, `COMMIT` executes the
+queued statements, and `REVERT` drops the queued statements without applying
+them. Sending multiple statements without `BEGIN` is rejected.
+
+```nspl
+BEGIN;
+CREATE DOMAIN production;
+CREATE SCHEMA notification (user_id I64);
+COMMIT;
+```
+
+`BEGIN` inside an active transaction is an error. `COMMIT` and `REVERT` also
+require an active transaction. Client-local commands such as `USE` are not
+valid inside a transaction and must be sent separately.
 
 Ingestors, relay-consuming processors, and generated-output processors use optional node-level arrival filters and per-output route clauses. Relay-consuming processors may also attach a source-level filter to `FROM`. Emitters use the same row-level filter-map surface on their sink boundary:
 

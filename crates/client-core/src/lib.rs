@@ -8,7 +8,7 @@ use std::{
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 pub use nervix_models::SubscriptionDeliveryBehavior;
-use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
+use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
 use proto::{
     CommandRequest, ListDomainsRequest, SessionRequest,
@@ -47,6 +47,7 @@ pub struct CommandOutcome {
     pub leader: Option<String>,
     pub leader_grpc_uri: Option<String>,
     pub already_existed: bool,
+    pub transaction_active: Option<bool>,
     pub results: Vec<CommandOutcome>,
 }
 
@@ -147,6 +148,7 @@ struct ClientInner {
     request_tx: Mutex<mpsc::Sender<SessionRequest>>,
     pending: Arc<Mutex<VecDeque<PendingResponse>>>,
     command_lock: Mutex<()>,
+    transaction_active: Mutex<bool>,
     response_task: Mutex<Option<JoinHandle<()>>>,
     subscription_tx: mpsc::Sender<SubscriptionEvent>,
     subscription_rx: Mutex<mpsc::Receiver<SubscriptionEvent>>,
@@ -281,6 +283,7 @@ impl Client {
             request_tx: Mutex::new(request_tx.0),
             pending,
             command_lock: Mutex::new(()),
+            transaction_active: Mutex::new(false),
             response_task: Mutex::new(Some(request_tx.1)),
             subscription_tx,
             subscription_rx: Mutex::new(subscription_rx),
@@ -301,10 +304,18 @@ impl Client {
         *self.inner.domain.lock().await = domain.into();
     }
 
+    pub async fn transaction_active(&self) -> bool {
+        *self.inner.transaction_active.lock().await
+    }
+
     pub async fn execute(&self, query: impl Into<String>) -> Result<CommandOutcome, ClientError> {
         let query = query.into();
         let _command_guard = self.inner.command_lock.lock().await;
-        self.execute_with_redirects(&query).await
+        let outcome = self.execute_with_redirects(&query).await?;
+        if let Some(active) = outcome.transaction_active {
+            *self.inner.transaction_active.lock().await = active;
+        }
+        Ok(outcome)
     }
 
     pub async fn list_domains(&self) -> Result<Vec<DomainInfo>, ClientError> {
@@ -365,36 +376,26 @@ impl Client {
                 .iter()
                 .any(|parsed| parsed.statement.requires_local_handling())
         {
-            return self.execute_client_statement_batch(statements).await;
+            if statements.len() > 1 {
+                return Ok(command_error_outcome(
+                    "client-local commands must be executed separately".to_string(),
+                ));
+            }
+            if self.transaction_active().await {
+                return Ok(command_error_outcome(
+                    "client-local commands are not allowed while a transaction is active"
+                        .to_string(),
+                ));
+            }
+            let parsed = statements
+                .into_iter()
+                .next()
+                .expect("non-empty parsed statements must contain one statement");
+            return self
+                .execute_client_statement(parsed.statement, &parsed.source)
+                .await;
         }
         self.execute_remote_once(query).await
-    }
-
-    async fn execute_client_statement_batch(
-        &self,
-        statements: Vec<ParsedClientStatement>,
-    ) -> Result<CommandOutcome, ClientError> {
-        let is_batch = statements.len() > 1;
-        let mut results = Vec::new();
-        for parsed in statements {
-            let outcome = self
-                .execute_client_statement(parsed.statement, &parsed.source)
-                .await?;
-            if !outcome.success {
-                return Ok(command_batch_outcome(results, outcome, is_batch));
-            }
-            append_command_outcome(&mut results, outcome);
-        }
-
-        if results.is_empty() {
-            return Ok(command_error_outcome("empty command".to_string()));
-        }
-        if !is_batch {
-            return Ok(results
-                .pop()
-                .expect("non-empty results must contain the single result"));
-        }
-        Ok(command_success_batch_outcome(results))
     }
 
     async fn execute_client_statement(
@@ -423,6 +424,9 @@ impl Client {
                 .await
             }
             ClientStatement::SubscribeSession(_)
+            | ClientStatement::BeginTransaction
+            | ClientStatement::CommitTransaction
+            | ClientStatement::RevertTransaction
             | ClientStatement::UnsubscribeSession(_)
             | ClientStatement::Server(_) => self.execute_remote_once(source).await,
         }
@@ -600,6 +604,7 @@ impl Client {
                 leader_grpc_uri: (!response.leader_grpc_uri.is_empty())
                     .then_some(response.leader_grpc_uri),
                 already_existed: false,
+                transaction_active: None,
                 results: Vec::new(),
             };
             if outcome.kind != CommandOutcomeKind::NotLeader {
@@ -627,6 +632,7 @@ impl Client {
             leader: None,
             leader_grpc_uri: None,
             already_existed: false,
+            transaction_active: None,
             results: Vec::new(),
         })
     }
@@ -946,6 +952,7 @@ fn command_ok_outcome(message: String) -> CommandOutcome {
         leader: None,
         leader_grpc_uri: None,
         already_existed: false,
+        transaction_active: None,
         results: Vec::new(),
     }
 }
@@ -959,73 +966,9 @@ fn command_error_outcome(message: String) -> CommandOutcome {
         leader: None,
         leader_grpc_uri: None,
         already_existed: false,
+        transaction_active: None,
         results: Vec::new(),
     }
-}
-
-fn append_command_outcome(results: &mut Vec<CommandOutcome>, outcome: CommandOutcome) {
-    if outcome.results.is_empty() {
-        results.push(outcome);
-    } else {
-        results.extend(outcome.results);
-    }
-}
-
-fn command_success_batch_outcome(results: Vec<CommandOutcome>) -> CommandOutcome {
-    CommandOutcome {
-        success: true,
-        kind: CommandOutcomeKind::Ok,
-        message: command_outcomes_message(&results),
-        diagnostics: Vec::new(),
-        leader: None,
-        leader_grpc_uri: None,
-        already_existed: false,
-        results,
-    }
-}
-
-fn command_batch_outcome(
-    mut previous_results: Vec<CommandOutcome>,
-    outcome: CommandOutcome,
-    is_batch: bool,
-) -> CommandOutcome {
-    if !is_batch {
-        return outcome;
-    }
-    append_command_outcome(&mut previous_results, outcome);
-    let success = previous_results.iter().all(|result| result.success);
-    CommandOutcome {
-        success,
-        kind: if success {
-            CommandOutcomeKind::Ok
-        } else {
-            previous_results
-                .last()
-                .map(|result| result.kind)
-                .unwrap_or(CommandOutcomeKind::Error)
-        },
-        message: command_outcomes_message(&previous_results),
-        diagnostics: previous_results
-            .last()
-            .map(|result| result.diagnostics.clone())
-            .unwrap_or_default(),
-        leader: previous_results
-            .last()
-            .and_then(|result| result.leader.clone()),
-        leader_grpc_uri: previous_results
-            .last()
-            .and_then(|result| result.leader_grpc_uri.clone()),
-        already_existed: false,
-        results: previous_results,
-    }
-}
-
-fn command_outcomes_message(results: &[CommandOutcome]) -> String {
-    results
-        .iter()
-        .map(|result| result.message.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 impl SubscriptionRequest {
@@ -1088,6 +1031,7 @@ impl From<proto::CommandResult> for CommandOutcome {
             leader: (!value.leader.is_empty()).then_some(value.leader),
             leader_grpc_uri: (!value.leader_grpc_uri.is_empty()).then_some(value.leader_grpc_uri),
             already_existed: value.already_existed,
+            transaction_active: value.transaction_active,
             results: value.results.into_iter().map(Into::into).collect(),
         }
     }
@@ -1189,6 +1133,7 @@ mod tests {
                 request_tx: Mutex::new(request_tx),
                 pending: Arc::new(Mutex::new(VecDeque::new())),
                 command_lock: Mutex::new(()),
+                transaction_active: Mutex::new(false),
                 response_task: Mutex::new(None),
                 subscription_tx,
                 subscription_rx: Mutex::new(subscription_rx),
@@ -1285,6 +1230,7 @@ mod tests {
             already_existed: true,
             leader_web_console_uri: String::new(),
             results: Vec::new(),
+            transaction_active: Some(true),
         });
         assert_eq!(outcome.success, false);
         assert_eq!(outcome.kind, CommandOutcomeKind::NotLeader);
@@ -1296,6 +1242,7 @@ mod tests {
             Some("http://127.0.0.1:47393")
         );
         assert!(outcome.already_existed);
+        assert_eq!(outcome.transaction_active, Some(true));
 
         let subscription = SubscriptionEvent::from(proto::SubscriptionEvent {
             subscription: "sub_orders".to_string(),
@@ -1368,6 +1315,38 @@ mod tests {
             .await
             .expect_err("must fail");
         assert!(matches!(err, ClientError::SessionClosed));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_mixed_client_local_multi_statement_request() {
+        let client = test_client("default");
+        let outcome = client
+            .execute("USE prod; CREATE DOMAIN prod;")
+            .await
+            .expect("client-local multi-statement rejection should not use network");
+
+        assert!(!outcome.success);
+        assert_eq!(
+            outcome.message,
+            "client-local commands must be executed separately"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_client_local_command_during_transaction() {
+        let client = test_client("default");
+        *client.inner.transaction_active.lock().await = true;
+
+        let outcome = client
+            .execute("USE prod;")
+            .await
+            .expect("client-local transaction rejection should not use network");
+
+        assert!(!outcome.success);
+        assert_eq!(
+            outcome.message,
+            "client-local commands are not allowed while a transaction is active"
+        );
     }
 
     #[tokio::test]

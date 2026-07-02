@@ -29,11 +29,17 @@ CREATE UNPACED DOMAIN wasm_dual_demo;
 
 USE wasm_dual_demo;
 
+BEGIN;
 CREATE RESOURCE rust_wasm_filter;
+COMMIT;
 UPLOAD RESOURCE rust_wasm_filter VERSION './examples/wasm-processors/rust-guest/target/wasm32-unknown-unknown/release';
 
+BEGIN;
 CREATE RESOURCE go_wasm_filter;
+COMMIT;
 UPLOAD RESOURCE go_wasm_filter VERSION './examples/wasm-processors/go-guest';
+
+BEGIN;
 
 CREATE SCHEMA metric (
   value I32
@@ -91,3 +97,5 @@ SUBSCRIBE SESSION TO go_filtered_metrics;
 SUBSCRIBE SESSION TO go_positive_metrics;
 
 START;
+
+COMMIT;

@@ -29,4 +29,11 @@ In practice, the control plane covers:
 
 This is the part of Nervix where Raft-backed consistency matters. It keeps cluster-wide definitions coherent.
 
+NSPL command grouping is explicit. A session starts a control-plane transaction
+with `BEGIN`, queues following NSPL statements, applies them with `COMMIT`, or
+drops them with `REVERT`. `BEGIN` inside an active transaction is rejected, and
+`COMMIT` or `REVERT` without an active transaction is rejected. A request that
+contains multiple statements outside an explicit transaction is rejected instead
+of being treated as an implicit batch.
+
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.

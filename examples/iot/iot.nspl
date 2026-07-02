@@ -10,6 +10,8 @@ CREATE UNPACED DOMAIN iot_demo;
 
 USE iot_demo;
 
+BEGIN;
+
 CREATE SCHEMA iot_telemetry (
   site STRING,
   line STRING,
@@ -183,3 +185,5 @@ CREATE EMITTER redis_maintenance_alerts
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
 
 START;
+
+COMMIT;

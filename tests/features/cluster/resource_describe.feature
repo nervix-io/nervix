@@ -27,7 +27,7 @@ Feature: Resource lifecycle
       versions: (none)
       """
 
-  Scenario: Rust client batches can upload local resource directories
+  Scenario: Rust client can upload local resource directories
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has resource directory "proto_dir" containing
@@ -37,18 +37,21 @@ Feature: Resource lifecycle
         "schema/types/common.proto": "message Common {}"
       }
       """
-    When these NSPL commands are executed as one batch through the client on the leader node
+    When these NSPL commands are executed through the client on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
       UPLOAD RESOURCE proto VERSION '{{proto_dir}}';
-      DESCRIBE RESOURCE proto VERSION 1;
       """
     Then the last command output contains
       """
       uploaded resource version 1
       """
-    And the last command output contains
+    When these NSPL commands are executed through the client on the leader node
+      """
+      DESCRIBE RESOURCE proto VERSION 1;
+      """
+    Then the last command output contains
       """
       cluster_ready: true
       """

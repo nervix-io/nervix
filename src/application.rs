@@ -93,8 +93,8 @@ use nervix_models::{
 use nervix_nspl::{
     Token, Word,
     client_statement::{
-        ClientStatement, parse_client_statements, suggest_client_statement,
-        upload_resource_path_fragment,
+        ClientStatement, ParsedClientStatement, parse_client_statement_sources,
+        parse_client_statements, suggest_client_statement, upload_resource_path_fragment,
     },
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
@@ -223,6 +223,29 @@ struct SubscriptionMatcher {
 
 struct SessionSubscriptions {
     subscriptions: HashMap<String, SessionSubscription>,
+    transaction: SessionCommandTransaction,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSessionCommand {
+    source: String,
+    statement: ClientStatement,
+    domain: String,
+}
+
+#[derive(Debug, Default)]
+struct SessionCommandTransaction {
+    active: bool,
+    commands: Vec<PendingSessionCommand>,
+}
+
+#[derive(Debug)]
+enum SessionCommandOperation {
+    Begin,
+    Queue(PendingSessionCommand),
+    Commit,
+    Revert,
+    Execute(PendingSessionCommand),
 }
 
 struct SessionSubscriptionTaskConfig {
@@ -240,7 +263,80 @@ impl SessionSubscriptions {
     fn new() -> Self {
         Self {
             subscriptions: HashMap::new(),
+            transaction: SessionCommandTransaction::default(),
         }
+    }
+
+    fn transaction_active(&self) -> bool {
+        self.transaction.is_active()
+    }
+
+    fn plan_commands(
+        &self,
+        statements: Vec<ParsedClientStatement>,
+        request_domain: &str,
+    ) -> Result<Vec<SessionCommandOperation>, String> {
+        let mut transaction_active = self.transaction.is_active();
+        let multi_statement = statements.len() > 1;
+        let mut operations = Vec::with_capacity(statements.len());
+
+        for parsed in statements {
+            match parsed.statement {
+                ClientStatement::BeginTransaction => {
+                    if transaction_active {
+                        return Err("transaction is already active".to_string());
+                    }
+                    transaction_active = true;
+                    operations.push(SessionCommandOperation::Begin);
+                }
+                ClientStatement::CommitTransaction => {
+                    if !transaction_active {
+                        return Err("COMMIT requires an active transaction".to_string());
+                    }
+                    transaction_active = false;
+                    operations.push(SessionCommandOperation::Commit);
+                }
+                ClientStatement::RevertTransaction => {
+                    if !transaction_active {
+                        return Err("REVERT requires an active transaction".to_string());
+                    }
+                    transaction_active = false;
+                    operations.push(SessionCommandOperation::Revert);
+                }
+                statement => {
+                    let command = PendingSessionCommand {
+                        source: parsed.source,
+                        statement,
+                        domain: request_domain.to_string(),
+                    };
+                    if transaction_active {
+                        operations.push(SessionCommandOperation::Queue(command));
+                    } else if multi_statement {
+                        return Err("multiple commands require BEGIN".to_string());
+                    } else {
+                        operations.push(SessionCommandOperation::Execute(command));
+                    }
+                }
+            }
+        }
+
+        Ok(operations)
+    }
+
+    fn begin_transaction(&mut self) {
+        self.transaction.begin();
+    }
+
+    fn queue_transaction_command(&mut self, command: PendingSessionCommand) -> usize {
+        self.transaction.push(command)
+    }
+
+    fn commit_transaction(&mut self) -> Vec<PendingSessionCommand> {
+        self.transaction.commit()
+    }
+
+    fn revert_transaction(&mut self) -> usize {
+        self.transaction.revert()
     }
 
     fn insert(
@@ -444,6 +540,34 @@ impl SessionSubscriptions {
                 .unregister_subscription_interest(&subscription.domain, &subscription.relay)
                 .await;
         }
+    }
+}
+
+impl SessionCommandTransaction {
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn begin(&mut self) {
+        self.active = true;
+        self.commands.clear();
+    }
+
+    fn push(&mut self, command: PendingSessionCommand) -> usize {
+        self.commands.push(command);
+        self.commands.len()
+    }
+
+    fn commit(&mut self) -> Vec<PendingSessionCommand> {
+        self.active = false;
+        std::mem::take(&mut self.commands)
+    }
+
+    fn revert(&mut self) -> usize {
+        self.active = false;
+        let dropped = self.commands.len();
+        self.commands.clear();
+        dropped
     }
 }
 
@@ -5579,65 +5703,78 @@ impl SessionServiceImpl {
         tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        let client_statements = match parse_client_statements(&req.query) {
+        let client_statements = match parse_client_statement_sources(&req.query) {
             Ok(statements) => statements,
             Err(ParseFromSourceError::Lex { diagnostics, .. }) => {
-                return error_response("lex error", &diagnostics);
+                return command_with_transaction_state(
+                    error_response("lex error", &diagnostics),
+                    subscriptions.transaction_active(),
+                );
             }
             Err(ParseFromSourceError::Parse { diagnostics, .. }) => {
-                return error_response("parse error", &diagnostics);
+                return command_with_transaction_state(
+                    error_response("parse error", &diagnostics),
+                    subscriptions.transaction_active(),
+                );
             }
         };
 
-        let is_batch = client_statements.len() > 1;
-        let mut results = Vec::new();
-        let mut client_statements = client_statements.into_iter().peekable();
-        while let Some(client_statement) = client_statements.next() {
-            if let ClientStatement::Server(Statement::Create(create)) = client_statement {
-                let mut creates = vec![create];
-                while let Some(ClientStatement::Server(Statement::Create(_))) =
-                    client_statements.peek()
-                {
-                    let Some(ClientStatement::Server(Statement::Create(create))) =
-                        client_statements.next()
-                    else {
-                        unreachable!("peeked create statement must be next");
-                    };
-                    creates.push(create);
-                }
-                let result = if creates.len() == 1 {
-                    self.process_client_statement(
-                        ClientStatement::Server(Statement::Create(
-                            creates
-                                .pop()
-                                .expect("single create batch must contain one create statement"),
-                        )),
-                        &req.query,
-                        &req.domain,
-                        tx,
-                        subscriptions,
-                    )
-                    .await
-                } else {
-                    self.process_create_model_batch(creates, &req.query, &req.domain)
-                        .await
-                };
-                if !result.success {
-                    return command_batch_result(results, result, is_batch);
-                }
-                append_command_result(&mut results, result);
-                continue;
+        let operations = match subscriptions.plan_commands(client_statements, &req.domain) {
+            Ok(operations) => operations,
+            Err(error) => {
+                return command_with_transaction_state(
+                    command_error(error),
+                    subscriptions.transaction_active(),
+                );
             }
+        };
 
-            let result = self
-                .process_client_statement(
-                    client_statement,
-                    &req.query,
-                    &req.domain,
-                    tx,
-                    subscriptions,
-                )
-                .await;
+        let result = self
+            .process_session_command_operations(operations, tx, subscriptions)
+            .await;
+        command_with_transaction_state(result, subscriptions.transaction_active())
+    }
+
+    async fn process_session_command_operations(
+        &self,
+        operations: Vec<SessionCommandOperation>,
+        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
+        subscriptions: &mut SessionSubscriptions,
+    ) -> CommandResult {
+        let is_batch = operations.len() > 1;
+        let mut results = Vec::new();
+
+        for operation in operations {
+            let result = match operation {
+                SessionCommandOperation::Begin => {
+                    subscriptions.begin_transaction();
+                    command_ok("transaction started".to_string())
+                }
+                SessionCommandOperation::Queue(command) => {
+                    let pending = subscriptions.queue_transaction_command(command);
+                    command_ok(format!("queued command in transaction ({pending} pending)"))
+                }
+                SessionCommandOperation::Commit => {
+                    let commands = subscriptions.commit_transaction();
+                    if commands.is_empty() {
+                        command_ok("transaction committed: 0 commands".to_string())
+                    } else {
+                        self.process_pending_session_commands(commands, tx, subscriptions, true)
+                            .await
+                    }
+                }
+                SessionCommandOperation::Revert => {
+                    let dropped = subscriptions.revert_transaction();
+                    command_ok(format!(
+                        "transaction reverted: dropped {dropped} command(s)"
+                    ))
+                }
+                SessionCommandOperation::Execute(command) => {
+                    self.process_pending_session_commands(vec![command], tx, subscriptions, false)
+                        .await
+                }
+            };
+
             if !result.success {
                 return command_batch_result(results, result, is_batch);
             }
@@ -5655,11 +5792,102 @@ impl SessionServiceImpl {
 
         CommandResult {
             success: true,
-            message: results
-                .iter()
-                .map(|result| result.message.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
+            message: command_results_message(&results),
+            diagnostics: Vec::new(),
+            kind: CommandResultKind::Ok as i32,
+            results,
+            ..Default::default()
+        }
+    }
+
+    async fn process_pending_session_commands(
+        &self,
+        commands: Vec<PendingSessionCommand>,
+        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
+        subscriptions: &mut SessionSubscriptions,
+        explicit_batch: bool,
+    ) -> CommandResult {
+        let is_batch = explicit_batch || commands.len() > 1;
+        let mut results = Vec::new();
+        let mut commands = commands.into_iter().peekable();
+
+        while let Some(command) = commands.next() {
+            match command.statement {
+                ClientStatement::Server(Statement::Create(create)) => {
+                    let domain = command.domain;
+                    let mut sources = vec![command.source];
+                    let mut creates = vec![create];
+
+                    while let Some(next) = commands.peek() {
+                        if next.domain != domain {
+                            break;
+                        }
+                        let ClientStatement::Server(Statement::Create(_)) = &next.statement else {
+                            break;
+                        };
+                        let next = commands
+                            .next()
+                            .expect("peeked command must still be available");
+                        let ClientStatement::Server(Statement::Create(create)) = next.statement
+                        else {
+                            unreachable!("peeked create statement must be next");
+                        };
+                        sources.push(next.source);
+                        creates.push(create);
+                    }
+
+                    let create_query = sources.join("; ");
+                    let result =
+                        if creates.len() == 1 {
+                            self.process_client_statement(
+                                ClientStatement::Server(Statement::Create(creates.pop().expect(
+                                    "single create batch must contain one create statement",
+                                ))),
+                                &create_query,
+                                &domain,
+                                tx,
+                                subscriptions,
+                            )
+                            .await
+                        } else {
+                            self.process_create_model_batch(creates, &create_query, &domain)
+                                .await
+                        };
+                    if !result.success {
+                        return command_batch_result(results, result, is_batch);
+                    }
+                    append_command_result(&mut results, result);
+                }
+                statement => {
+                    let result = self
+                        .process_client_statement(
+                            statement,
+                            &command.source,
+                            &command.domain,
+                            tx,
+                            subscriptions,
+                        )
+                        .await;
+                    if !result.success {
+                        return command_batch_result(results, result, is_batch);
+                    }
+                    append_command_result(&mut results, result);
+                }
+            }
+        }
+
+        if results.is_empty() {
+            return command_error("empty command".to_string());
+        }
+        if !is_batch {
+            return results
+                .pop()
+                .expect("non-empty results must contain the single result");
+        }
+
+        CommandResult {
+            success: true,
+            message: command_results_message(&results),
             diagnostics: Vec::new(),
             kind: CommandResultKind::Ok as i32,
             results,
@@ -5899,6 +6127,14 @@ impl SessionServiceImpl {
                 return self
                     .unsubscribe_session(&domain, subscription, subscriptions)
                     .await;
+            }
+            ClientStatement::BeginTransaction
+            | ClientStatement::CommitTransaction
+            | ClientStatement::RevertTransaction => {
+                return command_error(
+                    "transaction control commands must be handled by the session transaction"
+                        .to_string(),
+                );
             }
             ClientStatement::Server(statement) => statement,
         };
@@ -6643,8 +6879,9 @@ impl SessionServiceImpl {
                 true
             })
         {
-            return command_error(
-                "UPLOAD RESOURCE is not supported in the web console".to_string(),
+            return command_with_transaction_state(
+                command_error("UPLOAD RESOURCE is not supported in the web console".to_string()),
+                subscriptions.transaction_active(),
             );
         }
 
@@ -10214,6 +10451,11 @@ fn command_error(message: String) -> CommandResult {
         kind: CommandResultKind::Error as i32,
         ..Default::default()
     }
+}
+
+fn command_with_transaction_state(mut result: CommandResult, active: bool) -> CommandResult {
+    result.transaction_active = Some(active);
+    result
 }
 
 async fn fetch_resource_archive(
@@ -14152,9 +14394,7 @@ mod tests {
     async fn process_command_create_if_not_exists_returns_already_existed_for_models() {
         let (service, registry, path) = build_test_service(true).await;
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
 
         let first = service
             .process_command(
@@ -14202,18 +14442,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_command_executes_semicolon_separated_batch_without_trailing_semicolon() {
+    async fn process_command_rejects_implicit_semicolon_batch() {
         let (service, registry, path) = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA notification \
-                            UNBRANCHED; CREATE SCHEMA notification ( user_id U32 )"
+                    query: "CREATE DOMAIN prod; CREATE SCHEMA notification ( user_id U32 )"
+                        .to_string(),
+                    domain: "prod".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+
+        assert!(!result.success);
+        assert_eq!(result.message, "multiple commands require BEGIN");
+        assert_eq!(result.transaction_active, Some(false));
+        assert!(
+            registry
+                .get(
+                    &Domain::parse("prod").expect("valid domain"),
+                    ModelKind::Schema,
+                    &identifier("notification"),
+                )
+                .expect("registry get should succeed")
+                .is_none(),
+            "implicit batch must not create later models"
+        );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {
+        let (service, registry, path) = build_test_service(false).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        let result = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN; CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA \
+                            notification UNBRANCHED; CREATE SCHEMA notification ( user_id U32 ); \
+                            COMMIT"
                         .to_string(),
                     domain: "prod".to_string(),
                 },
@@ -14223,7 +14499,7 @@ mod tests {
             .await;
 
         assert!(result.success, "command must succeed: {}", result.message);
-        assert_eq!(result.results.len(), 3);
+        assert_eq!(result.transaction_active, Some(false));
         assert!(result.message.contains("created domain 'prod'"));
         assert!(result.message.contains("stored model 'notifications'"));
         assert!(result.message.contains("stored model 'notification'"));
@@ -14256,17 +14532,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_command_queues_transaction_across_requests_and_reverts() {
+        let (service, registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        let begin = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN;".to_string(),
+                    domain: "default".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(begin.success);
+        assert_eq!(begin.transaction_active, Some(true));
+
+        let queued = service
+            .process_command(
+                CommandRequest {
+                    query: "CREATE SCHEMA queued_event ( user_id U32 );".to_string(),
+                    domain: "default".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(queued.success);
+        assert_eq!(queued.message, "queued command in transaction (1 pending)");
+        assert_eq!(queued.transaction_active, Some(true));
+        assert!(
+            registry
+                .get(
+                    &Domain::parse("default").expect("valid domain"),
+                    ModelKind::Schema,
+                    &identifier("queued_event"),
+                )
+                .expect("registry get should succeed")
+                .is_none(),
+            "queued command must not execute before COMMIT"
+        );
+
+        let reverted = service
+            .process_command(
+                CommandRequest {
+                    query: "REVERT;".to_string(),
+                    domain: "default".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(reverted.success);
+        assert_eq!(
+            reverted.message,
+            "transaction reverted: dropped 1 command(s)"
+        );
+        assert_eq!(reverted.transaction_active, Some(false));
+        assert!(
+            registry
+                .get(
+                    &Domain::parse("default").expect("valid domain"),
+                    ModelKind::Schema,
+                    &identifier("queued_event"),
+                )
+                .expect("registry get should succeed")
+                .is_none(),
+            "reverted command must not persist"
+        );
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn process_command_rejects_begin_inside_begin() {
+        let (service, _registry, path) = build_test_service(true).await;
+        let (tx, _rx) = mpsc::channel(16);
+        let mut subscriptions = SessionSubscriptions::new();
+
+        let begin = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN;".to_string(),
+                    domain: "default".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(begin.success);
+        assert_eq!(begin.transaction_active, Some(true));
+
+        let nested = service
+            .process_command(
+                CommandRequest {
+                    query: "BEGIN;".to_string(),
+                    domain: "default".to_string(),
+                },
+                &tx,
+                &mut subscriptions,
+            )
+            .await;
+        assert!(!nested.success);
+        assert_eq!(nested.message, "transaction is already active");
+        assert_eq!(nested.transaction_active, Some(true));
+
+        subscriptions.stop_all(&service).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
     async fn process_command_batch_returns_prior_successes_before_error() {
         let (service, _registry, path) = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "CREATE DOMAIN prod; CREATE DOMAIN prod".to_string(),
+                    query: "BEGIN; CREATE DOMAIN prod; CREATE DOMAIN prod; COMMIT".to_string(),
                     domain: "prod".to_string(),
                 },
                 &tx,
@@ -14275,11 +14662,7 @@ mod tests {
             .await;
 
         assert!(!result.success);
-        assert_eq!(result.results.len(), 2);
-        assert!(result.results[0].success);
-        assert_eq!(result.results[0].message, "created domain 'prod'");
-        assert!(!result.results[1].success);
-        assert!(result.results[1].message.contains("already exists"));
+        assert_eq!(result.transaction_active, Some(false));
         assert!(result.message.contains("created domain 'prod'"));
         assert!(result.message.contains("already exists"));
 
@@ -14291,14 +14674,12 @@ mod tests {
     async fn process_command_batch_returns_each_domain_create_result() {
         let (service, _registry, path) = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "CREATE DOMAIN alpha; CREATE DOMAIN beta".to_string(),
+                    query: "BEGIN; CREATE DOMAIN alpha; CREATE DOMAIN beta; COMMIT".to_string(),
                     domain: "default".to_string(),
                 },
                 &tx,
@@ -14307,9 +14688,7 @@ mod tests {
             .await;
 
         assert!(result.success, "command must succeed: {}", result.message);
-        assert_eq!(result.results.len(), 2);
-        assert_eq!(result.results[0].message, "created domain 'alpha'");
-        assert_eq!(result.results[1].message, "created domain 'beta'");
+        assert_eq!(result.transaction_active, Some(false));
         assert!(result.message.contains("created domain 'alpha'"));
         assert!(result.message.contains("created domain 'beta'"));
 
@@ -14321,15 +14700,14 @@ mod tests {
     async fn process_command_model_create_batch_is_atomic_on_registry_failure() {
         let (service, registry, path) = build_test_service(false).await;
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
             .process_command(
                 CommandRequest {
-                    query: "CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA missing_schema \
-                            UNBRANCHED; CREATE SCHEMA notification ( user_id U32 )"
+                    query: "BEGIN; CREATE DOMAIN prod; CREATE RELAY notifications SCHEMA \
+                            missing_schema UNBRANCHED; CREATE SCHEMA notification ( user_id U32 \
+                            ); COMMIT"
                         .to_string(),
                     domain: "prod".to_string(),
                 },
@@ -14339,9 +14717,8 @@ mod tests {
             .await;
 
         assert!(!result.success);
-        assert_eq!(result.results.len(), 2);
-        assert!(result.results[0].success);
-        assert!(!result.results[1].success);
+        assert_eq!(result.transaction_active, Some(false));
+        assert!(result.message.contains("created domain 'prod'"));
 
         let domain = Domain::parse("prod").expect("valid domain");
         let relay = registry
@@ -14560,9 +14937,7 @@ mod tests {
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
         };
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
         let commands = [
             "CREATE SCHEMA notification ( user_id I64 );",
             "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
@@ -14736,9 +15111,7 @@ mod tests {
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
         };
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
         for command in [
             "CREATE SCHEMA notification ( user_id I64 );",
             "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
@@ -14907,9 +15280,7 @@ mod tests {
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
         };
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
         for command in [
             "CREATE SCHEMA transaction ( transaction_id STRING, amount I64 );",
             "CREATE STRICT WIRE JSON SCHEMA transaction_wire ( transaction_id string, amount \
@@ -15152,9 +15523,7 @@ mod tests {
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
         };
         let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions {
-            subscriptions: HashMap::new(),
-        };
+        let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
             .process_command(

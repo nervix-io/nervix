@@ -1,14 +1,16 @@
 Feature: Domain lifecycle
-  Scenario Outline: Semicolon-separated command batches execute as one request
+  Scenario Outline: Explicit transactions execute multiple commands as one request
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When this NSPL command batch is executed on the leader node
+    When this NSPL command request is executed on the leader node
       """
+      BEGIN;
       CREATE DOMAIN {{domain}};
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE SCHEMA notification (
         user_id I64
-      )
+      );
+      COMMIT
       """
     Then the last command output contains
       """
@@ -34,8 +36,9 @@ Feature: Domain lifecycle
       """
       CREATE SCHEMA notification (user_id I64);
       """
-    When this NSPL command batch is executed on the leader node
+    When this NSPL command request is executed on the leader node
       """
+      BEGIN;
       CREATE SCHEMA zip_code (
         zip_code U64,
         latitude F64,
@@ -51,7 +54,8 @@ Feature: Domain lifecycle
         city STRING,
         state STRING,
         county STRING
-      )
+      );
+      COMMIT
       """
     Then the last command output contains
       """

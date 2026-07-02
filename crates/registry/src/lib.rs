@@ -8253,6 +8253,9 @@ mod tests {
                     domain = next;
                 }
                 nervix_nspl::client_statement::ClientStatement::UploadResource(_)
+                | nervix_nspl::client_statement::ClientStatement::BeginTransaction
+                | nervix_nspl::client_statement::ClientStatement::CommitTransaction
+                | nervix_nspl::client_statement::ClientStatement::RevertTransaction
                 | nervix_nspl::client_statement::ClientStatement::SubscribeSession(_)
                 | nervix_nspl::client_statement::ClientStatement::UnsubscribeSession(_) => {}
                 nervix_nspl::client_statement::ClientStatement::Server(statement) => {
