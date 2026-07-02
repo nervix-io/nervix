@@ -10,6 +10,8 @@ CREATE UNPACED DOMAIN nats_factory_windows_demo;
 
 USE nats_factory_windows_demo;
 
+BEGIN;
+
 CREATE SCHEMA machine_signal (
   site STRING,
   line STRING,
@@ -244,3 +246,5 @@ CREATE EMITTER nats_battery_alerts
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
 
 START;
+
+COMMIT;

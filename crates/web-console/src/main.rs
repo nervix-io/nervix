@@ -227,6 +227,7 @@ fn App() -> impl IntoView {
     let active_theme = RwSignal::new(0_usize);
     let input = RwSignal::new(String::new());
     let terminal_lines = RwSignal::new(Vec::<TermLine>::new());
+    let transaction_active = RwSignal::new(false);
     let subscription_tabs = RwSignal::new(Vec::<SubscriptionTabView>::new());
     let active_subscription_tab = RwSignal::new(None::<u64>);
     let next_subscription_tab_id = RwSignal::new(1_u64);
@@ -242,6 +243,7 @@ fn App() -> impl IntoView {
         suggestions,
         domain_snapshots,
         active_domain,
+        transaction_active,
         domains,
         resource_details,
         subscription_tabs,
@@ -319,13 +321,26 @@ fn App() -> impl IntoView {
         if command.is_empty() {
             return;
         }
-        terminal_lines.update(|lines| lines.push(TermLine::prompt(command.clone())));
+        terminal_lines.update(|lines| {
+            lines.push(TermLine::prompt(
+                command.clone(),
+                transaction_active.get_untracked(),
+            ));
+        });
         if command.eq_ignore_ascii_case("clear") {
             terminal_lines.set(Vec::new());
             input.set(String::new());
             return;
         }
         if let Ok(ClientStatement::ListDomains) = parse_client_statement(&command) {
+            if transaction_active.get_untracked() {
+                terminal_lines.update(|lines| {
+                    lines.push(TermLine::error(
+                        "client-local commands are not allowed while a transaction is active",
+                    ));
+                });
+                return;
+            }
             let request = nervix_proto::SessionRequest {
                 request: Some(nervix_proto::session_request::Request::ListDomains(
                     nervix_proto::ListDomainsRequest {},
@@ -343,6 +358,14 @@ fn App() -> impl IntoView {
                 }
             }
         } else if let Ok(domain) = parse_use_domain(&command) {
+            if transaction_active.get_untracked() {
+                terminal_lines.update(|lines| {
+                    lines.push(TermLine::error(
+                        "client-local commands are not allowed while a transaction is active",
+                    ));
+                });
+                return;
+            }
             let domain_name = domain.to_string();
             if domains
                 .get_untracked()
@@ -517,6 +540,7 @@ fn App() -> impl IntoView {
                             domain=active_domain_name
                             input=input
                             terminal_lines=terminal_lines
+                            transaction_active=move || transaction_active.get()
                             subscription_tabs=subscription_tabs
                             active_subscription_tab=active_subscription_tab
                             stop_subscription=stop_subscription
@@ -591,6 +615,7 @@ fn use_websocket_session(
     suggestions: RwSignal<Vec<String>>,
     domain_snapshots: RwSignal<Vec<DomainSnapshotView>>,
     active_domain: RwSignal<Option<String>>,
+    transaction_active: RwSignal<bool>,
     domains: RwSignal<Vec<DomainView>>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
@@ -731,6 +756,7 @@ fn use_websocket_session(
                                                         suggestions,
                                                         domain_snapshots,
                                                         active_domain,
+                                                        transaction_active,
                                                         domains,
                                                         resource_details,
                                                         subscription_tabs,
@@ -925,6 +951,7 @@ fn handle_session_response(
     suggestions: RwSignal<Vec<String>>,
     domain_snapshots: RwSignal<Vec<DomainSnapshotView>>,
     active_domain: RwSignal<Option<String>>,
+    transaction_active: RwSignal<bool>,
     domains: RwSignal<Vec<DomainView>>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
@@ -938,6 +965,9 @@ fn handle_session_response(
         Some(nervix_proto::session_response::Event::Result(result)) => {
             if let Some(leader_url) = leader_web_console_redirect_url(&result) {
                 return SessionResponseAction::Reconnect(leader_url);
+            }
+            if let Some(active) = result.transaction_active {
+                transaction_active.set(active);
             }
             if result_is_set_active_domain_ack(&result) {
                 terminal_lines.update(|lines| lines.extend(command_result_lines(result, "")));
@@ -1444,7 +1474,10 @@ fn first_created_domain_from_query(query: &str) -> Option<String> {
 
 fn is_domainless_server_command(command: &str) -> bool {
     let normalized = command.trim_start().to_ascii_uppercase();
-    normalized.starts_with("CREATE DOMAIN ")
+    normalized.starts_with("BEGIN")
+        || normalized.starts_with("COMMIT")
+        || normalized.starts_with("REVERT")
+        || normalized.starts_with("CREATE DOMAIN ")
         || normalized.starts_with("CREATE UNPACED DOMAIN ")
         || normalized.starts_with("CREATE PACED DOMAIN ")
         || normalized.starts_with("CREATE USER ")
@@ -3410,6 +3443,7 @@ fn ReplPanel(
     domain: impl Fn() -> String + Copy + Send + 'static,
     input: RwSignal<String>,
     terminal_lines: RwSignal<Vec<TermLine>>,
+    transaction_active: impl Fn() -> bool + Copy + Send + 'static,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
     active_subscription_tab: RwSignal<Option<u64>>,
     stop_subscription: impl Fn(u64) + Copy + Send + 'static,
@@ -3558,7 +3592,13 @@ fn ReplPanel(
                 input.set(command.clone());
                 run_command(Some(command));
             }>
-                <span>{move || format!("nervix[{}]>", domain())}</span>
+                <span>{move || {
+                    if transaction_active() {
+                        format!("nervix[{} tx]>", domain())
+                    } else {
+                        format!("nervix[{}]>", domain())
+                    }
+                }}</span>
                 <input
                     node_ref=input_ref
                     type="text"
@@ -6013,10 +6053,15 @@ struct TermLine {
 }
 
 impl TermLine {
-    fn prompt(text: impl Into<String>) -> Self {
+    fn prompt(text: impl Into<String>, transaction_active: bool) -> Self {
+        let prompt = if transaction_active {
+            "nervix[tx]>"
+        } else {
+            "nervix>"
+        };
         Self {
             kind: TermLineKind::Prompt,
-            text: format!("nervix> {}", text.into()),
+            text: format!("{prompt} {}", text.into()),
         }
     }
 

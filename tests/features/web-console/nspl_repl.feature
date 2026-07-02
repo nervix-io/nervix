@@ -65,13 +65,13 @@ Feature: Web console NSPL REPL
     When selector ".prompt-row input" is pressed with "ArrowDown"
     Then selector ".prompt-row input" has value "SHOW "
 
-  Scenario: Web console submits semicolon-separated command batches
+  Scenario: Web console submits explicit NSPL transactions
     Given a 3 node nervix cluster is started
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    When selector ".prompt-row input" is filled with "CREATE DOMAIN production; CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 )"
+    When selector ".prompt-row input" is filled with "BEGIN; CREATE DOMAIN production; CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE DOMAIN production; CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 )"
+    Then selector ".terminal" contains "BEGIN; CREATE DOMAIN production; CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
     And selector ".terminal" contains "created domain 'production'"
     And selector ".terminal" contains "stored model 'http_main'"
     And selector ".terminal" contains "stored model 'notification'"
@@ -91,14 +91,35 @@ Feature: Web console NSPL REPL
     Then selector ".terminal" contains "CREATE DOMAIN {{domain}};"
     And selector ".terminal" contains "created domain '{{domain}}'"
 
-  Scenario: Web console command batches opened on a follower are handled by the leader
+  Scenario: Web console transaction prompts show active transaction state
+    Given a 3 node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "created domain '{{domain}}'"
+    And selector ".prompt-row" contains "{{domain}}"
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "transaction started"
+    And selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA reverted_notification ( user_id I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "queued command in transaction (1 pending)"
+    And selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "REVERT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "transaction reverted: dropped 1 command(s)"
+    And selector ".prompt-row" does not contain "{{domain}} tx"
+
+  Scenario: Web console transactions opened on a follower are handled by the leader
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
     When the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
-    When selector ".prompt-row input" is filled with "CREATE DOMAIN production; CREATE SCHEMA follower_notification ( user_id I64 )"
+    When selector ".prompt-row input" is filled with "BEGIN; CREATE DOMAIN production; CREATE SCHEMA follower_notification ( user_id I64 ); COMMIT"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "stored model 'follower_notification'"
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA follower_notification"

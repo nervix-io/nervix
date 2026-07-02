@@ -13,6 +13,9 @@ use crate::{
 pub enum ClientStatement {
     UseDomain(Domain),
     ListDomains,
+    BeginTransaction,
+    CommitTransaction,
+    RevertTransaction,
     UploadResource(UploadResource),
     SubscribeSession(SubscribeSession),
     UnsubscribeSession(UnsubscribeSession),
@@ -23,7 +26,12 @@ impl ClientStatement {
     pub fn requires_local_handling(&self) -> bool {
         match self {
             Self::UseDomain(_) | Self::ListDomains | Self::UploadResource(_) => true,
-            Self::SubscribeSession(_) | Self::UnsubscribeSession(_) | Self::Server(_) => false,
+            Self::BeginTransaction
+            | Self::CommitTransaction
+            | Self::RevertTransaction
+            | Self::SubscribeSession(_)
+            | Self::UnsubscribeSession(_)
+            | Self::Server(_) => false,
         }
     }
 }
@@ -49,11 +57,35 @@ pub fn list_domains_parser<'src>()
         .to(())
 }
 
+pub fn begin_transaction_parser<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    kw(Keyword::Begin)
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .to(())
+}
+
+pub fn commit_transaction_parser<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    kw(Keyword::Commit)
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .to(())
+}
+
+pub fn revert_transaction_parser<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    kw(Keyword::Revert)
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .to(())
+}
+
 pub fn client_command_parser<'src>()
 -> impl Parser<'src, &'src [Token], ClientStatement, extra::Err<ParseError<'src>>> + Clone {
     choice((
         use_domain_parser().map(ClientStatement::UseDomain),
         list_domains_parser().to(ClientStatement::ListDomains),
+        begin_transaction_parser().to(ClientStatement::BeginTransaction),
+        commit_transaction_parser().to(ClientStatement::CommitTransaction),
+        revert_transaction_parser().to(ClientStatement::RevertTransaction),
         crate::upload_resource::upload_resource_parser().map(ClientStatement::UploadResource),
         crate::subscribe::subscribe_session_parser().map(ClientStatement::SubscribeSession),
         crate::subscribe::unsubscribe_session_parser().map(ClientStatement::UnsubscribeSession),
@@ -166,6 +198,15 @@ fn starts_with_client_command_keyword(tokens: &[Token]) -> bool {
     if *iden == Keyword::List {
         return true;
     }
+    if *iden == Keyword::Begin {
+        return true;
+    }
+    if *iden == Keyword::Commit {
+        return true;
+    }
+    if *iden == Keyword::Revert {
+        return true;
+    }
     if *iden == Keyword::Upload {
         return true;
     }
@@ -178,6 +219,13 @@ fn starts_with_client_command_keyword(tokens: &[Token]) -> bool {
     false
 }
 
+fn starts_with_server_command_keyword(tokens: &[Token]) -> bool {
+    let Some(Token::Word(Word::KnownWord { .. })) = tokens.first() else {
+        return false;
+    };
+    !starts_with_client_command_keyword(tokens)
+}
+
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
     let safe_cursor = cursor.min(input.len());
     let prefix_src = &input[..safe_cursor];
@@ -187,6 +235,10 @@ pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
+
+    if starts_with_server_command_keyword(&tokens) {
+        return crate::statement::suggest_statement(input, cursor);
+    }
 
     let out = client_command_parser()
         .then_ignore(end())
@@ -262,6 +314,22 @@ mod tests {
     fn parses_list_domains() {
         let parsed = parse_client_statement("LIST DOMAINS;").expect("parse should succeed");
         assert!(matches!(parsed, ClientStatement::ListDomains));
+    }
+
+    #[test]
+    fn parses_transaction_controls() {
+        assert!(matches!(
+            parse_client_statement("BEGIN;").expect("parse should succeed"),
+            ClientStatement::BeginTransaction
+        ));
+        assert!(matches!(
+            parse_client_statement("COMMIT;").expect("parse should succeed"),
+            ClientStatement::CommitTransaction
+        ));
+        assert!(matches!(
+            parse_client_statement("REVERT;").expect("parse should succeed"),
+            ClientStatement::RevertTransaction
+        ));
     }
 
     #[test]
@@ -377,6 +445,20 @@ mod tests {
         assert!(suggestions.contains(&"SUBSCRIBE SESSION".to_string()));
         let suggestions = suggest_client_statement("LI", 2);
         assert!(suggestions.contains(&"LIST".to_string()));
+        let suggestions = suggest_client_statement("BE", 2);
+        assert!(suggestions.contains(&"BEGIN".to_string()));
+        let suggestions = suggest_client_statement("RE", 2);
+        assert!(suggestions.contains(&"REVERT".to_string()));
+    }
+
+    #[test]
+    fn client_statement_suggestions_do_not_leak_transaction_controls_into_server_context() {
+        let suggestions = suggest_client_statement("SHOW ", "SHOW ".len());
+        assert!(suggestions.contains(&"CLUSTER".to_string()));
+        assert!(suggestions.contains(&"CREATE".to_string()));
+        assert!(!suggestions.contains(&"BEGIN".to_string()));
+        assert!(!suggestions.contains(&"COMMIT".to_string()));
+        assert!(!suggestions.contains(&"REVERT".to_string()));
     }
 
     #[test]

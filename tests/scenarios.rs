@@ -2221,10 +2221,11 @@ fn payload_matches_expected(actual: &str, expected: &str) -> bool {
 
 fn requires_persistent_session(commands: &str) -> bool {
     nspl_statements(commands).iter().any(|statement| {
-        statement
-            .trim_start()
-            .to_ascii_uppercase()
-            .starts_with("SUBSCRIBE SESSION TO ")
+        let normalized = statement.trim().to_ascii_uppercase();
+        normalized.starts_with("SUBSCRIBE SESSION TO ")
+            || normalized == "BEGIN;"
+            || normalized == "COMMIT;"
+            || normalized == "REVERT;"
     })
 }
 
@@ -2723,38 +2724,6 @@ async fn connect_to_leader_with_credentials(
     }
 }
 
-#[when("these NSPL commands are executed as one batch through the client on the leader node")]
-async fn when_these_nspl_commands_are_executed_as_one_batch_through_the_client_on_the_leader_node(
-    world: &mut ScenarioWorld,
-    #[step] step: &Step,
-) {
-    world.last_command_error = None;
-    world.last_command_output = None;
-    let leader = current_leader_node(world).await;
-    let grpc_uri = world
-        .cluster()
-        .grpc_uri(&leader)
-        .expect("failed to resolve leader gRPC URI");
-    let client = Client::connect_with_options(
-        &grpc_uri,
-        world.domain.clone(),
-        client_connect_options(&grpc_uri).expect("failed to build client tls options"),
-    )
-    .await
-    .expect("failed to connect leader client");
-    let commands = expand_placeholders(world, docstring(step));
-    let outcome = client
-        .execute(commands.clone())
-        .await
-        .expect("client command should complete");
-    assert!(
-        outcome.success,
-        "client command batch must succeed: {commands}: {}",
-        outcome.message
-    );
-    world.last_command_output = Some(outcome.message);
-}
-
 #[when(expr = "these NSPL commands are executed through the client on node {string}")]
 async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
     world: &mut ScenarioWorld,
@@ -2900,8 +2869,8 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
-#[when("this NSPL command batch is executed on the leader node")]
-async fn when_this_nspl_command_batch_is_executed_on_leader_node(
+#[when("this NSPL command request is executed on the leader node")]
+async fn when_this_nspl_command_request_is_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {

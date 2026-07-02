@@ -33,14 +33,22 @@ CREATE UNPACED DOMAIN datalake_demo;
 
 USE datalake_demo;
 
+BEGIN;
 CREATE RESOURCE reference_data;
+COMMIT;
 UPLOAD RESOURCE reference_data VERSION './examples/datalake/reference-data';
 
+BEGIN;
 CREATE RESOURCE edge_activity_proto;
+COMMIT;
 UPLOAD RESOURCE edge_activity_proto VERSION './examples/datalake/proto';
 
+BEGIN;
 CREATE RESOURCE geoip_wasm;
+COMMIT;
 UPLOAD RESOURCE geoip_wasm VERSION './examples/datalake/geo-wasm-guest/resource';
+
+BEGIN;
 
 CREATE SCHEMA edge_site (
   edge_id STRING,
@@ -1217,3 +1225,5 @@ CREATE DETACHED EMITTER iceberg_distance_alerts
   COMMIT EACH 1m MAX SIZE 512MiB;
 
 START;
+
+COMMIT;

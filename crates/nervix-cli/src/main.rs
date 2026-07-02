@@ -18,8 +18,7 @@ use nervix_client_core::{
     SuggestionKind as ClientSuggestionKind, TlsRequirement,
 };
 use nervix_nspl::client_statement::{
-    parse_client_statements, parse_upload_resource_query, parse_use_domain,
-    upload_resource_path_fragment,
+    parse_client_statements, parse_upload_resource_query, upload_resource_path_fragment,
 };
 use reedline::{
     Completer, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
@@ -260,11 +259,6 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     spawn_event_collectors(client.clone(), event_sender);
 
     if let Some(command) = args.command {
-        if let Ok(domain) = parse_use_domain(&command) {
-            client.set_domain(domain.to_string()).await;
-            println!("using domain '{}'", domain);
-            return Ok(());
-        }
         execute_and_print(&client, command).await?;
         return Ok(());
     }
@@ -284,15 +278,20 @@ async fn main() -> Result<(), StackReport<ClientError>> {
 
     loop {
         let active_domain = client.domain().await;
+        let prompt_domain = if client.transaction_active().await {
+            format!("{active_domain} tx")
+        } else {
+            active_domain
+        };
         drain_event_queue(&mut event_receiver);
         let prompt = if buffer.is_empty() {
             DefaultPrompt::new(
-                DefaultPromptSegment::Basic(format!("nervix[{active_domain}]")),
+                DefaultPromptSegment::Basic(format!("nervix[{prompt_domain}]")),
                 DefaultPromptSegment::Empty,
             )
         } else {
             DefaultPrompt::new(
-                DefaultPromptSegment::Basic(format!("....[{active_domain}]")),
+                DefaultPromptSegment::Basic(format!("....[{prompt_domain}]")),
                 DefaultPromptSegment::Empty,
             )
         };
@@ -322,11 +321,6 @@ async fn main() -> Result<(), StackReport<ClientError>> {
 
                 if command_buffer_is_complete(&buffer) {
                     let payload = std::mem::take(&mut buffer);
-                    if let Ok(domain) = parse_use_domain(&payload) {
-                        client.set_domain(domain.to_string()).await;
-                        println!("using domain '{}'", domain);
-                        continue;
-                    }
                     execute_and_print(&client, payload).await?;
                     drain_event_queue(&mut event_receiver);
                 }
@@ -944,7 +938,9 @@ mod tests {
     }
 
     #[test]
-    fn repl_use_command_is_parsed_locally() {
+    fn use_domain_parser_accepts_repl_command() {
+        use nervix_nspl::client_statement::parse_use_domain;
+
         assert_eq!(
             parse_use_domain("USE prod;")
                 .expect("parse should succeed")

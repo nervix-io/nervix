@@ -11,6 +11,8 @@ CREATE UNPACED DOMAIN binance_ws_example;
 
 USE binance_ws_example;
 
+BEGIN;
+
 CREATE SCHEMA binance_ws_event (
   event_type STRING,
   event_time I64,
@@ -94,3 +96,5 @@ CREATE INGESTOR ingest_binance_ws
 
 SUBSCRIBE SESSION TO binance_ws_events;
 START;
+
+COMMIT;

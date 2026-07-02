@@ -35,6 +35,7 @@ message CommandResult {
   bool already_existed = 7;
   string leader_web_console_uri = 8;
   repeated CommandResult results = 9;
+  optional bool transaction_active = 10;
 }
 
 message SubscriptionEvent {
