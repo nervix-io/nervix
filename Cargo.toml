@@ -301,8 +301,8 @@ ordered-float = "4"
 ort = { version = "2.0.0-rc.12", default-features = false }
 parking_lot = "0.12"
 parquet = { version = "57.1", features = ["async"] }
-petgraph = "0.7.1"
-playwright-rs = "0.12.3"
+petgraph = "0.8"
+playwright-rs = "0.14"
 postgres-types = "0.2"
 prometheus = "0.14.0"
 prost = "0.13"

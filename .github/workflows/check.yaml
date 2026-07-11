@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.96
+        uses: dtolnay/rust-toolchain@1.97
         with:
           targets: wasm32-unknown-unknown
 
@@ -127,7 +127,7 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.96
+        uses: dtolnay/rust-toolchain@1.97
         with:
           targets: wasm32-unknown-unknown
 
@@ -238,7 +238,7 @@ jobs:
           mdbook-version: "0.4.40"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.96
+        uses: dtolnay/rust-toolchain@1.97
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2

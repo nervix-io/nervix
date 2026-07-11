@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.96
+ARG RUST_VERSION=1.97
 ARG DEBIAN_VERSION=trixie
 ARG LLVM_VERSION=22
 
@@ -8,16 +8,21 @@ ARG SONIC_PARALLELISM=2
 ARG SONIC_TARGET_CPUS=x86-64-v3
 ARG ONNXRUNTIME_VERSION=1.24.2
 
-FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
+FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS builder
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 ARG BUILDARCH
 ARG TARGETARCH
+ARG RUST_VERSION
 ARG DEBIAN_VERSION
 ARG LLVM_VERSION
 ARG SONIC_PARALLELISM
 ARG SONIC_TARGET_CPUS
+
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -25,10 +30,13 @@ RUN apt-get update \
         ca-certificates \
         cmake \
         curl \
+        g++ \
         g++-aarch64-linux-gnu \
+        gcc \
         gcc-aarch64-linux-gnu \
         git \
         gnupg \
+        libc6-dev \
         libc6-dev-arm64-cross \
         libssl-dev \
         lsb-release \
@@ -37,6 +45,10 @@ RUN apt-get update \
         pkg-config \
         protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+    && rustup component add clippy
 
 RUN mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \

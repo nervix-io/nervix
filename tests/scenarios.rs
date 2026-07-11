@@ -3069,11 +3069,11 @@ async fn when_selector_uploads_resource_directory(
                 .expect("uploaded file must be under resource directory")
                 .to_string_lossy()
                 .replace('\\', "/");
-            FilePayload::builder()
-                .name(name)
-                .mime_type("application/octet-stream".to_string())
-                .buffer(std::fs::read(file).expect("uploaded file should be readable"))
-                .build()
+            FilePayload::new(
+                name,
+                "application/octet-stream",
+                std::fs::read(file).expect("uploaded file should be readable"),
+            )
         })
         .collect::<Vec<_>>();
     page.locator(&selector)
