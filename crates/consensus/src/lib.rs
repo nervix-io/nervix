@@ -143,8 +143,7 @@ openraft::declare_raft_types!(
         D = ConsensusCommand,
         R = ConsensusResponse,
         NodeId = String,
-        Node = BasicNode,
-        SnapshotData = Cursor<Vec<u8>>
+        Node = BasicNode
 );
 
 pub type NervixRaft = Raft<TypeConfig, Arc<FjallStore>>;
@@ -1092,6 +1091,8 @@ fn unreachable_err<E: std::error::Error + Send + Sync + 'static>(
 }
 
 impl RaftNetworkV2<TypeConfig> for NetworkClient {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
@@ -1467,6 +1468,8 @@ impl RaftLogStorage<TypeConfig> for Arc<FjallStore> {
 }
 
 impl RaftStateMachine<TypeConfig> for Arc<FjallStore> {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     type SnapshotBuilder = Arc<FjallStore>;
 
     async fn applied_state(&mut self) -> Result<(Option<LogIdOf>, StoredMembershipOf), io::Error> {
@@ -1553,6 +1556,8 @@ impl RaftStateMachine<TypeConfig> for Arc<FjallStore> {
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for Arc<FjallStore> {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     async fn build_snapshot(&mut self) -> Result<SnapshotOf, io::Error> {
         let state = self.inner.state_machine.read().await.clone();
         let snapshot_id = format!(
