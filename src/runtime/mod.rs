@@ -74,7 +74,8 @@ use nervix_vm::{
 };
 use nervix_wasm::{
     DomainClock as WasmDomainClock, WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmBranchInit,
-    WasmEnvelope, WasmOutputColumn, WasmOutputRow, WasmRuntime, WasmRuntimeConfig,
+    WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput, WasmRuntime,
+    WasmRuntimeConfig,
 };
 use ordered_float::OrderedFloat;
 use parking_lot::{Mutex as ParkingMutex, RwLock};
@@ -12514,44 +12515,59 @@ struct WasmMaterializedOutput {
 enum WasmOutputError {
     #[error("expected an output envelope at callback index {envelope_index}")]
     UnexpectedEnvelopeKind { envelope_index: usize },
+    #[error("WASM output group at callback index {envelope_index} has no routed outputs")]
+    EmptyOutputGroup { envelope_index: usize },
     #[error("unknown WASM output relay '{output_relay}'")]
     UnknownOutputRelay { output_relay: String },
     #[error(
         "WASM output relay '{output_relay}' has {actual} columns, but its destination schema has \
          {expected} fields"
     )]
-    OutputColumnCountMismatch {
+    RoutedOutputColumnCountMismatch {
         output_relay: String,
         expected: usize,
         actual: usize,
     },
+    #[error("WASM output group has invalid generated Arrow IPC: {reason}")]
+    InvalidGeneratedArrowIpc { reason: String },
+    #[error("WASM generated Arrow IPC has {actual} record batches instead of exactly one")]
+    GeneratedRecordBatchCount { actual: usize },
     #[error(
-        "WASM output relay '{output_relay}' field {field_index} ('{field_name}') has invalid \
-         guest Arrow IPC: {reason}"
+        "WASM output relay '{output_relay}' field {field_index} ('{field_name}') references \
+         generated column {column_index}, but the generated pool has {generated_column_count} \
+         columns"
     )]
-    InvalidGuestArrowIpc {
+    GeneratedColumnOutOfRange {
         output_relay: String,
         field_index: usize,
         field_name: String,
-        reason: String,
+        column_index: u32,
+        generated_column_count: usize,
     },
+    #[error("WASM generated column {column_index} is not referenced by any routed output")]
+    UnreferencedGeneratedColumn { column_index: usize },
     #[error(
-        "WASM output relay '{output_relay}' field {field_index} guest Arrow field mismatch: \
-         expected {expected}, actual {actual}"
+        "WASM output relay '{output_relay}' field {field_index} ('{field_name}') references \
+         incompatible generated column {column_index}: expected {expected}, actual {actual}"
     )]
-    GuestArrowFieldMismatch {
+    GeneratedColumnTypeMismatch {
         output_relay: String,
         field_index: usize,
+        field_name: String,
+        column_index: u32,
         expected: String,
         actual: String,
     },
     #[error(
-        "WASM output relay '{output_relay}' field {field_index} guest Arrow row count mismatch: \
-         expected {expected}, actual {actual}"
+        "WASM output relay '{output_relay}' field {field_index} ('{field_name}') references \
+         generated column {column_index} with {actual} rows, but the routed output has {expected} \
+         rows"
     )]
-    GuestArrowRowCountMismatch {
+    GeneratedColumnRowCountMismatch {
         output_relay: String,
         field_index: usize,
+        field_name: String,
+        column_index: u32,
         expected: usize,
         actual: usize,
     },
@@ -12621,62 +12637,65 @@ impl WasmOutputValidator<'_> {
         outputs: Vec<WasmEnvelope>,
     ) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
         self.validate_token_decisions(&outputs)?;
-        outputs
-            .into_iter()
-            .enumerate()
-            .map(|(envelope_index, output)| self.materialize(envelope_index, output))
-            .collect()
+        let mut materialized = Vec::new();
+        for (envelope_index, output) in outputs.into_iter().enumerate() {
+            materialized.extend(self.materialize_group(envelope_index, output)?);
+        }
+        Ok(materialized)
     }
 
     fn validate_token_decisions(&self, outputs: &[WasmEnvelope]) -> Result<(), WasmOutputError> {
         let mut carried_tokens = HashSet::<u64>::default();
         let mut terminal_tokens = HashSet::<u64>::default();
         for (envelope_index, output) in outputs.iter().enumerate() {
-            let WasmEnvelope::Output {
-                output_relay, acks, ..
-            } = output
-            else {
+            let WasmEnvelope::Output { outputs, .. } = output else {
                 return Err(WasmOutputError::UnexpectedEnvelopeKind { envelope_index });
             };
-            for (row_index, row) in acks.rows.iter().enumerate() {
-                if let Some(source_token) = row.source_token
-                    && !self.ack_map.contains_key(&source_token.0)
-                {
-                    return Err(WasmOutputError::UnknownSourceToken {
-                        output_relay: output_relay.clone(),
-                        row_index,
-                        token: source_token.0,
-                    });
-                }
-                let mut row_tokens = HashSet::<u64>::default();
-                for token in &row.tokens {
-                    if !self.ack_map.contains_key(&token.0) {
-                        return Err(WasmOutputError::InvalidTokenDecision {
-                            token: token.0,
-                            reason: "carried token is unknown to this branch instance".to_string(),
+            if outputs.is_empty() {
+                return Err(WasmOutputError::EmptyOutputGroup { envelope_index });
+            }
+            for output in outputs {
+                for (row_index, row) in output.acks.rows.iter().enumerate() {
+                    if let Some(source_token) = row.source_token
+                        && !self.ack_map.contains_key(&source_token.0)
+                    {
+                        return Err(WasmOutputError::UnknownSourceToken {
+                            output_relay: output.output_relay.clone(),
+                            row_index,
+                            token: source_token.0,
                         });
                     }
-                    if !row_tokens.insert(token.0) {
-                        return Err(WasmOutputError::InvalidTokenDecision {
-                            token: token.0,
-                            reason: "token occurs more than once in one output row".to_string(),
-                        });
+                    let mut row_tokens = HashSet::<u64>::default();
+                    for token in &row.tokens {
+                        if !self.ack_map.contains_key(&token.0) {
+                            return Err(WasmOutputError::InvalidTokenDecision {
+                                token: token.0,
+                                reason: "carried token is unknown to this branch instance"
+                                    .to_string(),
+                            });
+                        }
+                        if !row_tokens.insert(token.0) {
+                            return Err(WasmOutputError::InvalidTokenDecision {
+                                token: token.0,
+                                reason: "token occurs more than once in one output row".to_string(),
+                            });
+                        }
+                        carried_tokens.insert(token.0);
                     }
-                    carried_tokens.insert(token.0);
                 }
-            }
-            for token_set in &acks.acked {
-                self.validate_terminal_set(token_set, &mut terminal_tokens, "ACK")?;
-            }
-            for token_set in &acks.nacked {
-                self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "NACK")?;
-            }
-            for token_set in &acks.message_errors {
-                self.validate_terminal_tokens(
-                    &token_set.tokens,
-                    &mut terminal_tokens,
-                    "message error",
-                )?;
+                for token_set in &output.acks.acked {
+                    self.validate_terminal_set(token_set, &mut terminal_tokens, "ACK")?;
+                }
+                for token_set in &output.acks.nacked {
+                    self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "NACK")?;
+                }
+                for token_set in &output.acks.message_errors {
+                    self.validate_terminal_tokens(
+                        &token_set.tokens,
+                        &mut terminal_tokens,
+                        "message error",
+                    )?;
+                }
             }
         }
         if let Some(token) = carried_tokens.intersection(&terminal_tokens).next() {
@@ -12722,19 +12741,52 @@ impl WasmOutputValidator<'_> {
         Ok(())
     }
 
-    fn materialize(
+    fn materialize_group(
         &self,
         envelope_index: usize,
         output: WasmEnvelope,
-    ) -> Result<WasmMaterializedOutput, WasmOutputError> {
+    ) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
         let WasmEnvelope::Output {
-            output_relay,
-            columns,
-            acks,
+            generated_arrow_ipc_batch,
+            outputs,
         } = output
         else {
             return Err(WasmOutputError::UnexpectedEnvelopeKind { envelope_index });
         };
+        if outputs.is_empty() {
+            return Err(WasmOutputError::EmptyOutputGroup { envelope_index });
+        }
+        let generated_batch = self.decode_generated_batch(&generated_arrow_ipc_batch)?;
+        let generated_column_count = generated_batch.as_ref().map_or(0, RecordBatch::num_columns);
+        let mut referenced_generated_columns = vec![false; generated_column_count];
+        let mut materialized = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            materialized.push(self.materialize_routed_output(
+                output,
+                generated_batch.as_ref(),
+                &mut referenced_generated_columns,
+            )?);
+        }
+        if let Some(column_index) = referenced_generated_columns
+            .iter()
+            .position(|referenced| !referenced)
+        {
+            return Err(WasmOutputError::UnreferencedGeneratedColumn { column_index });
+        }
+        Ok(materialized)
+    }
+
+    fn materialize_routed_output(
+        &self,
+        output: WasmRoutedOutput,
+        generated_batch: Option<&RecordBatch>,
+        referenced_generated_columns: &mut [bool],
+    ) -> Result<WasmMaterializedOutput, WasmOutputError> {
+        let WasmRoutedOutput {
+            output_relay,
+            columns,
+            acks,
+        } = output;
         let output_identifier =
             Identifier::parse(&output_relay).map_err(|_| WasmOutputError::UnknownOutputRelay {
                 output_relay: output_relay.clone(),
@@ -12753,27 +12805,76 @@ impl WasmOutputValidator<'_> {
         let destination_schema = schema.arrow_schema();
         let destination_fields = destination_schema.fields();
         if columns.len() != destination_fields.len() {
-            return Err(WasmOutputError::OutputColumnCountMismatch {
+            return Err(WasmOutputError::RoutedOutputColumnCountMismatch {
                 output_relay,
                 expected: destination_fields.len(),
                 actual: columns.len(),
             });
         }
-        let has_input_columns = columns.iter().any(WasmOutputColumn::is_input);
+        let has_input_columns = columns.iter().any(WasmOutputColumnRef::is_input);
         self.validate_source_tokens(&output_relay, &acks.rows, has_input_columns)?;
         let arrays = columns
             .into_iter()
             .zip(destination_fields)
             .enumerate()
             .map(|(field_index, (column, destination_field))| match column {
-                WasmOutputColumn::GuestArrow { ipc } => self.decode_guest_column(
-                    &output_relay,
-                    field_index,
-                    destination_field,
-                    acks.rows.len(),
-                    &ipc,
-                ),
-                WasmOutputColumn::Input { column_index } => self.materialize_input_column(
+                WasmOutputColumnRef::Generated { column_index } => {
+                    let generated_column_count =
+                        generated_batch.map_or(0, RecordBatch::num_columns);
+                    let generated_index = usize::try_from(column_index).map_err(|_| {
+                        WasmOutputError::GeneratedColumnOutOfRange {
+                            output_relay: output_relay.clone(),
+                            field_index,
+                            field_name: destination_field.name().to_string(),
+                            column_index,
+                            generated_column_count,
+                        }
+                    })?;
+                    let Some(generated_batch) = generated_batch else {
+                        return Err(WasmOutputError::GeneratedColumnOutOfRange {
+                            output_relay: output_relay.clone(),
+                            field_index,
+                            field_name: destination_field.name().to_string(),
+                            column_index,
+                            generated_column_count,
+                        });
+                    };
+                    let generated_schema = generated_batch.schema();
+                    let Some(generated_field) = generated_schema.fields().get(generated_index)
+                    else {
+                        return Err(WasmOutputError::GeneratedColumnOutOfRange {
+                            output_relay: output_relay.clone(),
+                            field_index,
+                            field_name: destination_field.name().to_string(),
+                            column_index,
+                            generated_column_count,
+                        });
+                    };
+                    let expected_generated_field = destination_field.as_ref().clone().with_name("");
+                    if generated_field.as_ref() != &expected_generated_field {
+                        return Err(WasmOutputError::GeneratedColumnTypeMismatch {
+                            output_relay: output_relay.clone(),
+                            field_index,
+                            field_name: destination_field.name().to_string(),
+                            column_index,
+                            expected: format!("{expected_generated_field:?}"),
+                            actual: format!("{generated_field:?}"),
+                        });
+                    }
+                    if generated_batch.num_rows() != acks.rows.len() {
+                        return Err(WasmOutputError::GeneratedColumnRowCountMismatch {
+                            output_relay: output_relay.clone(),
+                            field_index,
+                            field_name: destination_field.name().to_string(),
+                            column_index,
+                            expected: acks.rows.len(),
+                            actual: generated_batch.num_rows(),
+                        });
+                    }
+                    referenced_generated_columns[generated_index] = true;
+                    Ok(generated_batch.column(generated_index).clone())
+                }
+                WasmOutputColumnRef::Input { column_index } => self.materialize_input_column(
                     &output_relay,
                     field_index,
                     destination_field,
@@ -12800,6 +12901,51 @@ impl WasmOutputValidator<'_> {
             batch,
             acks,
         })
+    }
+
+    fn decode_generated_batch(&self, ipc: &[u8]) -> Result<Option<RecordBatch>, WasmOutputError> {
+        if ipc.is_empty() {
+            return Ok(None);
+        }
+        let invalid = |reason: String| WasmOutputError::InvalidGeneratedArrowIpc { reason };
+        let mut cursor = std::io::Cursor::new(ipc);
+        let (actual_schema, mut batches) = {
+            let reader = StreamReader::try_new(&mut cursor, None)
+                .map_err(|error| invalid(error.to_string()))?;
+            let actual_schema = reader.schema();
+            let batches = reader
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| invalid(error.to_string()))?;
+            (actual_schema, batches)
+        };
+        let consumed = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
+        if consumed != ipc.len() {
+            return Err(invalid(format!(
+                "IPC stream has {} trailing bytes",
+                ipc.len().saturating_sub(consumed)
+            )));
+        }
+        if batches.len() != 1 {
+            return Err(WasmOutputError::GeneratedRecordBatchCount {
+                actual: batches.len(),
+            });
+        }
+        if actual_schema.fields().is_empty() {
+            return Err(invalid(
+                "encoded zero-column Arrow streams are not valid empty generated pools".to_string(),
+            ));
+        }
+        if let Some(field_index) = actual_schema
+            .fields()
+            .iter()
+            .position(|field| !field.name().is_empty())
+        {
+            return Err(invalid(format!(
+                "generated field {field_index} has non-empty name '{}'",
+                actual_schema.field(field_index).name()
+            )));
+        }
+        Ok(batches.pop())
     }
 
     fn validate_source_tokens(
@@ -12834,79 +12980,6 @@ impl WasmOutputValidator<'_> {
             }
         }
         Ok(())
-    }
-
-    fn decode_guest_column(
-        &self,
-        output_relay: &str,
-        field_index: usize,
-        destination_field: &Arc<arrow_schema::Field>,
-        row_count: usize,
-        ipc: &[u8],
-    ) -> Result<ArrayRef, WasmOutputError> {
-        let invalid = |reason: String| WasmOutputError::InvalidGuestArrowIpc {
-            output_relay: output_relay.to_string(),
-            field_index,
-            field_name: destination_field.name().to_string(),
-            reason,
-        };
-        if ipc.is_empty() {
-            return Err(invalid("IPC payload is empty".to_string()));
-        }
-        let mut cursor = std::io::Cursor::new(ipc);
-        let (actual_schema, batches) = {
-            let reader = StreamReader::try_new(&mut cursor, None)
-                .map_err(|error| invalid(error.to_string()))?;
-            let actual_schema = reader.schema();
-            let batches = reader
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| invalid(error.to_string()))?;
-            (actual_schema, batches)
-        };
-        let consumed = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
-        if consumed != ipc.len() {
-            return Err(invalid(format!(
-                "IPC stream has {} trailing bytes",
-                ipc.len().saturating_sub(consumed)
-            )));
-        }
-        if actual_schema.fields().len() != 1 {
-            return Err(invalid(format!(
-                "IPC schema has {} fields instead of exactly one",
-                actual_schema.fields().len()
-            )));
-        }
-        if batches.len() != 1 {
-            return Err(invalid(format!(
-                "IPC stream has {} record batches instead of exactly one",
-                batches.len()
-            )));
-        }
-        let actual_field = actual_schema.field(0);
-        if actual_field != destination_field.as_ref() {
-            return Err(WasmOutputError::GuestArrowFieldMismatch {
-                output_relay: output_relay.to_string(),
-                field_index,
-                expected: format!("{destination_field:?}"),
-                actual: format!("{actual_field:?}"),
-            });
-        }
-        let batch = &batches[0];
-        if batch.num_columns() != 1 {
-            return Err(invalid(format!(
-                "record batch has {} columns instead of exactly one",
-                batch.num_columns()
-            )));
-        }
-        if batch.num_rows() != row_count {
-            return Err(WasmOutputError::GuestArrowRowCountMismatch {
-                output_relay: output_relay.to_string(),
-                field_index,
-                expected: row_count,
-                actual: batch.num_rows(),
-            });
-        }
-        Ok(batch.column(0).clone())
     }
 
     fn materialize_input_column(

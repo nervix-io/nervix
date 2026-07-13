@@ -124,18 +124,25 @@ enum Envelope {
         acks: AckSidecar,
     },
     Output {
-        output_relay: String,
-        columns: Vec<OutputColumn>,
-        acks: AckSidecar,
+        #[serde(with = "cbor_byte_string")]
+        generated_arrow_ipc_batch: Vec<u8>,
+        outputs: Vec<RoutedOutput>,
     },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoutedOutput {
+    output_relay: String,
+    columns: Vec<OutputColumnRef>,
+    acks: AckSidecar,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum OutputColumn {
-    GuestArrow {
-        #[serde(with = "cbor_byte_string")]
-        ipc: Vec<u8>,
+enum OutputColumnRef {
+    Generated {
+        column_index: u32,
     },
     Input {
         column_index: u32,
@@ -523,28 +530,41 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
         if state.output_relays.is_empty() {
             return ERR_NOT_INITIALIZED;
         }
+        let Envelope::Output {
+            generated_arrow_ipc_batch,
+            mut outputs,
+        } = enriched
+        else {
+            return ERR_ENVELOPE;
+        };
+        let Some(template) = outputs.pop() else {
+            return ERR_ENVELOPE;
+        };
+        outputs = state
+            .output_relays
+            .iter()
+            .enumerate()
+            .map(|(index, relay)| {
+                let mut output = template.clone();
+                output.output_relay = relay.clone();
+                if index > 0 {
+                    output.acks.acked.clear();
+                    output.acks.nacked.clear();
+                    output.acks.message_errors.clear();
+                }
+                output
+            })
+            .collect();
         state.pending_emit.clear();
-        for (index, relay) in state.output_relays.iter().enumerate() {
-            let mut output = enriched.clone();
-            let Envelope::Output {
-                output_relay,
-                acks,
-                ..
-            } = &mut output
-            else {
-                return ERR_ENVELOPE;
-            };
-            *output_relay = relay.clone();
-            if index > 0 {
-                acks.acked.clear();
-                acks.nacked.clear();
-                acks.message_errors.clear();
+        match (Envelope::Output {
+            generated_arrow_ipc_batch,
+            outputs,
+        })
+        .encode()
+        {
+            Ok(encoded) => state.pending_emit.push(encoded),
+            Err(error) => return error,
             }
-            match output.encode() {
-                Ok(encoded) => state.pending_emit.push(encoded),
-                Err(error) => return error,
-            }
-        }
         SUCCESS
     })
 }
@@ -625,17 +645,20 @@ fn geo_enrich_envelope(
     let generated = geo_enrich_columns(&batches[0], reader)?;
     let fields = generated_fields();
     let mut columns = (0..14_u32)
-        .map(|column_index| OutputColumn::Input { column_index })
+        .map(|column_index| OutputColumnRef::Input { column_index })
         .collect::<Vec<_>>();
-    for (field, array) in fields.into_iter().zip(generated) {
-        columns.push(OutputColumn::GuestArrow {
-            ipc: encode_guest_column(field, array)?,
+    for column_index in 0..generated.len() {
+        columns.push(OutputColumnRef::Generated {
+            column_index: u32::try_from(column_index).map_err(|_| ERR_ENVELOPE)?,
         });
     }
     Ok(Envelope::Output {
-        output_relay: String::new(),
-        columns,
-        acks,
+        generated_arrow_ipc_batch: encode_generated_batch(fields, generated)?,
+        outputs: vec![RoutedOutput {
+            output_relay: String::new(),
+            columns,
+            acks,
+        }],
     })
 }
 
@@ -688,22 +711,22 @@ fn geo_enrich_columns(
 
 fn generated_fields() -> Vec<Field> {
     vec![
-        Field::new("geoip_database", DataType::Utf8, false),
-        Field::new("geoip_continent", DataType::Utf8, false),
-        Field::new("geoip_country", DataType::Utf8, false),
-        Field::new("geoip_region", DataType::Utf8, false),
-        Field::new("geoip_city", DataType::Utf8, false),
-        Field::new("geoip_lat", DataType::Float64, false),
-        Field::new("geoip_lon", DataType::Float64, false),
-        Field::new("geoip_geohash", DataType::Utf8, false),
-        Field::new("nearest_hub", DataType::Utf8, false),
-        Field::new("distance_to_hub_km", DataType::Float64, false),
+        Field::new("", DataType::Utf8, false),
+        Field::new("", DataType::Utf8, false),
+        Field::new("", DataType::Utf8, false),
+        Field::new("", DataType::Utf8, false),
+        Field::new("", DataType::Utf8, false),
+        Field::new("", DataType::Float64, false),
+        Field::new("", DataType::Float64, false),
+        Field::new("", DataType::Utf8, false),
+        Field::new("", DataType::Utf8, false),
+        Field::new("", DataType::Float64, false),
     ]
 }
 
-fn encode_guest_column(field: Field, array: ArrayRef) -> Result<Vec<u8>, i32> {
-    let schema = Arc::new(Schema::new(vec![field]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![array]).map_err(|_| ERR_ARROW_IPC)?;
+fn encode_generated_batch(fields: Vec<Field>, arrays: Vec<ArrayRef>) -> Result<Vec<u8>, i32> {
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).map_err(|_| ERR_ARROW_IPC)?;
     let mut ipc = Vec::new();
     {
         let mut writer = StreamWriter::try_new(&mut ipc, &schema).map_err(|_| ERR_ARROW_IPC)?;

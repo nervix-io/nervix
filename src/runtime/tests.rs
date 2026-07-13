@@ -32,7 +32,8 @@ use nervix_models::{
     WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_wasm::{
-    WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmEnvelope, WasmOutputColumn, WasmOutputRow,
+    WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmEnvelope, WasmOutputColumnRef,
+    WasmOutputRow, WasmRoutedOutput,
 };
 use ordered_float::OrderedFloat;
 use sorted_vec::SortedVec;
@@ -1008,20 +1009,45 @@ fn wasm_input_for_values(
     wasm_input_for_records(schema, records)
 }
 
+fn wasm_input_acks(envelope: &WasmEnvelope) -> &WasmAckSidecar {
+    envelope
+        .input_acks()
+        .expect("test envelope must be a WASM input")
+}
+
 fn validate_wasm_test_outputs(
     input_schema: &Arc<super::CompiledSchema>,
     output_schema: &Arc<super::CompiledSchema>,
     ack_map: &super::WasmAckMap,
     outputs: Vec<WasmEnvelope>,
 ) -> Result<Vec<super::WasmMaterializedOutput>, super::WasmOutputError> {
-    let relay = identifier("output");
-    let output_schemas = vec![(relay.clone(), Arc::clone(output_schema))];
+    validate_wasm_test_output_groups(
+        input_schema,
+        vec![("output", Arc::clone(output_schema))],
+        ack_map,
+        outputs,
+    )
+}
+
+fn validate_wasm_test_output_groups(
+    input_schema: &Arc<super::CompiledSchema>,
+    schemas: Vec<(&str, Arc<super::CompiledSchema>)>,
+    ack_map: &super::WasmAckMap,
+    outputs: Vec<WasmEnvelope>,
+) -> Result<Vec<super::WasmMaterializedOutput>, super::WasmOutputError> {
+    let output_schemas = schemas
+        .into_iter()
+        .map(|(relay, schema)| (identifier(relay), schema))
+        .collect::<Vec<_>>();
     let output_routes = super::RelayProcessorOutputsNode {
-        routes: vec![super::RelayProcessorOutputNode {
-            relay,
-            filter_map: None,
-            compiled_program: None,
-        }],
+        routes: output_schemas
+            .iter()
+            .map(|(relay, _)| super::RelayProcessorOutputNode {
+                relay: relay.clone(),
+                filter_map: None,
+                compiled_program: None,
+            })
+            .collect(),
     };
     super::WasmOutputValidator {
         ack_map,
@@ -1032,23 +1058,58 @@ fn validate_wasm_test_outputs(
     .validate(outputs)
 }
 
-fn wasm_test_output(columns: Vec<WasmOutputColumn>, rows: Vec<WasmOutputRow>) -> WasmEnvelope {
+fn wasm_test_output(columns: Vec<WasmOutputColumnRef>, rows: Vec<WasmOutputRow>) -> WasmEnvelope {
     WasmEnvelope::output(
-        "output",
-        columns,
-        WasmAckSidecar {
-            rows,
-            acked: Vec::new(),
-            nacked: Vec::new(),
-            message_errors: Vec::new(),
-        },
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            "output",
+            columns,
+            WasmAckSidecar {
+                rows,
+                acked: Vec::new(),
+                nacked: Vec::new(),
+                message_errors: Vec::new(),
+            },
+        )],
+    )
+}
+
+fn wasm_test_generated_output(
+    generated_arrow_ipc_batch: Vec<u8>,
+    columns: Vec<WasmOutputColumnRef>,
+    rows: Vec<WasmOutputRow>,
+) -> WasmEnvelope {
+    WasmEnvelope::output(
+        generated_arrow_ipc_batch,
+        vec![WasmRoutedOutput::new(
+            "output",
+            columns,
+            WasmAckSidecar {
+                rows,
+                acked: Vec::new(),
+                nacked: Vec::new(),
+                message_errors: Vec::new(),
+            },
+        )],
     )
 }
 
 fn wasm_guest_column(field: arrow_schema::Field, array: ArrayRef) -> Vec<u8> {
-    let schema = Arc::new(ArrowSchema::new(vec![field]));
+    let schema = Arc::new(ArrowSchema::new(vec![field.with_name("")]));
     let batch =
         RecordBatch::try_new(schema.clone(), vec![array]).expect("guest column batch must build");
+    wasm_guest_stream(schema, &[batch])
+}
+
+fn wasm_generated_pool(fields: Vec<arrow_schema::Field>, arrays: Vec<ArrayRef>) -> Vec<u8> {
+    let schema = Arc::new(ArrowSchema::new(
+        fields
+            .into_iter()
+            .map(|field| field.with_name(""))
+            .collect::<Vec<_>>(),
+    ));
+    let batch =
+        RecordBatch::try_new(schema.clone(), arrays).expect("generated pool batch must build");
     wasm_guest_stream(schema, &[batch])
 }
 
@@ -1101,8 +1162,8 @@ fn wasm_identity_input_reference_reuses_exact_source_array() {
         &schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
-            input.acks().rows.clone(),
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
+            wasm_input_acks(&input).rows.clone(),
         )],
     )
     .expect("identity reference must materialize");
@@ -1114,13 +1175,13 @@ fn wasm_identity_input_reference_reuses_exact_source_array() {
 fn wasm_contiguous_input_reference_shares_source_buffers() {
     let schema = test_schema(&[("value", ParseAsType::I32)]);
     let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]);
-    let rows = input.acks().rows[1..3].to_vec();
+    let rows = wasm_input_acks(&input).rows[1..3].to_vec();
     let outputs = validate_wasm_test_outputs(
         &schema,
         &schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             rows,
         )],
     )
@@ -1148,7 +1209,7 @@ fn wasm_contiguous_input_reference_shares_source_buffers() {
 fn wasm_general_input_selection_filters_reorders_and_duplicates_rows() {
     let schema = test_schema(&[("value", ParseAsType::I32)]);
     let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]);
-    let input_rows = input.acks().rows.clone();
+    let input_rows = wasm_input_acks(&input).rows.clone();
     let rows = vec![
         input_rows[3].clone(),
         input_rows[1].clone(),
@@ -1159,7 +1220,7 @@ fn wasm_general_input_selection_filters_reorders_and_duplicates_rows() {
         &schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             rows,
         )],
     )
@@ -1182,8 +1243,8 @@ fn wasm_input_references_materialize_rows_from_multiple_retained_batches() {
     let (second_input, mut second_ack_map) = wasm_input_for_values(&schema, &[20]);
     let second_context = second_ack_map.remove(&1).expect("second token must exist");
     ack_map.insert(2, second_context);
-    let mut rows = first_input.acks().rows.clone();
-    let mut second_row = second_input.acks().rows.clone().remove(0);
+    let mut rows = wasm_input_acks(&first_input).rows.clone();
+    let mut second_row = wasm_input_acks(&second_input).rows.clone().remove(0);
     second_row.tokens = vec![WasmAckToken(2)];
     second_row.source_token = Some(WasmAckToken(2));
     rows.push(second_row);
@@ -1193,7 +1254,7 @@ fn wasm_input_references_materialize_rows_from_multiple_retained_batches() {
         &schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             rows,
         )],
     )
@@ -1282,11 +1343,11 @@ fn wasm_identity_references_support_every_internal_arrow_field_kind() {
         &ack_map,
         vec![wasm_test_output(
             (0..schema.arrow_schema().fields().len())
-                .map(|column_index| WasmOutputColumn::Input {
+                .map(|column_index| WasmOutputColumnRef::Input {
                     column_index: u32::try_from(column_index).expect("field index must fit u32"),
                 })
                 .collect(),
-            input.acks().rows.clone(),
+            wasm_input_acks(&input).rows.clone(),
         )],
     )
     .expect("all internal field kinds must materialize");
@@ -1308,7 +1369,7 @@ fn wasm_zero_row_output_builds_exact_empty_destination_columns() {
         &schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             Vec::new(),
         )],
     )
@@ -1320,7 +1381,7 @@ fn wasm_zero_row_output_builds_exact_empty_destination_columns() {
 }
 
 #[test]
-fn wasm_mixed_input_and_guest_arrow_columns_match_destination_schema() {
+fn wasm_mixed_input_and_generated_columns_match_destination_schema() {
     let input_schema = test_schema(&[("value", ParseAsType::I32)]);
     let output_schema =
         test_schema(&[("value", ParseAsType::I32), ("bucket", ParseAsType::String)]);
@@ -1331,12 +1392,13 @@ fn wasm_mixed_input_and_guest_arrow_columns_match_destination_schema() {
         &input_schema,
         &output_schema,
         &ack_map,
-        vec![wasm_test_output(
+        vec![wasm_test_generated_output(
+            ipc,
             vec![
-                WasmOutputColumn::Input { column_index: 0 },
-                WasmOutputColumn::GuestArrow { ipc },
+                WasmOutputColumnRef::input(0),
+                WasmOutputColumnRef::generated(0),
             ],
-            input.acks().rows.clone(),
+            wasm_input_acks(&input).rows.clone(),
         )],
     )
     .expect("mixed output must materialize");
@@ -1346,6 +1408,334 @@ fn wasm_mixed_input_and_guest_arrow_columns_match_destination_schema() {
         output_schema.arrow_schema()
     );
     assert_eq!(outputs[0].batch.batch().num_rows(), 2);
+}
+
+#[test]
+fn wasm_shared_generated_column_reuses_one_array_across_routes_and_fields() {
+    let input_schema = test_schema(&[("value", ParseAsType::I32)]);
+    let enriched_schema = test_schema(&[
+        ("value", ParseAsType::I32),
+        ("bucket", ParseAsType::String),
+        ("bucket_copy", ParseAsType::String),
+    ]);
+    let audit_schema = test_schema(&[
+        ("value", ParseAsType::I32),
+        ("classification", ParseAsType::String),
+    ]);
+    let (input, ack_map) = wasm_input_for_values(&input_schema, &[2, 4]);
+    let rows = wasm_input_acks(&input).rows.clone();
+    let generated_arrow_ipc_batch = wasm_guest_column(
+        enriched_schema.arrow_schema().field(1).clone(),
+        Arc::new(StringArray::from(vec!["EVEN", "EVEN"])),
+    );
+    let output = WasmEnvelope::output(
+        generated_arrow_ipc_batch,
+        vec![
+            WasmRoutedOutput::new(
+                "enriched",
+                vec![
+                    WasmOutputColumnRef::input(0),
+                    WasmOutputColumnRef::generated(0),
+                    WasmOutputColumnRef::generated(0),
+                ],
+                WasmAckSidecar {
+                    rows: rows.clone(),
+                    ..WasmAckSidecar::default()
+                },
+            ),
+            WasmRoutedOutput::new(
+                "audit",
+                vec![
+                    WasmOutputColumnRef::input(0),
+                    WasmOutputColumnRef::generated(0),
+                ],
+                WasmAckSidecar {
+                    rows,
+                    ..WasmAckSidecar::default()
+                },
+            ),
+        ],
+    );
+    let outputs = validate_wasm_test_output_groups(
+        &input_schema,
+        vec![("enriched", enriched_schema), ("audit", audit_schema)],
+        &ack_map,
+        vec![output],
+    )
+    .expect("shared generated output must materialize");
+
+    let first = outputs[0].batch.batch().column(1);
+    assert!(Arc::ptr_eq(first, outputs[0].batch.batch().column(2)));
+    assert!(Arc::ptr_eq(first, outputs[1].batch.batch().column(1)));
+    let input_values = outputs[0]
+        .batch
+        .batch()
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("input reference must remain I32");
+    assert_eq!(input_values.values().as_ref(), &[2, 4]);
+}
+
+#[test]
+fn wasm_generated_pool_rejects_out_of_range_and_unreferenced_columns() {
+    let input_schema = test_schema(&[("input", ParseAsType::I32)]);
+    let output_schema = test_schema(&[("generated", ParseAsType::String)]);
+    let field = output_schema.arrow_schema().field(0).clone();
+    let one_column = wasm_guest_column(field.clone(), Arc::new(StringArray::from(vec!["value"])));
+    let rows = vec![WasmOutputRow {
+        tokens: Vec::new(),
+        source_token: None,
+    }];
+    let out_of_range = validate_wasm_test_outputs(
+        &input_schema,
+        &output_schema,
+        &super::WasmAckMap::default(),
+        vec![wasm_test_generated_output(
+            one_column,
+            vec![WasmOutputColumnRef::generated(1)],
+            rows.clone(),
+        )],
+    )
+    .expect_err("out-of-range generated column must fail");
+    assert!(matches!(
+        out_of_range,
+        super::WasmOutputError::GeneratedColumnOutOfRange {
+            column_index: 1,
+            ..
+        }
+    ));
+
+    let two_columns = wasm_generated_pool(
+        vec![field.clone(), field],
+        vec![
+            Arc::new(StringArray::from(vec!["used"])),
+            Arc::new(StringArray::from(vec!["unused"])),
+        ],
+    );
+    let unreferenced = validate_wasm_test_outputs(
+        &input_schema,
+        &output_schema,
+        &super::WasmAckMap::default(),
+        vec![wasm_test_generated_output(
+            two_columns,
+            vec![WasmOutputColumnRef::generated(0)],
+            rows,
+        )],
+    )
+    .expect_err("unreferenced generated column must fail");
+    assert!(matches!(
+        unreferenced,
+        super::WasmOutputError::UnreferencedGeneratedColumn { column_index: 1 }
+    ));
+}
+
+#[test]
+fn wasm_generated_pool_rejects_route_shape_type_and_row_mismatches() {
+    let input_schema = test_schema(&[("input", ParseAsType::I32)]);
+    let output_schema = test_schema(&[("generated", ParseAsType::String)]);
+    let field = output_schema.arrow_schema().field(0).clone();
+    let generated = wasm_guest_column(
+        field.clone(),
+        Arc::new(StringArray::from(vec!["first", "second"])),
+    );
+    let one_row = vec![WasmOutputRow {
+        tokens: Vec::new(),
+        source_token: None,
+    }];
+    let row_count = validate_wasm_test_outputs(
+        &input_schema,
+        &output_schema,
+        &super::WasmAckMap::default(),
+        vec![wasm_test_generated_output(
+            generated,
+            vec![WasmOutputColumnRef::generated(0)],
+            one_row.clone(),
+        )],
+    )
+    .expect_err("generated row count must match every referencing route");
+    assert!(matches!(
+        row_count,
+        super::WasmOutputError::GeneratedColumnRowCountMismatch {
+            expected: 1,
+            actual: 2,
+            ..
+        }
+    ));
+
+    let nullable_output_schema = test_optional_schema(&[("generated", ParseAsType::String, true)]);
+    let nullability = validate_wasm_test_outputs(
+        &input_schema,
+        &nullable_output_schema,
+        &super::WasmAckMap::default(),
+        vec![wasm_test_generated_output(
+            wasm_guest_column(field, Arc::new(StringArray::from(vec!["value"]))),
+            vec![WasmOutputColumnRef::generated(0)],
+            one_row.clone(),
+        )],
+    )
+    .expect_err("generated nullability must match the destination");
+    assert!(matches!(
+        nullability,
+        super::WasmOutputError::GeneratedColumnTypeMismatch { .. }
+    ));
+
+    let column_count = validate_wasm_test_outputs(
+        &input_schema,
+        &output_schema,
+        &super::WasmAckMap::default(),
+        vec![wasm_test_output(Vec::new(), one_row)],
+    )
+    .expect_err("routed output column count must match the destination");
+    assert!(matches!(
+        column_count,
+        super::WasmOutputError::RoutedOutputColumnCountMismatch {
+            expected: 1,
+            actual: 0,
+            ..
+        }
+    ));
+
+    let empty_group = validate_wasm_test_outputs(
+        &input_schema,
+        &output_schema,
+        &super::WasmAckMap::default(),
+        vec![WasmEnvelope::output(Vec::new(), Vec::new())],
+    )
+    .expect_err("empty output group must fail");
+    assert!(matches!(
+        empty_group,
+        super::WasmOutputError::EmptyOutputGroup { .. }
+    ));
+}
+
+#[test]
+fn wasm_shared_generated_column_requires_each_route_to_use_the_pool_row_layout() {
+    let input_schema = test_schema(&[("input", ParseAsType::I32)]);
+    let first_schema = test_schema(&[("first", ParseAsType::String)]);
+    let second_schema = test_schema(&[("second", ParseAsType::String)]);
+    let generated = wasm_guest_column(
+        first_schema.arrow_schema().field(0).clone(),
+        Arc::new(StringArray::from(vec!["one", "two"])),
+    );
+    let row = WasmOutputRow {
+        tokens: Vec::new(),
+        source_token: None,
+    };
+    let output = WasmEnvelope::output(
+        generated,
+        vec![
+            WasmRoutedOutput::new(
+                "first",
+                vec![WasmOutputColumnRef::generated(0)],
+                WasmAckSidecar {
+                    rows: vec![row.clone(), row.clone()],
+                    ..WasmAckSidecar::default()
+                },
+            ),
+            WasmRoutedOutput::new(
+                "second",
+                vec![WasmOutputColumnRef::generated(0)],
+                WasmAckSidecar {
+                    rows: vec![row],
+                    ..WasmAckSidecar::default()
+                },
+            ),
+        ],
+    );
+    let error = validate_wasm_test_output_groups(
+        &input_schema,
+        vec![("first", first_schema), ("second", second_schema)],
+        &super::WasmAckMap::default(),
+        vec![output],
+    )
+    .expect_err("one pool cannot serve routes with different row counts");
+
+    assert!(matches!(
+        error,
+        super::WasmOutputError::GeneratedColumnRowCountMismatch {
+            output_relay,
+            expected: 1,
+            actual: 2,
+            ..
+        } if output_relay == "second"
+    ));
+}
+
+#[tokio::test]
+async fn wasm_routed_output_fanout_waits_for_every_downstream_ack() {
+    let schema = test_schema(&[("value", ParseAsType::I32)]);
+    let (input, mut ack_map) = wasm_input_for_values(&schema, &[2]);
+    let (root_acks, completion) = AckSet::root();
+    ack_map.get_mut(&1).expect("token must exist").acks = root_acks;
+    let row = wasm_input_acks(&input).rows[0].clone();
+    let output = WasmEnvelope::output(
+        Vec::new(),
+        vec![
+            WasmRoutedOutput::new(
+                "first",
+                vec![WasmOutputColumnRef::input(0)],
+                WasmAckSidecar {
+                    rows: vec![row.clone()],
+                    ..WasmAckSidecar::default()
+                },
+            ),
+            WasmRoutedOutput::new(
+                "second",
+                vec![WasmOutputColumnRef::input(0)],
+                WasmAckSidecar {
+                    rows: vec![row],
+                    ..WasmAckSidecar::default()
+                },
+            ),
+        ],
+    );
+    let mut outputs = validate_wasm_test_output_groups(
+        &schema,
+        vec![
+            ("first", Arc::clone(&schema)),
+            ("second", Arc::clone(&schema)),
+        ],
+        &ack_map,
+        vec![output],
+    )
+    .expect("fanout output must validate");
+    let mut token_use_counts = super::wasm_output_token_use_counts(&outputs);
+
+    let first = outputs.remove(0);
+    let first = super::relay_batch_from_wasm_output(
+        &None,
+        first.schema,
+        first.batch,
+        first.acks.rows,
+        &mut ack_map,
+        &mut token_use_counts,
+    )
+    .expect("first routed batch must build");
+    let completion_task = tokio::spawn(completion.wait());
+    first.batch.acks[0].ack_success();
+    tokio::task::yield_now().await;
+    assert!(
+        !completion_task.is_finished(),
+        "the first downstream ACK must not complete the fanned-out input"
+    );
+
+    let second = outputs.remove(0);
+    let second = super::relay_batch_from_wasm_output(
+        &None,
+        second.schema,
+        second.batch,
+        second.acks.rows,
+        &mut ack_map,
+        &mut token_use_counts,
+    )
+    .expect("second routed batch must build");
+    second.batch.acks[0].ack_success();
+    let outcome = timeout(Duration::from_millis(50), completion_task)
+        .await
+        .expect("the final downstream ACK must complete the input")
+        .expect("ACK completion task must not panic");
+    assert_eq!(outcome, AckOutcome::Ack);
 }
 
 #[test]
@@ -1360,8 +1750,9 @@ fn wasm_guest_generated_rows_do_not_require_source_tokens() {
         &input_schema,
         &output_schema,
         &super::WasmAckMap::default(),
-        vec![wasm_test_output(
-            vec![WasmOutputColumn::GuestArrow { ipc }],
+        vec![wasm_test_generated_output(
+            ipc,
+            vec![WasmOutputColumnRef::generated(0)],
             vec![WasmOutputRow {
                 tokens: Vec::new(),
                 source_token: None,
@@ -1374,62 +1765,63 @@ fn wasm_guest_generated_rows_do_not_require_source_tokens() {
 }
 
 #[test]
-fn wasm_guest_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
+fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
     let input_schema = test_schema(&[("value", ParseAsType::I32)]);
     let output_schema = test_schema(&[("value", ParseAsType::I32)]);
     let (input, ack_map) = wasm_input_for_values(&input_schema, &[2]);
-    let rows = input.acks().rows.clone();
+    let rows = wasm_input_acks(&input).rows.clone();
     let destination_field = output_schema.arrow_schema().field(0).clone();
     let validate_ipc = |ipc| {
         validate_wasm_test_outputs(
             &input_schema,
             &output_schema,
             &ack_map,
-            vec![wasm_test_output(
-                vec![WasmOutputColumn::GuestArrow { ipc }],
+            vec![wasm_test_generated_output(
+                ipc,
+                vec![WasmOutputColumnRef::generated(0)],
                 rows.clone(),
             )],
         )
     };
 
-    let empty = validate_ipc(Vec::new()).expect_err("empty guest IPC must fail");
+    let empty = validate_ipc(Vec::new()).expect_err("generated reference without a pool must fail");
     assert!(matches!(
         empty,
-        super::WasmOutputError::InvalidGuestArrowIpc { .. }
+        super::WasmOutputError::GeneratedColumnOutOfRange { .. }
     ));
 
-    let zero_fields = wasm_guest_stream(Arc::new(ArrowSchema::empty()), &[]);
+    let empty_schema = Arc::new(ArrowSchema::empty());
+    let zero_fields = wasm_guest_stream(
+        empty_schema.clone(),
+        &[RecordBatch::new_empty(empty_schema)],
+    );
     let zero_fields = validate_ipc(zero_fields).expect_err("zero fields must fail");
     assert!(matches!(
         zero_fields,
-        super::WasmOutputError::InvalidGuestArrowIpc { .. }
+        super::WasmOutputError::InvalidGeneratedArrowIpc { .. }
     ));
 
-    let two_field_schema = Arc::new(ArrowSchema::new(vec![
-        arrow_schema::Field::new("value", arrow_schema::DataType::Int32, false),
-        arrow_schema::Field::new("other", arrow_schema::DataType::Int32, false),
-    ]));
-    let two_field_batch = RecordBatch::try_new(
-        two_field_schema.clone(),
-        vec![
-            Arc::new(Int32Array::from(vec![2])),
-            Arc::new(Int32Array::from(vec![3])),
-        ],
+    let named_field_schema = Arc::new(ArrowSchema::new(vec![destination_field.clone()]));
+    let named_field_batch = RecordBatch::try_new(
+        named_field_schema.clone(),
+        vec![Arc::new(Int32Array::from(vec![2]))],
     )
-    .expect("two-field batch must build");
-    let multiple_fields = validate_ipc(wasm_guest_stream(two_field_schema, &[two_field_batch]))
-        .expect_err("multiple guest fields must fail");
+    .expect("named field batch must build");
+    let named_field = validate_ipc(wasm_guest_stream(named_field_schema, &[named_field_batch]))
+        .expect_err("generated field names must be empty");
     assert!(matches!(
-        multiple_fields,
-        super::WasmOutputError::InvalidGuestArrowIpc { .. }
+        named_field,
+        super::WasmOutputError::InvalidGeneratedArrowIpc { .. }
     ));
 
-    let one_field_schema = Arc::new(ArrowSchema::new(vec![destination_field.clone()]));
+    let one_field_schema = Arc::new(ArrowSchema::new(vec![
+        destination_field.clone().with_name(""),
+    ]));
     let no_batches = validate_ipc(wasm_guest_stream(one_field_schema.clone(), &[]))
         .expect_err("missing guest record batch must fail");
     assert!(matches!(
         no_batches,
-        super::WasmOutputError::InvalidGuestArrowIpc { .. }
+        super::WasmOutputError::GeneratedRecordBatchCount { actual: 0 }
     ));
     let one_batch = RecordBatch::try_new(
         one_field_schema.clone(),
@@ -1443,17 +1835,17 @@ fn wasm_guest_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
     .expect_err("multiple guest batches must fail");
     assert!(matches!(
         multiple_batches,
-        super::WasmOutputError::InvalidGuestArrowIpc { .. }
+        super::WasmOutputError::GeneratedRecordBatchCount { actual: 2 }
     ));
 
     let mismatched_field = validate_ipc(wasm_guest_column(
-        arrow_schema::Field::new("wrong_name", arrow_schema::DataType::Int32, false),
-        Arc::new(Int32Array::from(vec![2])),
+        arrow_schema::Field::new("ignored", arrow_schema::DataType::Utf8, false),
+        Arc::new(StringArray::from(vec!["wrong type"])),
     ))
     .expect_err("guest field mismatch must fail");
     assert!(matches!(
         mismatched_field,
-        super::WasmOutputError::GuestArrowFieldMismatch { .. }
+        super::WasmOutputError::GeneratedColumnTypeMismatch { .. }
     ));
 
     let row_count = validate_ipc(wasm_guest_column(
@@ -1463,7 +1855,7 @@ fn wasm_guest_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
     .expect_err("guest row-count mismatch must fail");
     assert!(matches!(
         row_count,
-        super::WasmOutputError::GuestArrowRowCountMismatch { .. }
+        super::WasmOutputError::GeneratedColumnRowCountMismatch { .. }
     ));
 
     let mut trailing_ipc =
@@ -1472,7 +1864,7 @@ fn wasm_guest_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
     let trailing = validate_ipc(trailing_ipc).expect_err("trailing guest IPC must fail");
     assert!(matches!(
         trailing,
-        super::WasmOutputError::InvalidGuestArrowIpc { .. }
+        super::WasmOutputError::InvalidGeneratedArrowIpc { .. }
     ));
 }
 
@@ -1483,14 +1875,14 @@ fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
     let string_schema = test_schema(&[("value", ParseAsType::String)]);
     let nullable_schema = test_optional_schema(&[("value", ParseAsType::I32, true)]);
     let (input, ack_map) = wasm_input_for_values(&input_schema, &[10]);
-    let rows = input.acks().rows.clone();
+    let rows = wasm_input_acks(&input).rows.clone();
 
     validate_wasm_test_outputs(
         &input_schema,
         &renamed_schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             rows.clone(),
         )],
     )
@@ -1501,7 +1893,7 @@ fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         &input_schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 9 }],
+            vec![WasmOutputColumnRef::Input { column_index: 9 }],
             rows.clone(),
         )],
     )
@@ -1516,7 +1908,7 @@ fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         &string_schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             rows.clone(),
         )],
     )
@@ -1531,7 +1923,7 @@ fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         &nullable_schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             rows.clone(),
         )],
     )
@@ -1548,7 +1940,7 @@ fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         &input_schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             missing_source,
         )],
     )
@@ -1566,7 +1958,7 @@ fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         &input_schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             unknown_source,
         )],
     )
@@ -1583,7 +1975,7 @@ fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         &input_schema,
         &ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
             not_carried,
         )],
     )
@@ -1599,16 +1991,19 @@ fn wasm_callback_rejects_tokens_that_are_both_carried_and_terminal() {
     let schema = test_schema(&[("value", ParseAsType::I32)]);
     let (input, ack_map) = wasm_input_for_values(&schema, &[10]);
     let output = WasmEnvelope::output(
-        "output",
-        vec![WasmOutputColumn::Input { column_index: 0 }],
-        WasmAckSidecar {
-            rows: input.acks().rows.clone(),
-            acked: vec![WasmAckTokenSet {
-                tokens: vec![WasmAckToken(1)],
-            }],
-            nacked: Vec::new(),
-            message_errors: Vec::new(),
-        },
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            "output",
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
+            WasmAckSidecar {
+                rows: wasm_input_acks(&input).rows.clone(),
+                acked: vec![WasmAckTokenSet {
+                    tokens: vec![WasmAckToken(1)],
+                }],
+                nacked: Vec::new(),
+                message_errors: Vec::new(),
+            },
+        )],
     );
 
     let error = validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![output])
@@ -1619,19 +2014,34 @@ fn wasm_callback_rejects_tokens_that_are_both_carried_and_terminal() {
     ));
 
     let duplicate_terminal = WasmEnvelope::output(
-        "output",
-        vec![WasmOutputColumn::Input { column_index: 0 }],
-        WasmAckSidecar {
-            rows: Vec::new(),
-            acked: vec![WasmAckTokenSet {
-                tokens: vec![WasmAckToken(1)],
-            }],
-            nacked: vec![nervix_wasm::WasmNackSet {
-                tokens: vec![WasmAckToken(1)],
-                reason: "rejected".to_string(),
-            }],
-            message_errors: Vec::new(),
-        },
+        Vec::new(),
+        vec![
+            WasmRoutedOutput::new(
+                "output",
+                vec![WasmOutputColumnRef::Input { column_index: 0 }],
+                WasmAckSidecar {
+                    rows: Vec::new(),
+                    acked: vec![WasmAckTokenSet {
+                        tokens: vec![WasmAckToken(1)],
+                    }],
+                    nacked: Vec::new(),
+                    message_errors: Vec::new(),
+                },
+            ),
+            WasmRoutedOutput::new(
+                "output",
+                vec![WasmOutputColumnRef::Input { column_index: 0 }],
+                WasmAckSidecar {
+                    rows: Vec::new(),
+                    acked: Vec::new(),
+                    nacked: vec![nervix_wasm::WasmNackSet {
+                        tokens: vec![WasmAckToken(1)],
+                        reason: "rejected".to_string(),
+                    }],
+                    message_errors: Vec::new(),
+                },
+            ),
+        ],
     );
     let error = validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![duplicate_terminal])
         .expect_err("one token cannot receive multiple terminal decisions");
@@ -1652,8 +2062,8 @@ fn wasm_reference_to_terminally_removed_or_other_branch_token_is_rejected() {
         &schema,
         &empty_ack_map,
         vec![wasm_test_output(
-            vec![WasmOutputColumn::Input { column_index: 0 }],
-            input.acks().rows.clone(),
+            vec![WasmOutputColumnRef::Input { column_index: 0 }],
+            wasm_input_acks(&input).rows.clone(),
         )],
     )
     .expect_err("a token outside the current live branch map must fail");
@@ -1669,21 +2079,33 @@ async fn wasm_callback_validation_is_all_or_nothing_for_terminal_decisions() {
     let (input, mut ack_map) = wasm_input_for_values(&schema, &[10]);
     let (acks, completion) = AckSet::root();
     ack_map.get_mut(&1).expect("token must exist").acks = acks;
-    let terminal = WasmEnvelope::output(
-        "output",
-        vec![WasmOutputColumn::Input { column_index: 0 }],
-        WasmAckSidecar {
-            rows: Vec::new(),
-            acked: vec![WasmAckTokenSet {
-                tokens: vec![WasmAckToken(1)],
-            }],
-            nacked: Vec::new(),
-            message_errors: Vec::new(),
-        },
+    let output_group = WasmEnvelope::output(
+        Vec::new(),
+        vec![
+            WasmRoutedOutput::new(
+                "output",
+                vec![WasmOutputColumnRef::Input { column_index: 0 }],
+                WasmAckSidecar {
+                    rows: Vec::new(),
+                    acked: vec![WasmAckTokenSet {
+                        tokens: vec![WasmAckToken(1)],
+                    }],
+                    nacked: Vec::new(),
+                    message_errors: Vec::new(),
+                },
+            ),
+            WasmRoutedOutput::new(
+                "output",
+                Vec::new(),
+                WasmAckSidecar {
+                    rows: wasm_input_acks(&input).rows.clone(),
+                    ..WasmAckSidecar::default()
+                },
+            ),
+        ],
     );
-    let malformed_later = wasm_test_output(Vec::new(), input.acks().rows.clone());
 
-    validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![terminal, malformed_later])
+    validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![output_group])
         .expect_err("later malformed output must reject the whole callback");
     assert!(
         timeout(Duration::from_millis(50), completion.wait())

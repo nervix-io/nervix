@@ -58,31 +58,30 @@ type guestSnapshot struct {
 }
 
 type envelope struct {
-	Kind          string         `cbor:"kind"`
-	ArrowIPCBatch []byte         `cbor:"arrow_ipc_batch,omitempty"`
-	OutputRelay   string         `cbor:"output_relay,omitempty"`
-	Columns       []outputColumn `cbor:"columns,omitempty"`
-	Acks          ackSidecar     `cbor:"acks"`
+	Kind                   string         `cbor:"kind"`
+	ArrowIPCBatch          []byte         `cbor:"arrow_ipc_batch,omitempty"`
+	Acks                   ackSidecar     `cbor:"acks,omitempty"`
+	GeneratedArrowIPCBatch []byte         `cbor:"generated_arrow_ipc_batch,omitempty"`
+	Outputs                []routedOutput `cbor:"outputs,omitempty"`
+}
+
+type routedOutput struct {
+	OutputRelay string         `cbor:"output_relay"`
+	Columns     []outputColumn `cbor:"columns"`
+	Acks        ackSidecar     `cbor:"acks"`
 }
 
 type outputColumn struct {
 	Kind        string `cbor:"kind"`
-	IPC         []byte `cbor:"ipc,omitempty"`
-	ColumnIndex uint32 `cbor:"column_index,omitempty"`
+	ColumnIndex uint32 `cbor:"column_index"`
 }
 
 func (column outputColumn) MarshalCBOR() ([]byte, error) {
-	if column.Kind == "input" {
+	if column.Kind == "input" || column.Kind == "generated" {
 		return cbor.Marshal(struct {
 			Kind        string `cbor:"kind"`
 			ColumnIndex uint32 `cbor:"column_index"`
 		}{Kind: column.Kind, ColumnIndex: column.ColumnIndex})
-	}
-	if column.Kind == "guest_arrow" {
-		return cbor.Marshal(struct {
-			Kind string `cbor:"kind"`
-			IPC  []byte `cbor:"ipc"`
-		}{Kind: column.Kind, IPC: column.IPC})
 	}
 	return nil, errors.New("invalid output column kind")
 }
@@ -94,10 +93,9 @@ type inputEnvelopeWire struct {
 }
 
 type outputEnvelopeWire struct {
-	Kind        string         `cbor:"kind"`
-	OutputRelay string         `cbor:"output_relay"`
-	Columns     []outputColumn `cbor:"columns"`
-	Acks        ackSidecar     `cbor:"acks"`
+	Kind                   string         `cbor:"kind"`
+	GeneratedArrowIPCBatch []byte         `cbor:"generated_arrow_ipc_batch"`
+	Outputs                []routedOutput `cbor:"outputs"`
 }
 
 type branchInitMetadata struct {
@@ -224,14 +222,14 @@ func nervixProcessBatch(size int32) int32 {
 		processedBatches++
 		lastDomainTimeNanos = hostDomainTimeNanos()
 		lastTimeoutHandle = hostTimeoutAfterNanos(defaultTimeoutNanos)
-		envelope, code := decodeEnvelope(buffer[:int(size)])
+		input, code := decodeEnvelope(buffer[:int(size)])
 		if code != success {
 			return code
 		}
-		if envelope.Kind != "input" {
+		if input.Kind != "input" {
 			return errEnvelope
 		}
-		firstValue, hasFirstValue, code := firstInt32Value(envelope.ArrowIPCBatch)
+		firstValue, hasFirstValue, code := firstInt32Value(input.ArrowIPCBatch)
 		if code != success {
 			return code
 		}
@@ -244,14 +242,18 @@ func nervixProcessBatch(size int32) int32 {
 			return success
 		}
 		if hasFirstValue && firstValue == -100 {
-			errorEnvelope, code := messageErrorEnvelope(envelope, "guest message error for value -100")
+			errorOutput, code := messageErrorOutput(input, "guest message error for value -100")
 			if code != success {
 				return code
 			}
 			if len(outputRelays) > 0 {
-				errorEnvelope.OutputRelay = outputRelays[0]
+				errorOutput.OutputRelay = outputRelays[0]
 			}
-			encoded, code := encodeEnvelope(errorEnvelope)
+			encoded, code := encodeEnvelope(envelope{
+				Kind:                   "output",
+				GeneratedArrowIPCBatch: make([]byte, 0),
+				Outputs:                []routedOutput{errorOutput},
+			})
 			if code != success {
 				return code
 			}
@@ -265,7 +267,7 @@ func nervixProcessBatch(size int32) int32 {
 				return code
 			}
 		}
-		rowCount, code := arrowIPCRowCount(envelope.ArrowIPCBatch)
+		rowCount, code := arrowIPCRowCount(input.ArrowIPCBatch)
 		if code != success {
 			return code
 		}
@@ -381,41 +383,45 @@ func flushPending() int32 {
 	if len(pendingBatch) == 0 {
 		return success
 	}
-	envelope, code := decodeEnvelope(pendingBatch)
+	input, code := decodeEnvelope(pendingBatch)
 	if code != success {
 		return code
 	}
-	filtered, code := filterEnvelopeByGlobalRow(envelope, pendingStartRow)
+	filtered, code := filterEnvelopeByGlobalRow(input, pendingStartRow)
 	if code != success {
 		return code
 	}
 	if len(outputRelays) == 0 {
 		return errNotInitialized
 	}
+	outputs := make([]routedOutput, 0, len(outputRelays))
 	for i := 0; i < len(outputRelays); i++ {
 		output := filtered
-		output.Kind = "output"
 		output.OutputRelay = outputRelays[i]
-		output.ArrowIPCBatch = nil
 		if i > 0 {
 			output.Acks.Acked = make([]ackTokenSet, 0)
 			output.Acks.Nacked = make([]nackSet, 0)
 			output.Acks.MessageErrors = make([]messageErrorSet, 0)
 		}
-		encoded, code := encodeEnvelope(output)
-		if code != success {
-			return code
-		}
-		pendingEmit = append(pendingEmit, encoded)
+		outputs = append(outputs, output)
 	}
+	encoded, code := encodeEnvelope(envelope{
+		Kind:                   "output",
+		GeneratedArrowIPCBatch: make([]byte, 0),
+		Outputs:                outputs,
+	})
+	if code != success {
+		return code
+	}
+	pendingEmit = append(pendingEmit, encoded)
 	pendingBatch = pendingBatch[:0]
 	pendingStartRow = processedRows
 	return success
 }
 
 func encodeEnvelope(value envelope) ([]byte, int32) {
-	value.Acks.normalize()
 	if value.Kind == "input" {
+		value.Acks.normalize()
 		encoded, err := cbor.Marshal(inputEnvelopeWire{
 			Kind:          value.Kind,
 			ArrowIPCBatch: value.ArrowIPCBatch,
@@ -427,14 +433,22 @@ func encodeEnvelope(value envelope) ([]byte, int32) {
 		return encoded, success
 	}
 	if value.Kind == "output" {
-		if value.Columns == nil {
-			value.Columns = make([]outputColumn, 0)
+		if value.GeneratedArrowIPCBatch == nil {
+			value.GeneratedArrowIPCBatch = make([]byte, 0)
+		}
+		if value.Outputs == nil {
+			value.Outputs = make([]routedOutput, 0)
+		}
+		for i := 0; i < len(value.Outputs); i++ {
+			if value.Outputs[i].Columns == nil {
+				value.Outputs[i].Columns = make([]outputColumn, 0)
+			}
+			value.Outputs[i].Acks.normalize()
 		}
 		encoded, err := cbor.Marshal(outputEnvelopeWire{
-			Kind:        value.Kind,
-			OutputRelay: value.OutputRelay,
-			Columns:     value.Columns,
-			Acks:        value.Acks,
+			Kind:                   value.Kind,
+			GeneratedArrowIPCBatch: value.GeneratedArrowIPCBatch,
+			Outputs:                value.Outputs,
 		})
 		if err != nil {
 			return nil, errEnvelope
@@ -520,18 +534,18 @@ func decodeEnvelope(data []byte) (envelope, int32) {
 		}, success
 	}
 	if kind == "output" {
-		if !hasExactFields(raw, "kind", "output_relay", "columns", "acks") {
+		if !hasExactFields(raw, "kind", "generated_arrow_ipc_batch", "outputs") {
 			return envelope{}, errEnvelope
 		}
-		if !validAckSidecar(mode, raw["acks"]) {
+		if !isCBORByteString(raw["generated_arrow_ipc_batch"]) {
 			return envelope{}, errEnvelope
 		}
-		var rawColumns []cbor.RawMessage
-		if err := mode.Unmarshal(raw["columns"], &rawColumns); err != nil {
+		var rawOutputs []cbor.RawMessage
+		if err := mode.Unmarshal(raw["outputs"], &rawOutputs); err != nil {
 			return envelope{}, errEnvelope
 		}
-		for i := 0; i < len(rawColumns); i++ {
-			if !validOutputColumn(mode, rawColumns[i]) {
+		for i := 0; i < len(rawOutputs); i++ {
+			if !validRoutedOutput(mode, rawOutputs[i]) {
 				return envelope{}, errEnvelope
 			}
 		}
@@ -540,13 +554,32 @@ func decodeEnvelope(data []byte) (envelope, int32) {
 			return envelope{}, errEnvelope
 		}
 		return envelope{
-			Kind:        wire.Kind,
-			OutputRelay: wire.OutputRelay,
-			Columns:     wire.Columns,
-			Acks:        wire.Acks,
+			Kind:                   wire.Kind,
+			GeneratedArrowIPCBatch: wire.GeneratedArrowIPCBatch,
+			Outputs:                wire.Outputs,
 		}, success
 	}
 	return envelope{}, errEnvelope
+}
+
+func validRoutedOutput(mode cbor.DecMode, data []byte) bool {
+	var raw map[string]cbor.RawMessage
+	if err := mode.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	if !hasExactFields(raw, "output_relay", "columns", "acks") || !validAckSidecar(mode, raw["acks"]) {
+		return false
+	}
+	var rawColumns []cbor.RawMessage
+	if err := mode.Unmarshal(raw["columns"], &rawColumns); err != nil {
+		return false
+	}
+	for i := 0; i < len(rawColumns); i++ {
+		if !validOutputColumn(mode, rawColumns[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func validAckSidecar(mode cbor.DecMode, data []byte) bool {
@@ -590,11 +623,8 @@ func validOutputColumn(mode cbor.DecMode, data []byte) bool {
 	if err := mode.Unmarshal(kindBytes, &kind); err != nil {
 		return false
 	}
-	if kind == "input" {
+	if kind == "input" || kind == "generated" {
 		return hasExactFields(raw, "kind", "column_index")
-	}
-	if kind == "guest_arrow" {
-		return hasExactFields(raw, "kind", "ipc") && isCBORByteString(raw["ipc"])
 	}
 	return false
 }
@@ -684,13 +714,13 @@ func arrowIPCRowCount(data []byte) (uint64, int32) {
 	return stream.RowCount(), success
 }
 
-func filterEnvelopeByGlobalRow(input envelope, startRow uint64) (envelope, int32) {
+func filterEnvelopeByGlobalRow(input envelope, startRow uint64) (routedOutput, int32) {
 	if input.Kind != "input" {
-		return envelope{}, errEnvelope
+		return routedOutput{}, errEnvelope
 	}
 	stream, ok := tinyipc.ParseStream(input.ArrowIPCBatch)
 	if !ok {
-		return envelope{}, errArrowIPC
+		return routedOutput{}, errArrowIPC
 	}
 	outputAcks := ackSidecar{
 		Rows:          make([]outputRow, 0, len(input.Acks.Rows)),
@@ -704,7 +734,7 @@ func filterEnvelopeByGlobalRow(input envelope, startRow uint64) (envelope, int32
 		inputBatch := stream.Batches[batchIndex]
 		for row := 0; row < len(inputBatch.Rows); row++ {
 			if inputRow >= len(input.Acks.Rows) {
-				return envelope{}, errEnvelope
+				return routedOutput{}, errEnvelope
 			}
 			nextRow++
 			if nextRow%2 == 0 && inputBatch.Rows[row].Valid {
@@ -717,7 +747,7 @@ func filterEnvelopeByGlobalRow(input envelope, startRow uint64) (envelope, int32
 			inputRow++
 		}
 	}
-	return envelope{
+	return routedOutput{
 		Columns: []outputColumn{{Kind: "input", ColumnIndex: 0}},
 		Acks:    outputAcks,
 	}, success
@@ -732,13 +762,12 @@ func firstInt32Value(data []byte) (int32, bool, int32) {
 	return value, found, success
 }
 
-func messageErrorEnvelope(input envelope, reason string) (envelope, int32) {
+func messageErrorOutput(input envelope, reason string) (routedOutput, int32) {
 	tokens := []uint64(nil)
 	if len(input.Acks.Rows) > 0 {
 		tokens = append(tokens, input.Acks.Rows[0].Tokens...)
 	}
-	return envelope{
-		Kind:    "output",
+	return routedOutput{
 		Columns: []outputColumn{{Kind: "input", ColumnIndex: 0}},
 		Acks: ackSidecar{
 			Rows:          make([]outputRow, 0),

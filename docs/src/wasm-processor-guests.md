@@ -123,23 +123,52 @@ Output envelopes have this shape:
 ```text
 {
   "kind": "output",
-  "output_relay": text,
-  "columns": [
-    { "kind": "input", "column_index": u32 },
-    { "kind": "guest_arrow", "ipc": bytes }
-  ],
-  "acks": AckSidecar
+  "generated_arrow_ipc_batch": bytes,
+  "outputs": [
+    {
+      "output_relay": text,
+      "columns": [
+        { "kind": "input", "column_index": u32 },
+        { "kind": "generated", "column_index": u32 }
+      ],
+      "acks": AckSidecar
+    }
+  ]
 }
 ```
 
-Each `columns` entry corresponds positionally to a destination field. An
-`input` column references the declared processor input schema by index; the
-source and destination types and nullability must match exactly, although their
-names may differ. A `guest_arrow` column is a complete Arrow IPC stream with
-exactly one schema field, one record batch, and one column. That field must
-exactly match the destination field, including name, data type, nullability,
-timestamp properties, nested types, fixed lengths, and relevant metadata. Its
-row count must equal the number of output sidecar rows.
+Each routed output's `columns` entries correspond positionally to its
+destination fields. An `input` column references the declared processor input
+schema by index; source and destination types and nullability must match
+exactly, although their names may differ. A `generated` column references the
+common generated Arrow batch by index. Index namespaces are determined by the
+variant.
+
+`generated_arrow_ipc_batch` is either an empty byte string or exactly one Arrow
+IPC stream containing one schema and one record batch. The empty byte string is
+the only valid empty generated pool; do not encode a zero-column Arrow stream.
+When present, generated schema field names must be empty. Nervix compares every
+other field property with each referencing destination field, including data
+type, nullability, timestamp units and timezones, nested types, fixed lengths,
+and semantic field metadata. Destination schemas remain authoritative for field
+names.
+
+Generated columns are immutable and reusable. Several routes, or several
+fields in one route, may reference the same generated index. Nervix decodes the
+common batch once and clones the same `ArrayRef`; it does not copy, decode, or
+serialize that column again. Every generated pool column must be referenced at
+least once.
+
+Rows are positional within one output group. For routed row `R`, a generated
+reference reads generated array row `R`, while an input reference reads the
+host input row selected by that routed row's `source_token`. Every route that
+references the generated pool must therefore have the pool's row count and use
+the same generated row order. Routes needing different generated counts,
+ordering, guest-side filtering, or duplication must be queued as separate
+output envelopes and returned by separate positive `nervix_read_emit()` calls.
+Generated indexes never cross an envelope boundary. Route-level `SET` and
+`WHERE` processing occurs after this materialization and does not prevent
+sharing.
 
 The ACK sidecar is:
 
@@ -189,19 +218,25 @@ If any of these exports exists, all three must exist. After host calls into the 
 
 The guest decides lineage; the host performs the actual ACK/NACK operation. Tokens are host-local hot-path capabilities. They are valid only while the current host instance is alive, and they are never persisted.
 
-The sidecar must be internally consistent:
+Each routed output retains its own sidecar because routes may carry different
+row lineage or terminal decisions. The host counts carried token uses across
+all routed outputs in the callback, so fan-out completes the original input ACK
+only after every downstream delivery completes. A terminal decision may occur
+only once across the validated callback.
 
-- `rows.len()` is the output row count and must equal every guest Arrow column's row count.
+The sidecars must be internally consistent:
+
+- `rows.len()` is the routed output row count and must equal the generated pool row count when that route references a generated column.
 - every token in `rows`, `acked`, `nacked`, and `message_errors` must come from the current host-provided input sidecar.
 - a token may be carried into output rows, or terminally acked/nacked, but not both.
 - a token may have at most one terminal decision across `acked`, `nacked`, and `message_errors`.
 - a non-null `source_token` must be live and carried in its output row.
 
-It is valid to carry the same input token into more than one emitted row or
-output envelope. The host keeps attached child guards and resolves the original
-guard only after all derived deliveries complete. All output envelopes from
-one callback are validated together; no output is dispatched and no terminal
-decision is applied if a later envelope is invalid.
+It is valid to carry the same input token into more than one emitted row,
+routed output, or output group. The host keeps attached child guards and
+resolves the original guard only after all derived deliveries complete. All
+output groups from one callback are validated together; no output is dispatched
+and no terminal decision is applied if any routed output is invalid.
 
 For input references, Nervix retains the original input Arrow batch while its
 tokens are live. Identity selections reuse the source `ArrayRef`, contiguous
@@ -212,7 +247,9 @@ serialize unchanged field values back to the host.
 All fields are required, including empty arrays. Unknown or missing fields,
 unknown `kind` values, trailing CBOR bytes, invalid column counts, bad source
 tokens, malformed or trailing Arrow IPC, and exact-schema mismatches are global
-processor errors. Old length-prefixed envelopes are not supported.
+processor errors. Empty output groups, out-of-range or unreferenced generated
+columns, and generated row-layout mismatches are also rejected. Old
+length-prefixed and per-output generated-column envelopes are not supported.
 There is no protocol version, magic prefix, feature negotiation, legacy
 decoder, or fallback path. Rebuild every guest for this CBOR contract.
 
@@ -227,8 +264,11 @@ ACK tokens are separate from guest state. They are host-local hot-path runtime c
 A guest may include a pending CBOR envelope in its opaque snapshot, but tokens
 and input-column references remain usable only while the originating live host
 ACK map exists. Restored output that refers to lost tokens is rejected. Guest
-load code must reject old-format pending envelopes rather than silently reset
-the snapshot.
+state that retains a pending output group must retain the complete generated
+Arrow IPC bytes, every routed output, all column references, and every sidecar.
+Generated indexes are not host capabilities and have no meaning without that
+complete envelope. Guest load code must reject old-format pending envelopes
+rather than silently reset the snapshot.
 
 ## Timeouts
 
@@ -238,7 +278,10 @@ A guest can call `nervix_timeout_after_nanos(delay)` while processing. The host 
 nervix_on_timeout(handle)
 ```
 
-After any successful timeout callback, the host calls `nervix_read_emit()` and forwards emitted envelopes. Input-column references remain valid in timeout output while their source token is live.
+After any successful timeout callback, the host repeatedly calls
+`nervix_read_emit()` and forwards every emitted output group. Shared generated
+columns work identically in timeout output. Input-column references remain
+valid while their source token is live.
 
 ## Rust Sketch
 
@@ -325,18 +368,27 @@ fn filter_envelope_by_global_row(
         }
     }
 
-    output_schemas
+    let outputs = output_schemas
         .iter()
-        .map(|schema| {
-            Ok(WasmEnvelope::Output {
-                output_relay: schema.name.clone(),
-                columns: vec![WasmOutputColumn::Input { column_index: 0 }],
-                acks: output_acks.clone(),
-            })
+        .map(|schema| WasmRoutedOutput {
+            output_relay: schema.name.clone(),
+            columns: vec![WasmOutputColumnRef::input(0)],
+            acks: output_acks.clone(),
         })
-        .collect()
+        .collect();
+    Ok(vec![WasmEnvelope::Output {
+        generated_arrow_ipc_batch: Vec::new(),
+        outputs,
+    }])
 }
 ```
+
+For enrichment, build one destination-neutral Arrow batch whose fields have
+empty names, then use `WasmOutputColumnRef::generated(index)` wherever a routed
+destination field consumes that array. The constructor helpers keep input and
+generated index namespaces explicit. A guest-side builder may additionally
+check local index bounds and route row counts, but host validation remains
+authoritative.
 
 State restoration in the prototype is plain CBOR:
 
@@ -473,7 +525,10 @@ just wasm-processor-go-guest
 - Do not keep global mixed-branch state. Each module instance is branch-local.
 - Do not invent ACK tokens. Only carry, ack, or nack tokens that arrived in the input sidecar.
 - Do not omit `source_token` when preserving an input-derived row.
-- Do not emit a guest Arrow column without exactly one field, batch, and column.
+- Do not serialize a generated column separately for every route; place it once in the common generated batch and reference its index.
+- Do not give common generated schema fields destination names; their names must be empty.
+- Do not emit an encoded zero-column Arrow stream; use an empty byte string for an empty pool.
+- Do not leave generated pool columns unreferenced or reuse a pool for routes with different generated row layouts.
 - Do not rebuild unchanged input fields in the guest; emit input-column references.
 - Do not ack/nack a token and also carry it into an emitted row.
 - Do not silently accept an init payload whose schema does not match what the guest implements.
@@ -498,10 +553,11 @@ just wasm-processor-go-guest
   limit. Split the output, reduce batch size, or change the runtime limit when
   that becomes configurable.
 
-`guest Arrow row count ... does not match output row count ...`
+`generated column ... has ... rows, but the routed output has ... rows`
 
-: A generated column and the sidecar disagree. Emit exactly one `rows` entry
-  for each generated Arrow value.
+: A generated pool and one referencing route disagree. Emit exactly one
+  `rows` entry per generated Arrow value, or move the incompatible route into a
+  separate output group.
 
 `missing source token for output row ...`
 
