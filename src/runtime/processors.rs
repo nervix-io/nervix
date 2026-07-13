@@ -16,7 +16,7 @@ use super::{
     BranchRuntime, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
     RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
     ReplicatedDeduplicatorState, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
-    RuntimeFlushPolicy, SharedActiveGraph, WindowProcessorState,
+    RuntimeFlushPolicy, SharedActiveGraph, WindowProcessorState, inferencer::OnnxInferencerSession,
 };
 use crate::{
     runtime_ack::AckSet,
@@ -387,6 +387,7 @@ pub(super) enum RelayProcessorOperationNode {
         flush_each: RuntimeFlushPolicy,
         pending: Vec<RelayRecordBatch>,
         next_flush: Option<Timestamp>,
+        session: Option<OnnxInferencerSession>,
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsNode,
@@ -500,6 +501,7 @@ pub(super) struct JunctionFlushContext<'a> {
 }
 
 pub(super) struct InferencerFlushContext<'a> {
+    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: &'a str,
     pub(super) processor: &'a Identifier,
@@ -510,6 +512,8 @@ pub(super) struct InferencerFlushContext<'a> {
     pub(super) file: &'a str,
     pub(super) inputs: &'a [InferencerTensorMapping],
     pub(super) outputs: &'a [InferencerTensorMapping],
+    pub(super) input_relays: &'a [Identifier],
+    pub(super) session: &'a mut Option<OnnxInferencerSession>,
 }
 
 pub(super) struct WasmFlushContext<'a> {

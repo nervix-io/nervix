@@ -20,12 +20,13 @@ use nervix_models::{
     CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
     CreateSchema, CreateWasmProcessor, CreateWindowProcessor, Domain, DomainConfig, DomainPace,
     DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink, ErrorPolicies,
-    GeneralErrorPolicy, Identifier, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    JsonType, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos, MqttSession, ParseAsType,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-    RemoteAckOutcome, RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus,
-    RetryPolicy, ScheduledNode, SchemaField, Timestamp, WindowBound, WireSchemaField,
-    ZeroMqIngestMode,
+    GeneralErrorPolicy, Identifier, InferencerTensorDimension, InferencerTensorElementType,
+    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestSource,
+    IngestTimestampSource, JsonType, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos,
+    MqttSession, ParseAsType, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayBranching, RemoteAckOutcome, RemoteAckResolution, ResourceId,
+    ResourceVersion, ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, Timestamp,
+    WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmBatchEnvelope, WasmMessageErrorSet, WasmNackSet,
@@ -33,6 +34,14 @@ use nervix_wasm::{
 };
 use ordered_float::OrderedFloat;
 use sorted_vec::SortedVec;
+
+fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
+    InferencerTensorSchema {
+        representation: InferencerTensorRepresentation::Dense,
+        element_type: InferencerTensorElementType::F32,
+        dimensions: vec![InferencerTensorDimension::Fixed(size)],
+    }
+}
 use tempfile::tempdir;
 use tokio::{
     sync::{Mutex, mpsc, watch},
@@ -1592,11 +1601,13 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 file: "models/score.onnx".to_string(),
                 inputs: vec![InferencerTensorMapping {
                     tensor: "features".to_string(),
+                    schema: inferencer_tensor_schema(2),
                     relay: identifier("orders"),
                     field: identifier("features"),
                 }],
                 outputs: vec![InferencerTensorMapping {
                     tensor: "score".to_string(),
+                    schema: inferencer_tensor_schema(1),
                     relay: identifier("scores"),
                     field: identifier("score"),
                 }],
@@ -4210,11 +4221,13 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                     file: "models/fraud.onnx".to_string(),
                     inputs: vec![InferencerTensorMapping {
                         tensor: "features".to_string(),
+                        schema: inferencer_tensor_schema(2),
                         relay: identifier("features"),
                         field: identifier("vector"),
                     }],
                     outputs: vec![InferencerTensorMapping {
                         tensor: "score".to_string(),
+                        schema: inferencer_tensor_schema(1),
                         relay: identifier("scores"),
                         field: identifier("score"),
                     }],

@@ -154,11 +154,11 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
   USING RESOURCE <resource> [VERSION <n>]
   FILE '<model.onnx>'
   INPUTS {
-    "<onnx_input_name>" = <input>.<field>,
+    "<onnx_input_name>" DENSE TENSOR<F32>[<dimensions>] = <input>.<field>,
     ...
   }
   OUTPUTS {
-    "<onnx_output_name>" = <output>.<field>,
+    "<onnx_output_name>" DENSE TENSOR<F32>[<dimensions>] = <output>.<field>,
     ...
   }
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
@@ -169,7 +169,34 @@ An inferencer declares a branch-local ONNX model execution node. The model file 
 
 The optional `FILTER WHERE` clause runs before tensor construction. `INPUTS` maps ONNX input tensor names to fields on one of the declared input relays after that arrival filter. `OUTPUTS` maps ONNX output tensor names to fields on the output relay. Inferencers do not pass input fields through automatically; every required output field must come from `OUTPUTS` or a route-level `SET`.
 
-Inferencers preserve the upstream branch exactly as received. Runtime ONNX execution is still under implementation; the control plane currently validates the resource/file reference and schema field mappings before accepting the model.
+Every binding declares its complete tensor schema. The supported schema is currently `DENSE TENSOR<F32>`. Its dimensions are a comma-separated list of positive fixed sizes and, optionally, one `BATCH` axis. An empty list (`DENSE TENSOR<F32>[]`) is a scalar. All bindings in one inferencer must either contain exactly one `BATCH` axis each or contain no `BATCH` axes. The batch axis may occur at any rank position. A mapped relay field stores one message's tensor slice as a scalar `F32` or a flat row-major `ARRAY<F32, N>` whose length is the product of the fixed axes.
+
+Without `BATCH`, each collected message causes an independent ONNX invocation. With `BATCH`, one flush of `N` messages causes one invocation and the declared batch axis is materialized with size `N`; returned slices are assigned to messages in their original order.
+
+Inferencer creation loads the selected ONNX model and requires complete, exact input and output name coverage. It validates dense representation, `F32` element type, rank, and every fixed dimension. An ONNX dynamic dimension may be instantiated by either `BATCH` or a fixed positive size; `BATCH` is incompatible with a fixed ONNX dimension. Inferencers preserve the upstream branch exactly as received, and each concrete branch owns its model session and buffered messages.
+
+Per-message schema:
+
+```nspl
+INPUTS {
+  "features" DENSE TENSOR<F32>[128] = input.features
+}
+OUTPUTS {
+  "scores" DENSE TENSOR<F32>[10] = output.scores
+}
+```
+
+Batched schema:
+
+```nspl
+INPUTS {
+  "features" DENSE TENSOR<F32>[BATCH, 128] = input.features,
+  "mask" DENSE TENSOR<F32>[BATCH, 128] = input.mask
+}
+OUTPUTS {
+  "scores" DENSE TENSOR<F32>[BATCH, 10] = output.scores
+}
+```
 
 ## Deduplicator
 

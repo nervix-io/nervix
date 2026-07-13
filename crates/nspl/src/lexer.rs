@@ -155,6 +155,8 @@ pub enum Identifier {
     File,
     Inputs,
     Outputs,
+    Dense,
+    Tensor,
     Hash,
     Key,
     Kafka,

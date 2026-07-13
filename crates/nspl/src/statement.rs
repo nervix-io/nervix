@@ -1514,7 +1514,7 @@ mod tests {
     #[test]
     fn parses_inferencer_statement() {
         let parsed = parse_statement(
-            r#"CREATE INFERENCER score_model FROM features TO scored UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" = features.vector } OUTPUTS { "score" = scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
+            r#"CREATE INFERENCER score_model FROM features TO scored UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUTS { "score" DENSE TENSOR<F32>[1] = scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
@@ -1698,7 +1698,7 @@ mod tests {
             ),
             (
                 "inferencer",
-                r#"CREATE INFERENCER score_model FROM features TO scored UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" = features.vector } OUTPUTS { "score" = scored.score } FLUSH IMMEDIATE"#,
+                r#"CREATE INFERENCER score_model FROM features TO scored UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUTS { "score" DENSE TENSOR<F32>[1] = scored.score } FLUSH IMMEDIATE"#,
             ),
         ];
 
@@ -1760,9 +1760,9 @@ mod tests {
              MESSAGES STEP 2 MESSAGES AGGREGATE projected.value = COUNT(raw.value) ON MESSAGE \
              ERROR LOG;",
             "CREATE INFERENCER score FROM features TO scored UNBRANCHED USING RESOURCE \
-             fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { \"features\" = \
-             features.vector } OUTPUTS { \"score\" = scored.score } FLUSH IMMEDIATE ON MESSAGE \
-             ERROR LOG;",
+             fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { \"features\" DENSE \
+             TENSOR<F32>[2] = features.vector } OUTPUTS { \"score\" DENSE TENSOR<F32>[1] = \
+             scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
             "CREATE WASM PROCESSOR filter_even USING RESOURCE wasm_filter VERSION 1 FILE \
              'processors/filter_even.wasm' FROM raw TO projected UNBRANCHED ON MESSAGE ERROR LOG \
              ON GLOBAL ERROR LOG;",

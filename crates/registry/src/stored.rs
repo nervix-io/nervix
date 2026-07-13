@@ -14,14 +14,15 @@ use nervix_models::{
     CreateSignalingProtocol, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
     CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType,
     ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend,
-    Identifier, InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
-    MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, NameError, NatsIngestMode, ParseAsType, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField,
-    SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode, WindowBound,
-    WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    Identifier, InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, IngestSource, IngestTimestampSource,
+    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode,
+    MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode,
+    MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode, ParseAsType,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
+    SchemaField, SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode,
+    WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -558,8 +559,32 @@ pub struct StoredCreateWasmProcessor {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredInferencerTensorMapping {
     pub tensor: String,
+    pub schema: StoredInferencerTensorSchema,
     pub relay: String,
     pub field: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredInferencerTensorSchema {
+    pub representation: StoredInferencerTensorRepresentation,
+    pub element_type: StoredInferencerTensorElementType,
+    pub dimensions: Vec<StoredInferencerTensorDimension>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredInferencerTensorRepresentation {
+    Dense,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredInferencerTensorElementType {
+    F32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredInferencerTensorDimension {
+    Fixed(u32),
+    Batch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -2874,6 +2899,27 @@ impl From<InferencerTensorMapping> for StoredInferencerTensorMapping {
     fn from(value: InferencerTensorMapping) -> Self {
         Self {
             tensor: value.tensor,
+            schema: StoredInferencerTensorSchema {
+                representation: match value.schema.representation {
+                    InferencerTensorRepresentation::Dense => {
+                        StoredInferencerTensorRepresentation::Dense
+                    }
+                },
+                element_type: match value.schema.element_type {
+                    InferencerTensorElementType::F32 => StoredInferencerTensorElementType::F32,
+                },
+                dimensions: value
+                    .schema
+                    .dimensions
+                    .into_iter()
+                    .map(|dimension| match dimension {
+                        InferencerTensorDimension::Fixed(size) => {
+                            StoredInferencerTensorDimension::Fixed(size)
+                        }
+                        InferencerTensorDimension::Batch => StoredInferencerTensorDimension::Batch,
+                    })
+                    .collect(),
+            },
             relay: value.relay.to_string(),
             field: value.field.to_string(),
         }
@@ -2886,6 +2932,27 @@ impl TryFrom<StoredInferencerTensorMapping> for InferencerTensorMapping {
     fn try_from(value: StoredInferencerTensorMapping) -> Result<Self, Self::Error> {
         Ok(Self {
             tensor: value.tensor,
+            schema: InferencerTensorSchema {
+                representation: match value.schema.representation {
+                    StoredInferencerTensorRepresentation::Dense => {
+                        InferencerTensorRepresentation::Dense
+                    }
+                },
+                element_type: match value.schema.element_type {
+                    StoredInferencerTensorElementType::F32 => InferencerTensorElementType::F32,
+                },
+                dimensions: value
+                    .schema
+                    .dimensions
+                    .into_iter()
+                    .map(|dimension| match dimension {
+                        StoredInferencerTensorDimension::Fixed(size) => {
+                            InferencerTensorDimension::Fixed(size)
+                        }
+                        StoredInferencerTensorDimension::Batch => InferencerTensorDimension::Batch,
+                    })
+                    .collect(),
+            },
             relay: Identifier::parse(&value.relay)?,
             field: Identifier::parse(&value.field)?,
         })
