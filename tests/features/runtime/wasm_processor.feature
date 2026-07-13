@@ -1033,9 +1033,9 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario: Invalid WASM processor module reports a runtime error
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a 1 node nervix cluster is started
+  Scenario Outline: Invalid WASM processor module prevents runtime startup
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
     And node "node-1" has invalid WASM processor fixture resource directory "wasm_processor"
     And the leader node is configured with these NSPL commands
       """
@@ -1046,7 +1046,7 @@ Feature: WASM processor runtime behavior
       CREATE RESOURCE wasm_invalid_filter;
       UPLOAD RESOURCE wasm_invalid_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these NSPL commands fail with "failed to compile wasm processor 'filter_even_rows'"
       """
 
       CREATE SCHEMA metric ( value I32 );
@@ -1072,11 +1072,11 @@ Feature: WASM processor runtime behavior
       SUBSCRIBE SESSION TO filtered_metrics;
       START;
       """
-    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
-      """
-      {"value":1}
-      """
-    Then within "10s" the active session observes a server error
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
 
   Scenario: Malformed WASM processor output reports a runtime error
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

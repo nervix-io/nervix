@@ -12169,10 +12169,9 @@ async fn ensure_wasm_processor_instance(
     if needs_compile {
         *compiled = Some(
             branch
-            .runtime
+                .runtime
                 .compile_wasm_processor_module(processor, resource, Some(version), file)
-            .await
-                ?,
+                .await?,
         );
         *instance = None;
     }
