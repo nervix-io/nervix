@@ -23,6 +23,53 @@ spot WebSocket API with an explicit `SIGNALING PROTOCOL` subscription handshake
 and normalizes the received stream events with a JAQ-native codec. Binance may
 restrict API access by jurisdiction or network location, so this example should
 be run only from environments where Binance permits API access.
+`examples/onnx-inference/per-message.nspl` and
+`examples/onnx-inference/batched.nspl` show complete typed ONNX tensor bindings
+for per-message and collected-batch execution. The accompanying README describes
+the model files that must be supplied explicitly.
+
+## ONNX Inference
+
+Per-message execution omits `BATCH` from every binding:
+
+```nspl
+CREATE INFERENCER score_message
+  FROM input
+  TO output
+  BRANCHED BY tenant
+  USING RESOURCE inference
+  FILE 'score.onnx'
+  INPUTS {
+    "features" DENSE TENSOR<F32>[128] = input.features
+  }
+  OUTPUTS {
+    "scores" DENSE TENSOR<F32>[10] = output.scores
+  }
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR DROP;
+```
+
+Batched execution gives every binding one `BATCH` axis. For a flush of `N`
+messages, this example invokes the model once with `features` and `mask` shaped
+`F32[N, 128]`, then maps the `F32[N, 10]` scores back in message order:
+
+```nspl
+CREATE INFERENCER batch_score_messages
+  FROM input
+  TO output
+  BRANCHED BY tenant
+  USING RESOURCE inference
+  FILE 'batch-score.onnx'
+  INPUTS {
+    "features" DENSE TENSOR<F32>[BATCH, 128] = input.features,
+    "mask" DENSE TENSOR<F32>[BATCH, 128] = input.mask
+  }
+  OUTPUTS {
+    "scores" DENSE TENSOR<F32>[BATCH, 10] = output.scores
+  }
+  FLUSH EACH 10ms MAX BATCH SIZE 16mb
+  ON MESSAGE ERROR DROP;
+```
 
 ## Basic Kafka Ingestion
 

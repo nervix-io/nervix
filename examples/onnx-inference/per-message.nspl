@@ -1,0 +1,28 @@
+CREATE RESOURCE inference;
+UPLOAD RESOURCE inference VERSION './examples/onnx-inference/models';
+
+CREATE SCHEMA input_schema (
+  features ARRAY<F32, 128>
+);
+CREATE SCHEMA output_schema (
+  scores ARRAY<F32, 10>
+);
+CREATE SCHEMA tenant_schema ( tenant STRING );
+CREATE BRANCH tenant SCHEMA tenant_schema TTL 5m;
+CREATE RELAY input SCHEMA input_schema BRANCHED BY tenant;
+CREATE RELAY output SCHEMA output_schema BRANCHED BY tenant;
+
+CREATE INFERENCER score_message
+  FROM input
+  TO output
+  BRANCHED BY tenant
+  USING RESOURCE inference
+  FILE 'score.onnx'
+  INPUTS {
+    "features" DENSE TENSOR<F32>[128] = input.features
+  }
+  OUTPUTS {
+    "scores" DENSE TENSOR<F32>[10] = output.scores
+  }
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR DROP;

@@ -38,9 +38,9 @@ use nervix_models::{
     CreateRelay, CreateSignalingProtocol, CreateWireSchemaStmt, Domain, DomainConfig, DomainPace,
     DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorFieldMapping,
     ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    Identifier, IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode,
-    KafkaPartitionSchedule, KinesisIngestMode, MessageErrorPolicy, Model, ModelKind,
-    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    Identifier, InferencerExecutionMode, IngestSource, IngestTimestampSource, KafkaIngestMode,
+    KafkaOffsetMode, KafkaPartitionSchedule, KinesisIngestMode, MessageErrorPolicy, Model,
+    ModelKind, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, MySqlValueMapping, PostgresConflictAction, PostgresValueMapping,
     PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
     RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, ScheduledNode,
@@ -112,6 +112,7 @@ mod client_config;
 mod deduplicator;
 mod emitters;
 mod http_client;
+mod inferencer;
 mod ingestors;
 mod kafka_offset_state;
 mod materialized_state;
@@ -3604,6 +3605,7 @@ impl RelayProcessorNode {
                     flush_each,
                     pending,
                     next_flush,
+                    session,
                 } => {
                     let now = branch
                         .runtime
@@ -3616,6 +3618,7 @@ impl RelayProcessorNode {
                         RuntimeFlushPolicy::Immediate => {
                             flush_branch_inferencer(
                                 InferencerFlushContext {
+                                    graph,
                                     branch,
                                     node_kind: self.kind.as_str(),
                                     processor: &self.processor,
@@ -3626,6 +3629,8 @@ impl RelayProcessorNode {
                                     file,
                                     inputs,
                                     outputs,
+                                    input_relays: &self.input_relays,
+                                    session,
                                 },
                                 pending,
                                 next_flush,
@@ -3645,6 +3650,7 @@ impl RelayProcessorNode {
                             {
                                 flush_branch_inferencer(
                                     InferencerFlushContext {
+                                        graph,
                                         branch,
                                         node_kind: self.kind.as_str(),
                                         processor: &self.processor,
@@ -3655,6 +3661,8 @@ impl RelayProcessorNode {
                                         file,
                                         inputs,
                                         outputs,
+                                        input_relays: &self.input_relays,
+                                        session,
                                     },
                                     pending,
                                     next_flush,
@@ -3901,12 +3909,14 @@ impl RelayProcessorNode {
                     flush_each,
                     pending,
                     next_flush,
+                    session,
                 } => {
                     if let RuntimeFlushPolicy::Each { .. } = flush_each
                         && next_flush.is_some_and(|deadline| deadline <= now)
                     {
                         flush_branch_inferencer(
                             InferencerFlushContext {
+                                graph,
                                 branch,
                                 node_kind: self.kind.as_str(),
                                 processor: &self.processor,
@@ -3917,6 +3927,8 @@ impl RelayProcessorNode {
                                 file,
                                 inputs,
                                 outputs,
+                                input_relays: &self.input_relays,
+                                session,
                             },
                             pending,
                             next_flush,
@@ -4277,6 +4289,7 @@ impl RelayProcessorTemplate {
                     flush_each: *flush_each,
                     pending: Vec::new(),
                     next_flush: None,
+                    session: None,
                 },
                 RelayProcessorOperationTemplate::WasmProcessor {
                     output_routes,
@@ -11728,6 +11741,7 @@ async fn flush_branch_inferencer(
     next_flush: &mut Option<Timestamp>,
 ) {
     let InferencerFlushContext {
+        graph,
         branch,
         node_kind,
         processor,
@@ -11738,7 +11752,8 @@ async fn flush_branch_inferencer(
         file,
         inputs,
         outputs,
-        ..
+        input_relays,
+        session,
     } = context;
     if pending.is_empty() {
         *next_flush = None;
@@ -11767,6 +11782,78 @@ async fn flush_branch_inferencer(
         }
     };
 
+    let version = match resource_version {
+        Some(version) => version,
+        None => match branch
+            .runtime
+            .resolve_resource_version(resource, resource.as_str())
+        {
+            Ok(version) => version,
+            Err(error) => {
+                branch.runtime.handle_internal_processor_error_for_acks(
+                    &branch.domain,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    forwarded.acks.iter(),
+                    error,
+                );
+                return;
+            }
+        },
+    };
+    if session
+        .as_ref()
+        .is_none_or(|loaded| loaded.version() != version)
+    {
+        let Some(resource_store) = branch.runtime.resource_store.read().clone() else {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                forwarded.acks.iter(),
+                "resource store is not attached".to_string(),
+            );
+            return;
+        };
+        let path = match resource_store.resolve_content_path(resource, version, file) {
+            Ok(path) => path,
+            Err(error) => {
+                branch.runtime.handle_internal_processor_error_for_acks(
+                    &branch.domain,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    forwarded.acks.iter(),
+                    error.to_string(),
+                );
+                return;
+            }
+        };
+        match inferencer::OnnxInferencerSession::load(version, &path).await {
+            Ok(loaded) => *session = Some(loaded),
+            Err(error) => {
+                branch.runtime.handle_internal_processor_error_for_acks(
+                    &branch.domain,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    forwarded.acks.iter(),
+                    format!(
+                        "inferencer '{}' failed to load resource '{}@{}' file '{}': {}",
+                        processor.as_str(),
+                        resource.as_str(),
+                        version,
+                        file,
+                        error
+                    ),
+                );
+                return;
+            }
+        }
+    }
+
     let messages = match forwarded.try_into_messages() {
         Ok(messages) => messages,
         Err(error_and_batch) => {
@@ -11787,36 +11874,164 @@ async fn flush_branch_inferencer(
         }
     };
 
-    let version = resource_version
-        .map(|version| format!("@{version}"))
-        .unwrap_or_else(|| "@latest".to_string());
-    let output_names = output_routes
-        .base_relay()
-        .map(|relay| relay.as_str().to_string())
-        .unwrap_or_else(|| "<none>".to_string());
-    for message in messages {
-        branch
-            .runtime
-            .handle_message_error(
+    let execution_mode = inputs
+        .first()
+        .or_else(|| outputs.first())
+        .map(|mapping| {
+            if mapping.schema.batch_axis().is_some() {
+                InferencerExecutionMode::Batched
+            } else {
+                InferencerExecutionMode::PerMessage
+            }
+        })
+        .unwrap_or(InferencerExecutionMode::PerMessage);
+    let Some(session) = session.as_ref() else {
+        branch.runtime.handle_internal_processor_error_for_acks(
+            &branch.domain,
+            node_kind,
+            processor,
+            error_policies,
+            messages.iter().map(|message| &message.acks),
+            format!(
+                "inferencer '{}' ONNX session was not loaded",
+                processor.as_str()
+            ),
+        );
+        return;
+    };
+    let input_records = messages
+        .iter()
+        .map(|message| message.record.clone())
+        .collect::<Vec<_>>();
+    let output_fields = match session
+        .execute(&input_records, inputs, outputs, execution_mode)
+        .await
+    {
+        Ok(output_fields) => output_fields,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
                 &branch.domain,
                 node_kind,
                 processor,
                 error_policies,
-                message,
+                messages.iter().map(|message| &message.acks),
                 format!(
-                    "inferencer '{}' reached branch-local runtime but ONNX execution is not \
-                     implemented yet for resource '{}{}' file '{}' into output route '{}' ({} \
-                     inputs, {} outputs)",
+                    "inferencer '{}' failed ONNX execution for resource '{}@{}' file '{}': {}",
                     processor.as_str(),
                     resource.as_str(),
                     version,
                     file,
-                    output_names,
-                    inputs.len(),
-                    outputs.len()
+                    error
                 ),
-            )
-            .await;
+            );
+            return;
+        }
+    };
+    if output_fields.len() != messages.len() {
+        branch.runtime.handle_internal_processor_error_for_acks(
+            &branch.domain,
+            node_kind,
+            processor,
+            error_policies,
+            messages.iter().map(|message| &message.acks),
+            format!(
+                "inferencer '{}' returned {} output rows for {} input messages",
+                processor.as_str(),
+                output_fields.len(),
+                messages.len()
+            ),
+        );
+        return;
+    }
+    let output_messages = messages
+        .into_iter()
+        .zip(output_fields)
+        .map(|(message, fields)| RelayMessage {
+            key: message.key,
+            record: RuntimeRecord::from_fields_with_metadata(
+                fields,
+                message.record.metadata().clone(),
+            ),
+            acks: message.acks,
+        })
+        .collect::<Vec<_>>();
+    let Some(base_output_relay) = output_routes.base_relay() else {
+        for message in output_messages {
+            branch
+                .runtime
+                .handle_message_error(
+                    &branch.domain,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    message,
+                    format!("inferencer '{}' has no output routes", processor.as_str()),
+                )
+                .await;
+        }
+        return;
+    };
+    let output_schema =
+        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &base_output_relay) {
+            Ok(schema) => schema,
+            Err(error) => {
+                for message in output_messages {
+                    branch
+                        .runtime
+                        .handle_message_error(
+                            &branch.domain,
+                            node_kind,
+                            processor,
+                            error_policies,
+                            message,
+                            error.clone(),
+                        )
+                        .await;
+                }
+                return;
+            }
+        };
+    let output_error_acks = output_messages
+        .iter()
+        .map(|message| message.acks.clone())
+        .collect::<Vec<_>>();
+    let output_batch = match RelayRecordBatch::from_messages(output_schema, output_messages) {
+        Ok(batch) => batch,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                output_error_acks.iter(),
+                format!(
+                    "inferencer '{}' failed to build output batch: {}",
+                    processor.as_str(),
+                    error
+                ),
+            );
+            return;
+        }
+    };
+    if let Some(acks) = dispatch_processor_outputs(
+        ProcessorOutputDispatchContext {
+            graph,
+            branch,
+            node_kind,
+            source_kind: ModelKind::Inferencer,
+            processor,
+            error_policies,
+            input_relays,
+            filter_source: ProcessorOutputFilterSource::InputRelays,
+        },
+        output_routes,
+        output_batch,
+    )
+    .await
+    {
+        for ack in acks {
+            ack.ack_success();
+        }
     }
 }
 

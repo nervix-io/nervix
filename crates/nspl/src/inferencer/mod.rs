@@ -1,5 +1,9 @@
 use chumsky::prelude::*;
-use nervix_models::{AckMode, CreateInferencer, CreateStatement, InferencerTensorMapping};
+use nervix_models::{
+    AckMode, CreateInferencer, CreateStatement, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema,
+};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -22,15 +26,58 @@ fn u64_value<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseEr
 fn field_mapping<'src>()
 -> impl Parser<'src, &'src [Token], InferencerTensorMapping, extra::Err<ParseError<'src>>> + Clone {
     string_lit()
+        .then(tensor_schema())
         .then_ignore(tok(Token::Eq))
         .then(relay_ref())
         .then_ignore(tok(Token::Dot))
         .then(crate::parser_support::field_ref())
-        .map(|((tensor, relay), field)| InferencerTensorMapping {
-            tensor,
-            relay,
-            field,
-        })
+        .map(
+            |(((tensor, schema), relay), field)| InferencerTensorMapping {
+                tensor,
+                schema,
+                relay,
+                field,
+            },
+        )
+}
+
+fn tensor_schema<'src>()
+-> impl Parser<'src, &'src [Token], InferencerTensorSchema, extra::Err<ParseError<'src>>> + Clone {
+    let dimension = choice((
+        kw(Identifier::Batch).to(InferencerTensorDimension::Batch),
+        select! { Token::NumberLiteral(raw) => raw }.try_map(|raw, span| {
+            let size = raw.parse::<u32>().map_err(|_| {
+                Rich::custom(span, "tensor dimension must be a positive integer or BATCH")
+            })?;
+            if size == 0 {
+                return Err(Rich::custom(
+                    span,
+                    "tensor dimension must be greater than zero",
+                ));
+            }
+            Ok(InferencerTensorDimension::Fixed(size))
+        }),
+    ));
+
+    kw(Identifier::Dense)
+        .to(InferencerTensorRepresentation::Dense)
+        .then_ignore(kw(Identifier::Tensor))
+        .then_ignore(tok(Token::Lt))
+        .then(kw(Identifier::F32).to(InferencerTensorElementType::F32))
+        .then_ignore(tok(Token::Gt))
+        .then(
+            dimension
+                .separated_by(tok(Token::Comma))
+                .collect::<Vec<_>>()
+                .delimited_by(tok(Token::LBracket), tok(Token::RBracket)),
+        )
+        .map(
+            |((representation, element_type), dimensions)| InferencerTensorSchema {
+                representation,
+                element_type,
+                dimensions,
+            },
+        )
 }
 
 fn field_mappings<'src>(
@@ -171,8 +218,8 @@ mod tests {
             BRANCHED BY tenant
             USING RESOURCE fraud_model VERSION 3
             FILE 'models/fraud.onnx'
-            INPUTS { "features" = features.vector }
-            OUTPUTS { "score" = scored.score }
+            INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = features.vector }
+            OUTPUTS { "score" DENSE TENSOR<F32>[BATCH, 1] = scored.score }
             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
         "#;
 
@@ -204,10 +251,79 @@ mod tests {
     }
 
     #[test]
+    fn parses_scalar_fixed_and_non_leading_batch_tensor_dimensions() {
+        let input = r#"
+            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            INPUTS {
+                "scalar" DENSE TENSOR<F32>[] = a.scalar,
+                "image" DENSE TENSOR<F32>[3, 224, 224] = a.image,
+                "tokens" DENSE TENSOR<F32>[128, BATCH] = a.tokens
+            }
+            OUTPUTS { "score" DENSE TENSOR<F32>[10, BATCH] = b.score }
+            FLUSH EACH 10ms MAX BATCH SIZE 16mb ON MESSAGE ERROR LOG;
+        "#;
+
+        let parsed = parse_create_inferencer_tokens(&to_tokens(input)).expect("parse should work");
+
+        assert!(parsed.inputs[0].schema.dimensions.is_empty());
+        assert_eq!(
+            parsed.inputs[1].schema.dimensions,
+            vec![
+                nervix_models::InferencerTensorDimension::Fixed(3),
+                nervix_models::InferencerTensorDimension::Fixed(224),
+                nervix_models::InferencerTensorDimension::Fixed(224),
+            ]
+        );
+        assert_eq!(parsed.inputs[2].schema.batch_axis(), Some(1));
+        assert_eq!(parsed.outputs[0].schema.batch_axis(), Some(1));
+    }
+
+    #[test]
+    fn rejects_zero_sized_tensor_dimension() {
+        let input = r#"
+            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            INPUTS { "x" DENSE TENSOR<F32>[0] = a.x }
+            OUTPUTS { "y" DENSE TENSOR<F32>[1] = b.y }
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        "#;
+        assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_tensor_representation_and_element_type() {
+        let sparse = r#"
+            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            INPUTS { "x" SPARSE TENSOR<F32>[1] = a.x }
+            OUTPUTS { "y" DENSE TENSOR<F32>[1] = b.y }
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        "#;
+        let f64 = r#"
+            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            INPUTS { "x" DENSE TENSOR<F64>[1] = a.x }
+            OUTPUTS { "y" DENSE TENSOR<F32>[1] = b.y }
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        "#;
+        assert!(parse_create_inferencer_tokens(&to_tokens(sparse)).is_err());
+        assert!(parse_create_inferencer_tokens(&to_tokens(f64)).is_err());
+    }
+
+    #[test]
+    fn rejects_binding_without_complete_tensor_schema() {
+        let input = r#"
+            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            INPUTS { "x" = a.x }
+            OUTPUTS { "y" DENSE TENSOR<F32>[1] = b.y }
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        "#;
+        assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
+    }
+
+    #[test]
     fn rejects_inferencer_without_flush_policy() {
         let input = r#"
             CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
-            INPUTS { "x" = a.x } OUTPUTS { "y" = b.y } ON MESSAGE ERROR LOG;
+            INPUTS { "x" DENSE TENSOR<F32>[1] = a.x }
+            OUTPUTS { "y" DENSE TENSOR<F32>[1] = b.y } ON MESSAGE ERROR LOG;
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
     }
@@ -216,7 +332,8 @@ mod tests {
     fn rejects_legacy_parenthesized_tensor_mappings() {
         let input = r#"
             CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
-            INPUTS ("x" = a.x) OUTPUTS ("y" = b.y)
+            INPUTS ("x" DENSE TENSOR<F32>[1] = a.x)
+            OUTPUTS ("y" DENSE TENSOR<F32>[1] = b.y)
             FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
@@ -239,6 +356,16 @@ mod tests {
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"{".to_string()));
         assert!(!suggestions.contains(&"VALUES".to_string()));
+        assert!(!suggestions.contains(&"BRANCHED BY".to_string()));
+    }
+
+    #[test]
+    fn suggests_dense_tensor_schema_without_output_keyword_leakage() {
+        let input = "CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx' \
+                     INPUTS { \"x\" ";
+        let suggestions = suggest_create_inferencer(input, input.len());
+        assert!(suggestions.contains(&"DENSE".to_string()));
+        assert!(!suggestions.contains(&"OUTPUTS".to_string()));
         assert!(!suggestions.contains(&"BRANCHED BY".to_string()));
     }
 }

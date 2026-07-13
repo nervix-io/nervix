@@ -3,10 +3,10 @@
 
 The model is intentionally dependency-free: it trains a two-feature linear
 regressor with plain Python and writes the ONNX protobuf wire format directly.
-Inputs:
-  features: FLOAT tensor [batch, 2]
-Outputs:
-  score: FLOAT tensor [batch, 1]
+The per-message model has `features: FLOAT[2] -> score: FLOAT[1]`.
+The batch model has `features, mask: FLOAT[batch, 2] -> scores: FLOAT[batch, 2]`.
+Its outputs include a batch-wide feature mean so tests can distinguish one
+collected-batch invocation from repeated single-message invocations.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 TENSOR_FLOAT = 1
+TENSOR_DOUBLE = 11
 
 
 def key(field_number: int, wire_type: int) -> bytes:
@@ -59,33 +60,8 @@ def message_field(field_number: int, value: bytes) -> bytes:
 
 
 def train_linear_regressor() -> tuple[list[float], float]:
-    samples = [
-        ([0.0, 0.0], 0.10),
-        ([1.0, 0.0], 0.85),
-        ([0.0, 1.0], -0.40),
-        ([1.0, 1.0], 0.35),
-        ([2.0, 1.0], 1.10),
-        ([1.0, 2.0], -0.15),
-        ([2.0, 2.0], 0.60),
-        ([3.0, 1.0], 1.85),
-    ]
-    weights = [0.0, 0.0]
-    bias = 0.0
-    learning_rate = 0.04
-
-    for _ in range(1200):
-        grad_w = [0.0, 0.0]
-        grad_b = 0.0
-        for features, expected in samples:
-            predicted = weights[0] * features[0] + weights[1] * features[1] + bias
-            error = predicted - expected
-            grad_w[0] += error * features[0]
-            grad_w[1] += error * features[1]
-            grad_b += error
-        scale = 2.0 / len(samples)
-        weights[0] -= learning_rate * scale * grad_w[0]
-        weights[1] -= learning_rate * scale * grad_w[1]
-        bias -= learning_rate * scale * grad_b
+    weights = [0.75, -0.5]
+    bias = 0.125
 
     for value in [*weights, bias]:
         if not math.isfinite(value):
@@ -103,13 +79,15 @@ def tensor_shape(dims: list[int | str]) -> bytes:
     return bytes(out)
 
 
-def tensor_type(dims: list[int | str]) -> bytes:
-    tensor = field_varint(1, TENSOR_FLOAT) + message_field(2, tensor_shape(dims))
+def tensor_type(dims: list[int | str], element_type: int = TENSOR_FLOAT) -> bytes:
+    tensor = field_varint(1, element_type) + message_field(2, tensor_shape(dims))
     return message_field(1, tensor)
 
 
-def value_info(name: str, dims: list[int | str]) -> bytes:
-    return field_string(1, name) + message_field(2, tensor_type(dims))
+def value_info(
+    name: str, dims: list[int | str], element_type: int = TENSOR_FLOAT
+) -> bytes:
+    return field_string(1, name) + message_field(2, tensor_type(dims, element_type))
 
 
 def tensor_initializer(name: str, dims: list[int], values: list[float]) -> bytes:
@@ -123,7 +101,25 @@ def tensor_initializer(name: str, dims: list[int], values: list[float]) -> bytes
     return bytes(out)
 
 
-def node(op_type: str, inputs: list[str], outputs: list[str], name: str) -> bytes:
+def attribute_int(name: str, value: int) -> bytes:
+    return field_string(1, name) + field_varint(3, value) + field_varint(20, 2)
+
+
+def attribute_ints(name: str, values: list[int]) -> bytes:
+    out = bytearray(field_string(1, name))
+    for value in values:
+        out += field_varint(8, value)
+    out += field_varint(20, 7)
+    return bytes(out)
+
+
+def node(
+    op_type: str,
+    inputs: list[str],
+    outputs: list[str],
+    name: str,
+    attributes: list[bytes] | None = None,
+) -> bytes:
     out = bytearray()
     for input_name in inputs:
         out += field_string(1, input_name)
@@ -131,27 +127,59 @@ def node(op_type: str, inputs: list[str], outputs: list[str], name: str) -> byte
         out += field_string(2, output_name)
     out += field_string(3, name)
     out += field_string(4, op_type)
+    for attribute in attributes or []:
+        out += message_field(5, attribute)
     return bytes(out)
 
 
-def graph(weights: list[float], bias: float) -> bytes:
+def per_message_graph(weights: list[float], bias: float) -> bytes:
     out = bytearray()
     out += message_field(1, node("MatMul", ["features", "weights"], ["linear"], "linear"))
     out += message_field(1, node("Add", ["linear", "bias"], ["score"], "score"))
-    out += field_string(2, "nervix_simple_score")
+    out += field_string(2, "nervix_per_message_score")
     out += message_field(5, tensor_initializer("weights", [2, 1], weights))
     out += message_field(5, tensor_initializer("bias", [1], [bias]))
-    out += message_field(11, value_info("features", ["batch", 2]))
-    out += message_field(12, value_info("score", ["batch", 1]))
+    out += message_field(11, value_info("features", [2]))
+    out += message_field(12, value_info("score", [1]))
     return bytes(out)
 
 
-def model_proto(weights: list[float], bias: float) -> bytes:
+def batch_graph() -> bytes:
+    out = bytearray()
+    out += message_field(
+        1,
+        node(
+            "ReduceMean",
+            ["features"],
+            ["feature_mean"],
+            "feature_mean",
+            [attribute_ints("axes", [0]), attribute_int("keepdims", 1)],
+        ),
+    )
+    out += message_field(1, node("Add", ["features", "mask"], ["combined"], "combine"))
+    out += message_field(1, node("Add", ["combined", "feature_mean"], ["scores"], "scores"))
+    out += field_string(2, "nervix_batch_score")
+    out += message_field(11, value_info("features", ["batch", 2]))
+    out += message_field(11, value_info("mask", ["batch", 2]))
+    out += message_field(12, value_info("scores", ["batch", 2]))
+    return bytes(out)
+
+
+def f64_graph() -> bytes:
+    out = bytearray()
+    out += message_field(1, node("Identity", ["features"], ["score"], "score"))
+    out += field_string(2, "nervix_f64_score")
+    out += message_field(11, value_info("features", [2], TENSOR_DOUBLE))
+    out += message_field(12, value_info("score", [2], TENSOR_DOUBLE))
+    return bytes(out)
+
+
+def model_proto(graph: bytes) -> bytes:
     opset_import = field_string(1, "") + field_varint(2, 13)
     return (
         field_varint(1, 8)
         + field_string(2, "nervix-test-generator")
-        + message_field(7, graph(weights, bias))
+        + message_field(7, graph)
         + message_field(8, opset_import)
     )
 
@@ -163,13 +191,31 @@ def main() -> None:
         default="tests/fixtures/onnx/simple_score.onnx",
         help="path to write the generated ONNX model",
     )
+    parser.add_argument(
+        "--batch-output",
+        default="tests/fixtures/onnx/batch_score.onnx",
+        help="path to write the generated batched ONNX model",
+    )
+    parser.add_argument(
+        "--f64-output",
+        default="tests/fixtures/onnx/f64_score.onnx",
+        help="path to write the generated unsupported-F64 ONNX model",
+    )
     args = parser.parse_args()
 
     weights, bias = train_linear_regressor()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(model_proto(weights, bias))
+    output.write_bytes(model_proto(per_message_graph(weights, bias)))
+    batch_output = Path(args.batch_output)
+    batch_output.parent.mkdir(parents=True, exist_ok=True)
+    batch_output.write_bytes(model_proto(batch_graph()))
+    f64_output = Path(args.f64_output)
+    f64_output.parent.mkdir(parents=True, exist_ok=True)
+    f64_output.write_bytes(model_proto(f64_graph()))
     print(f"wrote {output} weights={weights!r} bias={bias!r}")
+    print(f"wrote {batch_output}")
+    print(f"wrote {f64_output}")
 
 
 if __name__ == "__main__":

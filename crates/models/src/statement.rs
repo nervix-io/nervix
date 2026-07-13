@@ -3,8 +3,9 @@ use std::ops::{Deref, DerefMut};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, IntoStaticStr};
+use thiserror::Error;
 
-use crate::{CreateSchema, CreateWireSchemaStmt, Domain, Identifier, Timestamp};
+use crate::{CreateSchema, CreateWireSchemaStmt, Domain, Identifier, ParseAsType, Timestamp};
 
 pub type DomainId = Domain;
 
@@ -1380,6 +1381,53 @@ pub struct CreateInferencer {
     pub filter_where: Option<String>,
 }
 
+impl CreateInferencer {
+    pub fn execution_mode(&self) -> Result<InferencerExecutionMode, InferencerTensorSchemaError> {
+        let mut execution_mode = None;
+        for mapping in self.inputs.iter().chain(&self.outputs) {
+            let batch_axis_count = mapping.schema.batch_axis_count();
+            if batch_axis_count > 1 {
+                return Err(InferencerTensorSchemaError::MultipleBatchAxes {
+                    tensor: mapping.tensor.clone(),
+                });
+            }
+            if mapping.schema.fixed_element_count().is_none() {
+                return Err(InferencerTensorSchemaError::ElementCountOverflow {
+                    tensor: mapping.tensor.clone(),
+                });
+            }
+            let mapping_mode = if batch_axis_count == 1 {
+                InferencerExecutionMode::Batched
+            } else {
+                InferencerExecutionMode::PerMessage
+            };
+            if let Some(execution_mode) = execution_mode
+                && execution_mode != mapping_mode
+            {
+                return Err(InferencerTensorSchemaError::MixedExecutionModes);
+            }
+            execution_mode = Some(mapping_mode);
+        }
+        Ok(execution_mode.unwrap_or(InferencerExecutionMode::PerMessage))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InferencerExecutionMode {
+    PerMessage,
+    Batched,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum InferencerTensorSchemaError {
+    #[error("tensor '{tensor}' contains more than one BATCH axis")]
+    MultipleBatchAxes { tensor: String },
+    #[error("inferencer mixes batched and per-message tensor bindings")]
+    MixedExecutionModes,
+    #[error("tensor '{tensor}' fixed element count exceeds the supported size")]
+    ElementCountOverflow { tensor: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWasmProcessor {
     pub name: Identifier,
@@ -1401,8 +1449,89 @@ pub struct CreateWasmProcessor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferencerTensorMapping {
     pub tensor: String,
+    pub schema: InferencerTensorSchema,
     pub relay: Identifier,
     pub field: Identifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferencerTensorSchema {
+    pub representation: InferencerTensorRepresentation,
+    pub element_type: InferencerTensorElementType,
+    pub dimensions: Vec<InferencerTensorDimension>,
+}
+
+impl InferencerTensorSchema {
+    pub fn batch_axis(&self) -> Option<usize> {
+        self.dimensions
+            .iter()
+            .position(InferencerTensorDimension::is_batch)
+    }
+
+    pub fn batch_axis_count(&self) -> usize {
+        self.dimensions
+            .iter()
+            .filter(|dimension| dimension.is_batch())
+            .count()
+    }
+
+    pub fn fixed_element_count(&self) -> Option<usize> {
+        self.dimensions
+            .iter()
+            .filter_map(|dimension| match dimension {
+                InferencerTensorDimension::Fixed(size) => Some(*size as usize),
+                InferencerTensorDimension::Batch => None,
+            })
+            .try_fold(1_usize, usize::checked_mul)
+    }
+
+    pub fn is_compatible_with_field_type(&self, field_type: &ParseAsType) -> bool {
+        let Some(element_count) = self.fixed_element_count() else {
+            return false;
+        };
+        let has_fixed_dimensions = self.dimensions.iter().any(|dimension| {
+            if let InferencerTensorDimension::Fixed(_) = dimension {
+                true
+            } else {
+                false
+            }
+        });
+        if !has_fixed_dimensions {
+            return field_type == &ParseAsType::F32;
+        }
+        let Ok(element_count) = u32::try_from(element_count) else {
+            return false;
+        };
+        field_type
+            == &ParseAsType::Array {
+                element: Box::new(ParseAsType::F32),
+                len: element_count,
+            }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum InferencerTensorRepresentation {
+    Dense,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum InferencerTensorElementType {
+    F32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InferencerTensorDimension {
+    Fixed(u32),
+    Batch,
+}
+
+impl InferencerTensorDimension {
+    pub fn is_batch(&self) -> bool {
+        if let Self::Batch = self { true } else { false }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

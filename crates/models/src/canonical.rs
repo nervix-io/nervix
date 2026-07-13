@@ -15,16 +15,16 @@ use crate::{
     CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
     CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
     GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry, KinesisIngestMode,
-    MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
-    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
-    NatsConfigEntry, NatsIngestMode, ParseAsType, PostgresConfigEntry, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry,
-    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
-    RedisPubSubIngestMode, RelayBranching, RetryPolicy, S3ConfigEntry, SchemaField, SqsConfigEntry,
-    SqsIngestMode, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField,
-    ZeroMqConfigEntry, ZeroMqIngestMode,
+    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
+    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry,
+    KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry,
+    MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
+    MySqlConflictAction, NatsConfigEntry, NatsIngestMode, ParseAsType, PostgresConfigEntry,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
+    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
+    S3ConfigEntry, SchemaField, SqsConfigEntry, SqsIngestMode, WebsocketsConfigEntry,
+    WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 fn branch_values_to_nspl(values: &[BranchValueMapping]) -> String {
@@ -1109,8 +1109,20 @@ fn inference_mappings_to_nspl(
         .iter()
         .map(|mapping| {
             Ok(format!(
-                "{} = {}.{}",
+                "{} {} TENSOR<{}>[{}] = {}.{}",
                 string_literal(&mapping.tensor)?,
+                mapping.schema.representation.as_ref(),
+                mapping.schema.element_type.as_ref(),
+                mapping
+                    .schema
+                    .dimensions
+                    .iter()
+                    .map(|dimension| match dimension {
+                        InferencerTensorDimension::Fixed(size) => size.to_string(),
+                        InferencerTensorDimension::Batch => "BATCH".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 mapping.relay.as_str(),
                 mapping.field.as_str()
             ))

@@ -913,6 +913,13 @@ impl DomainState {
                     )?;
                 }
                 Model::Inferencer(processor) => {
+                    processor.execution_mode().map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -8626,8 +8633,8 @@ mod tests {
               BRANCHED BY by_tenant_branch
               USING RESOURCE fraud_model VERSION 1
               FILE 'models/simple_score.onnx'
-              INPUTS { "features" = features.vector }
-              OUTPUTS { "score" = scored.score }
+              INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector }
+              OUTPUTS { "score" DENSE TENSOR<F32>[1] = scored.score }
               FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
@@ -8637,6 +8644,66 @@ mod tests {
         registry
             .apply_batch(&domain, models)
             .expect("inferencer tensor outputs should define non-input output fields");
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_mixed_inferencer_execution_modes() {
+        let (domain, models) = example_graph_models(
+            "mixed inferencer execution modes",
+            r#"
+            CREATE SCHEMA features ( vector ARRAY<F32, 2> );
+            CREATE SCHEMA scored ( score ARRAY<F32, 1> );
+            CREATE RELAY features SCHEMA features UNBRANCHED;
+            CREATE RELAY scored SCHEMA scored UNBRANCHED;
+            CREATE INFERENCER score_model
+              FROM features TO scored UNBRANCHED
+              USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
+              INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = features.vector }
+              OUTPUTS { "score" DENSE TENSOR<F32>[1] = scored.score }
+              FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let error = registry
+            .apply_batch(&domain, models)
+            .expect_err("mixed inferencer execution modes must fail");
+        assert!(error.to_string().contains("mixes batched and per-message"));
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_multiple_batch_axes_in_one_tensor() {
+        let (domain, models) = example_graph_models(
+            "multiple inferencer batch axes",
+            r#"
+            CREATE SCHEMA features ( vector ARRAY<F32, 2> );
+            CREATE SCHEMA scored ( score ARRAY<F32, 1> );
+            CREATE RELAY features SCHEMA features UNBRANCHED;
+            CREATE RELAY scored SCHEMA scored UNBRANCHED;
+            CREATE INFERENCER score_model
+              FROM features TO scored UNBRANCHED
+              USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
+              INPUTS { "features" DENSE TENSOR<F32>[BATCH, BATCH, 2] = features.vector }
+              OUTPUTS { "score" DENSE TENSOR<F32>[BATCH, 1] = scored.score }
+              FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let error = registry
+            .apply_batch(&domain, models)
+            .expect_err("multiple BATCH axes must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("contains more than one BATCH axis")
+        );
 
         let _ = fs::remove_dir_all(path);
     }
