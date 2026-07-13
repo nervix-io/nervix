@@ -12111,6 +12111,7 @@ async fn ensure_wasm_processor_instance(
             .runtime
             .wasm_runtime
             .compile_processor(&wasm)
+            .await
             .map_err(|error| {
                 format!(
                     "failed to compile wasm processor '{}' resource '{}@{}' file '{}': {}",

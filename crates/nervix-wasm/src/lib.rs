@@ -91,6 +91,8 @@ pub enum WasmProcessorError {
     Configure(#[source] wasmtime::Error),
     #[error("failed to compile wasm module: {0}")]
     Compile(#[source] wasmtime::Error),
+    #[error("failed to join wasm compilation task: {0}")]
+    CompileTask(#[source] tokio::task::JoinError),
     #[error("failed to link wasm module: {0}")]
     Link(#[source] wasmtime::Error),
     #[error("failed to instantiate wasm module: {0}")]
@@ -186,17 +188,22 @@ impl WasmRuntime {
         })
     }
 
-    pub fn compile_processor(
+    pub async fn compile_processor(
         &self,
         wasm: impl AsRef<[u8]>,
     ) -> Result<CompiledWasmProcessor, WasmProcessorError> {
-        let module =
-            Module::new(&self.engine, wasm.as_ref()).map_err(WasmProcessorError::Compile)?;
-        let mut linker = Linker::<BranchStore>::new(&self.engine);
-        define_host_functions(&mut linker)?;
-        let instance_pre = linker
-            .instantiate_pre(&module)
-            .map_err(WasmProcessorError::Link)?;
+        let engine = self.engine.clone();
+        let wasm = wasm.as_ref().to_vec();
+        let instance_pre = tokio::task::spawn_blocking(move || {
+            let module = Module::new(&engine, wasm).map_err(WasmProcessorError::Compile)?;
+            let mut linker = Linker::<BranchStore>::new(&engine);
+            define_host_functions(&mut linker)?;
+            linker
+                .instantiate_pre(&module)
+                .map_err(WasmProcessorError::Link)
+        })
+        .await
+        .map_err(WasmProcessorError::CompileTask)??;
         Ok(CompiledWasmProcessor {
             engine: self.engine.clone(),
             instance_pre,
@@ -1568,6 +1575,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(wasm.as_bytes())
+            .await
             .expect("module should compile");
         let error = compiled
             .instantiate_branch(
@@ -1618,6 +1626,7 @@ mod tests {
         .expect("runtime must initialize");
         let compiled = runtime
             .compile_processor(return_code_wasm(0, 0).as_bytes())
+            .await
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
@@ -1647,6 +1656,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(return_code_wasm(-4, 0).as_bytes())
+            .await
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
@@ -1676,6 +1686,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(return_code_wasm(0, -5).as_bytes())
+            .await
             .expect("module should compile");
         let mut branch = compiled
             .instantiate_branch(
@@ -1719,6 +1730,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(wasm.as_bytes())
+            .await
             .expect("module should compile");
         let error = compiled
             .instantiate_branch(
@@ -1770,6 +1782,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(read_guest(path))
+            .await
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
@@ -1836,6 +1849,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(read_guest(&rust_guest_path()))
+            .await
             .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
@@ -1899,6 +1913,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(TEST_WASM)
+            .await
             .expect("module must compile");
         let left_clock = FixedDomainClock::new(Timestamp::from_unix_nanos(100));
         let right_clock = FixedDomainClock::new(Timestamp::from_unix_nanos(200));
@@ -1953,6 +1968,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(TEST_WASM)
+            .await
             .expect("module must compile");
         let clock = FixedDomainClock::new(Timestamp::from_unix_nanos(700));
         let mut branch = compiled
@@ -1981,6 +1997,7 @@ mod tests {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(TEST_WASM)
+            .await
             .expect("module must compile");
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut branch = compiled
@@ -2007,6 +2024,43 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_compilation_yields_to_async_executor() {
+        let runtime = runtime();
+        let mut wasm = String::from("(module");
+        for index in 0..2_048 {
+            wasm.push_str(&format!(
+                "(func $compile_stress_{index} (param i64) (result i64) local.get 0 i64.const \
+                 {index} i64.add)"
+            ));
+        }
+        wasm.push(')');
+
+        let ticks = Arc::new(AtomicU64::new(0));
+        let task_ticks = Arc::clone(&ticks);
+        let progress_task = tokio::spawn(async move {
+            loop {
+                tokio::task::consume_budget().await;
+                task_ticks.fetch_add(1, Ordering::Relaxed);
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        let ticks_before_compile = ticks.load(Ordering::Relaxed);
+
+        runtime
+            .compile_processor(wasm.as_bytes())
+            .await
+            .expect("stress module must compile");
+
+        let ticks_after_compile = ticks.load(Ordering::Relaxed);
+        progress_task.abort();
+        assert!(
+            ticks_after_compile > ticks_before_compile,
+            "wasm compilation must not block the async executor"
+        );
+    }
+
     #[tokio::test]
     async fn epoch_driver_yields_cpu_bound_guest_to_async_executor() {
         let runtime = WasmRuntime::new(WasmRuntimeConfig {
@@ -2018,6 +2072,7 @@ mod tests {
         .expect("runtime must initialize");
         let compiled = runtime
             .compile_processor(CPU_BOUND_WASM)
+            .await
             .expect("module must compile");
         let mut branch = compiled
             .instantiate_branch(
