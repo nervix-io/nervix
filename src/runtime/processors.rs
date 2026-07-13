@@ -300,6 +300,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
+        compiled: Option<WasmCompiledBranchProcessor>,
     },
 }
 
@@ -528,9 +529,10 @@ pub(super) struct WasmFlushContext<'a> {
     pub(super) replicated_state: &'a ReplicatedWasmProcessorState,
 }
 
+#[derive(Clone)]
 pub(super) struct WasmCompiledBranchProcessor {
     pub(super) version: u64,
-    pub(super) compiled: CompiledWasmProcessor,
+    pub(super) compiled: Arc<CompiledWasmProcessor>,
 }
 
 impl std::fmt::Debug for WasmCompiledBranchProcessor {

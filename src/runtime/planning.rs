@@ -753,6 +753,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
+                        compiled: None,
                     },
                 },
             });

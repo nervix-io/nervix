@@ -4286,6 +4286,7 @@ impl RelayProcessorTemplate {
                     resource,
                     resource_version,
                     file,
+                    compiled,
                 } => {
                     let replicated_state = runtime
                         .replicated_wasm_processor_state(
@@ -4305,7 +4306,7 @@ impl RelayProcessorTemplate {
                         resource: resource.clone(),
                         resource_version: *resource_version,
                         file: file.clone(),
-                        compiled: None,
+                        compiled: compiled.clone(),
                         instance: None,
                         replicated_state,
                         ack_map: HashMap::default(),
@@ -4321,6 +4322,32 @@ impl RelayProcessorTemplate {
 }
 
 impl BranchInstanceTemplate {
+    async fn prepare_wasm_processors(&mut self, runtime: &Runtime) -> Result<(), String> {
+        for processor in self.processors.values_mut() {
+            tokio::task::consume_budget().await;
+            if let RelayProcessorOperationTemplate::WasmProcessor {
+                resource,
+                resource_version,
+                file,
+                compiled,
+                ..
+            } = &mut processor.operation
+            {
+                *compiled = Some(
+                    runtime
+                        .compile_wasm_processor_module(
+                            &processor.processor,
+                            resource,
+                            *resource_version,
+                            file,
+                        )
+                        .await?,
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn instantiate(
         &self,
         runtime: &Runtime,
@@ -12065,6 +12092,55 @@ struct WasmInstanceContext<'a> {
     replicated_state: &'a ReplicatedWasmProcessorState,
 }
 
+impl Runtime {
+    async fn compile_wasm_processor_module(
+        &self,
+        processor: &Identifier,
+        resource: &Identifier,
+        resource_version: Option<u64>,
+        file: &str,
+    ) -> Result<WasmCompiledBranchProcessor, String> {
+        let version = match resource_version {
+            Some(version) => version,
+            None => self.resolve_resource_version(resource, resource.as_str())?,
+        };
+        let Some(resource_store) = self.resource_store.read().clone() else {
+            return Err("resource store is not attached".to_string());
+        };
+        let path = resource_store
+            .resolve_content_path(resource, version, file)
+            .map_err(|error| error.to_string())?;
+        let wasm = tokio::fs::read(&path).await.map_err(|error| {
+            format!(
+                "failed to read wasm processor '{}' resource '{}@{}' file '{}': {}",
+                processor.as_str(),
+                resource.as_str(),
+                version,
+                path.display(),
+                error
+            )
+        })?;
+        let compiled = self
+            .wasm_runtime
+            .compile_processor(&wasm)
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to compile wasm processor '{}' resource '{}@{}' file '{}': {}",
+                    processor.as_str(),
+                    resource.as_str(),
+                    version,
+                    file,
+                    error
+                )
+            })?;
+        Ok(WasmCompiledBranchProcessor {
+            version,
+            compiled: Arc::new(compiled),
+        })
+    }
+}
+
 async fn ensure_wasm_processor_instance(
     context: WasmInstanceContext<'_>,
     compiled: &mut Option<WasmCompiledBranchProcessor>,
@@ -12091,41 +12167,13 @@ async fn ensure_wasm_processor_instance(
         .as_ref()
         .is_none_or(|compiled| compiled.version != version);
     if needs_compile {
-        let Some(resource_store) = branch.runtime.resource_store.read().clone() else {
-            return Err("resource store is not attached".to_string());
-        };
-        let path = resource_store
-            .resolve_content_path(resource, version, file)
-            .map_err(|error| error.to_string())?;
-        let wasm = tokio::fs::read(&path).await.map_err(|error| {
-            format!(
-                "failed to read wasm processor '{}' resource '{}@{}' file '{}': {}",
-                processor.as_str(),
-                resource.as_str(),
-                version,
-                path.display(),
-                error
-            )
-        })?;
-        let module = branch
+        *compiled = Some(
+            branch
             .runtime
-            .wasm_runtime
-            .compile_processor(&wasm)
+                .compile_wasm_processor_module(processor, resource, Some(version), file)
             .await
-            .map_err(|error| {
-                format!(
-                    "failed to compile wasm processor '{}' resource '{}@{}' file '{}': {}",
-                    processor.as_str(),
-                    resource.as_str(),
-                    version,
-                    file,
-                    error
-                )
-            })?;
-        *compiled = Some(WasmCompiledBranchProcessor {
-            version,
-            compiled: module,
-        });
+                ?,
+        );
         *instance = None;
     }
 

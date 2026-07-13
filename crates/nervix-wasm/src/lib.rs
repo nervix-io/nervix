@@ -168,6 +168,10 @@ impl WasmRuntime {
     pub fn new(config: WasmRuntimeConfig) -> Result<Self, WasmProcessorError> {
         let mut wasmtime_config = Config::new();
         wasmtime_config.epoch_interruption(true);
+        // Runtime instances already compile independently on blocking workers. Letting each
+        // Cranelift invocation fan out across the global CPU pool can starve Raft and Tokio
+        // executor threads when several nodes or branch instances initialize together.
+        wasmtime_config.parallel_compilation(false);
         wasmtime_config.cranelift_opt_level(if config.optimize {
             OptLevel::Speed
         } else {
