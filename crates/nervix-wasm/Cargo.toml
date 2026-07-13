@@ -12,6 +12,7 @@ ciborium = { workspace = true }
 nervix-models = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
+serde_bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 wasmtime = { workspace = true }

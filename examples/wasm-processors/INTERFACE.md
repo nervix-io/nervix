@@ -46,28 +46,46 @@ Return code `0` means success. Negative return codes are guest errors:
 
 ## Batch Envelope
 
-Input and output batches use a small binary envelope:
+Each input or output payload is exactly one CBOR value. The ABI function's size
+argument or return value frames the payload; there are no internal length
+prefixes. Arrow IPC values are CBOR byte strings.
+
+Host input:
 
 ```text
-u32 little-endian output relay name byte size
-UTF-8 output relay name bytes, empty on host-to-guest input
-u32 little-endian Arrow IPC byte size
-Arrow IPC stream bytes
-u32 little-endian ack sidecar byte size
-CBOR ack sidecar bytes
+{
+  "kind": "input",
+  "arrow_ipc_batch": bytes,
+  "acks": AckSidecar
+}
 ```
 
-Host-to-guest input envelopes use an empty output relay name. Guest-to-host
-output envelopes must name one of the processor's declared `TO` relays, and the
-Arrow IPC batch in that envelope must match that relay's schema before route
-`SET` and `WHERE` clauses are applied.
+Guest output:
 
-The ack sidecar is CBOR encoded:
+```text
+{
+  "kind": "output",
+  "output_relay": text,
+  "columns": [
+    { "kind": "input", "column_index": u32 },
+    { "kind": "guest_arrow", "ipc": bytes }
+  ],
+  "acks": AckSidecar
+}
+```
+
+Each output column is positionally aligned with the destination relay schema.
+`input` references an unchanged column in the declared processor input schema.
+`guest_arrow` contains an independent Arrow IPC stream with exactly one field,
+one record batch, and one column. Its field must exactly equal the destination
+field and its row count must equal `acks.rows.len()`.
+
+The ACK sidecar is:
 
 ```text
 {
   "rows": [
-    { "tokens": [u64, ...] },
+    { "tokens": [u64, ...], "source_token": u64 | null },
     ...
   ],
   "acked": [
@@ -85,12 +103,29 @@ The ack sidecar is CBOR encoded:
 }
 ```
 
-`rows` is positionally aligned with the Arrow batch rows. Each output row must
-carry the ack tokens that should follow that row. Multiple tokens represent a
-merged lineage. `acked` contains input row token sets that the guest decided to
-complete because they were dropped or otherwise consumed. `nacked` contains
-input row token sets the guest decided to fail directly. `message_errors`
-contains input row token sets to route through `ON MESSAGE ERROR`.
+Each host input row has one token and a matching non-null `source_token`. A
+guest may preserve that row object when filtering or enriching. If any output
+column is an input reference, every output row must have a live `source_token`
+that also appears in that row's `tokens`. The token selects both the retained
+input row used by every referenced column and the record exposed through route
+expressions such as `input.field`.
+
+Multiple tokens represent merged lineage. `acked` contains token sets consumed
+without output, `nacked` contains token sets failed directly, and
+`message_errors` contains token sets routed through `ON MESSAGE ERROR`. A token
+may be carried into multiple output rows or envelopes, but it cannot be both
+carried and terminally completed in one callback.
+
+All fields are required, including empty arrays and `source_token` (encoded as
+CBOR `null` when absent). Unknown fields, unknown kinds, missing fields,
+trailing bytes, malformed Arrow IPC, and schema mismatches reject the complete
+callback output before any dispatch or ACK decision is applied. The whole CBOR
+envelope remains subject to the configured guest-buffer limit.
+
+This CBOR format completely replaces the former length-prefixed envelope.
+There is no protocol version, magic prefix, negotiation, or legacy decoder.
+Guests must be rebuilt with the current contract. A snapshot containing a
+pending old-format envelope must be rejected during guest-state restoration.
 
 Global errors are not part of the ACK sidecar. They are guest/node state and use
 a separate optional export channel:
@@ -125,11 +160,11 @@ the guest-owned bytes returned from `nervix_dump_state`, then restores them with
 
 ## Init Payload
 
-`nervix_init` receives CBOR encoded metadata. The first iteration stores this
-metadata as opaque bytes so the host ABI can settle before the runtime model is
-wired in.
+`nervix_init` receives CBOR encoded metadata. Bundled guests retain the exact
+bytes for snapshots and parse the input and output schemas needed to construct
+column descriptors.
 
-The intended shape is:
+The shape is:
 
 ```text
 {
@@ -180,5 +215,6 @@ The state includes:
 Filtering uses `processed row count` as a global row ordinal. Rows with even
 global ordinals are preserved and rows with odd global ordinals are dropped, so
 state restoration changes subsequent keep/drop decisions. Preserved rows carry
-their input ack token sets into the emitted envelope; dropped rows are listed in
-the emitted envelope's `acked` sidecar.
+their complete input row sidecars, including `source_token`, and unchanged
+fields are emitted as input-column references. Dropped rows are listed in the
+emitted envelope's `acked` sidecar.

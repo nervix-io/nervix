@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     runtime_ack::AckSet,
-    runtime_schema::{CompiledSchema, RuntimeRecord, RuntimeRecordMetadata},
+    runtime_schema::{CompiledSchema, RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata},
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
@@ -30,6 +30,8 @@ pub(super) struct WasmAckContext {
     pub(super) acks: AckSet,
     pub(super) metadata: RuntimeRecordMetadata,
     pub(super) record: RuntimeRecord,
+    pub(super) input_batch: Arc<RuntimeRecordBatch>,
+    pub(super) input_row: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +300,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         resource: Identifier,
         resource_version: Option<u64>,
         file: String,
+        compiled: Option<WasmCompiledBranchProcessor>,
     },
 }
 
@@ -530,9 +533,10 @@ pub(super) struct WasmFlushContext<'a> {
     pub(super) replicated_state: &'a ReplicatedWasmProcessorState,
 }
 
+#[derive(Clone)]
 pub(super) struct WasmCompiledBranchProcessor {
     pub(super) version: u64,
-    pub(super) compiled: CompiledWasmProcessor,
+    pub(super) compiled: Arc<CompiledWasmProcessor>,
 }
 
 impl std::fmt::Debug for WasmCompiledBranchProcessor {

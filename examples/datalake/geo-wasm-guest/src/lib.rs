@@ -1,16 +1,74 @@
 use std::{cell::UnsafeCell, io::Cursor, net::IpAddr, panic::AssertUnwindSafe, sync::Arc};
 
 use arrow_array::{
-    Array, ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray,
-    TimestampNanosecondArray,
-    builder::{Float64Builder, Int64Builder, StringBuilder},
+    Array, ArrayRef, RecordBatch, StringArray,
+    builder::{Float64Builder, StringBuilder},
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
-use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use arrow_schema::{DataType, Field, Schema};
 use geo::{Distance, Haversine, Point};
 use geohash::{Coord, encode};
 use maxminddb::{geoip2, Reader};
 use serde::{Deserialize, Serialize};
+
+mod cbor_byte_string {
+    use std::fmt;
+
+    use serde::{Deserializer, Serializer, de::Visitor};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serde::Serialize::serialize(serde_bytes::Bytes::new(bytes), serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_byte_buf(ByteStringVisitor)
+    }
+
+    struct ByteStringVisitor;
+
+    impl Visitor<'_> for ByteStringVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a CBOR byte string")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_vec())
+        }
+
+        fn visit_borrowed_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value)
+        }
+    }
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 const SUCCESS: i32 = 0;
 const ERR_INVALID_SIZE: i32 = -1;
@@ -24,20 +82,7 @@ const DBIP_MMDB: &[u8] = include_bytes!(concat!(
     "/dbip-city-lite-2026-06.mmdb"
 ));
 
-const SOURCE: usize = 0;
-const EVENT_ID: usize = 1;
-const TENANT_ID: usize = 2;
-const DEVICE_ID: usize = 3;
-const SESSION_ID: usize = 4;
-const EDGE_ID: usize = 5;
-const EVENT_TYPE: usize = 6;
 const SOURCE_IP: usize = 7;
-const DEVICE_LAT: usize = 8;
-const DEVICE_LON: usize = 9;
-const BATTERY_PCT: usize = 10;
-const FIRMWARE: usize = 11;
-const TS: usize = 12;
-const SEQ: usize = 13;
 const GEOHASH_PRECISION: usize = 8;
 const METERS_PER_KM: f64 = 1000.0;
 
@@ -70,11 +115,31 @@ struct GuestSnapshot {
     error_state: Option<String>,
 }
 
-#[derive(Clone)]
-struct BatchEnvelope {
-    output_relay: Option<String>,
-    arrow_ipc_batch: Vec<u8>,
-    acks: AckSidecar,
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Envelope {
+    Input {
+        #[serde(with = "cbor_byte_string")]
+        arrow_ipc_batch: Vec<u8>,
+        acks: AckSidecar,
+    },
+    Output {
+        output_relay: String,
+        columns: Vec<OutputColumn>,
+        acks: AckSidecar,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum OutputColumn {
+    GuestArrow {
+        #[serde(with = "cbor_byte_string")]
+        ipc: Vec<u8>,
+    },
+    Input {
+        column_index: u32,
+    },
 }
 
 #[derive(Clone, Deserialize)]
@@ -89,29 +154,37 @@ struct ProcessorSchema {
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AckSidecar {
-    #[serde(default)]
-    rows: Vec<RowAckSet>,
-    #[serde(default)]
-    acked: Vec<RowAckSet>,
-    #[serde(default)]
+    rows: Vec<OutputRow>,
+    acked: Vec<AckTokenSet>,
     nacked: Vec<NackSet>,
-    #[serde(default)]
     message_errors: Vec<WasmMessageErrorSet>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct RowAckSet {
+#[serde(deny_unknown_fields)]
+struct OutputRow {
+    tokens: Vec<AckToken>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    source_token: Option<AckToken>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AckTokenSet {
     tokens: Vec<AckToken>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NackSet {
     tokens: Vec<AckToken>,
     reason: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WasmMessageErrorSet {
     tokens: Vec<AckToken>,
     reason: String,
@@ -259,63 +332,20 @@ impl GuestState {
     }
 }
 
-impl BatchEnvelope {
+impl Envelope {
     fn encode(&self) -> Result<Vec<u8>, i32> {
-        let output_relay = self.output_relay.as_deref().unwrap_or_default().as_bytes();
-        let output_len = u32::try_from(output_relay.len()).map_err(|_| ERR_ENVELOPE)?;
-        let arrow_len = u32::try_from(self.arrow_ipc_batch.len()).map_err(|_| ERR_ENVELOPE)?;
-        let mut ack_bytes = Vec::new();
-        ciborium::into_writer(&self.acks, &mut ack_bytes).map_err(|_| ERR_ENVELOPE)?;
-        let ack_len = u32::try_from(ack_bytes.len()).map_err(|_| ERR_ENVELOPE)?;
-        let mut encoded = Vec::with_capacity(
-            12 + output_relay.len() + self.arrow_ipc_batch.len() + ack_bytes.len(),
-        );
-        encoded.extend_from_slice(&output_len.to_le_bytes());
-        encoded.extend_from_slice(output_relay);
-        encoded.extend_from_slice(&arrow_len.to_le_bytes());
-        encoded.extend_from_slice(&self.arrow_ipc_batch);
-        encoded.extend_from_slice(&ack_len.to_le_bytes());
-        encoded.extend_from_slice(&ack_bytes);
+        let mut encoded = Vec::new();
+        ciborium::into_writer(self, &mut encoded).map_err(|_| ERR_ENVELOPE)?;
         Ok(encoded)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, i32> {
-        if bytes.len() < 12 {
+        let mut cursor = Cursor::new(bytes);
+        let envelope = ciborium::from_reader(&mut cursor).map_err(|_| ERR_ENVELOPE)?;
+        if usize::try_from(cursor.position()).map_err(|_| ERR_ENVELOPE)? != bytes.len() {
             return Err(ERR_ENVELOPE);
         }
-        let output_len = read_u32_len(bytes, 0)?;
-        let output_start = 4_usize;
-        let output_end = output_start.checked_add(output_len).ok_or(ERR_ENVELOPE)?;
-        if output_end.checked_add(8).ok_or(ERR_ENVELOPE)? > bytes.len() {
-            return Err(ERR_ENVELOPE);
-        }
-        let output_relay = if output_len == 0 {
-            None
-        } else {
-            Some(
-                std::str::from_utf8(&bytes[output_start..output_end])
-                    .map_err(|_| ERR_ENVELOPE)?
-                    .to_string(),
-            )
-        };
-        let arrow_len = read_u32_len(bytes, output_end)?;
-        let arrow_start = output_end + 4;
-        let arrow_end = arrow_start.checked_add(arrow_len).ok_or(ERR_ENVELOPE)?;
-        if arrow_end.checked_add(4).ok_or(ERR_ENVELOPE)? > bytes.len() {
-            return Err(ERR_ENVELOPE);
-        }
-        let ack_len = read_u32_len(bytes, arrow_end)?;
-        let ack_start = arrow_end + 4;
-        let ack_end = ack_start.checked_add(ack_len).ok_or(ERR_ENVELOPE)?;
-        if ack_end != bytes.len() {
-            return Err(ERR_ENVELOPE);
-        }
-        let acks = ciborium::from_reader(&bytes[ack_start..ack_end]).map_err(|_| ERR_ENVELOPE)?;
-        Ok(Self {
-            output_relay,
-            arrow_ipc_batch: bytes[arrow_start..arrow_end].to_vec(),
-            acks,
-        })
+        Ok(envelope)
     }
 }
 
@@ -466,11 +496,18 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
 
         state.processed_batches = state.processed_batches.saturating_add(1);
         state.last_domain_time_nanos = unsafe { nervix_domain_time_nanos() };
-        let envelope = match BatchEnvelope::decode(&state.buffer[..size]) {
+        let envelope = match Envelope::decode(&state.buffer[..size]) {
             Ok(envelope) => envelope,
             Err(error) => return error,
         };
-        let row_count = match arrow_ipc_row_count(&envelope.arrow_ipc_batch) {
+        let Envelope::Input {
+            arrow_ipc_batch,
+            acks,
+        } = envelope
+        else {
+            return ERR_ENVELOPE;
+        };
+        let row_count = match arrow_ipc_row_count(&arrow_ipc_batch) {
             Ok(row_count) => row_count,
             Err(error) => return error,
         };
@@ -479,7 +516,7 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
         let Some(reader) = state.geoip_reader.as_ref() else {
             return ERR_NOT_INITIALIZED;
         };
-        let enriched = match geo_enrich_envelope(envelope, reader) {
+        let enriched = match geo_enrich_envelope(arrow_ipc_batch, acks, reader) {
             Ok(envelope) => envelope,
             Err(error) => return error,
         };
@@ -489,11 +526,19 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
         state.pending_emit.clear();
         for (index, relay) in state.output_relays.iter().enumerate() {
             let mut output = enriched.clone();
-            output.output_relay = Some(relay.clone());
+            let Envelope::Output {
+                output_relay,
+                acks,
+                ..
+            } = &mut output
+            else {
+                return ERR_ENVELOPE;
+            };
+            *output_relay = relay.clone();
             if index > 0 {
-                output.acks.acked.clear();
-                output.acks.nacked.clear();
-                output.acks.message_errors.clear();
+                acks.acked.clear();
+                acks.nacked.clear();
+                acks.message_errors.clear();
             }
             match output.encode() {
                 Ok(encoded) => state.pending_emit.push(encoded),
@@ -542,12 +587,6 @@ pub extern "C" fn nervix_reset_state() -> i32 {
     })
 }
 
-fn read_u32_len(bytes: &[u8], offset: usize) -> Result<usize, i32> {
-    let end = offset.checked_add(4).ok_or(ERR_ENVELOPE)?;
-    let raw = bytes.get(offset..end).ok_or(ERR_ENVELOPE)?;
-    Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize)
-}
-
 fn output_relays_from_init_metadata(metadata: &[u8]) -> Result<Vec<String>, i32> {
     ciborium::from_reader::<BranchInitMetadata, _>(Cursor::new(metadata))
         .map(|metadata| {
@@ -571,66 +610,41 @@ fn arrow_ipc_row_count(bytes: &[u8]) -> Result<u64, i32> {
 }
 
 fn geo_enrich_envelope(
-    envelope: BatchEnvelope,
+    arrow_ipc_batch: Vec<u8>,
+    acks: AckSidecar,
     reader: &Reader<&'static [u8]>,
-) -> Result<BatchEnvelope, i32> {
-    let ipc_reader = StreamReader::try_new(Cursor::new(&envelope.arrow_ipc_batch), None)
+) -> Result<Envelope, i32> {
+    let ipc_reader = StreamReader::try_new(Cursor::new(&arrow_ipc_batch), None)
         .map_err(|_| ERR_ARROW_IPC)?;
-    let schema = output_schema();
-    let mut output_batches = Vec::new();
-    for batch in ipc_reader {
-        output_batches.push(geo_enrich_batch(&batch.map_err(|_| ERR_ARROW_IPC)?, reader)?);
+    let batches = ipc_reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ERR_ARROW_IPC)?;
+    if batches.len() != 1 {
+        return Err(ERR_ARROW_IPC);
     }
-
-    let mut output = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut output, &schema).map_err(|_| ERR_ARROW_IPC)?;
-        for batch in output_batches {
-            writer.write(&batch).map_err(|_| ERR_ARROW_IPC)?;
-        }
-        writer.finish().map_err(|_| ERR_ARROW_IPC)?;
+    let generated = geo_enrich_columns(&batches[0], reader)?;
+    let fields = generated_fields();
+    let mut columns = (0..14_u32)
+        .map(|column_index| OutputColumn::Input { column_index })
+        .collect::<Vec<_>>();
+    for (field, array) in fields.into_iter().zip(generated) {
+        columns.push(OutputColumn::GuestArrow {
+            ipc: encode_guest_column(field, array)?,
+        });
     }
-    Ok(BatchEnvelope {
-        output_relay: None,
-        arrow_ipc_batch: output,
-        acks: envelope.acks,
+    Ok(Envelope::Output {
+        output_relay: String::new(),
+        columns,
+        acks,
     })
 }
 
-fn geo_enrich_batch(
+fn geo_enrich_columns(
     batch: &RecordBatch,
     reader: &Reader<&'static [u8]>,
-) -> Result<RecordBatch, i32> {
-    let source = string_column(batch, SOURCE)?;
-    let event_id = string_column(batch, EVENT_ID)?;
-    let tenant_id = string_column(batch, TENANT_ID)?;
-    let device_id = string_column(batch, DEVICE_ID)?;
-    let session_id = string_column(batch, SESSION_ID)?;
-    let edge_id = string_column(batch, EDGE_ID)?;
-    let event_type = string_column(batch, EVENT_TYPE)?;
+) -> Result<Vec<ArrayRef>, i32> {
     let source_ip = string_column(batch, SOURCE_IP)?;
-    let device_lat = f64_column(batch, DEVICE_LAT)?;
-    let device_lon = f64_column(batch, DEVICE_LON)?;
-    let battery_pct = f64_column(batch, BATTERY_PCT)?;
-    let firmware = string_column(batch, FIRMWARE)?;
-    let ts = timestamp_column(batch, TS)?;
-    let seq = i64_column(batch, SEQ)?;
-
     let row_count = batch.num_rows();
-    let mut out_source = StringBuilder::new();
-    let mut out_event_id = StringBuilder::new();
-    let mut out_tenant_id = StringBuilder::new();
-    let mut out_device_id = StringBuilder::new();
-    let mut out_session_id = StringBuilder::new();
-    let mut out_edge_id = StringBuilder::new();
-    let mut out_event_type = StringBuilder::new();
-    let mut out_source_ip = StringBuilder::new();
-    let mut out_device_lat = Float64Builder::new();
-    let mut out_device_lon = Float64Builder::new();
-    let mut out_battery_pct = Float64Builder::new();
-    let mut out_firmware = StringBuilder::new();
-    let mut out_ts = Vec::with_capacity(row_count);
-    let mut out_seq = Int64Builder::new();
     let mut out_geoip_database = StringBuilder::new();
     let mut out_geoip_continent = StringBuilder::new();
     let mut out_geoip_country = StringBuilder::new();
@@ -643,26 +657,10 @@ fn geo_enrich_batch(
     let mut out_distance_to_hub_km = Float64Builder::new();
 
     for row in 0..row_count {
-        append_string(&mut out_source, source, row);
-        append_string(&mut out_event_id, event_id, row);
-        append_string(&mut out_tenant_id, tenant_id, row);
-        append_string(&mut out_device_id, device_id, row);
-        append_string(&mut out_session_id, session_id, row);
-        append_string(&mut out_edge_id, edge_id, row);
-        append_string(&mut out_event_type, event_type, row);
-        append_string(&mut out_source_ip, source_ip, row);
-        out_device_lat.append_value(non_null_f64(device_lat, row)?);
-        out_device_lon.append_value(non_null_f64(device_lon, row)?);
-        out_battery_pct.append_value(non_null_f64(battery_pct, row)?);
-        append_string(&mut out_firmware, firmware, row);
-        out_ts.push(Some(non_null_timestamp(ts, row)?));
-        out_seq.append_value(non_null_i64(seq, row)?);
-
         let geo = resolve_ip(reader, string_value(source_ip, row));
         let geo_hash = geo_hash(geo.lat, geo.lon);
         let (hub, distance) = nearest_hub(geo.lat, geo.lon);
-        out_geoip_database
-            .append_value(reader.metadata.database_type.as_str());
+        out_geoip_database.append_value(reader.metadata.database_type.as_str());
         out_geoip_continent.append_value(geo.continent.as_str());
         out_geoip_country.append_value(geo.country.as_str());
         out_geoip_region.append_value(geo.region.as_str());
@@ -674,21 +672,7 @@ fn geo_enrich_batch(
         out_distance_to_hub_km.append_value(distance);
     }
 
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(out_source.finish()),
-        Arc::new(out_event_id.finish()),
-        Arc::new(out_tenant_id.finish()),
-        Arc::new(out_device_id.finish()),
-        Arc::new(out_session_id.finish()),
-        Arc::new(out_edge_id.finish()),
-        Arc::new(out_event_type.finish()),
-        Arc::new(out_source_ip.finish()),
-        Arc::new(out_device_lat.finish()),
-        Arc::new(out_device_lon.finish()),
-        Arc::new(out_battery_pct.finish()),
-        Arc::new(out_firmware.finish()),
-        Arc::new(TimestampNanosecondArray::from(out_ts).with_timezone_utc()),
-        Arc::new(out_seq.finish()),
+    Ok(vec![
         Arc::new(out_geoip_database.finish()),
         Arc::new(out_geoip_continent.finish()),
         Arc::new(out_geoip_country.finish()),
@@ -699,31 +683,11 @@ fn geo_enrich_batch(
         Arc::new(out_geoip_geohash.finish()),
         Arc::new(out_nearest_hub.finish()),
         Arc::new(out_distance_to_hub_km.finish()),
-    ];
-
-    RecordBatch::try_new(output_schema(), columns).map_err(|_| ERR_ARROW_IPC)
+    ])
 }
 
-fn output_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("source", DataType::Utf8, false),
-        Field::new("event_id", DataType::Utf8, false),
-        Field::new("tenant_id", DataType::Utf8, false),
-        Field::new("device_id", DataType::Utf8, false),
-        Field::new("session_id", DataType::Utf8, false),
-        Field::new("edge_id", DataType::Utf8, false),
-        Field::new("event_type", DataType::Utf8, false),
-        Field::new("source_ip", DataType::Utf8, false),
-        Field::new("device_lat", DataType::Float64, false),
-        Field::new("device_lon", DataType::Float64, false),
-        Field::new("battery_pct", DataType::Float64, false),
-        Field::new("firmware", DataType::Utf8, false),
-        Field::new(
-            "ts",
-            DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
-            false,
-        ),
-        Field::new("seq", DataType::Int64, false),
+fn generated_fields() -> Vec<Field> {
+    vec![
         Field::new("geoip_database", DataType::Utf8, false),
         Field::new("geoip_continent", DataType::Utf8, false),
         Field::new("geoip_country", DataType::Utf8, false),
@@ -734,7 +698,19 @@ fn output_schema() -> Arc<Schema> {
         Field::new("geoip_geohash", DataType::Utf8, false),
         Field::new("nearest_hub", DataType::Utf8, false),
         Field::new("distance_to_hub_km", DataType::Float64, false),
-    ]))
+    ]
+}
+
+fn encode_guest_column(field: Field, array: ArrayRef) -> Result<Vec<u8>, i32> {
+    let schema = Arc::new(Schema::new(vec![field]));
+    let batch = RecordBatch::try_new(schema.clone(), vec![array]).map_err(|_| ERR_ARROW_IPC)?;
+    let mut ipc = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut ipc, &schema).map_err(|_| ERR_ARROW_IPC)?;
+        writer.write(&batch).map_err(|_| ERR_ARROW_IPC)?;
+        writer.finish().map_err(|_| ERR_ARROW_IPC)?;
+    }
+    Ok(ipc)
 }
 
 fn string_column(batch: &RecordBatch, index: usize) -> Result<&StringArray, i32> {
@@ -745,63 +721,11 @@ fn string_column(batch: &RecordBatch, index: usize) -> Result<&StringArray, i32>
         .ok_or(ERR_ARROW_IPC)
 }
 
-fn f64_column(batch: &RecordBatch, index: usize) -> Result<&Float64Array, i32> {
-    batch
-        .column(index)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or(ERR_ARROW_IPC)
-}
-
-fn i64_column(batch: &RecordBatch, index: usize) -> Result<&Int64Array, i32> {
-    batch
-        .column(index)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .ok_or(ERR_ARROW_IPC)
-}
-
-fn timestamp_column(batch: &RecordBatch, index: usize) -> Result<&TimestampNanosecondArray, i32> {
-    batch
-        .column(index)
-        .as_any()
-        .downcast_ref::<TimestampNanosecondArray>()
-        .ok_or(ERR_ARROW_IPC)
-}
-
 fn string_value(array: &StringArray, row: usize) -> &str {
     if array.is_valid(row) {
         array.value(row)
     } else {
         ""
-    }
-}
-
-fn append_string(builder: &mut StringBuilder, array: &StringArray, row: usize) {
-    builder.append_value(string_value(array, row));
-}
-
-fn non_null_f64(array: &Float64Array, row: usize) -> Result<f64, i32> {
-    if array.is_valid(row) {
-        Ok(array.value(row))
-    } else {
-        Err(ERR_ARROW_IPC)
-    }
-}
-
-fn non_null_i64(array: &Int64Array, row: usize) -> Result<i64, i32> {
-    if array.is_valid(row) {
-        Ok(array.value(row))
-    } else {
-        Err(ERR_ARROW_IPC)
-    }
-}
-
-fn non_null_timestamp(array: &TimestampNanosecondArray, row: usize) -> Result<i64, i32> {
-    if array.is_valid(row) {
-        Ok(array.value(row))
-    } else {
-        Err(ERR_ARROW_IPC)
     }
 }
 

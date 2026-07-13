@@ -4067,7 +4067,7 @@ impl Runtime {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let template = materialize_branch_instance_template(
+            let mut template = materialize_branch_instance_template(
                 spec,
                 &model_index,
                 &relay_schemas,
@@ -4078,6 +4078,13 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason,
             })?;
+            template
+                .prepare_wasm_processors(self)
+                .await
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason,
+                })?;
             let Some(runtime) = self.start_branched_entrypoint_runtime(
                 domain,
                 &spec.identifier,
@@ -5512,7 +5519,7 @@ impl Runtime {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let template = materialize_branch_instance_template(
+            let mut template = materialize_branch_instance_template(
                 spec,
                 &model_index,
                 &relay_schemas,
@@ -5523,6 +5530,13 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason,
             })?;
+            template
+                .prepare_wasm_processors(self)
+                .await
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason,
+                })?;
             let Some(runtime) = self.start_branched_entrypoint_runtime(
                 domain,
                 &spec.identifier,
@@ -7893,7 +7907,7 @@ impl Runtime {
         let mut branched_templates = HashMap::default();
         if let Some(specs) = execution.branched_ingestors.get(&ingestor.name) {
             for spec in specs {
-                let template = materialize_branch_instance_template(
+                let mut template = materialize_branch_instance_template(
                     spec,
                     &model_index,
                     &execution.relay_schemas,
@@ -7904,6 +7918,13 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason,
                 })?;
+                template
+                    .prepare_wasm_processors(self)
+                    .await
+                    .map_err(|reason| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason,
+                    })?;
                 branched_templates
                     .insert(spec.root_relay.clone(), (execution.graph.clone(), template));
             }
