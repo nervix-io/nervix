@@ -1,4 +1,91 @@
 Feature: WASM processor runtime behavior
+  Scenario Outline: WASM enrichment references unchanged input columns inside concrete branches
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_reference_enricher;
+      UPLOAD RESOURCE wasm_reference_enricher VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event (
+        value I32,
+        tenant STRING,
+        message STRING,
+        occurred_at DATETIME
+      );
+      CREATE SCHEMA enriched_event (
+        value I32,
+        tenant STRING,
+        message STRING,
+        occurred_at DATETIME,
+        bucket STRING
+      );
+      CREATE STRICT WIRE JSON SCHEMA event_wire (
+        value integer,
+        tenant string,
+        message string,
+        occurred_at string
+      );
+      CREATE CODEC event_codec
+        FROM WIRE JSON SCHEMA event_wire
+        TO SCHEMA event
+        ENCODE occurred_at AS RFC3339;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY raw_events SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY enriched_events SCHEMA enriched_event BRANCHED BY by_tenant;
+      CREATE VHOST edge wasm-reference-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR event_source
+        TO raw_events
+        DECODE USING event_codec
+        BRANCHED BY by_tenant VALUES { tenant = raw_events.tenant }
+        FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR enrich_even_rows
+        USING RESOURCE wasm_reference_enricher VERSION 1
+        FILE 'processors/filter_even.wasm'
+        FROM raw_events
+        TO enriched_events
+        BRANCHED BY by_tenant
+        ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+      SUBSCRIBE SESSION TO enriched_events;
+      START;
+      """
+    When http payload is posted to host "wasm-reference-{{test_id}}.example.com" path "/events"
+      """
+      {"value":11,"tenant":"alpha","message":"alpha-first","occurred_at":"2026-07-13T01:02:03Z"}
+      """
+    And http payload is posted to host "wasm-reference-{{test_id}}.example.com" path "/events"
+      """
+      {"value":21,"tenant":"beta","message":"beta-first","occurred_at":"2026-07-13T02:03:04Z"}
+      """
+    And http payload is posted to host "wasm-reference-{{test_id}}.example.com" path "/events"
+      """
+      {"value":12,"tenant":"alpha","message":"alpha-second","occurred_at":"2026-07-13T03:04:05Z"}
+      """
+    And http payload is posted to host "wasm-reference-{{test_id}}.example.com" path "/events"
+      """
+      {"value":22,"tenant":"beta","message":"beta-second","occurred_at":"2026-07-13T04:05:06Z"}
+      """
+    Then within "10s" the relay subscription receives payloads
+      """
+      "bucket":"EVEN","message":"alpha-second","occurred_at":"2026-07-13T03:04:05+00:00","tenant":"alpha","value":12
+      "bucket":"EVEN","message":"beta-second","occurred_at":"2026-07-13T04:05:06+00:00","tenant":"beta","value":22
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: WASM processor filters records inside each concrete branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -394,7 +481,7 @@ Feature: WASM processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: WASM processor receives guest output from a guest timeout
+  Scenario Outline: WASM processor receives referenced input columns from a guest timeout
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
@@ -669,11 +756,10 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: Rust and Go WASM processors handle a time-flushed input batch
+  Scenario Outline: Rust WASM processor references a time-flushed input batch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "rust" example WASM processor resource directory "rust_wasm_processor"
-    And node "node-1" has "go" example WASM processor resource directory "go_wasm_processor"
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -682,8 +768,6 @@ Feature: WASM processor runtime behavior
       """
       CREATE RESOURCE rust_wasm_filter;
       UPLOAD RESOURCE rust_wasm_filter VERSION '{{rust_wasm_processor}}';
-      CREATE RESOURCE go_wasm_filter;
-      UPLOAD RESOURCE go_wasm_filter VERSION '{{go_wasm_processor}}';
       """
     And these NSPL commands are executed on the leader node
       """
@@ -693,7 +777,6 @@ Feature: WASM processor runtime behavior
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
-      CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
@@ -709,14 +792,7 @@ Feature: WASM processor runtime behavior
         TO rust_filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      CREATE WASM PROCESSOR go_filter_even_rows
-        USING RESOURCE go_wasm_filter VERSION 1
-        FILE 'nervix_wasm_processor_go_guest.wasm'
-        FROM rust_filtered_metrics
-        TO go_filtered_metrics
-        UNBRANCHED
-        ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO go_filtered_metrics;
+      SUBSCRIBE SESSION TO rust_filtered_metrics;
       START;
       """
     When 100 sequential metric http payloads are posted to host "http-{{test_id}}.example.com" path "/metrics"

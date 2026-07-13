@@ -1,4 +1,5 @@
 use std::{
+    io::Cursor,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -16,6 +17,65 @@ use wasmtime::{
     Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel, Store,
     TypedFunc,
 };
+
+mod cbor_byte_string {
+    use std::fmt;
+
+    use serde::{Deserializer, Serializer, de::Visitor};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serde::Serialize::serialize(serde_bytes::Bytes::new(bytes), serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_byte_buf(ByteStringVisitor)
+    }
+
+    struct ByteStringVisitor;
+
+    impl Visitor<'_> for ByteStringVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a CBOR byte string")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_vec())
+        }
+
+        fn visit_borrowed_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value)
+        }
+    }
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 const ENV_MODULE: &str = "env";
 const EXPORT_MEMORY: &str = "memory";
@@ -57,12 +117,22 @@ pub enum WasmProcessorError {
     InvalidSize(i32),
     #[error("failed to encode branch init metadata as CBOR: {0}")]
     EncodeInit(#[source] ciborium::ser::Error<std::io::Error>),
-    #[error("failed to encode WASM batch envelope ack sidecar as CBOR: {0}")]
-    EncodeEnvelope(#[source] ciborium::ser::Error<std::io::Error>),
-    #[error("failed to decode WASM batch envelope: {0}")]
-    DecodeEnvelope(String),
+    #[error(transparent)]
+    Protocol(#[from] WasmProtocolError),
+    #[error("guest global error bytes are not valid UTF-8: {0}")]
+    InvalidGuestGlobalError(#[source] std::string::FromUtf8Error),
     #[error("guest buffer size {size} exceeds configured limit {limit}")]
     GuestBufferTooLarge { size: usize, limit: usize },
+}
+
+#[derive(Debug, Error)]
+pub enum WasmProtocolError {
+    #[error("failed to encode WASM envelope as CBOR: {0}")]
+    EncodeEnvelope(#[source] ciborium::ser::Error<std::io::Error>),
+    #[error("failed to decode WASM envelope from CBOR: {0}")]
+    DecodeEnvelope(#[source] ciborium::de::Error<std::io::Error>),
+    #[error("WASM envelope has {remaining} trailing bytes")]
+    TrailingEnvelopeBytes { remaining: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -302,45 +372,88 @@ pub struct WasmTimeoutRequest {
 pub struct WasmAckToken(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct WasmRowAckSet {
+#[serde(deny_unknown_fields)]
+pub struct WasmAckTokenSet {
     pub tokens: Vec<WasmAckToken>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasmOutputRow {
+    pub tokens: Vec<WasmAckToken>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub source_token: Option<WasmAckToken>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WasmNackSet {
     pub tokens: Vec<WasmAckToken>,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WasmMessageErrorSet {
     pub tokens: Vec<WasmAckToken>,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WasmAckSidecar {
-    #[serde(default)]
-    pub rows: Vec<WasmRowAckSet>,
-    #[serde(default)]
-    pub acked: Vec<WasmRowAckSet>,
-    #[serde(default)]
+    pub rows: Vec<WasmOutputRow>,
+    pub acked: Vec<WasmAckTokenSet>,
     pub nacked: Vec<WasmNackSet>,
-    #[serde(default)]
     pub message_errors: Vec<WasmMessageErrorSet>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WasmBatchEnvelope {
-    pub output_relay: Option<String>,
-    pub arrow_ipc_batch: Vec<u8>,
-    pub acks: WasmAckSidecar,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WasmEnvelope {
+    Input {
+        #[serde(with = "cbor_byte_string")]
+        arrow_ipc_batch: Vec<u8>,
+        acks: WasmAckSidecar,
+    },
+    Output {
+        output_relay: String,
+        columns: Vec<WasmOutputColumn>,
+        acks: WasmAckSidecar,
+    },
 }
 
-impl WasmBatchEnvelope {
-    pub fn new(arrow_ipc_batch: Vec<u8>, acks: WasmAckSidecar) -> Self {
-        Self {
-            output_relay: None,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WasmOutputColumn {
+    GuestArrow {
+        #[serde(with = "cbor_byte_string")]
+        ipc: Vec<u8>,
+    },
+    Input {
+        column_index: u32,
+    },
+}
+
+impl WasmOutputColumn {
+    pub const fn is_input(&self) -> bool {
+        if let Self::Input { .. } = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl WasmEnvelope {
+    pub const fn acks(&self) -> &WasmAckSidecar {
+        match self {
+            Self::Input { acks, .. } | Self::Output { acks, .. } => acks,
+        }
+    }
+
+    pub fn input(arrow_ipc_batch: Vec<u8>, acks: WasmAckSidecar) -> Self {
+        Self::Input {
             arrow_ipc_batch,
             acks,
         }
@@ -348,135 +461,54 @@ impl WasmBatchEnvelope {
 
     pub fn output(
         output_relay: impl Into<String>,
-        arrow_ipc_batch: Vec<u8>,
+        columns: Vec<WasmOutputColumn>,
         acks: WasmAckSidecar,
     ) -> Self {
-        Self {
-            output_relay: Some(output_relay.into()),
-            arrow_ipc_batch,
+        Self::Output {
+            output_relay: output_relay.into(),
+            columns,
             acks,
         }
     }
 
-    pub fn arrow_only(arrow_ipc_batch: Vec<u8>) -> Self {
-        Self {
-            output_relay: None,
+    pub fn input_arrow_only(arrow_ipc_batch: Vec<u8>) -> Self {
+        Self::Input {
             arrow_ipc_batch,
             acks: WasmAckSidecar::default(),
         }
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>, WasmProcessorError> {
-        let output_relay = self.output_relay.as_deref().unwrap_or_default().as_bytes();
-        let output_len = u32::try_from(output_relay.len()).map_err(|_| {
-            WasmProcessorError::DecodeEnvelope("output relay name is too large".to_string())
-        })?;
-        let arrow_len = u32::try_from(self.arrow_ipc_batch.len()).map_err(|_| {
-            WasmProcessorError::DecodeEnvelope("Arrow IPC payload is too large".to_string())
-        })?;
-        let mut ack_bytes = Vec::new();
-        ciborium::into_writer(&self.acks, &mut ack_bytes)
-            .map_err(WasmProcessorError::EncodeEnvelope)?;
-        let ack_len = u32::try_from(ack_bytes.len()).map_err(|_| {
-            WasmProcessorError::DecodeEnvelope("ack sidecar payload is too large".to_string())
-        })?;
-        let mut encoded = Vec::with_capacity(
-            12 + output_relay.len() + self.arrow_ipc_batch.len() + ack_bytes.len(),
-        );
-        encoded.extend_from_slice(&output_len.to_le_bytes());
-        encoded.extend_from_slice(output_relay);
-        encoded.extend_from_slice(&arrow_len.to_le_bytes());
-        encoded.extend_from_slice(&self.arrow_ipc_batch);
-        encoded.extend_from_slice(&ack_len.to_le_bytes());
-        encoded.extend_from_slice(&ack_bytes);
+    pub fn encode(&self) -> Result<Vec<u8>, WasmProtocolError> {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(self, &mut encoded).map_err(WasmProtocolError::EncodeEnvelope)?;
         Ok(encoded)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, WasmProcessorError> {
-        if bytes.len() < 12 {
-            return Err(WasmProcessorError::DecodeEnvelope(
-                "envelope is shorter than length prefixes".to_string(),
-            ));
+    pub fn decode(bytes: &[u8]) -> Result<Self, WasmProtocolError> {
+        let mut cursor = Cursor::new(bytes);
+        let envelope =
+            ciborium::from_reader(&mut cursor).map_err(WasmProtocolError::DecodeEnvelope)?;
+        let consumed = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
+        if consumed != bytes.len() {
+            return Err(WasmProtocolError::TrailingEnvelopeBytes {
+                remaining: bytes.len().saturating_sub(consumed),
+            });
         }
-        let output_len = read_u32_len(bytes, 0, "output relay")?;
-        let output_start = 4_usize;
-        let output_end = output_start.checked_add(output_len).ok_or_else(|| {
-            WasmProcessorError::DecodeEnvelope("output relay length overflow".to_string())
-        })?;
-        if output_end + 8 > bytes.len() {
-            return Err(WasmProcessorError::DecodeEnvelope(
-                "output relay length exceeds envelope size".to_string(),
-            ));
-        }
-        let output_relay = if output_len == 0 {
-            None
-        } else {
-            Some(
-                std::str::from_utf8(&bytes[output_start..output_end])
-                    .map_err(|error| {
-                        WasmProcessorError::DecodeEnvelope(format!(
-                            "invalid output relay UTF-8: {error}"
-                        ))
-                    })?
-                    .to_string(),
-            )
-        };
-        let arrow_len = read_u32_len(bytes, output_end, "Arrow IPC")?;
-        let arrow_start = output_end + 4;
-        let arrow_end = arrow_start.checked_add(arrow_len).ok_or_else(|| {
-            WasmProcessorError::DecodeEnvelope("Arrow IPC length overflow".to_string())
-        })?;
-        if arrow_end + 4 > bytes.len() {
-            return Err(WasmProcessorError::DecodeEnvelope(
-                "Arrow IPC length exceeds envelope size".to_string(),
-            ));
-        }
-        let ack_len = read_u32_len(bytes, arrow_end, "ack sidecar")?;
-        let ack_start = arrow_end + 4;
-        let ack_end = ack_start.checked_add(ack_len).ok_or_else(|| {
-            WasmProcessorError::DecodeEnvelope("ack sidecar length overflow".to_string())
-        })?;
-        if ack_end != bytes.len() {
-            return Err(WasmProcessorError::DecodeEnvelope(
-                "ack sidecar length does not consume the envelope".to_string(),
-            ));
-        }
-        let acks = ciborium::from_reader(&bytes[ack_start..ack_end]).map_err(|error| {
-            WasmProcessorError::DecodeEnvelope(format!("invalid ack sidecar CBOR: {error}"))
-        })?;
-        Ok(Self {
-            output_relay,
-            arrow_ipc_batch: bytes[arrow_start..arrow_end].to_vec(),
-            acks,
-        })
+        Ok(envelope)
     }
-}
-
-fn read_u32_len(
-    bytes: &[u8],
-    offset: usize,
-    label: &'static str,
-) -> Result<usize, WasmProcessorError> {
-    let end = offset
-        .checked_add(4)
-        .ok_or_else(|| WasmProcessorError::DecodeEnvelope(format!("{label} length overflow")))?;
-    let raw = bytes.get(offset..end).ok_or_else(|| {
-        WasmProcessorError::DecodeEnvelope(format!("missing {label} length prefix"))
-    })?;
-    Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize)
 }
 
 struct BranchStore {
     clock: Box<dyn DomainClock>,
     timeout_requests: Vec<WasmTimeoutRequest>,
     next_timeout_handle: i64,
-    emitted_batch_sender: Option<mpsc::UnboundedSender<WasmBatchEnvelope>>,
+    emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
 }
 
 impl BranchStore {
     fn new(
         clock: Box<dyn DomainClock>,
-        emitted_batch_sender: Option<mpsc::UnboundedSender<WasmBatchEnvelope>>,
+        emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Self {
         Self {
             clock,
@@ -531,7 +563,7 @@ impl CompiledWasmProcessor {
         init: WasmBranchInit,
         clock: Box<dyn DomainClock>,
         restored_state: Option<&[u8]>,
-        emitted_batch_sender: Option<mpsc::UnboundedSender<WasmBatchEnvelope>>,
+        emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Result<WasmBranchInstance, WasmProcessorError> {
         let mut store = Store::new(&self.engine, BranchStore::new(clock, emitted_batch_sender));
         store.set_epoch_deadline(self.epoch_deadline_ticks);
@@ -641,19 +673,15 @@ impl WasmBranchInstance {
     pub async fn process_batch(
         &mut self,
         arrow_ipc_batch: &[u8],
-    ) -> Result<Vec<Vec<u8>>, WasmProcessorError> {
-        let envelope = WasmBatchEnvelope::arrow_only(arrow_ipc_batch.to_vec());
-        let emitted = self.process_envelope(&envelope).await?;
-        Ok(emitted
-            .into_iter()
-            .map(|envelope| envelope.arrow_ipc_batch)
-            .collect())
+    ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
+        let envelope = WasmEnvelope::input_arrow_only(arrow_ipc_batch.to_vec());
+        self.process_envelope(&envelope).await
     }
 
     pub async fn process_envelope(
         &mut self,
-        envelope: &WasmBatchEnvelope,
-    ) -> Result<Vec<WasmBatchEnvelope>, WasmProcessorError> {
+        envelope: &WasmEnvelope,
+    ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
         let bytes = envelope.encode()?;
         let (_ptr, size) = self.write_to_guest_buffer(&bytes).await?;
         let call_result = self.process_batch.call_async(&mut self.store, size).await;
@@ -682,7 +710,7 @@ impl WasmBranchInstance {
     pub async fn on_timeout(
         &mut self,
         handle: WasmTimeoutHandle,
-    ) -> Result<Vec<WasmBatchEnvelope>, WasmProcessorError> {
+    ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
         let call_result = self
             .on_timeout
             .call_async(&mut self.store, handle.raw())
@@ -816,9 +844,8 @@ impl WasmBranchInstance {
                 source,
             })?;
         ensure_success("nervix_clear_global_error", code)?;
-        let reason = String::from_utf8(bytes).map_err(|error| {
-            WasmProcessorError::DecodeEnvelope(format!("invalid guest global error UTF-8: {error}"))
-        })?;
+        let reason =
+            String::from_utf8(bytes).map_err(WasmProcessorError::InvalidGuestGlobalError)?;
         Ok(Some(reason))
     }
 
@@ -877,7 +904,7 @@ impl WasmBranchInstance {
         Ok(out)
     }
 
-    async fn read_pending_emit(&mut self) -> Result<Vec<WasmBatchEnvelope>, WasmProcessorError> {
+    async fn read_pending_emit(&mut self) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
         let mut batches = Vec::new();
         loop {
             let size = self
@@ -897,7 +924,7 @@ impl WasmBranchInstance {
                 }
                 ensure_success("nervix_read_emit", size)?;
             }
-            let batch = WasmBatchEnvelope::decode(&self.read_guest_buffer(size).await?)
+            let batch = WasmEnvelope::decode(&self.read_guest_buffer(size).await?)
                 .map_err(|error| WasmProcessorError::GuestGlobalError(error.to_string()))?;
             if let Some(sender) = self.store.data().emitted_batch_sender.as_ref() {
                 let _ = sender.send(batch.clone());
@@ -995,8 +1022,8 @@ mod tests {
         sync::{Arc as StdArc, atomic::AtomicU64},
     };
 
-    use arrow_array::{Array, Int32Array, RecordBatch};
-    use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
+    use arrow_array::{Int32Array, RecordBatch, StringArray};
+    use arrow_ipc::writer::StreamWriter;
     use arrow_schema::{DataType, Field, Schema};
     use nervix_models::{CreateSchema, Identifier, ParseAsType, SchemaField};
 
@@ -1195,29 +1222,280 @@ mod tests {
         output
     }
 
-    fn decode_arrow_ipc_values(bytes: &[u8]) -> Vec<i32> {
-        let reader = StreamReader::try_new(bytes, None).expect("ipc reader must build");
-        let mut values = Vec::new();
-        for batch in reader {
-            let batch = batch.expect("ipc batch must decode");
-            let column = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("value column must be i32");
-            for row in 0..column.len() {
-                if column.is_valid(row) {
-                    values.push(column.value(row));
-                }
-            }
+    fn sample_arrow_ipc_with_strings(values: &[i32], payloads: &[&str]) -> Vec<u8> {
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("value", DataType::Int32, false),
+            Field::new("payload", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(Int32Array::from(values.to_vec())),
+                StdArc::new(StringArray::from(payloads.to_vec())),
+            ],
+        )
+        .expect("batch must build");
+        let mut output = Vec::new();
+        {
+            let mut writer =
+                StreamWriter::try_new(&mut output, &schema).expect("ipc writer must build");
+            writer.write(&batch).expect("batch must encode");
+            writer.finish().expect("ipc stream must finish");
         }
-        values
+        output
     }
 
-    fn row_ack(token: u64) -> WasmRowAckSet {
-        WasmRowAckSet {
+    fn string_passthrough_init() -> WasmBranchInit {
+        let schema = CreateSchema {
+            name: Identifier::parse("input_events").expect("schema name must be valid"),
+            fields: vec![
+                SchemaField {
+                    name: Identifier::parse("value").expect("field name must be valid"),
+                    ty: ParseAsType::I32,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: Identifier::parse("payload").expect("field name must be valid"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+            ],
+        };
+        let mut output_schema = WasmProcessorSchema::from(&schema);
+        output_schema.name = "output_events".to_string();
+        WasmBranchInit {
+            domain_name: "events".to_string(),
+            domain_type: "PACED".to_string(),
+            branch_key: Some(b"user=42".to_vec()),
+            input_schema: WasmProcessorSchema::from(&schema),
+            output_schemas: vec![output_schema],
+        }
+    }
+
+    fn output_row(token: u64) -> WasmOutputRow {
+        WasmOutputRow {
+            tokens: vec![WasmAckToken(token)],
+            source_token: Some(WasmAckToken(token)),
+        }
+    }
+
+    fn token_set(token: u64) -> WasmAckTokenSet {
+        WasmAckTokenSet {
             tokens: vec![WasmAckToken(token)],
         }
+    }
+
+    #[test]
+    fn input_envelope_cbor_round_trip_uses_byte_string_for_arrow_ipc() {
+        let envelope = WasmEnvelope::input(
+            vec![0, 1, 2, 255],
+            WasmAckSidecar {
+                rows: vec![output_row(7)],
+                acked: Vec::new(),
+                nacked: Vec::new(),
+                message_errors: Vec::new(),
+            },
+        );
+
+        let encoded = envelope.encode().expect("input envelope must encode");
+        assert_eq!(
+            WasmEnvelope::decode(&encoded).expect("input envelope must decode"),
+            envelope
+        );
+        let value: ciborium::Value =
+            ciborium::from_reader(encoded.as_slice()).expect("encoded envelope must be CBOR");
+        let ciborium::Value::Map(fields) = value else {
+            panic!("envelope must encode as a CBOR map");
+        };
+        let arrow = fields
+            .into_iter()
+            .find_map(|(key, value)| {
+                (key == ciborium::Value::Text("arrow_ipc_batch".into())).then_some(value)
+            })
+            .expect("input envelope must contain arrow_ipc_batch");
+        assert_eq!(arrow, ciborium::Value::Bytes(vec![0, 1, 2, 255]));
+    }
+
+    #[test]
+    fn mixed_output_envelope_cbor_round_trip() {
+        let envelope = WasmEnvelope::output(
+            "enriched_events",
+            vec![
+                WasmOutputColumn::Input { column_index: 0 },
+                WasmOutputColumn::GuestArrow { ipc: vec![9, 8, 7] },
+            ],
+            WasmAckSidecar {
+                rows: vec![output_row(11)],
+                acked: vec![token_set(12)],
+                nacked: Vec::new(),
+                message_errors: Vec::new(),
+            },
+        );
+
+        let encoded = envelope.encode().expect("output envelope must encode");
+        assert_eq!(
+            WasmEnvelope::decode(&encoded).expect("output envelope must decode"),
+            envelope
+        );
+    }
+
+    #[test]
+    fn envelope_decode_rejects_unknown_missing_and_trailing_data() {
+        let unknown_field = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("input".into()),
+            ),
+            (
+                ciborium::Value::Text("arrow_ipc_batch".into()),
+                ciborium::Value::Bytes(Vec::new()),
+            ),
+            (
+                ciborium::Value::Text("acks".into()),
+                empty_ack_sidecar_value(),
+            ),
+            (ciborium::Value::Text("extra".into()), ciborium::Value::Null),
+        ]);
+        let missing_field = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("input".into()),
+            ),
+            (
+                ciborium::Value::Text("acks".into()),
+                empty_ack_sidecar_value(),
+            ),
+        ]);
+        let unknown_kind = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("legacy".into()),
+            ),
+            (
+                ciborium::Value::Text("acks".into()),
+                empty_ack_sidecar_value(),
+            ),
+        ]);
+        let integer_array_arrow_payload = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("input".into()),
+            ),
+            (
+                ciborium::Value::Text("arrow_ipc_batch".into()),
+                ciborium::Value::Array(vec![ciborium::Value::Integer(1.into())]),
+            ),
+            (
+                ciborium::Value::Text("acks".into()),
+                empty_ack_sidecar_value(),
+            ),
+        ]);
+        let unknown_column_kind = output_envelope_value(ciborium::Value::Map(vec![(
+            ciborium::Value::Text("kind".into()),
+            ciborium::Value::Text("legacy".into()),
+        )]));
+        let malformed_ack_sidecar = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("input".into()),
+            ),
+            (
+                ciborium::Value::Text("arrow_ipc_batch".into()),
+                ciborium::Value::Bytes(Vec::new()),
+            ),
+            (
+                ciborium::Value::Text("acks".into()),
+                ciborium::Value::Map(vec![
+                    (
+                        ciborium::Value::Text("rows".into()),
+                        ciborium::Value::Array(vec![ciborium::Value::Map(vec![(
+                            ciborium::Value::Text("tokens".into()),
+                            ciborium::Value::Array(Vec::new()),
+                        )])]),
+                    ),
+                    (
+                        ciborium::Value::Text("acked".into()),
+                        ciborium::Value::Array(Vec::new()),
+                    ),
+                    (
+                        ciborium::Value::Text("nacked".into()),
+                        ciborium::Value::Array(Vec::new()),
+                    ),
+                    (
+                        ciborium::Value::Text("message_errors".into()),
+                        ciborium::Value::Array(Vec::new()),
+                    ),
+                ]),
+            ),
+        ]);
+        for (case, value) in [
+            ("unknown field", unknown_field),
+            ("missing field", missing_field),
+            ("unknown kind", unknown_kind),
+            ("integer-array Arrow payload", integer_array_arrow_payload),
+            ("unknown column kind", unknown_column_kind),
+            ("malformed ACK sidecar", malformed_ack_sidecar),
+        ] {
+            let mut encoded = Vec::new();
+            ciborium::into_writer(&value, &mut encoded).expect("test CBOR must encode");
+            assert!(
+                WasmEnvelope::decode(&encoded).is_err(),
+                "{case} must be rejected"
+            );
+        }
+
+        let mut trailing = WasmEnvelope::input_arrow_only(Vec::new())
+            .encode()
+            .expect("input envelope must encode");
+        trailing.push(0);
+        assert!(matches!(
+            WasmEnvelope::decode(&trailing),
+            Err(WasmProtocolError::TrailingEnvelopeBytes { remaining: 1 })
+        ));
+    }
+
+    fn empty_ack_sidecar_value() -> ciborium::Value {
+        ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("rows".into()),
+                ciborium::Value::Array(Vec::new()),
+            ),
+            (
+                ciborium::Value::Text("acked".into()),
+                ciborium::Value::Array(Vec::new()),
+            ),
+            (
+                ciborium::Value::Text("nacked".into()),
+                ciborium::Value::Array(Vec::new()),
+            ),
+            (
+                ciborium::Value::Text("message_errors".into()),
+                ciborium::Value::Array(Vec::new()),
+            ),
+        ])
+    }
+
+    fn output_envelope_value(column: ciborium::Value) -> ciborium::Value {
+        ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("output".into()),
+            ),
+            (
+                ciborium::Value::Text("output_relay".into()),
+                ciborium::Value::Text("events".into()),
+            ),
+            (
+                ciborium::Value::Text("columns".into()),
+                ciborium::Value::Array(vec![column]),
+            ),
+            (
+                ciborium::Value::Text("acks".into()),
+                empty_ack_sidecar_value(),
+            ),
+        ])
     }
 
     #[test]
@@ -1488,7 +1766,7 @@ mod tests {
         })
     }
 
-    async fn guest_flushes_on_timeout_and_periodic_boundary(path: &Path) {
+    async fn guest_emits_cbor_input_reference_output(path: &Path) {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(read_guest(path))
@@ -1501,435 +1779,119 @@ mod tests {
             )
             .await
             .expect("guest branch must instantiate");
-
-        assert_eq!(
-            branch
-                .current_domain_time()
-                .await
-                .expect("guest must read domain clock"),
-            Timestamp::from_unix_nanos(1_234)
+        let input = WasmEnvelope::input(
+            sample_arrow_ipc(&[1, 2, 3, 4]),
+            WasmAckSidecar {
+                rows: vec![
+                    output_row(10),
+                    output_row(20),
+                    output_row(30),
+                    output_row(40),
+                ],
+                acked: Vec::new(),
+                nacked: Vec::new(),
+                message_errors: Vec::new(),
+            },
         );
 
-        let first = sample_arrow_ipc(&[1, 2, 3, 4]);
-        let second = sample_arrow_ipc(&[5, 6, 7, 8]);
-        let third = sample_arrow_ipc(&[9, 10]);
-        let fourth = sample_arrow_ipc(&[11, 12, 13]);
-
         assert_eq!(
             branch
-                .process_batch(&first)
+                .process_envelope(&input)
                 .await
-                .expect("first batch must process"),
-            Vec::<Vec<u8>>::new()
+                .expect("first input must process"),
+            Vec::<WasmEnvelope>::new()
         );
         let timeout = branch
             .take_timeout_requests()
             .pop()
-            .expect("first batch should request a flush timeout");
-        assert_eq!(timeout.requested_at, Timestamp::from_unix_nanos(1_234));
-        assert_eq!(timeout.delay, Duration::from_secs(1));
-        let timeout_output = branch
-            .on_timeout(timeout.handle)
-            .await
-            .expect("timeout should flush pending batch");
-        assert_eq!(timeout_output.len(), 1);
-        assert_eq!(
-            decode_arrow_ipc_values(&timeout_output[0].arrow_ipc_batch),
-            vec![2, 4]
-        );
-
-        let second_output = branch
-            .process_batch(&second)
-            .await
-            .expect("second batch must process");
-        assert_eq!(second_output.len(), 1);
-        assert_eq!(decode_arrow_ipc_values(&second_output[0]), vec![6, 8]);
-        assert_eq!(
-            branch
-                .process_batch(&third)
-                .await
-                .expect("third batch must process"),
-            Vec::<Vec<u8>>::new()
-        );
-        let fourth_output = branch
-            .process_batch(&fourth)
-            .await
-            .expect("fourth batch must process");
-        assert_eq!(fourth_output.len(), 1);
-        assert_eq!(decode_arrow_ipc_values(&fourth_output[0]), vec![12]);
-    }
-
-    async fn guest_state_restoration_preserves_processed_row_count(path: &Path) {
-        let runtime = runtime();
-        let compiled = runtime
-            .compile_processor(read_guest(path))
-            .expect("guest module must compile");
-        let mut branch = compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_000))),
-                None,
-            )
-            .await
-            .expect("guest branch must instantiate");
-
-        assert_eq!(
-            branch
-                .process_batch(&sample_arrow_ipc(&[1, 2, 3]))
-                .await
-                .expect("first batch must process"),
-            Vec::<Vec<u8>>::new()
-        );
-        let timeout = branch
-            .take_timeout_requests()
-            .pop()
-            .expect("first batch should request a flush timeout");
-        let first_output = branch
-            .on_timeout(timeout.handle)
-            .await
-            .expect("timeout should flush first batch");
-        assert_eq!(first_output.len(), 1);
-        assert_eq!(
-            decode_arrow_ipc_values(&first_output[0].arrow_ipc_batch),
-            vec![2]
-        );
-
-        let saved_state = branch.save_state().await.expect("state must dump");
-        let mut restored = compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(6_000))),
-                Some(&saved_state),
-            )
-            .await
-            .expect("restored guest branch must instantiate");
-
-        let restored_output = restored
-            .process_batch(&sample_arrow_ipc(&[4, 5, 6]))
-            .await
-            .expect("restored branch must process next batch");
-        assert_eq!(restored_output.len(), 1);
-        assert_eq!(decode_arrow_ipc_values(&restored_output[0]), vec![4, 6]);
-    }
-
-    async fn guest_preserves_and_completes_ack_sidecar(path: &Path) {
-        let runtime = runtime();
-        let compiled = runtime
-            .compile_processor(read_guest(path))
-            .expect("guest module must compile");
-        let mut branch = compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_000))),
-                None,
-            )
-            .await
-            .expect("guest branch must instantiate");
-
-        assert_eq!(
-            branch
-                .process_envelope(&WasmBatchEnvelope::new(
-                    sample_arrow_ipc(&[1, 2, 3, 4]),
-                    WasmAckSidecar {
-                        rows: vec![row_ack(10), row_ack(20), row_ack(30), row_ack(40),],
-                        acked: Vec::new(),
-                        nacked: Vec::new(),
-                        message_errors: Vec::new(),
-                    },
-                ))
-                .await
-                .expect("first batch must process"),
-            Vec::<WasmBatchEnvelope>::new()
-        );
-        let timeout = branch
-            .take_timeout_requests()
-            .pop()
-            .expect("first batch should request a flush timeout");
+            .expect("guest should request a timeout");
         let output = branch
             .on_timeout(timeout.handle)
             .await
-            .expect("timeout should flush pending batch");
+            .expect("timeout must emit output");
         assert_eq!(output.len(), 1);
-        assert_eq!(
-            decode_arrow_ipc_values(&output[0].arrow_ipc_batch),
-            vec![2, 4]
-        );
-        assert_eq!(output[0].acks.rows, vec![row_ack(20), row_ack(40)]);
-        assert_eq!(output[0].acks.acked, vec![row_ack(10), row_ack(30)]);
-        assert_eq!(output[0].acks.nacked, Vec::<WasmNackSet>::new());
+        let WasmEnvelope::Output {
+            output_relay,
+            columns,
+            acks,
+        } = &output[0]
+        else {
+            panic!("guest must emit an output envelope");
+        };
+        assert_eq!(output_relay, "output_events");
+        assert_eq!(columns, &[WasmOutputColumn::Input { column_index: 0 }]);
+        assert_eq!(acks.rows, vec![output_row(20), output_row(40)]);
+        assert_eq!(acks.acked, vec![token_set(10), token_set(30)]);
     }
 
     #[tokio::test]
-    async fn go_guest_filters_rust_guest_output_envelope() {
-        let runtime = runtime();
-        let rust_compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
-            .expect("rust guest module must compile");
-        let go_compiled = runtime
-            .compile_processor(read_guest(&go_guest_path()))
-            .expect("go guest module must compile");
-        let mut rust_branch = rust_compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_000))),
-                None,
-            )
-            .await
-            .expect("rust guest branch must instantiate");
-        let mut go_branch = go_compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_000))),
-                None,
-            )
-            .await
-            .expect("go guest branch must instantiate");
-
-        rust_branch
-            .process_envelope(&WasmBatchEnvelope::new(
-                sample_arrow_ipc(&[1, 2, 3, 4]),
-                WasmAckSidecar {
-                    rows: vec![row_ack(10), row_ack(20), row_ack(30), row_ack(40)],
-                    acked: Vec::new(),
-                    nacked: Vec::new(),
-                    message_errors: Vec::new(),
-                },
-            ))
-            .await
-            .expect("rust guest first batch must process");
-        let rust_timeout = rust_branch
-            .take_timeout_requests()
-            .pop()
-            .expect("rust guest should request flush timeout");
-        let rust_output = rust_branch
-            .on_timeout(rust_timeout.handle)
-            .await
-            .expect("rust guest timeout should flush");
-        assert_eq!(rust_output.len(), 1);
-        assert_eq!(
-            decode_arrow_ipc_values(&rust_output[0].arrow_ipc_batch),
-            vec![2, 4]
-        );
-
-        let go_output = go_branch
-            .process_envelope(&rust_output[0])
-            .await
-            .expect("go guest must accept rust guest output envelope");
-        assert_eq!(go_output, Vec::<WasmBatchEnvelope>::new());
-        let go_timeout = go_branch
-            .take_timeout_requests()
-            .pop()
-            .expect("go guest should request flush timeout");
-        let go_output = go_branch
-            .on_timeout(go_timeout.handle)
-            .await
-            .expect("go guest timeout should flush");
-        assert_eq!(go_output.len(), 1);
-        assert_eq!(
-            decode_arrow_ipc_values(&go_output[0].arrow_ipc_batch),
-            vec![4]
-        );
-        assert_eq!(go_output[0].acks.rows, vec![row_ack(40)]);
-        assert_eq!(
-            go_output[0].acks.acked,
-            vec![row_ack(10), row_ack(30), row_ack(20)]
-        );
+    async fn rust_guest_interoperates_with_host_cbor_format() {
+        guest_emits_cbor_input_reference_output(&rust_guest_path()).await;
     }
 
     #[tokio::test]
-    async fn go_guest_handles_many_rust_guest_output_envelopes() {
-        let runtime = runtime();
-        let rust_compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
-            .expect("rust guest module must compile");
-        let go_compiled = runtime
-            .compile_processor(read_guest(&go_guest_path()))
-            .expect("go guest module must compile");
-        let mut rust_branch = rust_compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_000))),
-                None,
-            )
-            .await
-            .expect("rust guest branch must instantiate");
-        let mut go_branch = go_compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_000))),
-                None,
-            )
-            .await
-            .expect("go guest branch must instantiate");
+    async fn rust_guest_output_omits_unchanged_string_payloads() {
+        const SENTINEL: &str = "UNCHANGED_PAYLOAD_SENTINEL";
 
-        let values = (1..=100_i32).collect::<Vec<_>>();
-        assert_eq!(
-            rust_branch
-                .process_envelope(&WasmBatchEnvelope::new(
-                    sample_arrow_ipc(&values),
-                    WasmAckSidecar {
-                        rows: Vec::new(),
-                        acked: Vec::new(),
-                        nacked: Vec::new(),
-                        message_errors: Vec::new(),
-                    },
-                ))
-                .await
-                .expect("rust guest must process input envelope"),
-            Vec::<WasmBatchEnvelope>::new()
-        );
-
-        let mut observed = Vec::new();
-        for timeout in rust_branch.take_timeout_requests() {
-            let rust_outputs = rust_branch
-                .on_timeout(timeout.handle)
-                .await
-                .expect("rust guest timeout must flush");
-            for rust_output in rust_outputs {
-                let go_outputs = go_branch
-                    .process_envelope(&rust_output)
-                    .await
-                    .expect("go guest must process rust timeout output envelope");
-                for go_output in go_outputs {
-                    observed.extend(decode_arrow_ipc_values(&go_output.arrow_ipc_batch));
-                }
-            }
-        }
-        for timeout in go_branch.take_timeout_requests() {
-            let go_outputs = go_branch
-                .on_timeout(timeout.handle)
-                .await
-                .expect("go guest timeout must flush");
-            for go_output in go_outputs {
-                observed.extend(decode_arrow_ipc_values(&go_output.arrow_ipc_batch));
-            }
-        }
-
-        assert!(observed.contains(&100));
-    }
-
-    #[tokio::test]
-    async fn go_guest_timeout_survives_state_dump_after_process() {
         let runtime = runtime();
         let compiled = runtime
-            .compile_processor(read_guest(&go_guest_path()))
-            .expect("go guest module must compile");
+            .compile_processor(read_guest(&rust_guest_path()))
+            .expect("guest module must compile");
         let mut branch = compiled
             .instantiate_branch(
-                init(),
+                string_passthrough_init(),
                 Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
                 None,
             )
             .await
-            .expect("go guest branch must instantiate");
+            .expect("guest branch must instantiate");
+        let input = WasmEnvelope::input(
+            sample_arrow_ipc_with_strings(&[1, 2], &["dropped", SENTINEL]),
+            WasmAckSidecar {
+                rows: vec![output_row(10), output_row(20)],
+                acked: Vec::new(),
+                nacked: Vec::new(),
+                message_errors: Vec::new(),
+            },
+        );
 
-        assert_eq!(
+        assert!(
             branch
-                .process_envelope(&WasmBatchEnvelope::new(
-                    sample_arrow_ipc(&[1, 2, 3, 4]),
-                    WasmAckSidecar {
-                        rows: vec![row_ack(10), row_ack(20), row_ack(30), row_ack(40)],
-                        acked: Vec::new(),
-                        nacked: Vec::new(),
-                        message_errors: Vec::new(),
-                    },
-                ))
+                .process_envelope(&input)
                 .await
-                .expect("go guest first batch must process"),
-            Vec::<WasmBatchEnvelope>::new()
+                .expect("input must process")
+                .is_empty()
         );
         let timeout = branch
             .take_timeout_requests()
             .pop()
-            .expect("go guest should request flush timeout");
-
-        let _saved_state = branch.save_state().await.expect("state must dump");
-        let output = branch
+            .expect("guest should request a timeout");
+        let outputs = branch
             .on_timeout(timeout.handle)
             .await
-            .expect("timeout should flush pending batch after state dump");
-
-        assert_eq!(output.len(), 1);
+            .expect("timeout must emit output");
+        let WasmEnvelope::Output { columns, .. } = &outputs[0] else {
+            panic!("guest must emit an output envelope");
+        };
         assert_eq!(
-            decode_arrow_ipc_values(&output[0].arrow_ipc_batch),
-            vec![2, 4]
+            columns,
+            &[
+                WasmOutputColumn::Input { column_index: 0 },
+                WasmOutputColumn::Input { column_index: 1 },
+            ]
         );
-        assert_eq!(output[0].acks.rows, vec![row_ack(20), row_ack(40)]);
+        let encoded = outputs[0].encode().expect("output envelope must encode");
+        assert!(
+            !encoded
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL.as_bytes()),
+            "unchanged string payload must not be serialized guest-to-host"
+        );
     }
 
     #[tokio::test]
-    async fn go_guest_filters_repeated_single_row_rust_outputs() {
-        let runtime = runtime();
-        let rust_compiled = runtime
-            .compile_processor(read_guest(&rust_guest_path()))
-            .expect("rust guest module must compile");
-        let go_compiled = runtime
-            .compile_processor(read_guest(&go_guest_path()))
-            .expect("go guest module must compile");
-        let mut rust_branch = rust_compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_000))),
-                None,
-            )
-            .await
-            .expect("rust guest branch must instantiate");
-        let mut go_branch = go_compiled
-            .instantiate_branch(
-                init(),
-                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_000))),
-                None,
-            )
-            .await
-            .expect("go guest branch must instantiate");
-
-        let mut go_values = Vec::new();
-        for value in 1..=8 {
-            let mut rust_outputs = rust_branch
-                .process_envelope(&WasmBatchEnvelope::new(
-                    sample_arrow_ipc(&[value]),
-                    WasmAckSidecar {
-                        rows: vec![row_ack(value as u64)],
-                        acked: Vec::new(),
-                        nacked: Vec::new(),
-                        message_errors: Vec::new(),
-                    },
-                ))
-                .await
-                .expect("rust guest single-row batch must process");
-            let rust_timeout = rust_branch
-                .take_timeout_requests()
-                .pop()
-                .expect("rust guest should request flush timeout");
-            rust_outputs.extend(
-                rust_branch
-                    .on_timeout(rust_timeout.handle)
-                    .await
-                    .expect("rust guest timeout should flush"),
-            );
-
-            for envelope in rust_outputs {
-                let process_output = go_branch
-                    .process_envelope(&envelope)
-                    .await
-                    .expect("go guest must process rust output envelope");
-                for envelope in process_output {
-                    go_values.extend(decode_arrow_ipc_values(&envelope.arrow_ipc_batch));
-                }
-                let Some(go_timeout) = go_branch.take_timeout_requests().pop() else {
-                    continue;
-                };
-                let go_output = go_branch
-                    .on_timeout(go_timeout.handle)
-                    .await
-                    .expect("go guest timeout should flush");
-                for envelope in go_output {
-                    go_values.extend(decode_arrow_ipc_values(&envelope.arrow_ipc_batch));
-                }
-            }
-        }
-
-        assert_eq!(go_values, vec![4, 8]);
+    async fn go_guest_interoperates_with_host_cbor_format() {
+        guest_emits_cbor_input_reference_output(&go_guest_path()).await;
     }
 
     #[tokio::test]
@@ -1968,8 +1930,14 @@ mod tests {
             .await
             .expect("right batch must process");
 
-        assert_eq!(left_out, vec![b"left batch".to_vec()]);
-        assert_eq!(right_out, vec![b"right batch".to_vec()]);
+        assert_eq!(
+            left_out,
+            vec![WasmEnvelope::input_arrow_only(b"left batch".to_vec())]
+        );
+        assert_eq!(
+            right_out,
+            vec![WasmEnvelope::input_arrow_only(b"right batch".to_vec())]
+        );
         assert_eq!(
             left.timeout_requests()[0].requested_at,
             Timestamp::from_unix_nanos(100)
@@ -2029,10 +1997,13 @@ mod tests {
             .process_batch(b"stream me")
             .await
             .expect("batch must process");
-        assert_eq!(returned, vec![b"stream me".to_vec()]);
+        assert_eq!(
+            returned,
+            vec![WasmEnvelope::input_arrow_only(b"stream me".to_vec())]
+        );
         assert_eq!(
             receiver.recv().await.expect("emitted batch must arrive"),
-            WasmBatchEnvelope::arrow_only(b"stream me".to_vec())
+            WasmEnvelope::input_arrow_only(b"stream me".to_vec())
         );
     }
 
@@ -2072,40 +2043,13 @@ mod tests {
             .expect("batch must process");
         progress_task.abort();
 
-        assert_eq!(returned, vec![b"cpu".to_vec()]);
+        assert_eq!(
+            returned,
+            vec![WasmEnvelope::input_arrow_only(b"cpu".to_vec())]
+        );
         assert!(
             ticks.load(Ordering::Relaxed) > 0,
             "epoch async yielding should allow another task to run during guest execution"
         );
-    }
-
-    #[tokio::test]
-    async fn rust_guest_artifact_runs_in_isolation() {
-        guest_flushes_on_timeout_and_periodic_boundary(&rust_guest_path()).await;
-    }
-
-    #[tokio::test]
-    async fn go_guest_artifact_runs_in_isolation() {
-        guest_flushes_on_timeout_and_periodic_boundary(&go_guest_path()).await;
-    }
-
-    #[tokio::test]
-    async fn rust_guest_artifact_preserves_and_completes_ack_sidecar() {
-        guest_preserves_and_completes_ack_sidecar(&rust_guest_path()).await;
-    }
-
-    #[tokio::test]
-    async fn go_guest_artifact_preserves_and_completes_ack_sidecar() {
-        guest_preserves_and_completes_ack_sidecar(&go_guest_path()).await;
-    }
-
-    #[tokio::test]
-    async fn rust_guest_state_restoration_preserves_processed_row_count() {
-        guest_state_restoration_preserves_processed_row_count(&rust_guest_path()).await;
-    }
-
-    #[tokio::test]
-    async fn go_guest_state_restoration_preserves_processed_row_count() {
-        guest_state_restoration_preserves_processed_row_count(&go_guest_path()).await;
     }
 }

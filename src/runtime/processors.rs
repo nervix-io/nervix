@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     runtime_ack::AckSet,
-    runtime_schema::{CompiledSchema, RuntimeRecord, RuntimeRecordMetadata},
+    runtime_schema::{CompiledSchema, RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata},
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
@@ -30,6 +30,8 @@ pub(super) struct WasmAckContext {
     pub(super) acks: AckSet,
     pub(super) metadata: RuntimeRecordMetadata,
     pub(super) record: RuntimeRecord,
+    pub(super) input_batch: Arc<RuntimeRecordBatch>,
+    pub(super) input_row: usize,
 }
 
 #[derive(Debug, Clone)]

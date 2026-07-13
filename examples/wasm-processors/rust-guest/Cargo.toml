@@ -13,6 +13,7 @@ arrow-ipc = "54"
 arrow-schema = "54"
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 
 [profile.release]
 codegen-units = 1

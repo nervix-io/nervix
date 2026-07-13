@@ -12,14 +12,17 @@ use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use arc_swap::ArcSwapOption;
 use arrow_arith::boolean::and_kleene;
 use arrow_array::{
-    Array, ArrayRef, BooleanArray,
+    Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array,
     builder::{
         BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int8Builder,
         Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
         TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
     },
+    new_empty_array,
 };
+use arrow_ipc::reader::StreamReader;
 use arrow_schema::DataType as ArrowDataType;
+use arrow_select::{concat::concat as concat_arrow_arrays, take::take as take_arrow_array};
 use chrono::{TimeDelta, TimeZone, Utc};
 use dashmap::DashMap;
 use fjall::Database;
@@ -70,8 +73,8 @@ use nervix_vm::{
     infer_set_expr_types_for_bindings as infer_vm_set_expr_types_for_bindings,
 };
 use nervix_wasm::{
-    DomainClock as WasmDomainClock, WasmAckSidecar, WasmAckToken, WasmBatchEnvelope,
-    WasmBranchInit, WasmRowAckSet, WasmRuntime, WasmRuntimeConfig,
+    DomainClock as WasmDomainClock, WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmBranchInit,
+    WasmEnvelope, WasmOutputColumn, WasmOutputRow, WasmRuntime, WasmRuntimeConfig,
 };
 use ordered_float::OrderedFloat;
 use parking_lot::{Mutex as ParkingMutex, RwLock};
@@ -11994,13 +11997,14 @@ async fn flush_branch_wasm_processor(
                 node_kind,
                 processor,
                 error_policies,
-                forwarded.acks.iter(),
+                ack_map.values().map(|context| &context.acks),
                 format!(
                     "wasm processor '{}' failed to process batch: {}",
                     processor.as_str(),
                     error
                 ),
             );
+            ack_map.clear();
             return;
         }
     };
@@ -12171,7 +12175,7 @@ async fn ensure_wasm_processor_instance(
 fn wasm_envelope_from_relay_batch(
     batch: &RelayRecordBatch,
     next_ack_token: &mut u64,
-) -> Result<(WasmBatchEnvelope, WasmAckMap), String> {
+) -> Result<(WasmEnvelope, WasmAckMap), String> {
     let arrow_ipc_batch = batch.batch.to_arrow_ipc_bytes()?;
     if batch.records.len() != batch.acks.len() || batch.records.len() != batch.metadata.len() {
         return Err(format!(
@@ -12183,11 +12187,13 @@ fn wasm_envelope_from_relay_batch(
     }
     let mut rows = Vec::with_capacity(batch.acks.len());
     let mut ack_map = HashMap::with_capacity(batch.acks.len());
-    for (record, acks) in batch.records.iter().zip(batch.acks.iter()) {
+    let input_batch = Arc::new(batch.batch.clone());
+    for (input_row, (record, acks)) in batch.records.iter().zip(batch.acks.iter()).enumerate() {
         let token = *next_ack_token;
         *next_ack_token = next_ack_token.saturating_add(1);
-        rows.push(WasmRowAckSet {
+        rows.push(WasmOutputRow {
             tokens: vec![WasmAckToken(token)],
+            source_token: Some(WasmAckToken(token)),
         });
         ack_map.insert(
             token,
@@ -12195,11 +12201,13 @@ fn wasm_envelope_from_relay_batch(
                 acks: acks.clone(),
                 metadata: record.metadata().clone(),
                 record: record.clone(),
+                input_batch: Arc::clone(&input_batch),
+                input_row,
             },
         );
     }
     Ok((
-        WasmBatchEnvelope::new(
+        WasmEnvelope::input(
             arrow_ipc_batch,
             WasmAckSidecar {
                 rows,
@@ -12231,9 +12239,528 @@ struct WasmDecodedOutputBatch {
     input_records: Vec<Option<RuntimeRecord>>,
 }
 
+#[derive(Debug)]
+struct WasmMaterializedOutput {
+    output_route_index: usize,
+    schema: Arc<CompiledSchema>,
+    batch: RuntimeRecordBatch,
+    acks: WasmAckSidecar,
+}
+
+#[derive(Debug, Error)]
+enum WasmOutputError {
+    #[error("expected an output envelope at callback index {envelope_index}")]
+    UnexpectedEnvelopeKind { envelope_index: usize },
+    #[error("unknown WASM output relay '{output_relay}'")]
+    UnknownOutputRelay { output_relay: String },
+    #[error(
+        "WASM output relay '{output_relay}' has {actual} columns, but its destination schema has \
+         {expected} fields"
+    )]
+    OutputColumnCountMismatch {
+        output_relay: String,
+        expected: usize,
+        actual: usize,
+    },
+    #[error(
+        "WASM output relay '{output_relay}' field {field_index} ('{field_name}') has invalid \
+         guest Arrow IPC: {reason}"
+    )]
+    InvalidGuestArrowIpc {
+        output_relay: String,
+        field_index: usize,
+        field_name: String,
+        reason: String,
+    },
+    #[error(
+        "WASM output relay '{output_relay}' field {field_index} guest Arrow field mismatch: \
+         expected {expected}, actual {actual}"
+    )]
+    GuestArrowFieldMismatch {
+        output_relay: String,
+        field_index: usize,
+        expected: String,
+        actual: String,
+    },
+    #[error(
+        "WASM output relay '{output_relay}' field {field_index} guest Arrow row count mismatch: \
+         expected {expected}, actual {actual}"
+    )]
+    GuestArrowRowCountMismatch {
+        output_relay: String,
+        field_index: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error(
+        "WASM output relay '{output_relay}' field {field_index} references input column \
+         {column_index}, but the input schema has {input_column_count} fields"
+    )]
+    InputColumnOutOfRange {
+        output_relay: String,
+        field_index: usize,
+        column_index: u32,
+        input_column_count: usize,
+    },
+    #[error(
+        "WASM output relay '{output_relay}' field {field_index} references incompatible input \
+         column {column_index}: expected {expected}, actual {actual}"
+    )]
+    InputColumnTypeMismatch {
+        output_relay: String,
+        field_index: usize,
+        column_index: u32,
+        expected: String,
+        actual: String,
+    },
+    #[error("WASM output relay '{output_relay}' row {row_index} is missing a source token")]
+    MissingSourceToken {
+        output_relay: String,
+        row_index: usize,
+    },
+    #[error(
+        "WASM output relay '{output_relay}' row {row_index} references unknown source token \
+         {token}"
+    )]
+    UnknownSourceToken {
+        output_relay: String,
+        row_index: usize,
+        token: u64,
+    },
+    #[error(
+        "WASM output relay '{output_relay}' row {row_index} source token {token} is absent from \
+         row lineage"
+    )]
+    SourceTokenNotCarried {
+        output_relay: String,
+        row_index: usize,
+        token: u64,
+    },
+    #[error("invalid WASM token decision for token {token}: {reason}")]
+    InvalidTokenDecision { token: u64, reason: String },
+    #[error("failed to build WASM output batch for relay '{output_relay}': {reason}")]
+    OutputBatchBuild {
+        output_relay: String,
+        reason: String,
+    },
+}
+
+struct WasmOutputValidator<'a> {
+    ack_map: &'a WasmAckMap,
+    input_schema: &'a Arc<CompiledSchema>,
+    output_schemas: &'a [(Identifier, Arc<CompiledSchema>)],
+    output_routes: &'a RelayProcessorOutputsNode,
+}
+
+impl WasmOutputValidator<'_> {
+    fn validate(
+        &self,
+        outputs: Vec<WasmEnvelope>,
+    ) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
+        self.validate_token_decisions(&outputs)?;
+        outputs
+            .into_iter()
+            .enumerate()
+            .map(|(envelope_index, output)| self.materialize(envelope_index, output))
+            .collect()
+    }
+
+    fn validate_token_decisions(&self, outputs: &[WasmEnvelope]) -> Result<(), WasmOutputError> {
+        let mut carried_tokens = HashSet::<u64>::default();
+        let mut terminal_tokens = HashSet::<u64>::default();
+        for (envelope_index, output) in outputs.iter().enumerate() {
+            let WasmEnvelope::Output {
+                output_relay, acks, ..
+            } = output
+            else {
+                return Err(WasmOutputError::UnexpectedEnvelopeKind { envelope_index });
+            };
+            for (row_index, row) in acks.rows.iter().enumerate() {
+                if let Some(source_token) = row.source_token
+                    && !self.ack_map.contains_key(&source_token.0)
+                {
+                    return Err(WasmOutputError::UnknownSourceToken {
+                        output_relay: output_relay.clone(),
+                        row_index,
+                        token: source_token.0,
+                    });
+                }
+                let mut row_tokens = HashSet::<u64>::default();
+                for token in &row.tokens {
+                    if !self.ack_map.contains_key(&token.0) {
+                        return Err(WasmOutputError::InvalidTokenDecision {
+                            token: token.0,
+                            reason: "carried token is unknown to this branch instance".to_string(),
+                        });
+                    }
+                    if !row_tokens.insert(token.0) {
+                        return Err(WasmOutputError::InvalidTokenDecision {
+                            token: token.0,
+                            reason: "token occurs more than once in one output row".to_string(),
+                        });
+                    }
+                    carried_tokens.insert(token.0);
+                }
+            }
+            for token_set in &acks.acked {
+                self.validate_terminal_set(token_set, &mut terminal_tokens, "ACK")?;
+            }
+            for token_set in &acks.nacked {
+                self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "NACK")?;
+            }
+            for token_set in &acks.message_errors {
+                self.validate_terminal_tokens(
+                    &token_set.tokens,
+                    &mut terminal_tokens,
+                    "message error",
+                )?;
+            }
+        }
+        if let Some(token) = carried_tokens.intersection(&terminal_tokens).next() {
+            return Err(WasmOutputError::InvalidTokenDecision {
+                token: *token,
+                reason: "token is both carried and terminally completed in one callback"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_terminal_set(
+        &self,
+        token_set: &WasmAckTokenSet,
+        terminal_tokens: &mut HashSet<u64>,
+        decision: &str,
+    ) -> Result<(), WasmOutputError> {
+        self.validate_terminal_tokens(&token_set.tokens, terminal_tokens, decision)
+    }
+
+    fn validate_terminal_tokens(
+        &self,
+        tokens: &[WasmAckToken],
+        terminal_tokens: &mut HashSet<u64>,
+        decision: &str,
+    ) -> Result<(), WasmOutputError> {
+        for token in tokens {
+            if !self.ack_map.contains_key(&token.0) {
+                return Err(WasmOutputError::InvalidTokenDecision {
+                    token: token.0,
+                    reason: format!("terminal {decision} token is unknown to this branch instance"),
+                });
+            }
+            if !terminal_tokens.insert(token.0) {
+                return Err(WasmOutputError::InvalidTokenDecision {
+                    token: token.0,
+                    reason: "token receives more than one terminal decision in one callback"
+                        .to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn materialize(
+        &self,
+        envelope_index: usize,
+        output: WasmEnvelope,
+    ) -> Result<WasmMaterializedOutput, WasmOutputError> {
+        let WasmEnvelope::Output {
+            output_relay,
+            columns,
+            acks,
+        } = output
+        else {
+            return Err(WasmOutputError::UnexpectedEnvelopeKind { envelope_index });
+        };
+        let output_identifier =
+            Identifier::parse(&output_relay).map_err(|_| WasmOutputError::UnknownOutputRelay {
+                output_relay: output_relay.clone(),
+            })?;
+        let Some(schema) = wasm_output_schema(self.output_schemas, &output_identifier) else {
+            return Err(WasmOutputError::UnknownOutputRelay { output_relay });
+        };
+        let Some(output_route_index) = self
+            .output_routes
+            .routes
+            .iter()
+            .position(|route| route.relay == output_identifier)
+        else {
+            return Err(WasmOutputError::UnknownOutputRelay { output_relay });
+        };
+        let destination_schema = schema.arrow_schema();
+        let destination_fields = destination_schema.fields();
+        if columns.len() != destination_fields.len() {
+            return Err(WasmOutputError::OutputColumnCountMismatch {
+                output_relay,
+                expected: destination_fields.len(),
+                actual: columns.len(),
+            });
+        }
+        let has_input_columns = columns.iter().any(WasmOutputColumn::is_input);
+        self.validate_source_tokens(&output_relay, &acks.rows, has_input_columns)?;
+        let arrays = columns
+            .into_iter()
+            .zip(destination_fields)
+            .enumerate()
+            .map(|(field_index, (column, destination_field))| match column {
+                WasmOutputColumn::GuestArrow { ipc } => self.decode_guest_column(
+                    &output_relay,
+                    field_index,
+                    destination_field,
+                    acks.rows.len(),
+                    &ipc,
+                ),
+                WasmOutputColumn::Input { column_index } => self.materialize_input_column(
+                    &output_relay,
+                    field_index,
+                    destination_field,
+                    column_index,
+                    &acks.rows,
+                ),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let record_batch =
+            RecordBatch::try_new(destination_schema.clone(), arrays).map_err(|error| {
+                WasmOutputError::OutputBatchBuild {
+                    output_relay: output_relay.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+        let batch = RuntimeRecordBatch::from_record_batch(destination_schema, record_batch)
+            .map_err(|reason| WasmOutputError::OutputBatchBuild {
+                output_relay: output_relay.clone(),
+                reason,
+            })?;
+        Ok(WasmMaterializedOutput {
+            output_route_index,
+            schema: Arc::clone(schema),
+            batch,
+            acks,
+        })
+    }
+
+    fn validate_source_tokens(
+        &self,
+        output_relay: &str,
+        rows: &[WasmOutputRow],
+        required: bool,
+    ) -> Result<(), WasmOutputError> {
+        for (row_index, row) in rows.iter().enumerate() {
+            let Some(source_token) = row.source_token else {
+                if required {
+                    return Err(WasmOutputError::MissingSourceToken {
+                        output_relay: output_relay.to_string(),
+                        row_index,
+                    });
+                }
+                continue;
+            };
+            if !self.ack_map.contains_key(&source_token.0) {
+                return Err(WasmOutputError::UnknownSourceToken {
+                    output_relay: output_relay.to_string(),
+                    row_index,
+                    token: source_token.0,
+                });
+            }
+            if !row.tokens.contains(&source_token) {
+                return Err(WasmOutputError::SourceTokenNotCarried {
+                    output_relay: output_relay.to_string(),
+                    row_index,
+                    token: source_token.0,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_guest_column(
+        &self,
+        output_relay: &str,
+        field_index: usize,
+        destination_field: &Arc<arrow_schema::Field>,
+        row_count: usize,
+        ipc: &[u8],
+    ) -> Result<ArrayRef, WasmOutputError> {
+        let invalid = |reason: String| WasmOutputError::InvalidGuestArrowIpc {
+            output_relay: output_relay.to_string(),
+            field_index,
+            field_name: destination_field.name().to_string(),
+            reason,
+        };
+        if ipc.is_empty() {
+            return Err(invalid("IPC payload is empty".to_string()));
+        }
+        let mut cursor = std::io::Cursor::new(ipc);
+        let (actual_schema, batches) = {
+            let reader = StreamReader::try_new(&mut cursor, None)
+                .map_err(|error| invalid(error.to_string()))?;
+            let actual_schema = reader.schema();
+            let batches = reader
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| invalid(error.to_string()))?;
+            (actual_schema, batches)
+        };
+        let consumed = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
+        if consumed != ipc.len() {
+            return Err(invalid(format!(
+                "IPC stream has {} trailing bytes",
+                ipc.len().saturating_sub(consumed)
+            )));
+        }
+        if actual_schema.fields().len() != 1 {
+            return Err(invalid(format!(
+                "IPC schema has {} fields instead of exactly one",
+                actual_schema.fields().len()
+            )));
+        }
+        if batches.len() != 1 {
+            return Err(invalid(format!(
+                "IPC stream has {} record batches instead of exactly one",
+                batches.len()
+            )));
+        }
+        let actual_field = actual_schema.field(0);
+        if actual_field != destination_field.as_ref() {
+            return Err(WasmOutputError::GuestArrowFieldMismatch {
+                output_relay: output_relay.to_string(),
+                field_index,
+                expected: format!("{destination_field:?}"),
+                actual: format!("{actual_field:?}"),
+            });
+        }
+        let batch = &batches[0];
+        if batch.num_columns() != 1 {
+            return Err(invalid(format!(
+                "record batch has {} columns instead of exactly one",
+                batch.num_columns()
+            )));
+        }
+        if batch.num_rows() != row_count {
+            return Err(WasmOutputError::GuestArrowRowCountMismatch {
+                output_relay: output_relay.to_string(),
+                field_index,
+                expected: row_count,
+                actual: batch.num_rows(),
+            });
+        }
+        Ok(batch.column(0).clone())
+    }
+
+    fn materialize_input_column(
+        &self,
+        output_relay: &str,
+        field_index: usize,
+        destination_field: &Arc<arrow_schema::Field>,
+        column_index: u32,
+        rows: &[WasmOutputRow],
+    ) -> Result<ArrayRef, WasmOutputError> {
+        let input_index =
+            usize::try_from(column_index).map_err(|_| WasmOutputError::InputColumnOutOfRange {
+                output_relay: output_relay.to_string(),
+                field_index,
+                column_index,
+                input_column_count: self.input_schema.arrow_schema().fields().len(),
+            })?;
+        let input_schema = self.input_schema.arrow_schema();
+        let Some(source_field) = input_schema.fields().get(input_index) else {
+            return Err(WasmOutputError::InputColumnOutOfRange {
+                output_relay: output_relay.to_string(),
+                field_index,
+                column_index,
+                input_column_count: input_schema.fields().len(),
+            });
+        };
+        if source_field.data_type() != destination_field.data_type()
+            || source_field.is_nullable() != destination_field.is_nullable()
+        {
+            return Err(WasmOutputError::InputColumnTypeMismatch {
+                output_relay: output_relay.to_string(),
+                field_index,
+                column_index,
+                expected: format!("{destination_field:?}"),
+                actual: format!("{source_field:?}"),
+            });
+        }
+        if rows.is_empty() {
+            return Ok(new_empty_array(destination_field.data_type()));
+        }
+        let sources = rows
+            .iter()
+            .enumerate()
+            .map(|(row_index, row)| {
+                let source_token =
+                    row.source_token
+                        .ok_or_else(|| WasmOutputError::MissingSourceToken {
+                            output_relay: output_relay.to_string(),
+                            row_index,
+                        })?;
+                self.ack_map.get(&source_token.0).ok_or_else(|| {
+                    WasmOutputError::UnknownSourceToken {
+                        output_relay: output_relay.to_string(),
+                        row_index,
+                        token: source_token.0,
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let first = sources[0];
+        let one_batch = sources
+            .iter()
+            .all(|source| Arc::ptr_eq(&first.input_batch, &source.input_batch));
+        if one_batch {
+            let array = first.input_batch.batch().column(input_index);
+            let identity = sources.len() == first.input_batch.batch().num_rows()
+                && sources
+                    .iter()
+                    .enumerate()
+                    .all(|(row, source)| source.input_row == row);
+            if identity {
+                return Ok(array.clone());
+            }
+            let start = first.input_row;
+            let contiguous = sources
+                .iter()
+                .enumerate()
+                .all(|(offset, source)| source.input_row == start.saturating_add(offset));
+            if contiguous {
+                return Ok(array.slice(start, sources.len()));
+            }
+            let indices = UInt64Array::from_iter_values(
+                sources
+                    .iter()
+                    .map(|source| u64::try_from(source.input_row).unwrap_or(u64::MAX)),
+            );
+            return take_arrow_array(array.as_ref(), &indices, None).map_err(|error| {
+                WasmOutputError::OutputBatchBuild {
+                    output_relay: output_relay.to_string(),
+                    reason: error.to_string(),
+                }
+            });
+        }
+        let slices = sources
+            .iter()
+            .map(|source| {
+                source
+                    .input_batch
+                    .batch()
+                    .column(input_index)
+                    .slice(source.input_row, 1)
+            })
+            .collect::<Vec<_>>();
+        let arrays = slices
+            .iter()
+            .map(|array| array.as_ref())
+            .collect::<Vec<_>>();
+        concat_arrow_arrays(&arrays).map_err(|error| WasmOutputError::OutputBatchBuild {
+            output_relay: output_relay.to_string(),
+            reason: error.to_string(),
+        })
+    }
+}
+
 async fn dispatch_wasm_output_envelopes(
     context: WasmOutputContext<'_>,
-    outputs: Vec<WasmBatchEnvelope>,
+    outputs: Vec<WasmEnvelope>,
     ack_map: &mut WasmAckMap,
 ) -> Result<(), String> {
     let WasmOutputContext {
@@ -12249,119 +12776,53 @@ async fn dispatch_wasm_output_envelopes(
         key,
         dispatch_error,
     } = context;
-    let mut token_use_counts = wasm_output_token_use_counts(&outputs);
-    for output_envelope in outputs {
-        apply_wasm_sidecar_errors_and_completed_acks(
+    let validated_outputs = match (WasmOutputValidator {
+        ack_map,
+        input_schema,
+        output_schemas,
+        output_routes,
+    })
+    .validate(outputs)
+    {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            let reason = format!(
+                "wasm processor '{}' produced invalid output: {}",
+                processor.as_str(),
+                error
+            );
+            branch.runtime.handle_general_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                ack_map.values().map(|context| &context.acks),
+                reason,
+            );
+            ack_map.clear();
+            return Ok(());
+        }
+    };
+    let mut token_use_counts = wasm_output_token_use_counts(&validated_outputs);
+    for output in validated_outputs {
+        apply_wasm_sidecar_terminal_decisions(
             branch,
             node_kind,
             processor,
             error_policies,
             ack_map,
-            &output_envelope.acks,
+            &output.acks,
         )
-        .await?;
-        let output_relay = match output_envelope.output_relay.as_deref() {
-            Some(output_relay) => match Identifier::parse(output_relay) {
-                Ok(output_relay) => output_relay,
-                Err(error) => {
-                    let reason = format!(
-                        "wasm processor '{}' produced invalid output: {}",
-                        processor.as_str(),
-                        error
-                    );
-                    branch.runtime.handle_general_error_for_acks(
-                        &branch.domain,
-                        node_kind,
-                        processor,
-                        error_policies,
-                        ack_map.values().map(|context| &context.acks),
-                        reason,
-                    );
-                    ack_map.clear();
-                    return Ok(());
-                }
-            },
-            None => {
-                let reason = format!(
-                    "wasm processor '{}' produced output without an output relay",
-                    processor.as_str()
-                );
-                branch.runtime.handle_general_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    ack_map.values().map(|context| &context.acks),
-                    reason,
-                );
-                ack_map.clear();
-                return Ok(());
-            }
-        };
-        let Some(output_schema) = wasm_output_schema(output_schemas, &output_relay) else {
-            let reason = format!(
-                "wasm processor '{}' produced output for undeclared relay '{}'",
-                processor.as_str(),
-                output_relay.as_str()
-            );
-            branch.runtime.handle_general_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                ack_map.values().map(|context| &context.acks),
-                reason,
-            );
-            ack_map.clear();
-            return Ok(());
-        };
-        let Some(output_route) = output_routes
-            .routes
-            .iter_mut()
-            .find(|route| route.relay == output_relay)
-        else {
-            let reason = format!(
-                "wasm processor '{}' produced output for undeclared route '{}'",
-                processor.as_str(),
-                output_relay.as_str()
-            );
-            branch.runtime.handle_general_error_for_acks(
-                &branch.domain,
-                node_kind,
-                processor,
-                error_policies,
-                ack_map.values().map(|context| &context.acks),
-                reason,
-            );
-            ack_map.clear();
-            return Ok(());
-        };
-        let output_batch = match relay_batch_from_wasm_envelope(
+        .await;
+        let output_route = &mut output_routes.routes[output.output_route_index];
+        let output_batch = relay_batch_from_wasm_output(
             key,
-            output_schema,
-            output_envelope,
+            output.schema,
+            output.batch,
+            output.acks.rows,
             ack_map,
             &mut token_use_counts,
-        ) {
-            Ok(batch) => batch,
-            Err(error) => {
-                let reason = format!(
-                    "wasm processor '{}' produced invalid output: {}",
-                    processor.as_str(),
-                    error
-                );
-                branch.runtime.handle_general_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    ack_map.values().map(|context| &context.acks),
-                    reason,
-                );
-                ack_map.clear();
-                return Ok(());
-            }
-        };
+        )?;
         if output_batch.batch.message_count() == 0 {
             continue;
         }
@@ -12936,7 +13397,7 @@ fn wasm_output_schema<'a>(
         .find_map(|(relay, schema)| (relay == output_relay).then_some(schema))
 }
 
-fn wasm_output_token_use_counts(outputs: &[WasmBatchEnvelope]) -> HashMap<u64, usize> {
+fn wasm_output_token_use_counts(outputs: &[WasmMaterializedOutput]) -> HashMap<u64, usize> {
     let mut token_use_counts = HashMap::<u64, usize>::default();
     for output in outputs {
         for row in &output.acks.rows {
@@ -13009,16 +13470,14 @@ fn insert_wasm_filter_map_fields(
     }
 }
 
-async fn apply_wasm_sidecar_errors_and_completed_acks(
+async fn apply_wasm_sidecar_terminal_decisions(
     branch: &BranchRuntime,
     node_kind: &str,
     processor: &Identifier,
     error_policies: &ErrorPolicies,
     ack_map: &mut WasmAckMap,
     sidecar: &WasmAckSidecar,
-) -> Result<(), String> {
-    validate_wasm_sidecar_token_decisions(ack_map, sidecar)?;
-
+) {
     for message_error in &sidecar.message_errors {
         for token in &message_error.tokens {
             let context = ack_map
@@ -13045,7 +13504,7 @@ async fn apply_wasm_sidecar_errors_and_completed_acks(
         for token in &acked.tokens {
             let context = ack_map
                 .remove(&token.0)
-                .expect("terminal ack token should have been validated");
+                .expect("terminal ACK token should have been validated");
             context.acks.ack_success();
         }
     }
@@ -13053,77 +13512,10 @@ async fn apply_wasm_sidecar_errors_and_completed_acks(
         for token in &nacked.tokens {
             let context = ack_map
                 .remove(&token.0)
-                .expect("terminal nack token should have been validated");
+                .expect("terminal NACK token should have been validated");
             context.acks.no_ack(nacked.reason.clone());
         }
     }
-    Ok(())
-}
-
-fn validate_wasm_sidecar_token_decisions(
-    ack_map: &WasmAckMap,
-    sidecar: &WasmAckSidecar,
-) -> Result<(), String> {
-    let mut completed_tokens = HashSet::<u64>::default();
-    for acked in &sidecar.acked {
-        for token in &acked.tokens {
-            if !completed_tokens.insert(token.0) {
-                return Err(format!(
-                    "wasm output made more than one terminal ack decision for token {}",
-                    token.0
-                ));
-            }
-            if !ack_map.contains_key(&token.0) {
-                return Err(format!(
-                    "wasm output terminal ack referenced unknown ack token {}",
-                    token.0
-                ));
-            }
-        }
-    }
-    for nacked in &sidecar.nacked {
-        for token in &nacked.tokens {
-            if !completed_tokens.insert(token.0) {
-                return Err(format!(
-                    "wasm output made more than one terminal ack decision for token {}",
-                    token.0
-                ));
-            }
-            if !ack_map.contains_key(&token.0) {
-                return Err(format!(
-                    "wasm output terminal nack referenced unknown ack token {}",
-                    token.0
-                ));
-            }
-        }
-    }
-    for message_error in &sidecar.message_errors {
-        for token in &message_error.tokens {
-            if !completed_tokens.insert(token.0) {
-                return Err(format!(
-                    "wasm output made more than one terminal decision for token {}",
-                    token.0
-                ));
-            }
-            if !ack_map.contains_key(&token.0) {
-                return Err(format!(
-                    "wasm output message error referenced unknown ack token {}",
-                    token.0
-                ));
-            }
-        }
-    }
-    for row in &sidecar.rows {
-        for token in &row.tokens {
-            if completed_tokens.contains(&token.0) {
-                return Err(format!(
-                    "wasm output both carried and terminally completed ack token {}",
-                    token.0
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn persist_wasm_guest_state(
@@ -13147,69 +13539,56 @@ async fn persist_wasm_guest_state(
         .await
 }
 
-fn relay_batch_from_wasm_envelope(
+fn relay_batch_from_wasm_output(
     key: &Option<BranchKey>,
-    schema: &Arc<CompiledSchema>,
-    envelope: WasmBatchEnvelope,
+    schema: Arc<CompiledSchema>,
+    batch: RuntimeRecordBatch,
+    rows: Vec<WasmOutputRow>,
     ack_map: &mut WasmAckMap,
     token_use_counts: &mut HashMap<u64, usize>,
 ) -> Result<WasmDecodedOutputBatch, String> {
-    let batch =
-        RuntimeRecordBatch::from_arrow_ipc_bytes(schema.arrow_schema(), &envelope.arrow_ipc_batch)
-            .map_err(|error| format!("wasm output Arrow IPC is invalid: {error}"))?;
-    if batch.batch().num_rows() != envelope.acks.rows.len() {
-        return Err(format!(
-            "wasm output row count {} does not match ack sidecar row count {}",
-            batch.batch().num_rows(),
-            envelope.acks.rows.len()
+    let mut metadata = Vec::with_capacity(rows.len());
+    let mut acks = Vec::with_capacity(rows.len());
+    let mut input_records = Vec::with_capacity(rows.len());
+    for row in rows {
+        let source_context = row
+            .source_token
+            .and_then(|source_token| ack_map.get(&source_token.0));
+        metadata.push(source_context.map_or_else(
+            || {
+                let now = current_timestamp();
+                RuntimeRecordMetadata::from_ingested_at_watermarks(now, now)
+            },
+            |context| context.metadata.clone(),
         ));
-    }
-    let mut metadata = Vec::with_capacity(envelope.acks.rows.len());
-    let mut acks = Vec::with_capacity(envelope.acks.rows.len());
-    let mut input_records = Vec::with_capacity(envelope.acks.rows.len());
-    for row in envelope.acks.rows {
-        let mut row_ack_sets = Vec::new();
-        let mut row_metadata = None;
-        let mut row_input_record = None;
+        input_records.push(source_context.map(|context| context.record.clone()));
+
+        let mut row_ack_sets = Vec::with_capacity(row.tokens.len());
         for token in row.tokens {
-            let Some(context) = ack_map.get(&token.0) else {
-                return Err(format!(
-                    "wasm output referenced unknown ack token {}",
-                    token.0
-                ));
-            };
-            if row_metadata.is_none() {
-                row_metadata = Some(context.metadata.clone());
-            }
-            if row_input_record.is_none() {
-                row_input_record = Some(context.record.clone());
-            }
             let remaining_uses = token_use_counts
                 .get_mut(&token.0)
-                .expect("token use count should exist");
+                .expect("validated token use count should exist");
             if *remaining_uses > 1 {
                 *remaining_uses -= 1;
+                let context = ack_map
+                    .get(&token.0)
+                    .expect("validated carried token should remain live");
                 row_ack_sets.push(context.acks.attached());
             } else {
                 let context = ack_map
                     .remove(&token.0)
-                    .expect("last token use should still be present");
+                    .expect("last validated token use should remain live");
                 row_ack_sets.push(context.acks);
             }
         }
-        metadata.push(row_metadata.unwrap_or_else(|| {
-            let now = current_timestamp();
-            RuntimeRecordMetadata::from_ingested_at_watermarks(now, now)
-        }));
         acks.push(AckSet::merged(row_ack_sets));
-        input_records.push(row_input_record);
     }
-    RelayRecordBatch::from_runtime_batch(schema.clone(), key.clone(), batch, metadata, acks).map(
-        |batch| WasmDecodedOutputBatch {
+    RelayRecordBatch::from_runtime_batch(schema, key.clone(), batch, metadata, acks).map(|batch| {
+        WasmDecodedOutputBatch {
             batch,
             input_records,
-        },
-    )
+        }
+    })
 }
 
 fn generator_context_batch(

@@ -49,7 +49,7 @@ The host enforces a maximum guest buffer size. A guest should still validate siz
 
 ## Init Payload
 
-`nervix_init` receives CBOR. `output_schemas` contains one schema per declared `TO` relay. A guest output envelope must name one of those relays and its Arrow IPC batch must match that relay's schema before Nervix applies the route-level `SET` and `WHERE` clauses. `UNSET` is not valid on WASM output routes.
+`nervix_init` receives CBOR. `output_schemas` contains one schema per declared `TO` relay. A guest output envelope must name one of those relays and provide one destination-aligned column descriptor per field before Nervix applies the route-level `SET` and `WHERE` clauses. `UNSET` is not valid on WASM output routes.
 
 ```text
 {
@@ -104,26 +104,49 @@ Treat this as configuration for the branch instance. Store what you need in gues
 
 ## Batch Envelope
 
-Every input and output payload is:
+Every input or output payload is exactly one CBOR value. The existing ABI size
+argument or return value frames it, so the envelope has no manual length
+prefixes. Arrow IPC payloads are CBOR byte strings, not arrays of integers.
+
+Input envelopes have this shape:
 
 ```text
-u32 little-endian output relay name byte size
-UTF-8 output relay name bytes, empty on host-to-guest input
-u32 little-endian Arrow IPC stream byte size
-Arrow IPC stream bytes
-u32 little-endian ACK sidecar byte size
-CBOR ACK sidecar bytes
+{
+  "kind": "input",
+  "arrow_ipc_batch": bytes,
+  "acks": AckSidecar
+}
 ```
 
-Host-to-guest input envelopes leave the output relay name empty. Guest-to-host
-output envelopes must set it to the target relay for that Arrow IPC batch.
+Output envelopes have this shape:
+
+```text
+{
+  "kind": "output",
+  "output_relay": text,
+  "columns": [
+    { "kind": "input", "column_index": u32 },
+    { "kind": "guest_arrow", "ipc": bytes }
+  ],
+  "acks": AckSidecar
+}
+```
+
+Each `columns` entry corresponds positionally to a destination field. An
+`input` column references the declared processor input schema by index; the
+source and destination types and nullability must match exactly, although their
+names may differ. A `guest_arrow` column is a complete Arrow IPC stream with
+exactly one schema field, one record batch, and one column. That field must
+exactly match the destination field, including name, data type, nullability,
+timestamp properties, nested types, fixed lengths, and relevant metadata. Its
+row count must equal the number of output sidecar rows.
 
 The ACK sidecar is:
 
 ```text
 {
   "rows": [
-    { "tokens": [u64, ...] }
+    { "tokens": [u64, ...], "source_token": u64 | null }
   ],
   "acked": [
     { "tokens": [u64, ...] }
@@ -137,7 +160,20 @@ The ACK sidecar is:
 }
 ```
 
-`rows` is aligned with Arrow rows in the output batch. If an output row is derived from an input row, carry that input row's tokens into the output row. If the guest drops an input row, put that input row's token set in `acked`. If the guest wants to directly fail an input row without invoking the processor message error policy, put it in `nacked` with a reason.
+For every host input row, Nervix issues one token and sets both `tokens` and
+`source_token` to that token. Preserve the complete row sidecar when filtering
+or enriching. `source_token` is always encoded; use CBOR `null` only for a
+generated row that has no input source.
+
+If an output envelope contains any `input` column, every output row must have a
+non-null, live `source_token`, and that token must occur in the row's `tokens`.
+It selects the retained host input row used for every referenced column in that
+output row. It also selects the original record exposed through route
+expressions such as `input.field`. A source token does not add an ACK use.
+
+If the guest drops an input row, put that row's token set in `acked`. To fail it
+directly without invoking the processor message error policy, put it in
+`nacked` with a reason.
 
 Use `message_errors` for per-message guest errors that must be handled through `ON MESSAGE ERROR` (`IGNORE`, `LOG`, or `DLQ`). Global errors are not part of the ACK sidecar because they are guest/node state, not message lineage.
 
@@ -155,14 +191,30 @@ The guest decides lineage; the host performs the actual ACK/NACK operation. Toke
 
 The sidecar must be internally consistent:
 
-- `rows.len()` must equal the number of Arrow rows in the emitted batch.
+- `rows.len()` is the output row count and must equal every guest Arrow column's row count.
 - every token in `rows`, `acked`, `nacked`, and `message_errors` must come from the current host-provided input sidecar.
 - a token may be carried into output rows, or terminally acked/nacked, but not both.
 - a token may have at most one terminal decision across `acked`, `nacked`, and `message_errors`.
+- a non-null `source_token` must be live and carried in its output row.
 
-It is valid to carry the same input token into more than one emitted row. The
-host keeps attached child guards and resolves the original guard only after all
-derived output rows complete.
+It is valid to carry the same input token into more than one emitted row or
+output envelope. The host keeps attached child guards and resolves the original
+guard only after all derived deliveries complete. All output envelopes from
+one callback are validated together; no output is dispatched and no terminal
+decision is applied if a later envelope is invalid.
+
+For input references, Nervix retains the original input Arrow batch while its
+tokens are live. Identity selections reuse the source `ArrayRef`, contiguous
+selections use a buffer-sharing slice, and filtered, reordered, duplicated, or
+cross-batch selections use host-side Arrow kernels. The guest never has to
+serialize unchanged field values back to the host.
+
+All fields are required, including empty arrays. Unknown or missing fields,
+unknown `kind` values, trailing CBOR bytes, invalid column counts, bad source
+tokens, malformed or trailing Arrow IPC, and exact-schema mismatches are global
+processor errors. Old length-prefixed envelopes are not supported.
+There is no protocol version, magic prefix, feature negotiation, legacy
+decoder, or fallback path. Rebuild every guest for this CBOR contract.
 
 ## State
 
@@ -172,6 +224,12 @@ Nervix saves guest state through `nervix_dump_state`, persists and replicates th
 
 ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor reacts according to its delivery mode and retry policy.
 
+A guest may include a pending CBOR envelope in its opaque snapshot, but tokens
+and input-column references remain usable only while the originating live host
+ACK map exists. Restored output that refers to lost tokens is rejected. Guest
+load code must reject old-format pending envelopes rather than silently reset
+the snapshot.
+
 ## Timeouts
 
 A guest can call `nervix_timeout_after_nanos(delay)` while processing. The host returns a monotonically increasing handle for that branch instance. When the domain clock reaches the requested time, the host calls:
@@ -180,7 +238,7 @@ A guest can call `nervix_timeout_after_nanos(delay)` while processing. The host 
 nervix_on_timeout(handle)
 ```
 
-After any successful timeout callback, the host calls `nervix_read_emit()` and forwards emitted envelopes.
+After any successful timeout callback, the host calls `nervix_read_emit()` and forwards emitted envelopes. Input-column references remain valid in timeout output while their source token is live.
 
 ## Rust Sketch
 
@@ -208,7 +266,7 @@ pub extern "C" fn nervix_alloc(size: i32) -> i32 {
 pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
     with_state(|state| {
         let input = &state.buffer[..size as usize];
-        let envelope = match BatchEnvelope::decode(input) {
+        let envelope = match WasmEnvelope::decode(input) {
             Ok(envelope) => envelope,
             Err(code) => return code,
         };
@@ -245,31 +303,34 @@ The core filtering flow in the prototype is:
 
 ```rust
 fn filter_envelope_by_global_row(
-    envelope: BatchEnvelope,
+    envelope: WasmEnvelope,
     start_row: u64,
     output_schemas: &[ProcessorSchema],
-) -> Result<Vec<BatchEnvelope>, i32> {
-    let input = read_single_i32_batch(&envelope.arrow_ipc_batch)?;
-    let mut kept_values = Vec::new();
+) -> Result<Vec<WasmEnvelope>, i32> {
+    let WasmEnvelope::Input { arrow_ipc_batch, acks } = envelope else {
+        return Err(-5);
+    };
+    let input = read_single_i32_batch(&arrow_ipc_batch)?;
     let mut output_acks = AckSidecar::default();
 
-    for (row, value) in input.iter().enumerate() {
+    for row in 0..input.len() {
         let global_row = start_row + row as u64;
-        let row_tokens = envelope.acks.rows.get(row).cloned().unwrap_or_default();
+        let row_sidecar = acks.rows.get(row).cloned().ok_or(-5)?;
         if global_row % 2 == 1 {
-            kept_values.push(*value);
-            output_acks.rows.push(row_tokens);
+            output_acks.rows.push(row_sidecar);
         } else {
-            output_acks.acked.push(row_tokens);
+            output_acks.acked.push(AckTokenSet {
+                tokens: row_sidecar.tokens,
+            });
         }
     }
 
     output_schemas
         .iter()
         .map(|schema| {
-            Ok(BatchEnvelope {
-                output_relay: Some(schema.name.clone()),
-                arrow_ipc_batch: write_output_batch_for_schema(schema, &kept_values)?,
+            Ok(WasmEnvelope::Output {
+                output_relay: schema.name.clone(),
+                columns: vec![WasmOutputColumn::Input { column_index: 0 }],
                 acks: output_acks.clone(),
             })
         })
@@ -346,7 +407,7 @@ func nervixAlloc(size int32) int32 {
 
 //export nervix_process_batch
 func nervixProcessBatch(size int32) int32 {
-    envelope, code := decodeBatchEnvelope(buffer[:int(size)])
+    envelope, code := decodeEnvelope(buffer[:int(size)])
     if code != 0 {
         return code
     }
@@ -372,12 +433,18 @@ sidecar structs should stay explicit:
 
 ```go
 type ackSidecar struct {
-    Rows   []rowAckSet `cbor:"rows"`
-    Acked  []rowAckSet `cbor:"acked"`
+    Rows   []outputRow `cbor:"rows"`
+    Acked  []ackTokenSet `cbor:"acked"`
     Nacked []nackSet   `cbor:"nacked"`
+    MessageErrors []messageErrorSet `cbor:"message_errors"`
 }
 
-type rowAckSet struct {
+type outputRow struct {
+    Tokens []uint64 `cbor:"tokens"`
+    SourceToken *uint64 `cbor:"source_token"`
+}
+
+type ackTokenSet struct {
     Tokens []uint64 `cbor:"tokens"`
 }
 
@@ -387,8 +454,12 @@ type nackSet struct {
 }
 ```
 
-The same filter contract applies in Go: preserve tokens for rows you emit, add
-dropped rows to `Acked`, and add rejected rows to `Nacked` with a reason.
+Use tagged `envelope` and `outputColumn` structs with exact snake-case CBOR
+keys. Validate the allowed fields for each `kind`; `omitempty` is not a variant
+validator. In particular, an input reference to column zero must still encode
+`column_index: 0`. The same filter contract applies in Go: preserve the complete
+row sidecar for rows you emit, add dropped rows to `Acked`, and add rejected
+rows to `Nacked` with a reason.
 
 Build:
 
@@ -401,7 +472,9 @@ just wasm-processor-go-guest
 - Do not use WASI imports. The host does not provide WASI.
 - Do not keep global mixed-branch state. Each module instance is branch-local.
 - Do not invent ACK tokens. Only carry, ack, or nack tokens that arrived in the input sidecar.
-- Do not emit an Arrow row without a matching sidecar row.
+- Do not omit `source_token` when preserving an input-derived row.
+- Do not emit a guest Arrow column without exactly one field, batch, and column.
+- Do not rebuild unchanged input fields in the guest; emit input-column references.
 - Do not ack/nack a token and also carry it into an emitted row.
 - Do not silently accept an init payload whose schema does not match what the guest implements.
 - Do not persist guest state in a custom host-facing format unless `load_state` can reject bad bytes cleanly.
@@ -425,10 +498,15 @@ just wasm-processor-go-guest
   limit. Split the output, reduce batch size, or change the runtime limit when
   that becomes configurable.
 
-`wasm output row count ... does not match ack sidecar row count ...`
+`guest Arrow row count ... does not match output row count ...`
 
-: The emitted Arrow batch and sidecar disagree. Emit exactly one `rows` entry
-  for each Arrow row.
+: A generated column and the sidecar disagree. Emit exactly one `rows` entry
+  for each generated Arrow value.
+
+`missing source token for output row ...`
+
+: An output uses an input-column reference, but the row does not select a live
+  input row. Preserve the host-provided `source_token` and keep it in `tokens`.
 
 `wasm output referenced unknown ack token ...`
 

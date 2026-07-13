@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/nervix-wasm-processor-go-guest/tinyipc"
@@ -20,7 +21,6 @@ const (
 	defaultTimeoutNanos int64  = 1_000_000_000
 	flushEveryBatches   uint64 = 2
 	maxGuestBufferBytes        = 4 * 1024 * 1024
-	maxInt                     = int(^uint(0) >> 1)
 )
 
 //go:wasmimport env nervix_domain_time_nanos
@@ -57,10 +57,47 @@ type guestSnapshot struct {
 	ErrorState          string `cbor:"error_state"`
 }
 
-type batchEnvelope struct {
-	OutputRelay   string
-	ArrowIPCBatch []byte
-	Acks          ackSidecar
+type envelope struct {
+	Kind          string         `cbor:"kind"`
+	ArrowIPCBatch []byte         `cbor:"arrow_ipc_batch,omitempty"`
+	OutputRelay   string         `cbor:"output_relay,omitempty"`
+	Columns       []outputColumn `cbor:"columns,omitempty"`
+	Acks          ackSidecar     `cbor:"acks"`
+}
+
+type outputColumn struct {
+	Kind        string `cbor:"kind"`
+	IPC         []byte `cbor:"ipc,omitempty"`
+	ColumnIndex uint32 `cbor:"column_index,omitempty"`
+}
+
+func (column outputColumn) MarshalCBOR() ([]byte, error) {
+	if column.Kind == "input" {
+		return cbor.Marshal(struct {
+			Kind        string `cbor:"kind"`
+			ColumnIndex uint32 `cbor:"column_index"`
+		}{Kind: column.Kind, ColumnIndex: column.ColumnIndex})
+	}
+	if column.Kind == "guest_arrow" {
+		return cbor.Marshal(struct {
+			Kind string `cbor:"kind"`
+			IPC  []byte `cbor:"ipc"`
+		}{Kind: column.Kind, IPC: column.IPC})
+	}
+	return nil, errors.New("invalid output column kind")
+}
+
+type inputEnvelopeWire struct {
+	Kind          string     `cbor:"kind"`
+	ArrowIPCBatch []byte     `cbor:"arrow_ipc_batch"`
+	Acks          ackSidecar `cbor:"acks"`
+}
+
+type outputEnvelopeWire struct {
+	Kind        string         `cbor:"kind"`
+	OutputRelay string         `cbor:"output_relay"`
+	Columns     []outputColumn `cbor:"columns"`
+	Acks        ackSidecar     `cbor:"acks"`
 }
 
 type branchInitMetadata struct {
@@ -72,13 +109,18 @@ type processorSchema struct {
 }
 
 type ackSidecar struct {
-	Rows          []rowAckSet       `cbor:"rows"`
-	Acked         []rowAckSet       `cbor:"acked"`
+	Rows          []outputRow       `cbor:"rows"`
+	Acked         []ackTokenSet     `cbor:"acked"`
 	Nacked        []nackSet         `cbor:"nacked"`
 	MessageErrors []messageErrorSet `cbor:"message_errors"`
 }
 
-type rowAckSet struct {
+type outputRow struct {
+	Tokens      []uint64 `cbor:"tokens"`
+	SourceToken *uint64  `cbor:"source_token"`
+}
+
+type ackTokenSet struct {
 	Tokens []uint64 `cbor:"tokens"`
 }
 
@@ -182,9 +224,12 @@ func nervixProcessBatch(size int32) int32 {
 		processedBatches++
 		lastDomainTimeNanos = hostDomainTimeNanos()
 		lastTimeoutHandle = hostTimeoutAfterNanos(defaultTimeoutNanos)
-		envelope, code := decodeBatchEnvelope(buffer[:int(size)])
+		envelope, code := decodeEnvelope(buffer[:int(size)])
 		if code != success {
 			return code
+		}
+		if envelope.Kind != "input" {
+			return errEnvelope
 		}
 		firstValue, hasFirstValue, code := firstInt32Value(envelope.ArrowIPCBatch)
 		if code != success {
@@ -206,13 +251,19 @@ func nervixProcessBatch(size int32) int32 {
 			if len(outputRelays) > 0 {
 				errorEnvelope.OutputRelay = outputRelays[0]
 			}
-			encoded, code := encodeBatchEnvelope(errorEnvelope)
+			encoded, code := encodeEnvelope(errorEnvelope)
 			if code != success {
 				return code
 			}
 			pendingEmit = pendingEmit[:0]
 			pendingEmit = append(pendingEmit, encoded)
 			return success
+		}
+		pendingEmit = pendingEmit[:0]
+		if len(pendingBatch) > 0 {
+			if code := flushPending(); code != success {
+				return code
+			}
 		}
 		rowCount, code := arrowIPCRowCount(envelope.ArrowIPCBatch)
 		if code != success {
@@ -235,6 +286,7 @@ func nervixOnTimeout(handle int64) int32 {
 		if len(pendingBatch) == 0 {
 			return success
 		}
+		pendingEmit = pendingEmit[:0]
 		return flushPending()
 	})
 }
@@ -329,7 +381,7 @@ func flushPending() int32 {
 	if len(pendingBatch) == 0 {
 		return success
 	}
-	envelope, code := decodeBatchEnvelope(pendingBatch)
+	envelope, code := decodeEnvelope(pendingBatch)
 	if code != success {
 		return code
 	}
@@ -340,16 +392,17 @@ func flushPending() int32 {
 	if len(outputRelays) == 0 {
 		return errNotInitialized
 	}
-	pendingEmit = pendingEmit[:0]
 	for i := 0; i < len(outputRelays); i++ {
 		output := filtered
+		output.Kind = "output"
 		output.OutputRelay = outputRelays[i]
+		output.ArrowIPCBatch = nil
 		if i > 0 {
-			output.Acks.Acked = make([]rowAckSet, 0)
+			output.Acks.Acked = make([]ackTokenSet, 0)
 			output.Acks.Nacked = make([]nackSet, 0)
 			output.Acks.MessageErrors = make([]messageErrorSet, 0)
 		}
-		encoded, code := encodeBatchEnvelope(output)
+		encoded, code := encodeEnvelope(output)
 		if code != success {
 			return code
 		}
@@ -360,30 +413,43 @@ func flushPending() int32 {
 	return success
 }
 
-func encodeBatchEnvelope(envelope batchEnvelope) ([]byte, int32) {
-	envelope.Acks.normalize()
-	ackBytes := encodeAckSidecar(envelope.Acks)
-	if uint64(len(envelope.OutputRelay)) > uint64(^uint32(0)) ||
-		uint64(len(envelope.ArrowIPCBatch)) > uint64(^uint32(0)) ||
-		uint64(len(ackBytes)) > uint64(^uint32(0)) {
-		return nil, errEnvelope
+func encodeEnvelope(value envelope) ([]byte, int32) {
+	value.Acks.normalize()
+	if value.Kind == "input" {
+		encoded, err := cbor.Marshal(inputEnvelopeWire{
+			Kind:          value.Kind,
+			ArrowIPCBatch: value.ArrowIPCBatch,
+			Acks:          value.Acks,
+		})
+		if err != nil {
+			return nil, errEnvelope
+		}
+		return encoded, success
 	}
-	output := make([]byte, 0, 12+len(envelope.OutputRelay)+len(envelope.ArrowIPCBatch)+len(ackBytes))
-	output = appendUint32(output, uint32(len(envelope.OutputRelay)))
-	output = append(output, envelope.OutputRelay...)
-	output = appendUint32(output, uint32(len(envelope.ArrowIPCBatch)))
-	output = append(output, envelope.ArrowIPCBatch...)
-	output = appendUint32(output, uint32(len(ackBytes)))
-	output = append(output, ackBytes...)
-	return output, success
+	if value.Kind == "output" {
+		if value.Columns == nil {
+			value.Columns = make([]outputColumn, 0)
+		}
+		encoded, err := cbor.Marshal(outputEnvelopeWire{
+			Kind:        value.Kind,
+			OutputRelay: value.OutputRelay,
+			Columns:     value.Columns,
+			Acks:        value.Acks,
+		})
+		if err != nil {
+			return nil, errEnvelope
+		}
+		return encoded, success
+	}
+	return nil, errEnvelope
 }
 
 func (acks *ackSidecar) normalize() {
 	if acks.Rows == nil {
-		acks.Rows = make([]rowAckSet, 0)
+		acks.Rows = make([]outputRow, 0)
 	}
 	if acks.Acked == nil {
-		acks.Acked = make([]rowAckSet, 0)
+		acks.Acked = make([]ackTokenSet, 0)
 	}
 	if acks.Nacked == nil {
 		acks.Nacked = make([]nackSet, 0)
@@ -392,10 +458,14 @@ func (acks *ackSidecar) normalize() {
 		acks.MessageErrors = make([]messageErrorSet, 0)
 	}
 	for i := 0; i < len(acks.Rows); i++ {
-		acks.Rows[i].normalize()
+		if acks.Rows[i].Tokens == nil {
+			acks.Rows[i].Tokens = make([]uint64, 0)
+		}
 	}
 	for i := 0; i < len(acks.Acked); i++ {
-		acks.Acked[i].normalize()
+		if acks.Acked[i].Tokens == nil {
+			acks.Acked[i].Tokens = make([]uint64, 0)
+		}
 	}
 	for i := 0; i < len(acks.Nacked); i++ {
 		if acks.Nacked[i].Tokens == nil {
@@ -409,418 +479,140 @@ func (acks *ackSidecar) normalize() {
 	}
 }
 
-func (acks *rowAckSet) normalize() {
-	if acks.Tokens == nil {
-		acks.Tokens = make([]uint64, 0)
+func decodeEnvelope(data []byte) (envelope, int32) {
+	mode, err := cbor.DecOptions{
+		IndefLength:       cbor.IndefLengthForbidden,
+		ExtraReturnErrors: cbor.ExtraDecErrorUnknownField,
+	}.DecMode()
+	if err != nil {
+		return envelope{}, errEnvelope
 	}
-}
-
-func decodeBatchEnvelope(data []byte) (batchEnvelope, int32) {
-	if len(data) < 12 {
-		return batchEnvelope{}, errEnvelope
+	var raw map[string]cbor.RawMessage
+	if err := mode.Unmarshal(data, &raw); err != nil {
+		return envelope{}, errEnvelope
 	}
-	outputLen64 := uint64(readUint32(data))
-	if outputLen64 > uint64(maxInt) {
-		return batchEnvelope{}, errEnvelope
+	kindBytes, ok := raw["kind"]
+	if !ok {
+		return envelope{}, errEnvelope
 	}
-	outputLen := int(outputLen64)
-	outputStart := 4
-	outputEnd := outputStart + outputLen
-	if outputEnd < outputStart || outputEnd > len(data) || len(data)-outputEnd < 8 {
-		return batchEnvelope{}, errEnvelope
+	var kind string
+	if err := mode.Unmarshal(kindBytes, &kind); err != nil {
+		return envelope{}, errEnvelope
 	}
-	arrowLen64 := uint64(readUint32(data[outputEnd:]))
-	if arrowLen64 > uint64(maxInt) {
-		return batchEnvelope{}, errEnvelope
-	}
-	arrowLen := int(arrowLen64)
-	arrowStart := outputEnd + 4
-	arrowEnd := arrowStart + arrowLen
-	if arrowEnd < arrowStart || arrowEnd > len(data) || len(data)-arrowEnd < 4 {
-		return batchEnvelope{}, errEnvelope
-	}
-	ackLen64 := uint64(readUint32(data[arrowEnd:]))
-	if ackLen64 > uint64(maxInt) {
-		return batchEnvelope{}, errEnvelope
-	}
-	ackLen := int(ackLen64)
-	ackStart := arrowEnd + 4
-	if ackStart > len(data) || ackLen > len(data)-ackStart {
-		return batchEnvelope{}, errEnvelope
-	}
-	ackEnd := ackStart + ackLen
-	if ackEnd != len(data) {
-		return batchEnvelope{}, errEnvelope
-	}
-	acks, code := decodeAckSidecar(data[ackStart:ackEnd])
-	if code != success {
-		return batchEnvelope{}, errEnvelope
-	}
-	return batchEnvelope{
-		OutputRelay:   string(data[outputStart:outputEnd]),
-		ArrowIPCBatch: append([]byte(nil), data[arrowStart:arrowEnd]...),
-		Acks:          acks,
-	}, success
-}
-
-type cborReader struct {
-	data []byte
-	pos  int
-}
-
-func decodeAckSidecar(data []byte) (ackSidecar, int32) {
-	reader := cborReader{data: data}
-	length, code := reader.readMapLen()
-	if code != success {
-		return ackSidecar{}, code
-	}
-	acks := ackSidecar{}
-	for i := uint64(0); i < length; i++ {
-		key, code := reader.readText()
-		if code != success {
-			return ackSidecar{}, code
+	if kind == "input" {
+		if !hasExactFields(raw, "kind", "arrow_ipc_batch", "acks") {
+			return envelope{}, errEnvelope
 		}
-		switch key {
-		case "rows":
-			rows, code := reader.readRowAckSets()
-			if code != success {
-				return ackSidecar{}, code
-			}
-			acks.Rows = rows
-		case "acked":
-			acked, code := reader.readRowAckSets()
-			if code != success {
-				return ackSidecar{}, code
-			}
-			acks.Acked = acked
-		case "nacked":
-			nacked, code := reader.readNackSets()
-			if code != success {
-				return ackSidecar{}, code
-			}
-			acks.Nacked = nacked
-		case "message_errors":
-			messageErrors, code := reader.readMessageErrorSets()
-			if code != success {
-				return ackSidecar{}, code
-			}
-			acks.MessageErrors = messageErrors
-		default:
-			return ackSidecar{}, errEnvelope
+		if !isCBORByteString(raw["arrow_ipc_batch"]) {
+			return envelope{}, errEnvelope
 		}
-	}
-	if reader.pos != len(reader.data) {
-		return ackSidecar{}, errEnvelope
-	}
-	acks.normalize()
-	return acks, success
-}
-
-func (reader *cborReader) readRowAckSets() ([]rowAckSet, int32) {
-	length, code := reader.readArrayLen()
-	if code != success {
-		return nil, code
-	}
-	if length > uint64(maxInt) {
-		return nil, errEnvelope
-	}
-	rows := make([]rowAckSet, 0, int(length))
-	for i := uint64(0); i < length; i++ {
-		mapLen, code := reader.readMapLen()
-		if code != success {
-			return nil, code
+		if !validAckSidecar(mode, raw["acks"]) {
+			return envelope{}, errEnvelope
 		}
-		row := rowAckSet{}
-		for field := uint64(0); field < mapLen; field++ {
-			key, code := reader.readText()
-			if code != success {
-				return nil, code
-			}
-			if key != "tokens" {
-				return nil, errEnvelope
-			}
-			tokens, code := reader.readUintArray()
-			if code != success {
-				return nil, code
-			}
-			row.Tokens = tokens
+		var wire inputEnvelopeWire
+		if err := mode.Unmarshal(data, &wire); err != nil {
+			return envelope{}, errEnvelope
 		}
-		row.normalize()
-		rows = append(rows, row)
+		return envelope{
+			Kind:          wire.Kind,
+			ArrowIPCBatch: wire.ArrowIPCBatch,
+			Acks:          wire.Acks,
+		}, success
 	}
-	return rows, success
-}
-
-func (reader *cborReader) readNackSets() ([]nackSet, int32) {
-	length, code := reader.readArrayLen()
-	if code != success {
-		return nil, code
-	}
-	if length > uint64(maxInt) {
-		return nil, errEnvelope
-	}
-	nacks := make([]nackSet, 0, int(length))
-	for i := uint64(0); i < length; i++ {
-		mapLen, code := reader.readMapLen()
-		if code != success {
-			return nil, code
+	if kind == "output" {
+		if !hasExactFields(raw, "kind", "output_relay", "columns", "acks") {
+			return envelope{}, errEnvelope
 		}
-		nack := nackSet{}
-		for field := uint64(0); field < mapLen; field++ {
-			key, code := reader.readText()
-			if code != success {
-				return nil, code
-			}
-			switch key {
-			case "tokens":
-				tokens, code := reader.readUintArray()
-				if code != success {
-					return nil, code
-				}
-				nack.Tokens = tokens
-			case "reason":
-				reason, code := reader.readText()
-				if code != success {
-					return nil, code
-				}
-				nack.Reason = reason
-			default:
-				return nil, errEnvelope
+		if !validAckSidecar(mode, raw["acks"]) {
+			return envelope{}, errEnvelope
+		}
+		var rawColumns []cbor.RawMessage
+		if err := mode.Unmarshal(raw["columns"], &rawColumns); err != nil {
+			return envelope{}, errEnvelope
+		}
+		for i := 0; i < len(rawColumns); i++ {
+			if !validOutputColumn(mode, rawColumns[i]) {
+				return envelope{}, errEnvelope
 			}
 		}
-		if nack.Tokens == nil {
-			nack.Tokens = make([]uint64, 0)
+		var wire outputEnvelopeWire
+		if err := mode.Unmarshal(data, &wire); err != nil {
+			return envelope{}, errEnvelope
 		}
-		nacks = append(nacks, nack)
+		return envelope{
+			Kind:        wire.Kind,
+			OutputRelay: wire.OutputRelay,
+			Columns:     wire.Columns,
+			Acks:        wire.Acks,
+		}, success
 	}
-	return nacks, success
+	return envelope{}, errEnvelope
 }
 
-func (reader *cborReader) readMessageErrorSets() ([]messageErrorSet, int32) {
-	length, code := reader.readArrayLen()
-	if code != success {
-		return nil, code
+func validAckSidecar(mode cbor.DecMode, data []byte) bool {
+	var raw map[string]cbor.RawMessage
+	if err := mode.Unmarshal(data, &raw); err != nil {
+		return false
 	}
-	if length > uint64(maxInt) {
-		return nil, errEnvelope
+	if !hasExactFields(raw, "rows", "acked", "nacked", "message_errors") {
+		return false
 	}
-	errors := make([]messageErrorSet, 0, int(length))
-	for i := uint64(0); i < length; i++ {
-		mapLen, code := reader.readMapLen()
-		if code != success {
-			return nil, code
+	return validObjectArray(mode, raw["rows"], "tokens", "source_token") &&
+		validObjectArray(mode, raw["acked"], "tokens") &&
+		validObjectArray(mode, raw["nacked"], "tokens", "reason") &&
+		validObjectArray(mode, raw["message_errors"], "tokens", "reason")
+}
+
+func validObjectArray(mode cbor.DecMode, data []byte, expected ...string) bool {
+	var entries []cbor.RawMessage
+	if err := mode.Unmarshal(data, &entries); err != nil {
+		return false
+	}
+	for i := 0; i < len(entries); i++ {
+		var entry map[string]cbor.RawMessage
+		if err := mode.Unmarshal(entries[i], &entry); err != nil || !hasExactFields(entry, expected...) {
+			return false
 		}
-		messageError := messageErrorSet{}
-		for field := uint64(0); field < mapLen; field++ {
-			key, code := reader.readText()
-			if code != success {
-				return nil, code
-			}
-			switch key {
-			case "tokens":
-				tokens, code := reader.readUintArray()
-				if code != success {
-					return nil, code
-				}
-				messageError.Tokens = tokens
-			case "reason":
-				reason, code := reader.readText()
-				if code != success {
-					return nil, code
-				}
-				messageError.Reason = reason
-			default:
-				return nil, errEnvelope
-			}
+	}
+	return true
+}
+
+func validOutputColumn(mode cbor.DecMode, data []byte) bool {
+	var raw map[string]cbor.RawMessage
+	if err := mode.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	kindBytes, ok := raw["kind"]
+	if !ok {
+		return false
+	}
+	var kind string
+	if err := mode.Unmarshal(kindBytes, &kind); err != nil {
+		return false
+	}
+	if kind == "input" {
+		return hasExactFields(raw, "kind", "column_index")
+	}
+	if kind == "guest_arrow" {
+		return hasExactFields(raw, "kind", "ipc") && isCBORByteString(raw["ipc"])
+	}
+	return false
+}
+
+func isCBORByteString(data []byte) bool {
+	return len(data) > 0 && data[0]>>5 == 2 && data[0]&31 != 31
+}
+
+func hasExactFields(fields map[string]cbor.RawMessage, expected ...string) bool {
+	if len(fields) != len(expected) {
+		return false
+	}
+	for i := 0; i < len(expected); i++ {
+		if _, ok := fields[expected[i]]; !ok {
+			return false
 		}
-		if messageError.Tokens == nil {
-			messageError.Tokens = make([]uint64, 0)
-		}
-		errors = append(errors, messageError)
 	}
-	return errors, success
-}
-
-func (reader *cborReader) readUintArray() ([]uint64, int32) {
-	length, code := reader.readArrayLen()
-	if code != success {
-		return nil, code
-	}
-	if length > uint64(maxInt) {
-		return nil, errEnvelope
-	}
-	values := make([]uint64, 0, int(length))
-	for i := uint64(0); i < length; i++ {
-		value, code := reader.readUint()
-		if code != success {
-			return nil, code
-		}
-		values = append(values, value)
-	}
-	return values, success
-}
-
-func (reader *cborReader) readMapLen() (uint64, int32) {
-	major, value, code := reader.readHead()
-	if code != success || major != 5 {
-		return 0, errEnvelope
-	}
-	return value, success
-}
-
-func (reader *cborReader) readArrayLen() (uint64, int32) {
-	major, value, code := reader.readHead()
-	if code != success || major != 4 {
-		return 0, errEnvelope
-	}
-	return value, success
-}
-
-func (reader *cborReader) readText() (string, int32) {
-	major, length, code := reader.readHead()
-	if code != success || major != 3 || length > uint64(maxInt) {
-		return "", errEnvelope
-	}
-	size := int(length)
-	if size > len(reader.data)-reader.pos {
-		return "", errEnvelope
-	}
-	text := string(reader.data[reader.pos : reader.pos+size])
-	reader.pos += size
-	return text, success
-}
-
-func (reader *cborReader) readUint() (uint64, int32) {
-	major, value, code := reader.readHead()
-	if code != success || major != 0 {
-		return 0, errEnvelope
-	}
-	return value, success
-}
-
-func (reader *cborReader) readHead() (byte, uint64, int32) {
-	if reader.pos >= len(reader.data) {
-		return 0, 0, errEnvelope
-	}
-	head := reader.data[reader.pos]
-	reader.pos++
-	major := head >> 5
-	additional := head & 0x1f
-	if additional < 24 {
-		return major, uint64(additional), success
-	}
-	var size int
-	switch additional {
-	case 24:
-		size = 1
-	case 25:
-		size = 2
-	case 26:
-		size = 4
-	case 27:
-		size = 8
-	default:
-		return 0, 0, errEnvelope
-	}
-	if size > len(reader.data)-reader.pos {
-		return 0, 0, errEnvelope
-	}
-	var value uint64
-	for i := 0; i < size; i++ {
-		value = (value << 8) | uint64(reader.data[reader.pos+i])
-	}
-	reader.pos += size
-	return major, value, success
-}
-
-func encodeAckSidecar(acks ackSidecar) []byte {
-	output := make([]byte, 0, 64)
-	output = appendCborMapLen(output, 4)
-	output = appendCborText(output, "rows")
-	output = appendRowAckSets(output, acks.Rows)
-	output = appendCborText(output, "acked")
-	output = appendRowAckSets(output, acks.Acked)
-	output = appendCborText(output, "nacked")
-	output = appendNackSets(output, acks.Nacked)
-	output = appendCborText(output, "message_errors")
-	output = appendMessageErrorSets(output, acks.MessageErrors)
-	return output
-}
-
-func appendRowAckSets(output []byte, rows []rowAckSet) []byte {
-	output = appendCborArrayLen(output, uint64(len(rows)))
-	for i := 0; i < len(rows); i++ {
-		output = appendCborMapLen(output, 1)
-		output = appendCborText(output, "tokens")
-		output = appendUintArray(output, rows[i].Tokens)
-	}
-	return output
-}
-
-func appendNackSets(output []byte, nacks []nackSet) []byte {
-	output = appendCborArrayLen(output, uint64(len(nacks)))
-	for i := 0; i < len(nacks); i++ {
-		output = appendCborMapLen(output, 2)
-		output = appendCborText(output, "tokens")
-		output = appendUintArray(output, nacks[i].Tokens)
-		output = appendCborText(output, "reason")
-		output = appendCborText(output, nacks[i].Reason)
-	}
-	return output
-}
-
-func appendMessageErrorSets(output []byte, errors []messageErrorSet) []byte {
-	output = appendCborArrayLen(output, uint64(len(errors)))
-	for i := 0; i < len(errors); i++ {
-		output = appendCborMapLen(output, 2)
-		output = appendCborText(output, "tokens")
-		output = appendUintArray(output, errors[i].Tokens)
-		output = appendCborText(output, "reason")
-		output = appendCborText(output, errors[i].Reason)
-	}
-	return output
-}
-
-func appendUintArray(output []byte, values []uint64) []byte {
-	output = appendCborArrayLen(output, uint64(len(values)))
-	for i := 0; i < len(values); i++ {
-		output = appendCborUint(output, values[i])
-	}
-	return output
-}
-
-func appendCborMapLen(output []byte, length uint64) []byte {
-	return appendCborHead(output, 5, length)
-}
-
-func appendCborArrayLen(output []byte, length uint64) []byte {
-	return appendCborHead(output, 4, length)
-}
-
-func appendCborText(output []byte, text string) []byte {
-	output = appendCborHead(output, 3, uint64(len(text)))
-	return append(output, text...)
-}
-
-func appendCborUint(output []byte, value uint64) []byte {
-	return appendCborHead(output, 0, value)
-}
-
-func appendCborHead(output []byte, major byte, value uint64) []byte {
-	prefix := major << 5
-	if value < 24 {
-		return append(output, prefix|byte(value))
-	}
-	if value <= 0xff {
-		return append(output, prefix|24, byte(value))
-	}
-	if value <= 0xffff {
-		return append(output, prefix|25, byte(value>>8), byte(value))
-	}
-	if value <= 0xffffffff {
-		return append(output, prefix|26, byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
-	}
-	return append(output, prefix|27, byte(value>>56), byte(value>>48), byte(value>>40), byte(value>>32), byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+	return true
 }
 
 func readBufferRange(ptr int32, size int32) ([]byte, int32) {
@@ -866,6 +658,12 @@ func loadStateBytes(data []byte) int32 {
 	lastDomainTimeNanos = snapshot.LastDomainTimeNanos
 	lastTimeoutHandle = snapshot.LastTimeoutHandle
 	pendingBatch = append(pendingBatch[:0], snapshot.PendingBatch...)
+	if len(pendingBatch) > 0 {
+		pending, code := decodeEnvelope(pendingBatch)
+		if code != success || pending.Kind != "input" {
+			return errInvalidSize
+		}
+	}
 	initMetadata = append(initMetadata[:0], snapshot.InitMetadata...)
 	relays, code := outputRelaysFromInitMetadata(initMetadata)
 	if code != success {
@@ -886,47 +684,42 @@ func arrowIPCRowCount(data []byte) (uint64, int32) {
 	return stream.RowCount(), success
 }
 
-func filterEnvelopeByGlobalRow(envelope batchEnvelope, startRow uint64) (batchEnvelope, int32) {
-	stream, ok := tinyipc.ParseStream(envelope.ArrowIPCBatch)
+func filterEnvelopeByGlobalRow(input envelope, startRow uint64) (envelope, int32) {
+	if input.Kind != "input" {
+		return envelope{}, errEnvelope
+	}
+	stream, ok := tinyipc.ParseStream(input.ArrowIPCBatch)
 	if !ok {
-		return batchEnvelope{}, errArrowIPC
+		return envelope{}, errArrowIPC
 	}
 	outputAcks := ackSidecar{
-		Rows:          make([]rowAckSet, 0, len(envelope.Acks.Rows)),
-		Acked:         append([]rowAckSet(nil), envelope.Acks.Acked...),
-		Nacked:        append([]nackSet(nil), envelope.Acks.Nacked...),
-		MessageErrors: append([]messageErrorSet(nil), envelope.Acks.MessageErrors...),
+		Rows:          make([]outputRow, 0, len(input.Acks.Rows)),
+		Acked:         append([]ackTokenSet(nil), input.Acks.Acked...),
+		Nacked:        append([]nackSet(nil), input.Acks.Nacked...),
+		MessageErrors: append([]messageErrorSet(nil), input.Acks.MessageErrors...),
 	}
 	nextRow := startRow
 	inputRow := 0
-	outputBatches := make([]tinyipc.Batch, 0, len(stream.Batches))
 	for batchIndex := 0; batchIndex < len(stream.Batches); batchIndex++ {
 		inputBatch := stream.Batches[batchIndex]
-		outputBatch := inputBatch
-		outputBatch.Rows = make([]tinyipc.RowValue, 0, len(inputBatch.Rows)/2)
 		for row := 0; row < len(inputBatch.Rows); row++ {
+			if inputRow >= len(input.Acks.Rows) {
+				return envelope{}, errEnvelope
+			}
 			nextRow++
 			if nextRow%2 == 0 && inputBatch.Rows[row].Valid {
-				outputBatch.Rows = append(outputBatch.Rows, inputBatch.Rows[row])
-				if inputRow < len(envelope.Acks.Rows) {
-					outputAcks.Rows = append(outputAcks.Rows, envelope.Acks.Rows[inputRow])
-				} else {
-					outputAcks.Rows = append(outputAcks.Rows, rowAckSet{})
-				}
-			} else if inputRow < len(envelope.Acks.Rows) {
-				outputAcks.Acked = append(outputAcks.Acked, envelope.Acks.Rows[inputRow])
+				outputAcks.Rows = append(outputAcks.Rows, input.Acks.Rows[inputRow])
+			} else {
+				outputAcks.Acked = append(outputAcks.Acked, ackTokenSet{
+					Tokens: append([]uint64(nil), input.Acks.Rows[inputRow].Tokens...),
+				})
 			}
 			inputRow++
 		}
-		outputBatches = append(outputBatches, outputBatch)
 	}
-	output, ok := stream.EncodeBatches(outputBatches)
-	if !ok {
-		return batchEnvelope{}, errArrowIPC
-	}
-	return batchEnvelope{
-		ArrowIPCBatch: output,
-		Acks:          outputAcks,
+	return envelope{
+		Columns: []outputColumn{{Kind: "input", ColumnIndex: 0}},
+		Acks:    outputAcks,
 	}, success
 }
 
@@ -939,36 +732,19 @@ func firstInt32Value(data []byte) (int32, bool, int32) {
 	return value, found, success
 }
 
-func messageErrorEnvelope(envelope batchEnvelope, reason string) (batchEnvelope, int32) {
-	output, ok := tinyipc.EmptyLike(envelope.ArrowIPCBatch)
-	if !ok {
-		return batchEnvelope{}, errArrowIPC
-	}
+func messageErrorEnvelope(input envelope, reason string) (envelope, int32) {
 	tokens := []uint64(nil)
-	if len(envelope.Acks.Rows) > 0 {
-		tokens = append(tokens, envelope.Acks.Rows[0].Tokens...)
+	if len(input.Acks.Rows) > 0 {
+		tokens = append(tokens, input.Acks.Rows[0].Tokens...)
 	}
-	return batchEnvelope{
-		ArrowIPCBatch: output,
+	return envelope{
+		Kind:    "output",
+		Columns: []outputColumn{{Kind: "input", ColumnIndex: 0}},
 		Acks: ackSidecar{
-			Rows:          make([]rowAckSet, 0),
-			Acked:         append([]rowAckSet(nil), envelope.Acks.Acked...),
-			Nacked:        append([]nackSet(nil), envelope.Acks.Nacked...),
+			Rows:          make([]outputRow, 0),
+			Acked:         append([]ackTokenSet(nil), input.Acks.Acked...),
+			Nacked:        append([]nackSet(nil), input.Acks.Nacked...),
 			MessageErrors: []messageErrorSet{{Tokens: tokens, Reason: reason}},
 		},
 	}, success
-}
-
-func readUint32(data []byte) uint32 {
-	return uint32(data[0]) |
-		uint32(data[1])<<8 |
-		uint32(data[2])<<16 |
-		uint32(data[3])<<24
-}
-
-func appendUint32(out []byte, value uint32) []byte {
-	for shift := uint(0); shift < 32; shift += 8 {
-		out = append(out, byte(value>>shift))
-	}
-	return out
 }
