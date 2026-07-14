@@ -1372,6 +1372,20 @@ fn encode_remote_element_value(
             bytes.push(12);
             bytes.extend_from_slice(&value.to_bits().to_be_bytes());
         }
+        RemoteRuntimeElementValue::Array(values) => {
+            bytes.push(13);
+            encode_len(bytes, values.len())?;
+            for value in values {
+                encode_remote_element_value(bytes, value)?;
+            }
+        }
+        RemoteRuntimeElementValue::Vec(values) => {
+            bytes.push(14);
+            encode_len(bytes, values.len())?;
+            for value in values {
+                encode_remote_element_value(bytes, value)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1561,6 +1575,22 @@ impl<'a> WireCursor<'a> {
             10 => Ok(RemoteRuntimeElementValue::Datetime(self.read_string()?)),
             11 => Ok(RemoteRuntimeElementValue::F32(self.read_f32()?)),
             12 => Ok(RemoteRuntimeElementValue::F64(self.read_f64()?)),
+            13 => {
+                let len = self.read_len()?;
+                let mut values = Vec::with_capacity(len);
+                for _ in 0..len {
+                    values.push(self.read_remote_element_value()?);
+                }
+                Ok(RemoteRuntimeElementValue::Array(values))
+            }
+            14 => {
+                let len = self.read_len()?;
+                let mut values = Vec::with_capacity(len);
+                for _ in 0..len {
+                    values.push(self.read_remote_element_value()?);
+                }
+                Ok(RemoteRuntimeElementValue::Vec(values))
+            }
             tag => Err(TransportError::Decode(format!(
                 "unknown branch key element value tag {tag}"
             ))),

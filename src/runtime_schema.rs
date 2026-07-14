@@ -10,9 +10,10 @@ use arrow_array::{
     Scalar, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
     UInt64Array,
     builder::{
-        BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int8Builder,
-        Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
+        ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
+        Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
         TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+        make_builder,
     },
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
@@ -580,10 +581,9 @@ impl CompiledSchema {
                 field,
                 RuntimeValue::as_f64,
             )?))),
-            ParseAsType::Array { element, len } => {
-                build_fixed_size_list_column(records, field, element, *len)
+            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
+                build_recursive_arrow_column(records, field)
             }
-            ParseAsType::Vec { element } => build_list_column(records, field, element),
         }
     }
 }
@@ -1018,18 +1018,12 @@ impl RuntimeValue {
             Self::Datetime(v) => RemoteRuntimeValue::Datetime(v.to_rfc3339()),
             Self::F32(v) => RemoteRuntimeValue::F32(v.into_inner()),
             Self::F64(v) => RemoteRuntimeValue::F64(v.into_inner()),
-            Self::Array(v) => RemoteRuntimeValue::Array(
-                v.iter()
-                    .map(RuntimeValue::to_remote_element)
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("runtime arrays must contain scalar values"),
-            ),
-            Self::Vec(v) => RemoteRuntimeValue::Vec(
-                v.iter()
-                    .map(RuntimeValue::to_remote_element)
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("runtime vectors must contain scalar values"),
-            ),
+            Self::Array(v) => {
+                RemoteRuntimeValue::Array(v.iter().map(RuntimeValue::to_remote_element).collect())
+            }
+            Self::Vec(v) => {
+                RemoteRuntimeValue::Vec(v.iter().map(RuntimeValue::to_remote_element).collect())
+            }
         }
     }
 
@@ -1060,22 +1054,27 @@ impl RuntimeValue {
         }
     }
 
-    fn to_remote_element(&self) -> Result<RemoteRuntimeElementValue, ()> {
+    fn to_remote_element(&self) -> RemoteRuntimeElementValue {
         match self {
-            Self::U8(v) => Ok(RemoteRuntimeElementValue::U8(*v)),
-            Self::I8(v) => Ok(RemoteRuntimeElementValue::I8(*v)),
-            Self::U16(v) => Ok(RemoteRuntimeElementValue::U16(*v)),
-            Self::I16(v) => Ok(RemoteRuntimeElementValue::I16(*v)),
-            Self::U32(v) => Ok(RemoteRuntimeElementValue::U32(*v)),
-            Self::I32(v) => Ok(RemoteRuntimeElementValue::I32(*v)),
-            Self::U64(v) => Ok(RemoteRuntimeElementValue::U64(*v)),
-            Self::I64(v) => Ok(RemoteRuntimeElementValue::I64(*v)),
-            Self::Bool(v) => Ok(RemoteRuntimeElementValue::Bool(*v)),
-            Self::String(v) => Ok(RemoteRuntimeElementValue::String(v.clone())),
-            Self::Datetime(v) => Ok(RemoteRuntimeElementValue::Datetime(v.to_rfc3339())),
-            Self::F32(v) => Ok(RemoteRuntimeElementValue::F32(v.into_inner())),
-            Self::F64(v) => Ok(RemoteRuntimeElementValue::F64(v.into_inner())),
-            Self::Array(_) | Self::Vec(_) => Err(()),
+            Self::U8(v) => RemoteRuntimeElementValue::U8(*v),
+            Self::I8(v) => RemoteRuntimeElementValue::I8(*v),
+            Self::U16(v) => RemoteRuntimeElementValue::U16(*v),
+            Self::I16(v) => RemoteRuntimeElementValue::I16(*v),
+            Self::U32(v) => RemoteRuntimeElementValue::U32(*v),
+            Self::I32(v) => RemoteRuntimeElementValue::I32(*v),
+            Self::U64(v) => RemoteRuntimeElementValue::U64(*v),
+            Self::I64(v) => RemoteRuntimeElementValue::I64(*v),
+            Self::Bool(v) => RemoteRuntimeElementValue::Bool(*v),
+            Self::String(v) => RemoteRuntimeElementValue::String(v.clone()),
+            Self::Datetime(v) => RemoteRuntimeElementValue::Datetime(v.to_rfc3339()),
+            Self::F32(v) => RemoteRuntimeElementValue::F32(v.into_inner()),
+            Self::F64(v) => RemoteRuntimeElementValue::F64(v.into_inner()),
+            Self::Array(values) => RemoteRuntimeElementValue::Array(
+                values.iter().map(RuntimeValue::to_remote_element).collect(),
+            ),
+            Self::Vec(values) => RemoteRuntimeElementValue::Vec(
+                values.iter().map(RuntimeValue::to_remote_element).collect(),
+            ),
         }
     }
 
@@ -1097,6 +1096,12 @@ impl RuntimeValue {
             ),
             RemoteRuntimeElementValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeElementValue::F64(v) => Self::F64(OrderedFloat(v)),
+            RemoteRuntimeElementValue::Array(values) => {
+                Self::Array(values.into_iter().map(Self::from_remote_element).collect())
+            }
+            RemoteRuntimeElementValue::Vec(values) => {
+                Self::Vec(values.into_iter().map(Self::from_remote_element).collect())
+            }
         }
     }
 
@@ -2427,13 +2432,16 @@ fn runtime_value_to_avro_array_item(
         RuntimeValue::F64(v) => Ok(AvroValue::Double(v.into_inner())),
         RuntimeValue::String(v) => Ok(AvroValue::String(v.clone())),
         RuntimeValue::Datetime(v) => Ok(AvroValue::String(v.to_rfc3339())),
-        RuntimeValue::Array(_) | RuntimeValue::Vec(_) | RuntimeValue::U64(_) => {
-            Err(CodecError::EncodeField {
-                codec: codec.name.as_str().to_string(),
-                field: field.to_string(),
-                reason: "unsupported array item value".to_string(),
-            })
-        }
+        RuntimeValue::Array(values) | RuntimeValue::Vec(values) => values
+            .iter()
+            .map(|value| runtime_value_to_avro_array_item(codec, field, value))
+            .collect::<Result<Vec<_>, _>>()
+            .map(AvroValue::Array),
+        RuntimeValue::U64(_) => Err(CodecError::EncodeField {
+            codec: codec.name.as_str().to_string(),
+            field: field.to_string(),
+            reason: "array item U64 does not fit the Avro LONG representation".to_string(),
+        }),
     }
 }
 
@@ -2466,14 +2474,184 @@ fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
         ParseAsType::F32 => ArrowDataType::Float32,
         ParseAsType::F64 => ArrowDataType::Float64,
         ParseAsType::Array { element, len } => ArrowDataType::FixedSizeList(
-            ArrowFieldRef::new(ArrowField::new("item", arrow_data_type(element), true)),
+            ArrowFieldRef::new(ArrowField::new("item", arrow_data_type(element), false)),
             i32::try_from(*len).expect("array length must fit Arrow fixed-size list"),
         ),
         ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
             "item",
             arrow_data_type(element),
-            true,
+            false,
         ))),
+    }
+}
+
+fn build_recursive_arrow_column(
+    records: &[RuntimeRecord],
+    field: &CompiledSchemaField,
+) -> Result<ArrayRef, String> {
+    let mut builder = make_builder(&arrow_data_type(&field.ty), records.len());
+    for (row_index, record) in records.iter().enumerate() {
+        let value = record.value(&field.name);
+        if value.is_none() && !field.optional {
+            return Err(format!(
+                "record at row {row_index} is missing schema field '{}'",
+                field.name
+            ));
+        }
+        append_runtime_value_to_arrow(
+            builder.as_mut(),
+            &field.ty,
+            value,
+            &format!("record at row {row_index} field '{}'", field.name),
+        )?;
+    }
+    Ok(builder.finish())
+}
+
+fn append_runtime_value_to_arrow(
+    builder: &mut dyn ArrayBuilder,
+    ty: &ParseAsType,
+    value: Option<&RuntimeValue>,
+    context: &str,
+) -> Result<(), String> {
+    macro_rules! append_primitive {
+        ($builder:ty, $variant:path, $map:expr) => {{
+            let builder = builder
+                .as_any_mut()
+                .downcast_mut::<$builder>()
+                .ok_or_else(|| format!("{context} has an incompatible Arrow builder"))?;
+            match value {
+                Some($variant(value)) => {
+                    builder.append_value($map(value).ok_or_else(|| {
+                        format!("{context} value cannot be represented as {ty:?}")
+                    })?)
+                }
+                None => builder.append_null(),
+                Some(value) => {
+                    return Err(format!(
+                        "{context} expected {ty:?}, got {}",
+                        runtime_value_type_name(value)
+                    ));
+                }
+            }
+            Ok(())
+        }};
+    }
+
+    match ty {
+        ParseAsType::U8 => {
+            append_primitive!(UInt8Builder, RuntimeValue::U8, |value: &u8| Some(*value))
+        }
+        ParseAsType::I8 => {
+            append_primitive!(Int8Builder, RuntimeValue::I8, |value: &i8| Some(*value))
+        }
+        ParseAsType::U16 => {
+            append_primitive!(UInt16Builder, RuntimeValue::U16, |value: &u16| Some(*value))
+        }
+        ParseAsType::I16 => {
+            append_primitive!(Int16Builder, RuntimeValue::I16, |value: &i16| Some(*value))
+        }
+        ParseAsType::U32 => {
+            append_primitive!(UInt32Builder, RuntimeValue::U32, |value: &u32| Some(*value))
+        }
+        ParseAsType::I32 => {
+            append_primitive!(Int32Builder, RuntimeValue::I32, |value: &i32| Some(*value))
+        }
+        ParseAsType::U64 => {
+            append_primitive!(UInt64Builder, RuntimeValue::U64, |value: &u64| Some(*value))
+        }
+        ParseAsType::I64 => {
+            append_primitive!(Int64Builder, RuntimeValue::I64, |value: &i64| Some(*value))
+        }
+        ParseAsType::Bool => {
+            append_primitive!(BooleanBuilder, RuntimeValue::Bool, |value: &bool| Some(
+                *value
+            ))
+        }
+        ParseAsType::String => {
+            append_primitive!(StringBuilder, RuntimeValue::String, |value: &String| Some(
+                value.clone()
+            ))
+        }
+        ParseAsType::Datetime => append_primitive!(
+            TimestampNanosecondBuilder,
+            RuntimeValue::Datetime,
+            |value: &DateTime<FixedOffset>| value.timestamp_nanos_opt()
+        ),
+        ParseAsType::F32 => {
+            append_primitive!(Float32Builder, RuntimeValue::F32, |value: &OrderedFloat<
+                f32,
+            >| Some(
+                value.into_inner()
+            ))
+        }
+        ParseAsType::F64 => {
+            append_primitive!(Float64Builder, RuntimeValue::F64, |value: &OrderedFloat<
+                f64,
+            >| Some(
+                value.into_inner()
+            ))
+        }
+        ParseAsType::Array { element, len } => {
+            let builder = builder
+                .as_any_mut()
+                .downcast_mut::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>()
+                .ok_or_else(|| format!("{context} has an incompatible Arrow array builder"))?;
+            let values = match value {
+                Some(RuntimeValue::Array(values)) if values.len() == *len as usize => Some(values),
+                Some(RuntimeValue::Array(values)) => {
+                    return Err(format!(
+                        "{context} expected array length {len}, got {}",
+                        values.len()
+                    ));
+                }
+                None => None,
+                Some(value) => {
+                    return Err(format!(
+                        "{context} expected ARRAY, got {}",
+                        runtime_value_type_name(value)
+                    ));
+                }
+            };
+            for index in 0..*len as usize {
+                append_runtime_value_to_arrow(
+                    builder.values().as_mut(),
+                    element,
+                    values.map(|values| &values[index]),
+                    &format!("{context}[{index}]"),
+                )?;
+            }
+            builder.append(values.is_some());
+            Ok(())
+        }
+        ParseAsType::Vec { element } => {
+            let builder = builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>()
+                .ok_or_else(|| format!("{context} has an incompatible Arrow vector builder"))?;
+            let values = match value {
+                Some(RuntimeValue::Vec(values)) => Some(values),
+                None => None,
+                Some(value) => {
+                    return Err(format!(
+                        "{context} expected VEC, got {}",
+                        runtime_value_type_name(value)
+                    ));
+                }
+            };
+            if let Some(values) = values {
+                for (index, value) in values.iter().enumerate() {
+                    append_runtime_value_to_arrow(
+                        builder.values().as_mut(),
+                        element,
+                        Some(value),
+                        &format!("{context}[{index}]"),
+                    )?;
+                }
+            }
+            builder.append(values.is_some());
+            Ok(())
+        }
     }
 }
 
@@ -2506,31 +2684,6 @@ fn collect_optional_typed_values<T>(
         .collect()
 }
 
-fn list_values_for_field<'a>(
-    record: &'a RuntimeRecord,
-    field: &CompiledSchemaField,
-    row_index: usize,
-) -> Result<Option<&'a [RuntimeValue]>, String> {
-    let Some(value) = record.value(&field.name) else {
-        return if field.optional {
-            Ok(None)
-        } else {
-            Err(format!(
-                "record at row {row_index} is missing schema field '{}'",
-                field.name
-            ))
-        };
-    };
-    match value {
-        RuntimeValue::Array(values) | RuntimeValue::Vec(values) => Ok(Some(values)),
-        other => Err(format!(
-            "record at row {row_index} field '{}' expected list value, got {}",
-            field.name,
-            runtime_value_type_name(other)
-        )),
-    }
-}
-
 fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {
     match value {
         RuntimeValue::U8(_) => "U8",
@@ -2548,343 +2701,6 @@ fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {
         RuntimeValue::F64(_) => "F64",
         RuntimeValue::Array(_) => "ARRAY",
         RuntimeValue::Vec(_) => "VEC",
-    }
-}
-
-macro_rules! build_list_column_for_scalar {
-    ($records:expr, $field:expr, $extract:path, $builder:ty, $array:ty) => {{
-        let mut builder = ListBuilder::new(<$builder>::new());
-        for (row_index, record) in $records.iter().enumerate() {
-            let Some(values) = list_values_for_field(record, $field, row_index)? else {
-                builder.append(false);
-                continue;
-            };
-            for value in values {
-                if let Some(value) = $extract(value) {
-                    builder.values().append_value(value);
-                } else {
-                    builder.values().append_null();
-                }
-            }
-            builder.append(true);
-        }
-        Ok(Arc::new(builder.finish()) as ArrayRef)
-    }};
-}
-
-macro_rules! build_fixed_size_list_column_for_scalar {
-    ($records:expr, $field:expr, $len:expr, $extract:path, $builder:ty) => {{
-        let list_len = i32::try_from($len)
-            .map_err(|_| format!("array field '{}' length is too large", $field.name))?;
-        let mut builder = FixedSizeListBuilder::new(<$builder>::new(), list_len);
-        for (row_index, record) in $records.iter().enumerate() {
-            let Some(values) = list_values_for_field(record, $field, row_index)? else {
-                builder.append(false);
-                continue;
-            };
-            if values.len() != $len as usize {
-                return Err(format!(
-                    "record at row {row_index} field '{}' expected array length {}, got {}",
-                    $field.name,
-                    $len,
-                    values.len()
-                ));
-            }
-            for value in values {
-                if let Some(value) = $extract(value) {
-                    builder.values().append_value(value);
-                } else {
-                    builder.values().append_null();
-                }
-            }
-            builder.append(true);
-        }
-        Ok(Arc::new(builder.finish()) as ArrayRef)
-    }};
-}
-
-fn build_list_column(
-    records: &[RuntimeRecord],
-    field: &CompiledSchemaField,
-    element: &ParseAsType,
-) -> Result<ArrayRef, String> {
-    match element {
-        ParseAsType::U8 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_u8,
-            UInt8Builder,
-            UInt8Array
-        ),
-        ParseAsType::I8 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_i8,
-            Int8Builder,
-            Int8Array
-        ),
-        ParseAsType::U16 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_u16,
-            UInt16Builder,
-            UInt16Array
-        ),
-        ParseAsType::I16 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_i16,
-            Int16Builder,
-            Int16Array
-        ),
-        ParseAsType::U32 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_u32,
-            UInt32Builder,
-            UInt32Array
-        ),
-        ParseAsType::I32 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_i32,
-            Int32Builder,
-            Int32Array
-        ),
-        ParseAsType::U64 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_u64,
-            UInt64Builder,
-            UInt64Array
-        ),
-        ParseAsType::I64 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_i64,
-            Int64Builder,
-            Int64Array
-        ),
-        ParseAsType::Bool => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_bool,
-            BooleanBuilder,
-            BooleanArray
-        ),
-        ParseAsType::F32 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_f32,
-            Float32Builder,
-            Float32Array
-        ),
-        ParseAsType::F64 => build_list_column_for_scalar!(
-            records,
-            field,
-            RuntimeValue::as_f64,
-            Float64Builder,
-            Float64Array
-        ),
-        ParseAsType::String => {
-            let mut builder = ListBuilder::new(StringBuilder::new());
-            for (row_index, record) in records.iter().enumerate() {
-                let Some(values) = list_values_for_field(record, field, row_index)? else {
-                    builder.append(false);
-                    continue;
-                };
-                for value in values {
-                    if let Some(value) = value.as_string() {
-                        builder.values().append_value(value);
-                    } else {
-                        builder.values().append_null();
-                    }
-                }
-                builder.append(true);
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-        ParseAsType::Datetime => {
-            let value_builder = TimestampNanosecondBuilder::new().with_data_type(
-                ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into())),
-            );
-            let mut builder = ListBuilder::new(value_builder);
-            for (row_index, record) in records.iter().enumerate() {
-                let Some(values) = list_values_for_field(record, field, row_index)? else {
-                    builder.append(false);
-                    continue;
-                };
-                for value in values {
-                    if let Some(value) = value
-                        .as_datetime()
-                        .and_then(|value| value.timestamp_nanos_opt())
-                    {
-                        builder.values().append_value(value);
-                    } else {
-                        builder.values().append_null();
-                    }
-                }
-                builder.append(true);
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Err(format!(
-            "field '{}' uses unsupported list element type {:?}",
-            field.name, element
-        )),
-    }
-}
-
-fn build_fixed_size_list_column(
-    records: &[RuntimeRecord],
-    field: &CompiledSchemaField,
-    element: &ParseAsType,
-    len: u32,
-) -> Result<ArrayRef, String> {
-    match element {
-        ParseAsType::U8 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_u8,
-            UInt8Builder
-        ),
-        ParseAsType::I8 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_i8,
-            Int8Builder
-        ),
-        ParseAsType::U16 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_u16,
-            UInt16Builder
-        ),
-        ParseAsType::I16 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_i16,
-            Int16Builder
-        ),
-        ParseAsType::U32 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_u32,
-            UInt32Builder
-        ),
-        ParseAsType::I32 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_i32,
-            Int32Builder
-        ),
-        ParseAsType::U64 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_u64,
-            UInt64Builder
-        ),
-        ParseAsType::I64 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_i64,
-            Int64Builder
-        ),
-        ParseAsType::Bool => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_bool,
-            BooleanBuilder
-        ),
-        ParseAsType::F32 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_f32,
-            Float32Builder
-        ),
-        ParseAsType::F64 => build_fixed_size_list_column_for_scalar!(
-            records,
-            field,
-            len,
-            RuntimeValue::as_f64,
-            Float64Builder
-        ),
-        ParseAsType::String => {
-            let list_len = i32::try_from(len)
-                .map_err(|_| format!("array field '{}' length is too large", field.name))?;
-            let mut builder = FixedSizeListBuilder::new(StringBuilder::new(), list_len);
-            for (row_index, record) in records.iter().enumerate() {
-                let Some(values) = list_values_for_field(record, field, row_index)? else {
-                    builder.append(false);
-                    continue;
-                };
-                if values.len() != len as usize {
-                    return Err(format!(
-                        "record at row {row_index} field '{}' expected array length {}, got {}",
-                        field.name,
-                        len,
-                        values.len()
-                    ));
-                }
-                for value in values {
-                    if let Some(value) = value.as_string() {
-                        builder.values().append_value(value);
-                    } else {
-                        builder.values().append_null();
-                    }
-                }
-                builder.append(true);
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-        ParseAsType::Datetime => {
-            let list_len = i32::try_from(len)
-                .map_err(|_| format!("array field '{}' length is too large", field.name))?;
-            let value_builder = TimestampNanosecondBuilder::new().with_data_type(
-                ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into())),
-            );
-            let mut builder = FixedSizeListBuilder::new(value_builder, list_len);
-            for (row_index, record) in records.iter().enumerate() {
-                let Some(values) = list_values_for_field(record, field, row_index)? else {
-                    builder.append(false);
-                    continue;
-                };
-                if values.len() != len as usize {
-                    return Err(format!(
-                        "record at row {row_index} field '{}' expected array length {}, got {}",
-                        field.name,
-                        len,
-                        values.len()
-                    ));
-                }
-                for value in values {
-                    if let Some(value) = value
-                        .as_datetime()
-                        .and_then(|value| value.timestamp_nanos_opt())
-                    {
-                        builder.values().append_value(value);
-                    } else {
-                        builder.values().append_null();
-                    }
-                }
-                builder.append(true);
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Err(format!(
-            "field '{}' uses unsupported array element type {:?}",
-            field.name, element
-        )),
     }
 }
 
@@ -3121,20 +2937,16 @@ fn avro_type_json(
         && let Some(internal) = internal_fields
             .iter()
             .find(|internal| internal.name == field.name.as_str())
-        && let Some(item_ty) = parse_as_avro_item_type(&internal.ty)
+        && let ParseAsType::Array { .. } | ParseAsType::Vec { .. } = &internal.ty
     {
-        return format!(r#"{{"type":"array","items":"{}"}}"#, item_ty);
+        return parse_as_avro_type_json(&internal.ty);
     }
     format!(r#""{}""#, avro_type_name(field.ty))
 }
 
-fn parse_as_avro_item_type(ty: &ParseAsType) -> Option<&'static str> {
-    let element = match ty {
-        ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => element.as_ref(),
-        _ => return None,
-    };
-    match element {
-        ParseAsType::Bool => Some("boolean"),
+fn parse_as_avro_type_json(ty: &ParseAsType) -> String {
+    match ty {
+        ParseAsType::Bool => r#""boolean""#.to_string(),
         ParseAsType::U8
         | ParseAsType::I8
         | ParseAsType::U16
@@ -3142,11 +2954,14 @@ fn parse_as_avro_item_type(ty: &ParseAsType) -> Option<&'static str> {
         | ParseAsType::U32
         | ParseAsType::I32
         | ParseAsType::U64
-        | ParseAsType::I64 => Some("long"),
-        ParseAsType::F32 => Some("float"),
-        ParseAsType::F64 => Some("double"),
-        ParseAsType::String | ParseAsType::Datetime => Some("string"),
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => None,
+        | ParseAsType::I64 => r#""long""#.to_string(),
+        ParseAsType::F32 => r#""float""#.to_string(),
+        ParseAsType::F64 => r#""double""#.to_string(),
+        ParseAsType::String | ParseAsType::Datetime => r#""string""#.to_string(),
+        ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => format!(
+            r#"{{"type":"array","items":{}}}"#,
+            parse_as_avro_type_json(element)
+        ),
     }
 }
 
@@ -3486,6 +3301,73 @@ mod tests {
                 ]),
             ),
         ])
+    }
+
+    fn multidimensional_array_schema() -> CreateSchema {
+        CreateSchema {
+            name: identifier("shaped_metrics"),
+            fields: vec![
+                SchemaField {
+                    name: identifier("matrix"),
+                    ty: ParseAsType::Array {
+                        len: 2,
+                        element: Box::new(ParseAsType::Array {
+                            len: 3,
+                            element: Box::new(ParseAsType::F32),
+                        }),
+                    },
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: identifier("samples"),
+                    ty: ParseAsType::Vec {
+                        element: Box::new(ParseAsType::Array {
+                            len: 2,
+                            element: Box::new(ParseAsType::F32),
+                        }),
+                    },
+                    optional: false,
+                    sensitive: false,
+                },
+            ],
+        }
+    }
+
+    fn multidimensional_array_record() -> RuntimeRecord {
+        let f32_value = |value| RuntimeValue::F32(OrderedFloat(value));
+        RuntimeRecord::from_fields([
+            (
+                "matrix".to_string(),
+                RuntimeValue::Array(vec![
+                    RuntimeValue::Array(vec![f32_value(1.0), f32_value(2.0), f32_value(3.0)]),
+                    RuntimeValue::Array(vec![f32_value(4.0), f32_value(5.0), f32_value(6.0)]),
+                ]),
+            ),
+            (
+                "samples".to_string(),
+                RuntimeValue::Vec(vec![
+                    RuntimeValue::Array(vec![f32_value(10.0), f32_value(11.0)]),
+                    RuntimeValue::Array(vec![f32_value(20.0), f32_value(21.0)]),
+                    RuntimeValue::Array(vec![f32_value(30.0), f32_value(31.0)]),
+                ]),
+            ),
+        ])
+    }
+
+    fn multidimensional_avro_wire_schema() -> CreateWireSchemaStmt {
+        CreateWireSchemaStmt::Avro(CreateWireSchema {
+            name: identifier("shaped_metrics_wire"),
+            strictness: Default::default(),
+            fields: ["matrix", "samples"]
+                .into_iter()
+                .map(|name| WireSchemaField {
+                    name: identifier(name),
+                    ty: AvroType::Array,
+                    optional: false,
+                })
+                .collect(),
+        })
     }
 
     fn primitive_array_cases() -> Vec<(&'static str, ParseAsType, Vec<RuntimeValue>, Vec<JsonValue>)>
@@ -4077,6 +3959,56 @@ mod tests {
             array_record().value("cpu_last_64")
         );
         assert_eq!(roundtrip[0].value("labels"), array_record().value("labels"));
+    }
+
+    #[test]
+    fn arrow_roundtrips_multidimensional_fixed_and_variable_array_shapes() {
+        let schema = compile_schema(&multidimensional_array_schema());
+        let expected = multidimensional_array_record();
+        let batch = schema
+            .arrow_batch_from_records(std::slice::from_ref(&expected))
+            .expect("multidimensional arrays should convert to Arrow");
+
+        let arrow_schema = batch.batch().schema();
+        let ArrowDataType::FixedSizeList(matrix_rows, 2) = arrow_schema.field(0).data_type() else {
+            panic!("matrix should use nested fixed-size lists");
+        };
+        assert!(matches!(
+            matrix_rows.data_type(),
+            ArrowDataType::FixedSizeList(_, 3)
+        ));
+        let ArrowDataType::List(samples) = arrow_schema.field(1).data_type() else {
+            panic!("samples should use a variable outer list");
+        };
+        assert!(matches!(
+            samples.data_type(),
+            ArrowDataType::FixedSizeList(_, 2)
+        ));
+
+        let roundtrip = schema
+            .decoded_records_from_arrow_batch(&batch)
+            .expect("multidimensional arrays should roundtrip from Arrow");
+        assert_eq!(roundtrip[0].fields, expected.fields);
+    }
+
+    #[test]
+    fn avro_codec_roundtrips_multidimensional_fixed_and_variable_array_shapes() {
+        let schema = Arc::new(compile_schema(&multidimensional_array_schema()));
+        let codec = CreateCodec {
+            name: identifier("shaped_metrics_codec"),
+            wire_format: CodecWireFormat::Avro,
+            wire_schema: Some(identifier("shaped_metrics_wire")),
+            schema: identifier("shaped_metrics"),
+            encoding_rules: Vec::new(),
+        };
+        let codec = compile_codec(&codec, schema, Some(&multidimensional_avro_wire_schema()))
+            .expect("multidimensional Avro codec should compile");
+        let expected = multidimensional_array_record();
+
+        let payload = encode_with_codec(&codec, &expected).expect("must encode nested arrays");
+        let decoded = decode_with_codec(&codec, &payload).expect("must decode nested arrays");
+
+        assert_eq!(decoded.fields, expected.fields);
     }
 
     #[test]

@@ -202,6 +202,7 @@ pub enum Identifier {
     Parallel,
     Sequential,
     Batch,
+    Dynamic,
     Sample,
     Blocking,
     Dropping,

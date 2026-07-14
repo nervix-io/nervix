@@ -1480,33 +1480,34 @@ impl InferencerTensorSchema {
             .iter()
             .filter_map(|dimension| match dimension {
                 InferencerTensorDimension::Fixed(size) => Some(*size as usize),
-                InferencerTensorDimension::Batch => None,
+                InferencerTensorDimension::Dynamic | InferencerTensorDimension::Batch => None,
             })
             .try_fold(1_usize, usize::checked_mul)
     }
 
     pub fn is_compatible_with_field_type(&self, field_type: &ParseAsType) -> bool {
-        let Some(element_count) = self.fixed_element_count() else {
-            return false;
-        };
-        let has_fixed_dimensions = self.dimensions.iter().any(|dimension| {
-            if let InferencerTensorDimension::Fixed(_) = dimension {
-                true
-            } else {
-                false
+        let mut field_type = field_type;
+        for dimension in &self.dimensions {
+            match dimension {
+                InferencerTensorDimension::Fixed(expected) => {
+                    let ParseAsType::Array { element, len } = field_type else {
+                        return false;
+                    };
+                    if len != expected {
+                        return false;
+                    }
+                    field_type = element;
+                }
+                InferencerTensorDimension::Dynamic => {
+                    let ParseAsType::Vec { element } = field_type else {
+                        return false;
+                    };
+                    field_type = element;
+                }
+                InferencerTensorDimension::Batch => {}
             }
-        });
-        if !has_fixed_dimensions {
-            return field_type == &ParseAsType::F32;
         }
-        let Ok(element_count) = u32::try_from(element_count) else {
-            return false;
-        };
-        field_type
-            == &ParseAsType::Array {
-                element: Box::new(ParseAsType::F32),
-                len: element_count,
-            }
+        field_type == &ParseAsType::F32
     }
 }
 
@@ -1525,6 +1526,7 @@ pub enum InferencerTensorElementType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InferencerTensorDimension {
     Fixed(u32),
+    Dynamic,
     Batch,
 }
 
@@ -2211,8 +2213,9 @@ pub enum AckMode {
 mod tests {
     use super::{
         AckMode, BranchInitiatorSelection, BranchSelection, ClusterSchedule, CreateSchema,
-        DomainSchedule, ErrorPolicies, KafkaPartitionSchedule, MessageErrorPolicy, Model,
-        ModelKind, ScheduledNode,
+        DomainSchedule, ErrorPolicies, InferencerTensorDimension, InferencerTensorElementType,
+        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule,
+        MessageErrorPolicy, Model, ModelKind, ScheduledNode,
     };
     use crate::{
         CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Identifier, IngestSource,
@@ -2255,6 +2258,35 @@ mod tests {
         }
 
         assert_eq!(ModelKind::from_completion_label("ref:unknown"), None);
+    }
+
+    #[test]
+    fn inferencer_tensor_schema_requires_exact_array_axis_structure() {
+        let schema = InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions: vec![
+                InferencerTensorDimension::Fixed(2),
+                InferencerTensorDimension::Dynamic,
+                InferencerTensorDimension::Fixed(3),
+            ],
+        };
+        let exact = ParseAsType::Array {
+            len: 2,
+            element: Box::new(ParseAsType::Vec {
+                element: Box::new(ParseAsType::Array {
+                    len: 3,
+                    element: Box::new(ParseAsType::F32),
+                }),
+            }),
+        };
+        let flattened = ParseAsType::Array {
+            len: 6,
+            element: Box::new(ParseAsType::F32),
+        };
+
+        assert!(schema.is_compatible_with_field_type(&exact));
+        assert!(!schema.is_compatible_with_field_type(&flattened));
     }
 
     #[test]

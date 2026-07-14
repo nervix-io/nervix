@@ -14,9 +14,10 @@ use arrow_arith::boolean::and_kleene;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array,
     builder::{
-        BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int8Builder,
-        Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
+        ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
+        Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
         TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+        make_builder,
     },
     new_empty_array,
 };
@@ -10834,21 +10835,6 @@ fn materialized_record_from_entries(
         .find_map(|(entry_key, record)| (entry_key == key).then_some(record))
 }
 
-fn filter_map_list_values<'a>(
-    value: &'a RuntimeValue,
-    field: &arrow_schema::Field,
-) -> Result<&'a [RuntimeValue], String> {
-    match value {
-        RuntimeValue::Array(values) | RuntimeValue::Vec(values) => Ok(values),
-        _ => Err(format!(
-            "FILTER-MAP input field '{}' expected {:?}, got {}",
-            field.name(),
-            field.data_type(),
-            runtime_value_type_name(value)
-        )),
-    }
-}
-
 macro_rules! append_filter_map_numeric_list_value {
     ($builder:expr, $value:expr, $field:expr, $pattern:path) => {{
         match $value {
@@ -10992,287 +10978,145 @@ fn append_filter_map_datetime(
     }
 }
 
-macro_rules! build_filter_map_list_input {
-    ($records:expr, $filter_map_metadata:expr, $field:expr, $builder:expr, $append:expr) => {{
-        let mut builder = ListBuilder::new($builder);
-        for (index, record) in $records.iter().enumerate() {
-            let Some(value) = filter_map_input_value(record, $filter_map_metadata, index, $field)?
-            else {
-                builder.append(false);
-                continue;
-            };
-            for value in filter_map_list_values(value, $field)? {
-                $append(builder.values(), value, $field)?;
-            }
-            builder.append(true);
-        }
-        Ok(Arc::new(builder.finish()) as ArrayRef)
-    }};
-}
-
-macro_rules! build_filter_map_fixed_list_input {
-    ($records:expr, $filter_map_metadata:expr, $field:expr, $len:expr, $builder:expr, $append:expr) => {{
-        let mut builder = FixedSizeListBuilder::new($builder, $len);
-        for (index, record) in $records.iter().enumerate() {
-            let Some(value) = filter_map_input_value(record, $filter_map_metadata, index, $field)?
-            else {
-                builder.append(false);
-                continue;
-            };
-            let values = filter_map_list_values(value, $field)?;
-            if values.len() != usize::try_from($len).unwrap_or(usize::MAX) {
-                return Err(format!(
-                    "FILTER-MAP input field '{}' expected array length {}, got {}",
-                    $field.name(),
-                    $len,
-                    values.len()
-                ));
-            }
-            for value in values {
-                $append(builder.values(), value, $field)?;
-            }
-            builder.append(true);
-        }
-        Ok(Arc::new(builder.finish()) as ArrayRef)
-    }};
-}
-
-fn build_filter_map_list_input_column(
+fn build_filter_map_nested_input_column(
     records: &[RuntimeRecord],
     filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
     field: &arrow_schema::Field,
-    element: &ArrowDataType,
 ) -> Result<ArrayRef, String> {
-    match element {
-        ArrowDataType::UInt8 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            UInt8Builder::new(),
-            append_filter_map_u8
-        ),
-        ArrowDataType::Int8 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            Int8Builder::new(),
-            append_filter_map_i8
-        ),
-        ArrowDataType::UInt16 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            UInt16Builder::new(),
-            append_filter_map_u16
-        ),
-        ArrowDataType::Int16 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            Int16Builder::new(),
-            append_filter_map_i16
-        ),
-        ArrowDataType::UInt32 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            UInt32Builder::new(),
-            append_filter_map_u32
-        ),
-        ArrowDataType::Int32 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            Int32Builder::new(),
-            append_filter_map_i32
-        ),
-        ArrowDataType::UInt64 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            UInt64Builder::new(),
-            append_filter_map_u64
-        ),
-        ArrowDataType::Int64 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            Int64Builder::new(),
-            append_filter_map_i64
-        ),
-        ArrowDataType::Float32 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            Float32Builder::new(),
-            append_filter_map_f32
-        ),
-        ArrowDataType::Float64 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            Float64Builder::new(),
-            append_filter_map_f64
-        ),
-        ArrowDataType::Boolean => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            BooleanBuilder::new(),
-            append_filter_map_bool
-        ),
-        ArrowDataType::Utf8 => build_filter_map_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            StringBuilder::new(),
-            append_filter_map_string
-        ),
-        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
-            if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
-        {
-            let value_builder = TimestampNanosecondBuilder::new().with_data_type(
-                ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("+00:00".into())),
-            );
-            build_filter_map_list_input!(
-                records,
-                filter_map_metadata,
-                field,
-                value_builder,
-                append_filter_map_datetime
-            )
-        }
-        _ => Err(format!(
-            "FILTER-MAP input field '{}' has unsupported list element type {:?}",
-            field.name(),
-            element
-        )),
+    let mut builder = make_builder(field.data_type(), records.len());
+    for (index, record) in records.iter().enumerate() {
+        let value = filter_map_input_value(record, filter_map_metadata, index, field)?;
+        append_filter_map_nested_value(builder.as_mut(), field.data_type(), value, field)?;
     }
+    Ok(builder.finish())
 }
 
-fn build_filter_map_fixed_list_input_column(
-    records: &[RuntimeRecord],
-    filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
+fn append_filter_map_nested_value(
+    builder: &mut dyn ArrayBuilder,
+    data_type: &ArrowDataType,
+    value: Option<&RuntimeValue>,
     field: &arrow_schema::Field,
-    element: &ArrowDataType,
-    len: i32,
-) -> Result<ArrayRef, String> {
-    match element {
-        ArrowDataType::UInt8 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            UInt8Builder::new(),
-            append_filter_map_u8
-        ),
-        ArrowDataType::Int8 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            Int8Builder::new(),
-            append_filter_map_i8
-        ),
-        ArrowDataType::UInt16 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            UInt16Builder::new(),
-            append_filter_map_u16
-        ),
-        ArrowDataType::Int16 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            Int16Builder::new(),
-            append_filter_map_i16
-        ),
-        ArrowDataType::UInt32 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            UInt32Builder::new(),
-            append_filter_map_u32
-        ),
-        ArrowDataType::Int32 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            Int32Builder::new(),
-            append_filter_map_i32
-        ),
-        ArrowDataType::UInt64 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            UInt64Builder::new(),
-            append_filter_map_u64
-        ),
-        ArrowDataType::Int64 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            Int64Builder::new(),
-            append_filter_map_i64
-        ),
-        ArrowDataType::Float32 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            Float32Builder::new(),
-            append_filter_map_f32
-        ),
-        ArrowDataType::Float64 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            Float64Builder::new(),
-            append_filter_map_f64
-        ),
-        ArrowDataType::Boolean => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            BooleanBuilder::new(),
-            append_filter_map_bool
-        ),
-        ArrowDataType::Utf8 => build_filter_map_fixed_list_input!(
-            records,
-            filter_map_metadata,
-            field,
-            len,
-            StringBuilder::new(),
-            append_filter_map_string
-        ),
+) -> Result<(), String> {
+    macro_rules! append_primitive {
+        ($builder:ty, $append:ident) => {{
+            let builder = builder
+                .as_any_mut()
+                .downcast_mut::<$builder>()
+                .ok_or_else(|| {
+                    format!(
+                        "FILTER-MAP input field '{}' has an incompatible Arrow builder",
+                        field.name()
+                    )
+                })?;
+            if let Some(value) = value {
+                $append(builder, value, field)?;
+            } else {
+                builder.append_null();
+            }
+            Ok(())
+        }};
+    }
+
+    match data_type {
+        ArrowDataType::UInt8 => append_primitive!(UInt8Builder, append_filter_map_u8),
+        ArrowDataType::Int8 => append_primitive!(Int8Builder, append_filter_map_i8),
+        ArrowDataType::UInt16 => append_primitive!(UInt16Builder, append_filter_map_u16),
+        ArrowDataType::Int16 => append_primitive!(Int16Builder, append_filter_map_i16),
+        ArrowDataType::UInt32 => append_primitive!(UInt32Builder, append_filter_map_u32),
+        ArrowDataType::Int32 => append_primitive!(Int32Builder, append_filter_map_i32),
+        ArrowDataType::UInt64 => append_primitive!(UInt64Builder, append_filter_map_u64),
+        ArrowDataType::Int64 => append_primitive!(Int64Builder, append_filter_map_i64),
+        ArrowDataType::Float32 => append_primitive!(Float32Builder, append_filter_map_f32),
+        ArrowDataType::Float64 => append_primitive!(Float64Builder, append_filter_map_f64),
+        ArrowDataType::Boolean => append_primitive!(BooleanBuilder, append_filter_map_bool),
+        ArrowDataType::Utf8 => append_primitive!(StringBuilder, append_filter_map_string),
         ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
             if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
         {
-            let value_builder = TimestampNanosecondBuilder::new().with_data_type(
-                ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("+00:00".into())),
-            );
-            build_filter_map_fixed_list_input!(
-                records,
-                filter_map_metadata,
-                field,
-                len,
-                value_builder,
-                append_filter_map_datetime
-            )
+            append_primitive!(TimestampNanosecondBuilder, append_filter_map_datetime)
         }
-        _ => Err(format!(
-            "FILTER-MAP input field '{}' has unsupported list element type {:?}",
-            field.name(),
-            element
+        ArrowDataType::List(element) => {
+            let builder = builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>()
+                .ok_or_else(|| {
+                    format!(
+                        "FILTER-MAP input field '{}' has an incompatible list builder",
+                        field.name()
+                    )
+                })?;
+            let values = match value {
+                Some(RuntimeValue::Vec(values)) => Some(values),
+                None => None,
+                Some(value) => {
+                    return Err(format!(
+                        "FILTER-MAP input field '{}' expected VEC, got {}",
+                        field.name(),
+                        runtime_value_type_name(value)
+                    ));
+                }
+            };
+            if let Some(values) = values {
+                for value in values {
+                    append_filter_map_nested_value(
+                        builder.values().as_mut(),
+                        element.data_type(),
+                        Some(value),
+                        field,
+                    )?;
+                }
+            }
+            builder.append(values.is_some());
+            Ok(())
+        }
+        ArrowDataType::FixedSizeList(element, len) => {
+            let builder = builder
+                .as_any_mut()
+                .downcast_mut::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>()
+                .ok_or_else(|| {
+                    format!(
+                        "FILTER-MAP input field '{}' has an incompatible fixed-list builder",
+                        field.name()
+                    )
+                })?;
+            let expected = usize::try_from(*len).map_err(|_| {
+                format!(
+                    "FILTER-MAP input field '{}' has invalid array length",
+                    field.name()
+                )
+            })?;
+            let values = match value {
+                Some(RuntimeValue::Array(values)) if values.len() == expected => Some(values),
+                Some(RuntimeValue::Array(values)) => {
+                    return Err(format!(
+                        "FILTER-MAP input field '{}' expected array length {expected}, got {}",
+                        field.name(),
+                        values.len()
+                    ));
+                }
+                None => None,
+                Some(value) => {
+                    return Err(format!(
+                        "FILTER-MAP input field '{}' expected ARRAY, got {}",
+                        field.name(),
+                        runtime_value_type_name(value)
+                    ));
+                }
+            };
+            for index in 0..expected {
+                append_filter_map_nested_value(
+                    builder.values().as_mut(),
+                    element.data_type(),
+                    values.map(|values| &values[index]),
+                    field,
+                )?;
+            }
+            builder.append(values.is_some());
+            Ok(())
+        }
+        data_type => Err(format!(
+            "FILTER-MAP input field '{}' has unsupported nested type {data_type:?}",
+            field.name()
         )),
     }
 }
@@ -11553,23 +11397,13 @@ fn vm_typed_batch_from_runtime_records_with_metadata(
                         .with_timezone_utc(),
                 ))
             }
-            ArrowDataType::List(element) => {
-                Ok(VmTypedArray::Generic(build_filter_map_list_input_column(
+            ArrowDataType::List(_) | ArrowDataType::FixedSizeList(_, _) => {
+                Ok(VmTypedArray::Generic(build_filter_map_nested_input_column(
                     records,
                     filter_map_metadata,
                     field,
-                    element.data_type(),
                 )?))
             }
-            ArrowDataType::FixedSizeList(element, len) => Ok(VmTypedArray::Generic(
-                build_filter_map_fixed_list_input_column(
-                    records,
-                    filter_map_metadata,
-                    field,
-                    element.data_type(),
-                    *len,
-                )?,
-            )),
             _ => Err(format!(
                 "FILTER-MAP input field '{}' has unsupported type {:?}",
                 field.name(),

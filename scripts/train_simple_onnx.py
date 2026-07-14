@@ -165,12 +165,43 @@ def batch_graph() -> bytes:
     return bytes(out)
 
 
+def dynamic_batch_graph() -> bytes:
+    out = bytearray()
+    out += message_field(
+        1,
+        node(
+            "ReduceMean",
+            ["features"],
+            ["feature_mean"],
+            "feature_mean",
+            [attribute_ints("axes", [0]), attribute_int("keepdims", 1)],
+        ),
+    )
+    out += message_field(1, node("Add", ["features", "mask"], ["combined"], "combine"))
+    out += message_field(1, node("Add", ["combined", "feature_mean"], ["scores"], "scores"))
+    out += field_string(2, "nervix_dynamic_batch_score")
+    shape: list[int | str] = ["batch", "sequence", 2]
+    out += message_field(11, value_info("features", shape))
+    out += message_field(11, value_info("mask", shape))
+    out += message_field(12, value_info("scores", shape))
+    return bytes(out)
+
+
 def f64_graph() -> bytes:
     out = bytearray()
     out += message_field(1, node("Identity", ["features"], ["score"], "score"))
     out += field_string(2, "nervix_f64_score")
     out += message_field(11, value_info("features", [2], TENSOR_DOUBLE))
     out += message_field(12, value_info("score", [2], TENSOR_DOUBLE))
+    return bytes(out)
+
+
+def matrix_graph() -> bytes:
+    out = bytearray()
+    out += message_field(1, node("Identity", ["matrix"], ["transformed"], "transformed"))
+    out += field_string(2, "nervix_matrix_identity")
+    out += message_field(11, value_info("matrix", [2, 3]))
+    out += message_field(12, value_info("transformed", [2, 3]))
     return bytes(out)
 
 
@@ -201,6 +232,16 @@ def main() -> None:
         default="tests/fixtures/onnx/f64_score.onnx",
         help="path to write the generated unsupported-F64 ONNX model",
     )
+    parser.add_argument(
+        "--matrix-output",
+        default="tests/fixtures/onnx/matrix_identity.onnx",
+        help="path to write the generated multidimensional identity ONNX model",
+    )
+    parser.add_argument(
+        "--dynamic-batch-output",
+        default="tests/fixtures/onnx/dynamic_batch_score.onnx",
+        help="path to write the generated dynamically shaped batched ONNX model",
+    )
     args = parser.parse_args()
 
     weights, bias = train_linear_regressor()
@@ -213,9 +254,17 @@ def main() -> None:
     f64_output = Path(args.f64_output)
     f64_output.parent.mkdir(parents=True, exist_ok=True)
     f64_output.write_bytes(model_proto(f64_graph()))
+    matrix_output = Path(args.matrix_output)
+    matrix_output.parent.mkdir(parents=True, exist_ok=True)
+    matrix_output.write_bytes(model_proto(matrix_graph()))
+    dynamic_batch_output = Path(args.dynamic_batch_output)
+    dynamic_batch_output.parent.mkdir(parents=True, exist_ok=True)
+    dynamic_batch_output.write_bytes(model_proto(dynamic_batch_graph()))
     print(f"wrote {output} weights={weights!r} bias={bias!r}")
     print(f"wrote {batch_output}")
     print(f"wrote {f64_output}")
+    print(f"wrote {matrix_output}")
+    print(f"wrote {dynamic_batch_output}")
 
 
 if __name__ == "__main__":

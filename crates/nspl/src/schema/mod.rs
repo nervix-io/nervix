@@ -53,7 +53,7 @@ fn avro_type<'src>()
 
 fn nervix_type<'src>()
 -> impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone {
-    recursive(|_ty| {
+    recursive(|ty| {
         let scalar = choice((
             kw(Identifier::U8).to(ParseAsType::U8),
             kw(Identifier::I8).to(ParseAsType::I8),
@@ -70,29 +70,43 @@ fn nervix_type<'src>()
             kw(Identifier::F64).to(ParseAsType::F64),
         ));
 
+        let array_len = select! { Token::NumberLiteral(raw) => raw }.try_map(|raw, span| {
+            let len = raw
+                .parse::<u32>()
+                .map_err(|_| Rich::custom(span, "array length must be an unsigned integer"))?;
+            if len == 0 {
+                return Err(Rich::custom(span, "array length must be greater than zero"));
+            }
+            Ok(len)
+        });
+
         let array = kw(Identifier::Array).ignore_then(
-            scalar
-                .clone()
+            ty.clone()
                 .then_ignore(tok(Token::Comma))
-                .then(select! { Token::NumberLiteral(raw) => raw })
-                .try_map(|(element, raw), span| {
-                    let len = raw.parse::<u32>().map_err(|_| {
-                        Rich::custom(span, "array length must be an unsigned integer")
-                    })?;
-                    if len == 0 {
-                        return Err(Rich::custom(span, "array length must be greater than zero"));
-                    }
-                    Ok(ParseAsType::Array {
-                        element: Box::new(element),
-                        len,
-                    })
+                .then(array_len.clone())
+                .then(
+                    tok(Token::Comma)
+                        .ignore_then(array_len)
+                        .repeated()
+                        .collect::<Vec<_>>(),
+                )
+                .map(|((element, first_len), remaining_lengths)| {
+                    let mut lengths = Vec::with_capacity(remaining_lengths.len() + 1);
+                    lengths.push(first_len);
+                    lengths.extend(remaining_lengths);
+                    lengths
+                        .into_iter()
+                        .rev()
+                        .fold(element, |element, len| ParseAsType::Array {
+                            element: Box::new(element),
+                            len,
+                        })
                 })
                 .delimited_by(tok(Token::Lt), tok(Token::Gt)),
         );
 
         let vec_ty = kw(Identifier::Vec).ignore_then(
-            scalar
-                .clone()
+            ty.clone()
                 .map(|element| ParseAsType::Vec {
                     element: Box::new(element),
                 })
@@ -466,6 +480,47 @@ mod tests {
     }
 
     #[test]
+    fn parses_multidimensional_and_mixed_internal_array_shapes() {
+        let input = r#"
+            CREATE SCHEMA tensors (
+                matrix ARRAY<F32, 2, 3>,
+                samples VEC<ARRAY<F32, 4>>,
+                buckets ARRAY<VEC<I64>, 2>
+            );
+        "#;
+
+        let parsed = parse_create_schema_tokens(&to_tokens(input)).expect("parse should succeed");
+        assert_eq!(
+            parsed.fields[0].ty,
+            ParseAsType::Array {
+                len: 2,
+                element: Box::new(ParseAsType::Array {
+                    len: 3,
+                    element: Box::new(ParseAsType::F32),
+                }),
+            }
+        );
+        assert_eq!(
+            parsed.fields[1].ty,
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Array {
+                    len: 4,
+                    element: Box::new(ParseAsType::F32),
+                }),
+            }
+        );
+        assert_eq!(
+            parsed.fields[2].ty,
+            ParseAsType::Array {
+                len: 2,
+                element: Box::new(ParseAsType::Vec {
+                    element: Box::new(ParseAsType::I64),
+                }),
+            }
+        );
+    }
+
+    #[test]
     fn parses_array_and_vector_elements_for_all_internal_primitive_types() {
         let input = r#"
             CREATE SCHEMA metrics (
@@ -536,6 +591,12 @@ mod tests {
     #[test]
     fn rejects_internal_schema_zero_length_array() {
         let input = "CREATE SCHEMA metrics (cpu ARRAY<F32, 0>);";
+        assert!(parse_create_schema(input).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_length_in_any_multidimensional_array_axis() {
+        let input = "CREATE SCHEMA metrics (cpu ARRAY<F32, 2, 0>);";
         assert!(parse_create_schema(input).is_err());
     }
 
@@ -677,6 +738,17 @@ mod tests {
         assert!(suggestions.contains(&"STRING".to_string()));
         assert!(suggestions.contains(&"ARRAY".to_string()));
         assert!(suggestions.contains(&"VEC".to_string()));
+    }
+
+    #[test]
+    fn suggests_internal_element_types_inside_array_without_wire_type_leakage() {
+        let input = "CREATE SCHEMA s (matrix ARRAY<";
+        let suggestions = suggest_create_schema(input, input.len());
+        assert!(suggestions.contains(&"F32".to_string()));
+        assert!(suggestions.contains(&"ARRAY".to_string()));
+        assert!(suggestions.contains(&"VEC".to_string()));
+        assert!(!suggestions.contains(&"NUMBER".to_string()));
+        assert!(!suggestions.contains(&"OBJECT".to_string()));
     }
 
     #[test]

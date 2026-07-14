@@ -5253,14 +5253,14 @@ fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
             ArrowFieldRef::new(ArrowField::new(
                 "item",
                 arrow_data_type_for_parse_as(element),
-                true,
+                false,
             )),
             i32::try_from(*len).expect("array length must fit Arrow fixed-size list"),
         ),
         ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
             "item",
             arrow_data_type_for_parse_as(element),
-            true,
+            false,
         ))),
     }
 }

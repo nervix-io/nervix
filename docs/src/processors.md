@@ -169,7 +169,24 @@ An inferencer declares a branch-local ONNX model execution node. The model file 
 
 The optional `FILTER WHERE` clause runs before tensor construction. `INPUTS` maps ONNX input tensor names to fields on one of the declared input relays after that arrival filter. `OUTPUTS` maps ONNX output tensor names to fields on the output relay. Inferencers do not pass input fields through automatically; every required output field must come from `OUTPUTS` or a route-level `SET`.
 
-Every binding declares its complete tensor schema. The supported schema is currently `DENSE TENSOR<F32>`. Its dimensions are a comma-separated list of positive fixed sizes and, optionally, one `BATCH` axis. An empty list (`DENSE TENSOR<F32>[]`) is a scalar. All bindings in one inferencer must either contain exactly one `BATCH` axis each or contain no `BATCH` axes. The batch axis may occur at any rank position. A mapped relay field stores one message's tensor slice as a scalar `F32` or a flat row-major `ARRAY<F32, N>` whose length is the product of the fixed axes.
+Every binding declares its complete tensor schema. The supported schema is currently
+`DENSE TENSOR<F32>`. Each dimension is a positive fixed size, `DYNAMIC`, or the
+optional `BATCH` axis. An empty list (`DENSE TENSOR<F32>[]`) is a scalar. All
+bindings in one inferencer must either contain exactly one `BATCH` axis each or
+contain no `BATCH` axes. The batch axis may occur at any rank position.
+
+Tensor dimensions map structurally to one message's schema field: a fixed
+dimension consumes one matching `ARRAY` axis, `DYNAMIC` consumes one `VEC` axis,
+and `BATCH` consumes no field axis. For example,
+`DENSE TENSOR<F32>[3, 224, 224]` maps exactly to
+`ARRAY<F32, 3, 224, 224>`, while `DENSE TENSOR<F32>[DYNAMIC, 64]` maps to
+`VEC<ARRAY<F32, 64>>`. A flat `ARRAY<F32, 150528>` is not compatible with the
+three-dimensional tensor. Nervix preserves the nested shape on input and output;
+only the contiguous buffer passed across the ONNX Runtime boundary is linear.
+
+Dense dynamic values must be rectangular. Batched inputs with different concrete
+dynamic shapes are grouped by shape into separate ONNX invocations, and results
+are restored to their original message order.
 
 Without `BATCH`, each collected message causes an independent ONNX invocation. With `BATCH`, one flush of `N` messages causes one invocation and the declared batch axis is materialized with size `N`; returned slices are assigned to messages in their original order.
 

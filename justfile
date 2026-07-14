@@ -256,8 +256,8 @@ generate-dev-tls:
     set -euo pipefail
     bash scripts/generate_dev_tls.sh
 
-generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx":
-    python3 scripts/train_simple_onnx.py --output {{ output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }}
+generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx":
+    python3 scripts/train_simple_onnx.py --output {{ output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }}
 
 download-onnxruntime:
     bash scripts/download_onnxruntime.sh

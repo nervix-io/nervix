@@ -247,8 +247,171 @@ Feature: Inferencer resources
       """
 
     Examples:
-      | field_type    | tensor_type       |
-      | ARRAY<F32, 6> | DENSE TENSOR<F32> |
+      | field_type       | tensor_type       |
+      | ARRAY<F32, 3, 2> | DENSE TENSOR<F32> |
+
+  Scenario Outline: Per-message inferencer preserves multidimensional tensor shape
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      CREATE SCHEMA matrices ( matrix <matrix_type> );
+      CREATE SCHEMA transformed_matrices ( transformed <matrix_type> );
+      CREATE STRICT WIRE JSON SCHEMA matrices_wire ( matrix array );
+      CREATE CODEC matrices_codec FROM WIRE JSON SCHEMA matrices_wire TO SCHEMA matrices;
+      CREATE RELAY matrices SCHEMA matrices UNBRANCHED;
+      CREATE RELAY transformed_matrices SCHEMA transformed_matrices UNBRANCHED;
+      CREATE VHOST edge infer-matrix-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/matrix' TYPE HTTP;
+      CREATE INGESTOR matrix_source
+        TO matrices DECODE USING matrices_codec UNBRANCHED FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INFERENCER transform_matrix
+        FROM matrices TO transformed_matrices UNBRANCHED
+        USING RESOURCE inference VERSION 1 FILE 'models/matrix_identity.onnx'
+        INPUTS { "matrix" <tensor_type>[2, 3] = matrices.matrix }
+        OUTPUTS { "transformed" <tensor_type>[2, 3] = transformed_matrices.transformed }
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      SUBSCRIBE SESSION TO transformed_matrices;
+      START;
+      """
+    And http payload is posted to host "infer-matrix-{{test_id}}.example.com" path "/matrix"
+      """
+      {"matrix":[[1.0,2.0,3.0],[4.0,5.0,6.0]]}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"transformed":[[1.0,2.0,3.0],[4.0,5.0,6.0]]}
+      """
+
+    Examples:
+      | cluster_size | matrix_type      | tensor_type       |
+      | 1            | ARRAY<F32, 2, 3> | DENSE TENSOR<F32> |
+      | 3            | ARRAY<F32, 2, 3> | DENSE TENSOR<F32> |
+
+  Scenario Outline: Per-message inferencer maps dynamic tensor axes to vectors
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      CREATE SCHEMA sequences ( features <sequence_type>, mask <sequence_type> );
+      CREATE SCHEMA scored_sequences ( scores <sequence_type> );
+      CREATE STRICT WIRE JSON SCHEMA sequences_wire ( features array, mask array );
+      CREATE CODEC sequences_codec FROM WIRE JSON SCHEMA sequences_wire TO SCHEMA sequences;
+      CREATE RELAY sequences SCHEMA sequences UNBRANCHED;
+      CREATE RELAY scored_sequences SCHEMA scored_sequences UNBRANCHED;
+      CREATE VHOST edge infer-dynamic-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/sequence' TYPE HTTP;
+      CREATE INGESTOR sequence_source
+        TO sequences DECODE USING sequences_codec UNBRANCHED FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INFERENCER score_sequence
+        FROM sequences TO scored_sequences UNBRANCHED
+        USING RESOURCE inference VERSION 1 FILE 'models/batch_score.onnx'
+        INPUTS {
+          "features" <tensor_type>[DYNAMIC, 2] = sequences.features,
+          "mask" <tensor_type>[DYNAMIC, 2] = sequences.mask
+        }
+        OUTPUTS { "scores" <tensor_type>[DYNAMIC, 2] = scored_sequences.scores }
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      SUBSCRIBE SESSION TO scored_sequences;
+      START;
+      """
+    And http payload is posted to host "infer-dynamic-{{test_id}}.example.com" path "/sequence"
+      """
+      {"features":[[1.0,10.0],[2.0,20.0]],"mask":[[100.0,1000.0],[200.0,2000.0]]}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"scores":[[102.5,1025.0],[203.5,2035.0]]}
+      """
+
+    Examples:
+      | cluster_size | sequence_type      | tensor_type       |
+      | 1            | VEC<ARRAY<F32, 2>> | DENSE TENSOR<F32> |
+      | 3            | VEC<ARRAY<F32, 2>> | DENSE TENSOR<F32> |
+
+  Scenario Outline: Batched inferencer groups dynamic vectors by concrete shape
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      CREATE SCHEMA sequences ( features <sequence_type>, mask <sequence_type> );
+      CREATE SCHEMA scored_sequences ( scores <sequence_type> );
+      CREATE STRICT WIRE JSON SCHEMA sequences_wire ( features array, mask array );
+      CREATE CODEC sequences_codec FROM WIRE JSON SCHEMA sequences_wire TO SCHEMA sequences;
+      CREATE RELAY sequences SCHEMA sequences UNBRANCHED;
+      CREATE RELAY scored_sequences SCHEMA scored_sequences UNBRANCHED;
+      CREATE VHOST edge infer-dynamic-batch-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/sequence' TYPE HTTP;
+      CREATE INGESTOR sequence_source
+        TO sequences DECODE USING sequences_codec UNBRANCHED FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INFERENCER score_sequence_batch
+        FROM sequences TO scored_sequences UNBRANCHED
+        USING RESOURCE inference VERSION 1 FILE 'models/dynamic_batch_score.onnx'
+        INPUTS {
+          "features" <tensor_type>[BATCH, DYNAMIC, 2] = sequences.features,
+          "mask" <tensor_type>[BATCH, DYNAMIC, 2] = sequences.mask
+        }
+        OUTPUTS { "scores" <tensor_type>[BATCH, DYNAMIC, 2] = scored_sequences.scores }
+        FLUSH EACH 500ms MAX BATCH SIZE 16mb ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      SUBSCRIBE SESSION TO scored_sequences;
+      START;
+      """
+    And http payload is posted to host "infer-dynamic-batch-{{test_id}}.example.com" path "/sequence"
+      """
+      {"features":[[1.0,10.0]],"mask":[[100.0,1000.0]]}
+      """
+    And http payload is posted to host "infer-dynamic-batch-{{test_id}}.example.com" path "/sequence"
+      """
+      {"features":[[2.0,20.0],[4.0,40.0]],"mask":[[200.0,2000.0],[400.0,4000.0]]}
+      """
+    And http payload is posted to host "infer-dynamic-batch-{{test_id}}.example.com" path "/sequence"
+      """
+      {"features":[[3.0,30.0]],"mask":[[300.0,3000.0]]}
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      {"scores":[[103.0,1030.0]]}
+      {"scores":[[204.0,2040.0],[408.0,4080.0]]}
+      {"scores":[[305.0,3050.0]]}
+      """
+
+    Examples:
+      | cluster_size | sequence_type      | tensor_type       |
+      | 1            | VEC<ARRAY<F32, 2>> | DENSE TENSOR<F32> |
+      | 3            | VEC<ARRAY<F32, 2>> | DENSE TENSOR<F32> |
 
   Scenario Outline: Per-message inferencer invokes ONNX once for every collected message
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
