@@ -99,7 +99,7 @@ Primary goals:
    - Any runtime node that buffers records behind a flush boundary must require either `FLUSH EACH <duration>` or `FLUSH IMMEDIATE` in its NSPL grammar and typed model.
    - Do not implement optional flush cadence, hidden runtime defaults, or ad-hoc immediate-flush fallbacks for flush-based nodes.
    - New flush-based node implementations must make this requirement visible in the AST/model shape by storing the flush policy as a mandatory field.
-   - Window processors are the exception: they use `WIDTH` and `STEP` for their scheduling contract. Emitters are terminal drains and do not declare `FLUSH EACH`.
+   - Window processors are the exception: they use `WIDTH` and `STEP` for their scheduling contract.
    - WASM processors are also not flush-based Nervix nodes. Do not add `FLUSH EACH` or `FLUSH IMMEDIATE` to `CREATE WASM PROCESSOR`; the guest controls output emission through returned process batches and guest-requested timeouts.
 
 11. Dangerous execution policies must have a single public owner:
