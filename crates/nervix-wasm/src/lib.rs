@@ -428,25 +428,50 @@ pub enum WasmEnvelope {
         acks: WasmAckSidecar,
     },
     Output {
-        output_relay: String,
-        columns: Vec<WasmOutputColumn>,
-        acks: WasmAckSidecar,
+        #[serde(with = "cbor_byte_string")]
+        generated_arrow_ipc_batch: Vec<u8>,
+        outputs: Vec<WasmRoutedOutput>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WasmOutputColumn {
-    GuestArrow {
-        #[serde(with = "cbor_byte_string")]
-        ipc: Vec<u8>,
-    },
-    Input {
-        column_index: u32,
-    },
+#[serde(deny_unknown_fields)]
+pub struct WasmRoutedOutput {
+    pub output_relay: String,
+    pub columns: Vec<WasmOutputColumnRef>,
+    pub acks: WasmAckSidecar,
 }
 
-impl WasmOutputColumn {
+impl WasmRoutedOutput {
+    pub fn new(
+        output_relay: impl Into<String>,
+        columns: Vec<WasmOutputColumnRef>,
+        acks: WasmAckSidecar,
+    ) -> Self {
+        Self {
+            output_relay: output_relay.into(),
+            columns,
+            acks,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WasmOutputColumnRef {
+    Generated { column_index: u32 },
+    Input { column_index: u32 },
+}
+
+impl WasmOutputColumnRef {
+    pub const fn generated(column_index: u32) -> Self {
+        Self::Generated { column_index }
+    }
+
+    pub const fn input(column_index: u32) -> Self {
+        Self::Input { column_index }
+    }
+
     pub const fn is_input(&self) -> bool {
         if let Self::Input { .. } = self {
             true
@@ -457,9 +482,11 @@ impl WasmOutputColumn {
 }
 
 impl WasmEnvelope {
-    pub const fn acks(&self) -> &WasmAckSidecar {
-        match self {
-            Self::Input { acks, .. } | Self::Output { acks, .. } => acks,
+    pub const fn input_acks(&self) -> Option<&WasmAckSidecar> {
+        if let Self::Input { acks, .. } = self {
+            Some(acks)
+        } else {
+            None
         }
     }
 
@@ -470,15 +497,10 @@ impl WasmEnvelope {
         }
     }
 
-    pub fn output(
-        output_relay: impl Into<String>,
-        columns: Vec<WasmOutputColumn>,
-        acks: WasmAckSidecar,
-    ) -> Self {
+    pub fn output(generated_arrow_ipc_batch: Vec<u8>, outputs: Vec<WasmRoutedOutput>) -> Self {
         Self::Output {
-            output_relay: output_relay.into(),
-            columns,
-            acks,
+            generated_arrow_ipc_batch,
+            outputs,
         }
     }
 
@@ -1285,6 +1307,52 @@ mod tests {
         }
     }
 
+    fn shared_generated_init() -> WasmBranchInit {
+        let input_schema = CreateSchema {
+            name: Identifier::parse("input_events").expect("schema name must be valid"),
+            fields: vec![SchemaField {
+                name: Identifier::parse("value").expect("field name must be valid"),
+                ty: ParseAsType::I32,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let enriched_schema = CreateSchema {
+            name: Identifier::parse("enriched_events").expect("schema name must be valid"),
+            fields: vec![
+                input_schema.fields[0].clone(),
+                SchemaField {
+                    name: Identifier::parse("bucket").expect("field name must be valid"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+            ],
+        };
+        let audit_schema = CreateSchema {
+            name: Identifier::parse("audit_events").expect("schema name must be valid"),
+            fields: vec![
+                input_schema.fields[0].clone(),
+                SchemaField {
+                    name: Identifier::parse("classification").expect("field name must be valid"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+            ],
+        };
+        WasmBranchInit {
+            domain_name: "events".to_string(),
+            domain_type: "PACED".to_string(),
+            branch_key: Some(b"tenant=alpha".to_vec()),
+            input_schema: WasmProcessorSchema::from(&input_schema),
+            output_schemas: vec![
+                WasmProcessorSchema::from(&enriched_schema),
+                WasmProcessorSchema::from(&audit_schema),
+            ],
+        }
+    }
+
     fn output_row(token: u64) -> WasmOutputRow {
         WasmOutputRow {
             tokens: vec![WasmAckToken(token)],
@@ -1330,19 +1398,70 @@ mod tests {
     }
 
     #[test]
-    fn mixed_output_envelope_cbor_round_trip() {
+    fn shared_generated_output_envelope_cbor_round_trip() {
+        let generated_arrow_ipc_batch = vec![9, 8, 7];
         let envelope = WasmEnvelope::output(
-            "enriched_events",
+            generated_arrow_ipc_batch.clone(),
             vec![
-                WasmOutputColumn::Input { column_index: 0 },
-                WasmOutputColumn::GuestArrow { ipc: vec![9, 8, 7] },
+                WasmRoutedOutput::new(
+                    "enriched_events",
+                    vec![
+                        WasmOutputColumnRef::input(0),
+                        WasmOutputColumnRef::generated(0),
+                        WasmOutputColumnRef::generated(0),
+                    ],
+                    WasmAckSidecar {
+                        rows: vec![output_row(11)],
+                        acked: vec![token_set(12)],
+                        nacked: Vec::new(),
+                        message_errors: Vec::new(),
+                    },
+                ),
+                WasmRoutedOutput::new(
+                    "audit_events",
+                    vec![
+                        WasmOutputColumnRef::input(0),
+                        WasmOutputColumnRef::generated(0),
+                    ],
+                    WasmAckSidecar {
+                        rows: vec![output_row(11)],
+                        acked: Vec::new(),
+                        nacked: Vec::new(),
+                        message_errors: Vec::new(),
+                    },
+                ),
             ],
-            WasmAckSidecar {
-                rows: vec![output_row(11)],
-                acked: vec![token_set(12)],
-                nacked: Vec::new(),
-                message_errors: Vec::new(),
-            },
+        );
+
+        let encoded = envelope.encode().expect("output envelope must encode");
+        assert_eq!(
+            WasmEnvelope::decode(&encoded).expect("output envelope must decode"),
+            envelope
+        );
+        let value: ciborium::Value =
+            ciborium::from_reader(encoded.as_slice()).expect("encoded envelope must be CBOR");
+        let ciborium::Value::Map(fields) = value else {
+            panic!("envelope must encode as a CBOR map");
+        };
+        let generated_payloads = fields
+            .iter()
+            .filter(|(key, value)| {
+                key == &ciborium::Value::Text("generated_arrow_ipc_batch".into())
+                    && value == &ciborium::Value::Bytes(generated_arrow_ipc_batch.clone())
+            })
+            .count();
+        assert_eq!(generated_payloads, 1);
+    }
+
+    #[test]
+    fn input_only_output_envelope_uses_empty_generated_pool() {
+        let envelope = WasmEnvelope::output(
+            Vec::new(),
+            vec![WasmRoutedOutput::new(
+                "output_events",
+                vec![WasmOutputColumnRef::input(0)],
+                WasmAckSidecar::default(),
+            )],
         );
 
         let encoded = envelope.encode().expect("output envelope must encode");
@@ -1495,16 +1614,25 @@ mod tests {
                 ciborium::Value::Text("output".into()),
             ),
             (
-                ciborium::Value::Text("output_relay".into()),
-                ciborium::Value::Text("events".into()),
+                ciborium::Value::Text("generated_arrow_ipc_batch".into()),
+                ciborium::Value::Bytes(Vec::new()),
             ),
             (
-                ciborium::Value::Text("columns".into()),
-                ciborium::Value::Array(vec![column]),
-            ),
-            (
-                ciborium::Value::Text("acks".into()),
-                empty_ack_sidecar_value(),
+                ciborium::Value::Text("outputs".into()),
+                ciborium::Value::Array(vec![ciborium::Value::Map(vec![
+                    (
+                        ciborium::Value::Text("output_relay".into()),
+                        ciborium::Value::Text("events".into()),
+                    ),
+                    (
+                        ciborium::Value::Text("columns".into()),
+                        ciborium::Value::Array(vec![column]),
+                    ),
+                    (
+                        ciborium::Value::Text("acks".into()),
+                        empty_ack_sidecar_value(),
+                    ),
+                ])]),
             ),
         ])
     }
@@ -1828,17 +1956,18 @@ mod tests {
             .expect("timeout must emit output");
         assert_eq!(output.len(), 1);
         let WasmEnvelope::Output {
-            output_relay,
-            columns,
-            acks,
+            generated_arrow_ipc_batch,
+            outputs,
         } = &output[0]
         else {
             panic!("guest must emit an output envelope");
         };
-        assert_eq!(output_relay, "output_events");
-        assert_eq!(columns, &[WasmOutputColumn::Input { column_index: 0 }]);
-        assert_eq!(acks.rows, vec![output_row(20), output_row(40)]);
-        assert_eq!(acks.acked, vec![token_set(10), token_set(30)]);
+        assert!(generated_arrow_ipc_batch.is_empty());
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].output_relay, "output_events");
+        assert_eq!(outputs[0].columns, &[WasmOutputColumnRef::input(0)]);
+        assert_eq!(outputs[0].acks.rows, vec![output_row(20), output_row(40)]);
+        assert_eq!(outputs[0].acks.acked, vec![token_set(10), token_set(30)]);
     }
 
     #[tokio::test]
@@ -1888,15 +2017,18 @@ mod tests {
             .on_timeout(timeout.handle)
             .await
             .expect("timeout must emit output");
-        let WasmEnvelope::Output { columns, .. } = &outputs[0] else {
+        let WasmEnvelope::Output {
+            generated_arrow_ipc_batch,
+            outputs: routed_outputs,
+        } = &outputs[0]
+        else {
             panic!("guest must emit an output envelope");
         };
+        assert!(generated_arrow_ipc_batch.is_empty());
+        assert_eq!(routed_outputs.len(), 1);
         assert_eq!(
-            columns,
-            &[
-                WasmOutputColumn::Input { column_index: 0 },
-                WasmOutputColumn::Input { column_index: 1 },
-            ]
+            routed_outputs[0].columns,
+            &[WasmOutputColumnRef::input(0), WasmOutputColumnRef::input(1),]
         );
         let encoded = outputs[0].encode().expect("output envelope must encode");
         assert!(
@@ -1905,6 +2037,130 @@ mod tests {
                 .any(|window| window == SENTINEL.as_bytes()),
             "unchanged string payload must not be serialized guest-to-host"
         );
+    }
+
+    #[tokio::test]
+    async fn rust_guest_timeout_shares_one_generated_column_across_routes() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&rust_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                shared_generated_init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        let input = WasmEnvelope::input(
+            sample_arrow_ipc(&[1, 2]),
+            WasmAckSidecar {
+                rows: vec![output_row(10), output_row(20)],
+                acked: Vec::new(),
+                nacked: Vec::new(),
+                message_errors: Vec::new(),
+            },
+        );
+
+        assert!(
+            branch
+                .process_envelope(&input)
+                .await
+                .expect("input must process")
+                .is_empty()
+        );
+        let timeout = branch
+            .take_timeout_requests()
+            .pop()
+            .expect("guest should request a timeout");
+        let envelopes = branch
+            .on_timeout(timeout.handle)
+            .await
+            .expect("timeout must emit output");
+        let WasmEnvelope::Output {
+            generated_arrow_ipc_batch,
+            outputs,
+        } = &envelopes[0]
+        else {
+            panic!("guest must emit an output group");
+        };
+
+        assert!(!generated_arrow_ipc_batch.is_empty());
+        assert_eq!(outputs.len(), 2);
+        for output in outputs {
+            assert_eq!(
+                output.columns,
+                &[
+                    WasmOutputColumnRef::input(0),
+                    WasmOutputColumnRef::generated(0),
+                ]
+            );
+            assert_eq!(output.acks.rows, vec![output_row(20)]);
+        }
+        let reader =
+            arrow_ipc::reader::StreamReader::try_new(generated_arrow_ipc_batch.as_slice(), None)
+                .expect("generated Arrow IPC must decode");
+        assert_eq!(reader.schema().fields().len(), 1);
+        assert!(reader.schema().field(0).name().is_empty());
+        assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_read_emit_calls_return_multiple_output_groups() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&rust_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        let first = WasmEnvelope::input(
+            sample_arrow_ipc(&[2]),
+            WasmAckSidecar {
+                rows: vec![output_row(10)],
+                ..WasmAckSidecar::default()
+            },
+        );
+        let second = WasmEnvelope::input(
+            sample_arrow_ipc(&[4]),
+            WasmAckSidecar {
+                rows: vec![output_row(20)],
+                ..WasmAckSidecar::default()
+            },
+        );
+
+        assert!(
+            branch
+                .process_envelope(&first)
+                .await
+                .expect("first input must process")
+                .is_empty()
+        );
+        let groups = branch
+            .process_envelope(&second)
+            .await
+            .expect("second input must flush both pending layouts");
+
+        assert_eq!(groups.len(), 2);
+        for group in groups {
+            let WasmEnvelope::Output {
+                generated_arrow_ipc_batch,
+                outputs,
+            } = group
+            else {
+                panic!("guest must emit output groups");
+            };
+            assert!(generated_arrow_ipc_batch.is_empty());
+            assert_eq!(outputs.len(), 1);
+        }
     }
 
     #[tokio::test]

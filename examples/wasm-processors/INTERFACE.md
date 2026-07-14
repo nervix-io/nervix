@@ -65,20 +65,40 @@ Guest output:
 ```text
 {
   "kind": "output",
-  "output_relay": text,
-  "columns": [
-    { "kind": "input", "column_index": u32 },
-    { "kind": "guest_arrow", "ipc": bytes }
-  ],
-  "acks": AckSidecar
+  "generated_arrow_ipc_batch": bytes,
+  "outputs": [
+    {
+      "output_relay": text,
+      "columns": [
+        { "kind": "input", "column_index": u32 },
+        { "kind": "generated", "column_index": u32 }
+      ],
+      "acks": AckSidecar
+    }
+  ]
 }
 ```
 
-Each output column is positionally aligned with the destination relay schema.
-`input` references an unchanged column in the declared processor input schema.
-`guest_arrow` contains an independent Arrow IPC stream with exactly one field,
-one record batch, and one column. Its field must exactly equal the destination
-field and its row count must equal `acks.rows.len()`.
+Each routed output column is positionally aligned with its destination relay
+schema. `input` references an unchanged column in the declared processor input
+schema. `generated` references a column in the envelope's common generated
+Arrow batch. A generated column may be reused by several routes or more than
+once in one route; the host decodes it once and clones the immutable
+`ArrayRef`.
+
+The generated pool is either an empty byte string or one Arrow IPC stream with
+exactly one schema and one record batch. An empty byte string is required when
+there are no generated columns; an encoded zero-column stream is invalid.
+Generated field names must be empty. The host compares all other field
+properties with every referencing destination field, including data type,
+nullability, timestamp properties, nested types, fixed lengths, and metadata.
+Each referencing route must have the generated batch's row count.
+
+Generated row `R` is positional. Input row `R` is selected independently by
+that routed row's `source_token`. Routes that need different generated row
+counts, ordering, filtering, or duplication must be returned as separate
+output envelopes from separate positive `nervix_read_emit()` calls. Generated
+indexes are local to one envelope.
 
 The ACK sidecar is:
 
@@ -105,7 +125,7 @@ The ACK sidecar is:
 
 Each host input row has one token and a matching non-null `source_token`. A
 guest may preserve that row object when filtering or enriching. If any output
-column is an input reference, every output row must have a live `source_token`
+column is an input reference, every routed output row must have a live `source_token`
 that also appears in that row's `tokens`. The token selects both the retained
 input row used by every referenced column and the record exposed through route
 expressions such as `input.field`.
@@ -113,8 +133,13 @@ expressions such as `input.field`.
 Multiple tokens represent merged lineage. `acked` contains token sets consumed
 without output, `nacked` contains token sets failed directly, and
 `message_errors` contains token sets routed through `ON MESSAGE ERROR`. A token
-may be carried into multiple output rows or envelopes, but it cannot be both
+may be carried into multiple routed output rows or output groups, but it cannot be both
 carried and terminally completed in one callback.
+
+Every output group must contain at least one routed output, and every generated
+pool column must be referenced at least once. All structural, schema, row,
+relay, and token validation completes before any route is dispatched or any
+terminal ACK decision is applied.
 
 All fields are required, including empty arrays and `source_token` (encoded as
 CBOR `null` when absent). Unknown fields, unknown kinds, missing fields,

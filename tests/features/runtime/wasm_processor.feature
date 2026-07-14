@@ -181,7 +181,7 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: WASM processor routes guest output through output clauses
+  Scenario Outline: WASM processor shares one generated column across branched output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
@@ -198,31 +198,36 @@ Feature: WASM processor runtime behavior
       """
       CREATE SCHEMA metric_input (
         value I32,
-        source STRING
+        tenant STRING
       );
 
-      CREATE SCHEMA metric_value (
-        value I32
-      );
-
-      CREATE SCHEMA routed_metric (
+      CREATE SCHEMA metric (
         value I32,
-        source STRING OPTIONAL,
+        tenant STRING,
         bucket STRING
+      );
+
+      CREATE SCHEMA audited_metric (
+        value I32,
+        tenant STRING,
+        classification STRING
       );
 
       CREATE STRICT WIRE JSON SCHEMA metric_wire (
         value integer,
-        source string
+        tenant string
       );
 
       CREATE CODEC metric_codec
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric_input;
 
-      CREATE RELAY raw_metrics SCHEMA metric_input UNBRANCHED;
-      CREATE RELAY selected_metrics SCHEMA metric_value UNBRANCHED;
-      CREATE RELAY routed_metrics SCHEMA routed_metric UNBRANCHED;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+
+      CREATE RELAY raw_metrics SCHEMA metric_input BRANCHED BY by_tenant;
+      CREATE RELAY enriched_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY audited_metrics SCHEMA audited_metric BRANCHED BY by_tenant;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
@@ -234,44 +239,45 @@ Feature: WASM processor runtime behavior
       CREATE INGESTOR metric_source
         TO raw_metrics
         DECODE USING metric_codec
-        UNBRANCHED
+        BRANCHED BY by_tenant VALUES { tenant = raw_metrics.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
       CREATE WASM PROCESSOR filter_even_rows
         USING RESOURCE wasm_route_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics FILTER WHERE raw_metrics.value = raw_metrics.value
-        TO selected_metrics WHERE selected_metrics.value < selected_metrics.value
-        TO routed_metrics
-          SET routed_metrics.source = input.source,
-              routed_metrics.bucket = lower(routed_metrics.bucket)
-        UNBRANCHED
+        FROM raw_metrics
+        TO enriched_metrics
+        TO audited_metrics
+        BRANCHED BY by_tenant
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO routed_metrics;
+      SUBSCRIBE SESSION TO enriched_metrics;
+      SUBSCRIBE SESSION TO audited_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
-      {"value":1,"source":"ignored"}
+      {"value":1,"tenant":"alpha"}
       """
-    Then the relay subscription does not receive a payload within "500ms"
-    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
-      {"value":2,"source":"tenant-a"}
+      {"value":1,"tenant":"beta"}
       """
-    Then the relay subscription receives a payload
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
-      "value":2
+      {"value":2,"tenant":"alpha"}
       """
-    And the last relay subscription payload contains
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
-      "source":"tenant-a"
+      {"value":2,"tenant":"beta"}
       """
-    And the last relay subscription payload contains
+    Then within "10s" the relay subscription receives payloads
       """
-      "bucket":"even"
+      "bucket":"EVEN","tenant":"alpha","value":2
+      "bucket":"EVEN","tenant":"beta","value":2
+      "classification":"EVEN","tenant":"alpha","value":2
+      "classification":"EVEN","tenant":"beta","value":2
       """
 
     Examples:

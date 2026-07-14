@@ -121,18 +121,25 @@ enum Envelope {
         acks: AckSidecar,
     },
     Output {
-        output_relay: String,
-        columns: Vec<OutputColumn>,
-        acks: AckSidecar,
+        #[serde(with = "cbor_byte_string")]
+        generated_arrow_ipc_batch: Vec<u8>,
+        outputs: Vec<RoutedOutput>,
     },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoutedOutput {
+        output_relay: String,
+        columns: Vec<OutputColumnRef>,
+        acks: AckSidecar,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum OutputColumn {
-    GuestArrow {
-        #[serde(with = "cbor_byte_string")]
-        ipc: Vec<u8>,
+enum OutputColumnRef {
+    Generated {
+        column_index: u32,
     },
     Input {
         column_index: u32,
@@ -709,13 +716,15 @@ fn filter_envelope_by_global_row(
         }
     }
 
-    output_schemas
+    let generated_fields = generated_fields(input_schema, output_schemas);
+    let generated_arrow_ipc_batch = generated_batch_ipc(&generated_fields, &selected_values)?;
+    let outputs = output_schemas
         .iter()
         .enumerate()
         .map(|(index, output_schema)| {
-            Ok(Envelope::Output {
+            Ok(RoutedOutput {
                 output_relay: output_schema.name.clone(),
-                columns: output_columns(input_schema, output_schema, &selected_values)?,
+                columns: output_columns(input_schema, output_schema, &generated_fields)?,
                 acks: AckSidecar {
                     rows: selected_acks.clone(),
                     acked: if index == 0 { acked.clone() } else { Vec::new() },
@@ -732,7 +741,11 @@ fn filter_envelope_by_global_row(
                 },
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, i32>>()?;
+    Ok(vec![Envelope::Output {
+        generated_arrow_ipc_batch,
+        outputs,
+    }])
 }
 
 fn schemas_from_init_metadata(metadata: &[u8]) -> Result<BranchInitMetadata, i32> {
@@ -742,8 +755,8 @@ fn schemas_from_init_metadata(metadata: &[u8]) -> Result<BranchInitMetadata, i32
 fn output_columns(
     input_schema: &ProcessorSchema,
     output_schema: &ProcessorSchema,
-    selected_values: &[i32],
-) -> Result<Vec<OutputColumn>, i32> {
+    generated_fields: &[ProcessorField],
+) -> Result<Vec<OutputColumnRef>, i32> {
     output_schema
         .fields
         .iter()
@@ -758,26 +771,62 @@ fn output_columns(
                         && source.optional == destination.optional
                 })
             {
-                return Ok(OutputColumn::Input {
+                return Ok(OutputColumnRef::Input {
                     column_index: u32::try_from(column_index).map_err(|_| ERR_ENVELOPE)?,
                 });
             }
-            Ok(OutputColumn::GuestArrow {
-                ipc: guest_column_ipc(destination, selected_values)?,
+            let column_index = generated_fields
+                .iter()
+                .position(|field| {
+                    field.ty == destination.ty && field.optional == destination.optional
+                })
+                .ok_or(ERR_ENVELOPE)?;
+            Ok(OutputColumnRef::Generated {
+                column_index: u32::try_from(column_index).map_err(|_| ERR_ENVELOPE)?,
             })
         })
         .collect()
 }
 
-fn guest_column_ipc(field: &ProcessorField, selected_values: &[i32]) -> Result<Vec<u8>, i32> {
-    let arrow_field = Field::new(
-        field.name.as_str(),
-        field_arrow_type(&field.ty)?,
-        field.optional,
-    );
-    let schema = Arc::new(Schema::new(vec![arrow_field]));
-    let array = generated_output_column(field, selected_values)?;
-    let batch = RecordBatch::try_new(schema.clone(), vec![array]).map_err(|_| ERR_ARROW_IPC)?;
+fn generated_fields(
+    input_schema: &ProcessorSchema,
+    output_schemas: &[ProcessorSchema],
+) -> Vec<ProcessorField> {
+    let mut generated = Vec::<ProcessorField>::new();
+    for destination in output_schemas.iter().flat_map(|schema| &schema.fields) {
+        let is_input = input_schema.fields.iter().any(|source| {
+            source.name == destination.name
+                && source.ty == destination.ty
+                && source.optional == destination.optional
+        });
+        if !is_input
+            && !generated.iter().any(|field| {
+                field.ty == destination.ty && field.optional == destination.optional
+            })
+        {
+            generated.push(destination.clone());
+        }
+    }
+    generated
+}
+
+fn generated_batch_ipc(
+    fields: &[ProcessorField],
+    selected_values: &[i32],
+) -> Result<Vec<u8>, i32> {
+    if fields.is_empty() {
+        return Ok(Vec::new());
+    }
+    let arrow_fields = fields
+        .iter()
+        .map(|field| Ok(Field::new("", field_arrow_type(&field.ty)?, field.optional)))
+        .collect::<Result<Vec<_>, i32>>()?;
+    let arrays = fields
+        .iter()
+        .map(|field| generated_output_column(field, selected_values))
+        .collect::<Result<Vec<_>, _>>()?;
+    let schema = Arc::new(Schema::new(arrow_fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).map_err(|_| ERR_ARROW_IPC)?;
     let mut ipc = Vec::new();
     {
         let mut writer = StreamWriter::try_new(&mut ipc, &schema).map_err(|_| ERR_ARROW_IPC)?;
@@ -814,7 +863,7 @@ fn generated_output_column(
         ProcessorType::I32 if field.optional => Ok(Arc::new(Int32Array::from(
             vec![None; selected_values.len()],
         ))),
-        ProcessorType::String if field.name == "bucket" => {
+        ProcessorType::String if !field.optional => {
             let values = selected_values
                 .iter()
                 .map(|_| Some("EVEN"))
@@ -859,14 +908,18 @@ fn message_error_envelope(
         .first()
         .map(|row| row.tokens.clone())
         .unwrap_or_default();
+    let generated_fields = generated_fields(input_schema, std::slice::from_ref(output_schema));
     Ok(Envelope::Output {
-        output_relay: output_schema.name.clone(),
-        columns: output_columns(input_schema, output_schema, &[])?,
-        acks: AckSidecar {
-            rows: Vec::new(),
-            acked: acks.acked,
-            nacked: acks.nacked,
-            message_errors: vec![WasmMessageErrorSet { tokens, reason }],
-        },
+        generated_arrow_ipc_batch: generated_batch_ipc(&generated_fields, &[])?,
+        outputs: vec![RoutedOutput {
+            output_relay: output_schema.name.clone(),
+            columns: output_columns(input_schema, output_schema, &generated_fields)?,
+            acks: AckSidecar {
+                rows: Vec::new(),
+                acked: acks.acked,
+                nacked: acks.nacked,
+                message_errors: vec![WasmMessageErrorSet { tokens, reason }],
+            },
+        }],
     })
 }
