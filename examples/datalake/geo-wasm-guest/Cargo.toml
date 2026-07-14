@@ -11,12 +11,10 @@ crate-type = ["cdylib"]
 arrow-array = "54"
 arrow-ipc = "54"
 arrow-schema = "54"
-ciborium = "0.2"
 geo = { version = "0.33.1", default-features = false }
 geohash = "0.13.2"
 maxminddb = "0.28"
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
+nervix-wasm-protocol = { path = "../../../crates/nervix-wasm-protocol" }
 
 [build-dependencies]
 flate2 = "1.1"

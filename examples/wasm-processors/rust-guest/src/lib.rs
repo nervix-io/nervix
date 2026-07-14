@@ -3,66 +3,11 @@ use std::{cell::UnsafeCell, io::Cursor, panic::AssertUnwindSafe, sync::Arc};
 use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema};
-use serde::{Deserialize, Serialize};
-
-mod cbor_byte_string {
-    use std::fmt;
-
-    use serde::{Deserializer, Serializer, de::Visitor};
-
-    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serde::Serialize::serialize(serde_bytes::Bytes::new(bytes), serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_byte_buf(ByteStringVisitor)
-    }
-
-    struct ByteStringVisitor;
-
-    impl Visitor<'_> for ByteStringVisitor {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a CBOR byte string")
-        }
-
-        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value.to_vec())
-        }
-
-        fn visit_borrowed_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value.to_vec())
-        }
-
-        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value)
-        }
-    }
-}
-
-fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
+use nervix_wasm_protocol::{
+    AckSidecar, AckTokenSet, BranchInit as BranchInitMetadata, Envelope, EnvelopeRef, GuestSnapshot,
+    MessageErrorSet as WasmMessageErrorSet, OutputColumnRef, ProcessorField, ProcessorSchema,
+    ProcessorType, RoutedOutput,
+};
 
 const SUCCESS: i32 = 0;
 const ERR_INVALID_SIZE: i32 = -1;
@@ -97,137 +42,6 @@ struct GuestState {
     last_timeout_handle: i64,
     error_state: Option<String>,
 }
-
-#[derive(Serialize, Deserialize)]
-struct GuestSnapshot {
-    processed_batches: u64,
-    processed_rows: u64,
-    pending_start_row: u64,
-    last_domain_time_nanos: i64,
-    last_timeout_handle: i64,
-    pending_batch: Vec<u8>,
-    init_metadata: Vec<u8>,
-    saved_state: Vec<u8>,
-    #[serde(default)]
-    error_state: Option<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Envelope {
-    Input {
-        #[serde(with = "cbor_byte_string")]
-        arrow_ipc_batch: Vec<u8>,
-        acks: AckSidecar,
-    },
-    Output {
-        #[serde(with = "cbor_byte_string")]
-        generated_arrow_ipc_batch: Vec<u8>,
-        outputs: Vec<RoutedOutput>,
-    },
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RoutedOutput {
-        output_relay: String,
-        columns: Vec<OutputColumnRef>,
-        acks: AckSidecar,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum OutputColumnRef {
-    Generated {
-        column_index: u32,
-    },
-    Input {
-        column_index: u32,
-    },
-}
-
-#[derive(Clone, Deserialize)]
-struct BranchInitMetadata {
-    input_schema: ProcessorSchema,
-    output_schemas: Vec<ProcessorSchema>,
-}
-
-#[derive(Clone, Deserialize)]
-struct ProcessorSchema {
-    name: String,
-    fields: Vec<ProcessorField>,
-}
-
-#[derive(Clone, Deserialize)]
-struct ProcessorField {
-    name: String,
-    ty: ProcessorType,
-    optional: bool,
-}
-
-#[derive(Clone, PartialEq, Eq, Deserialize)]
-enum ProcessorType {
-    U8,
-    I8,
-    U16,
-    I16,
-    U32,
-    I32,
-    U64,
-    I64,
-    Bool,
-    String,
-    Datetime,
-    F32,
-    F64,
-    Array {
-        element: Box<ProcessorType>,
-        len: u32,
-    },
-    Vec {
-        element: Box<ProcessorType>,
-    },
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AckSidecar {
-    rows: Vec<OutputRow>,
-    acked: Vec<AckTokenSet>,
-    nacked: Vec<NackSet>,
-    message_errors: Vec<WasmMessageErrorSet>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OutputRow {
-    tokens: Vec<AckToken>,
-    #[serde(deserialize_with = "deserialize_required_option")]
-    source_token: Option<AckToken>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AckTokenSet {
-    tokens: Vec<AckToken>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NackSet {
-    tokens: Vec<AckToken>,
-    reason: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WasmMessageErrorSet {
-    tokens: Vec<AckToken>,
-    reason: String,
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-struct AckToken(u64);
 
 impl GuestState {
     const fn new() -> Self {
@@ -278,25 +92,25 @@ impl GuestState {
     }
 
     fn flush_pending(&mut self) -> i32 {
-        let envelope = match Envelope::decode(&self.pending_batch) {
-            Ok(envelope) => envelope,
-            Err(error) => return error,
+        let envelope = match EnvelopeRef::decode(&self.pending_batch) {
+            Ok(EnvelopeRef::Input(envelope)) => envelope,
+            Ok(EnvelopeRef::Output(_)) | Err(_) => return ERR_ENVELOPE,
         };
+        let arrow_ipc_batch = envelope.arrow_ipc_batch();
+        let acks = envelope.acks();
         let Some(input_schema) = self.input_schema.as_ref() else {
             return ERR_NOT_INITIALIZED;
         };
         match filter_envelope_by_global_row(
-            envelope,
+            arrow_ipc_batch,
+            acks,
             self.pending_start_row,
             input_schema,
             &self.output_schemas,
         ) {
             Ok(filtered) => {
                 for envelope in filtered {
-                    match envelope.encode() {
-                        Ok(encoded) => self.pending_emit.push(encoded),
-                        Err(error) => return error,
-                    }
+                    self.pending_emit.push(envelope.encode());
                 }
             }
             Err(error) => return error,
@@ -319,10 +133,7 @@ impl GuestState {
             error_state: self.error_state.clone(),
         };
 
-        self.buffer.clear();
-        if ciborium::into_writer(&snapshot, &mut self.buffer).is_err() {
-            return ERR_INVALID_SIZE;
-        }
+        self.buffer = snapshot.encode();
         self.buffer.len() as i32
     }
 
@@ -351,8 +162,7 @@ impl GuestState {
     }
 
     fn load_state_bytes(&mut self, saved_state: Vec<u8>) -> i32 {
-        let Ok(snapshot) = ciborium::from_reader::<GuestSnapshot, _>(Cursor::new(saved_state))
-        else {
+        let Ok(snapshot) = GuestSnapshot::decode(&saved_state) else {
             return ERR_INVALID_SIZE;
         };
 
@@ -366,7 +176,7 @@ impl GuestState {
         let Ok(metadata) = schemas_from_init_metadata(&self.init_metadata) else {
             return ERR_INVALID_SIZE;
         };
-        if !self.pending_batch.is_empty() && Envelope::decode(&self.pending_batch).is_err() {
+        if !self.pending_batch.is_empty() && EnvelopeRef::decode(&self.pending_batch).is_err() {
             return ERR_INVALID_SIZE;
         }
         self.input_schema = Some(metadata.input_schema);
@@ -374,23 +184,6 @@ impl GuestState {
         self.saved_state = snapshot.saved_state;
         self.error_state = snapshot.error_state;
         SUCCESS
-    }
-}
-
-impl Envelope {
-    fn encode(&self) -> Result<Vec<u8>, i32> {
-        let mut encoded = Vec::new();
-        ciborium::into_writer(self, &mut encoded).map_err(|_| ERR_ENVELOPE)?;
-        Ok(encoded)
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, i32> {
-        let mut cursor = Cursor::new(bytes);
-        let envelope = ciborium::from_reader(&mut cursor).map_err(|_| ERR_ENVELOPE)?;
-        if usize::try_from(cursor.position()).map_err(|_| ERR_ENVELOPE)? != bytes.len() {
-            return Err(ERR_ENVELOPE);
-        }
-        Ok(envelope)
     }
 }
 
@@ -539,27 +332,32 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
         state.processed_batches += 1;
         state.last_domain_time_nanos = unsafe { nervix_domain_time_nanos() };
         state.last_timeout_handle = unsafe { nervix_timeout_after_nanos(DEFAULT_TIMEOUT_NANOS) };
-        let envelope = match Envelope::decode(&state.buffer[..size]) {
-            Ok(envelope) => envelope,
-            Err(error) => return error,
+        let (first_value, row_count, acks) = {
+            let envelope = match EnvelopeRef::decode(&state.buffer[..size]) {
+                Ok(EnvelopeRef::Input(envelope)) => envelope,
+                Ok(EnvelopeRef::Output(_)) | Err(_) => return ERR_ENVELOPE,
+            };
+            let arrow_ipc_batch = envelope.arrow_ipc_batch();
+            let first_value = match first_i32_value(arrow_ipc_batch) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
+            let row_count = match arrow_ipc_row_count(arrow_ipc_batch) {
+                Ok(row_count) => row_count,
+                Err(error) => return error,
+            };
+            (first_value, row_count, envelope.acks())
         };
-        let Envelope::Input {
-            arrow_ipc_batch,
-            acks,
-        } = envelope
-        else {
-            return ERR_ENVELOPE;
-        };
-        match first_i32_value(&arrow_ipc_batch) {
-            Ok(Some(-300)) => {
+        match first_value {
+            Some(-300) => {
                 state.set_global_error("guest error state for value -300");
                 return ERR_ERROR_STATE;
             }
-            Ok(Some(-200)) => {
+            Some(-200) => {
                 state.set_global_error("guest global error for value -200");
                 return SUCCESS;
             }
-            Ok(Some(-100)) => {
+            Some(-100) => {
                 let Some(input_schema) = state.input_schema.as_ref() else {
                     return ERR_NOT_INITIALIZED;
                 };
@@ -572,18 +370,14 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
                     acks,
                     "guest message error for value -100".to_string(),
                 ) {
-                    Ok(envelope) => match envelope.encode() {
-                        Ok(encoded) => encoded,
-                        Err(error) => return error,
-                    },
+                    Ok(envelope) => envelope.encode(),
                     Err(error) => return error,
                 };
                 state.pending_emit.clear();
                 state.pending_emit.push(encoded);
                 return SUCCESS;
             }
-            Ok(_) => {}
-            Err(error) => return error,
+            _ => {}
         }
         state.pending_emit.clear();
         if !state.pending_batch.is_empty() {
@@ -592,22 +386,12 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
                 return result;
             }
         }
-        let row_count = match arrow_ipc_row_count(&arrow_ipc_batch) {
-            Ok(row_count) => row_count,
-            Err(error) => return error,
-        };
         state.pending_start_row = state.processed_rows;
         state.processed_rows = state.processed_rows.saturating_add(row_count);
         state.pending_batch.clear();
-        let pending = Envelope::Input {
-            arrow_ipc_batch,
-            acks,
-        };
-        let pending = match pending.encode() {
-            Ok(pending) => pending,
-            Err(error) => return error,
-        };
-        state.pending_batch.extend_from_slice(&pending);
+        state
+            .pending_batch
+            .extend_from_slice(&state.buffer[..size]);
 
         if state.processed_batches % FLUSH_EVERY_BATCHES == 0 {
             return state.flush_pending();
@@ -673,19 +457,13 @@ fn arrow_ipc_row_count(bytes: &[u8]) -> Result<u64, i32> {
 }
 
 fn filter_envelope_by_global_row(
-    envelope: Envelope,
+    arrow_ipc_batch: &[u8],
+    acks: AckSidecar,
     start_row: u64,
     input_schema: &ProcessorSchema,
     output_schemas: &[ProcessorSchema],
 ) -> Result<Vec<Envelope>, i32> {
-    let Envelope::Input {
-        arrow_ipc_batch,
-        acks,
-    } = envelope
-    else {
-        return Err(ERR_ENVELOPE);
-    };
-    let reader = StreamReader::try_new(Cursor::new(&arrow_ipc_batch), None)
+    let reader = StreamReader::try_new(Cursor::new(arrow_ipc_batch), None)
         .map_err(|_| ERR_ARROW_IPC)?;
     if output_schemas.is_empty() {
         return Err(ERR_NOT_INITIALIZED);
@@ -749,7 +527,7 @@ fn filter_envelope_by_global_row(
 }
 
 fn schemas_from_init_metadata(metadata: &[u8]) -> Result<BranchInitMetadata, i32> {
-    ciborium::from_reader(Cursor::new(metadata)).map_err(|_| ERR_INVALID_SIZE)
+    BranchInitMetadata::decode(metadata).map_err(|_| ERR_INVALID_SIZE)
 }
 
 fn output_columns(

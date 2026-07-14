@@ -10219,6 +10219,7 @@ fn format_wasm_processor_describe_output(
         format!("resource: {}", processor.resource.as_str()),
         format!("resource version: {version}"),
         format!("file: {}", processor.file),
+        format!("ABI serialization: {}", nervix_wasm::ABI_SERIALIZATION_NAME),
         format!(
             "filter-where: {}",
             if processor.filter_where.is_some() {

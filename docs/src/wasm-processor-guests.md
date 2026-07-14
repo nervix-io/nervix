@@ -49,7 +49,7 @@ The host enforces a maximum guest buffer size. A guest should still validate siz
 
 ## Init Payload
 
-`nervix_init` receives CBOR. `output_schemas` contains one schema per declared `TO` relay. A guest output envelope must name one of those relays and provide one destination-aligned column descriptor per field before Nervix applies the route-level `SET` and `WHERE` clauses. `UNSET` is not valid on WASM output routes.
+`nervix_init` receives the `BranchInit` variant of the size-prefixed FlatBuffers `Message` union. `output_schemas` contains one schema per declared `TO` relay. A guest output envelope must name one of those relays and provide one destination-aligned column descriptor per field before Nervix applies the route-level `SET` and `WHERE` clauses. `UNSET` is not valid on WASM output routes. The authoritative cross-language schema is [`crates/nervix-wasm-protocol/schema/nervix_wasm.fbs`](https://github.com/nervix-io/nervix/blob/main/crates/nervix-wasm-protocol/schema/nervix_wasm.fbs).
 
 ```text
 {
@@ -81,19 +81,19 @@ are targeting.
 explicit `UNBRANCHED` relay is still represented by one concrete branch
 key.
 
-`WasmProcessorType` is encoded with Serde's externally tagged CBOR enum shape.
-Unit variants are strings:
+`ProcessorTypeKind` is a FlatBuffers enum with these scalar variants:
 
 ```text
 "U8" | "I8" | "U16" | "I16" | "U32" | "I32" | "U64" | "I64"
 | "Bool" | "String" | "Datetime" | "F32" | "F64"
 ```
 
-Container variants are maps with one enum tag:
+Container variants use the nested `ProcessorType.element` table; arrays also
+set `array_len`:
 
 ```text
-{ "Array": { "element": WasmProcessorType, "len": u32 } }
-{ "Vec": { "element": WasmProcessorType } }
+ProcessorType { kind: Array, element: ProcessorType, array_len: u32 }
+ProcessorType { kind: Vec, element: ProcessorType }
 ```
 
 `Datetime` values are Arrow `Timestamp(Nanosecond)` values at the wire boundary.
@@ -104,9 +104,13 @@ Treat this as configuration for the branch instance. Store what you need in gues
 
 ## Batch Envelope
 
-Every input or output payload is exactly one CBOR value. The existing ABI size
-argument or return value frames it, so the envelope has no manual length
-prefixes. Arrow IPC payloads are CBOR byte strings, not arrays of integers.
+Every input, output, init, or bundled guest-state payload is one size-prefixed
+FlatBuffer. Its root is the `Message` union and its file identifier is `NVWX`.
+The ABI size and internal size prefix must agree exactly. Arrow IPC payloads
+are FlatBuffers byte vectors. Generated Rust and Go accessors return slices
+into the FlatBuffer, avoiding a deserialization copy. Crossing WebAssembly
+linear memory still requires one transfer; after a guest emit, the host keeps
+the generated Arrow vector as a shared slice of that retained FlatBuffer.
 
 Input envelopes have this shape:
 
@@ -191,8 +195,8 @@ The ACK sidecar is:
 
 For every host input row, Nervix issues one token and sets both `tokens` and
 `source_token` to that token. Preserve the complete row sidecar when filtering
-or enriching. `source_token` is always encoded; use CBOR `null` only for a
-generated row that has no input source.
+or enriching. `source_token` is an optional FlatBuffers scalar and is absent
+only for a generated row that has no input source.
 
 If an output envelope contains any `input` column, every output row must have a
 non-null, live `source_token`, and that token must occur in the row's `tokens`.
@@ -244,14 +248,15 @@ selections use a buffer-sharing slice, and filtered, reordered, duplicated, or
 cross-batch selections use host-side Arrow kernels. The guest never has to
 serialize unchanged field values back to the host.
 
-All fields are required, including empty arrays. Unknown or missing fields,
-unknown `kind` values, trailing CBOR bytes, invalid column counts, bad source
-tokens, malformed or trailing Arrow IPC, and exact-schema mismatches are global
-processor errors. Empty output groups, out-of-range or unreferenced generated
-columns, and generated row-layout mismatches are also rejected. Old
-length-prefixed and per-output generated-column envelopes are not supported.
-There is no protocol version, magic prefix, feature negotiation, legacy
-decoder, or fallback path. Rebuild every guest for this CBOR contract.
+All table and vector fields are required, including empty vectors. Unknown
+fields are ignored for FlatBuffers schema evolution; unknown union or enum
+variants, missing required fields, a wrong identifier or size prefix, trailing
+bytes, invalid column counts, bad source tokens, malformed or trailing Arrow
+IPC, and exact-schema mismatches are global processor errors. Empty output
+groups, out-of-range or unreferenced generated columns, and generated
+row-layout mismatches are also rejected. CBOR and per-output generated-column
+envelopes are not supported. There is no format negotiation, legacy decoder,
+or fallback path. Rebuild every guest for this FlatBuffers contract.
 
 ## State
 
@@ -261,7 +266,7 @@ Nervix saves guest state through `nervix_dump_state`, persists and replicates th
 
 ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor reacts according to its delivery mode and retry policy.
 
-A guest may include a pending CBOR envelope in its opaque snapshot, but tokens
+A guest may include a pending FlatBuffers envelope in its `GuestSnapshot`, but tokens
 and input-column references remain usable only while the originating live host
 ACK map exists. Restored output that refers to lost tokens is rejected. Guest
 state that retains a pending output group must retain the complete generated
@@ -390,19 +395,10 @@ generated index namespaces explicit. A guest-side builder may additionally
 check local index bounds and route row counts, but host validation remains
 authoritative.
 
-State restoration in the prototype is plain CBOR:
+State restoration uses the `GuestSnapshot` FlatBuffers message from the shared protocol crate:
 
 ```rust
-#[derive(Serialize, Deserialize)]
-struct GuestSnapshot {
-    processed_batches: u64,
-    processed_rows: u64,
-    pending_start_row: u64,
-    last_domain_time_nanos: i64,
-    last_timeout_handle: i64,
-    pending_batch: Vec<u8>,
-    init_metadata: Vec<u8>,
-}
+use nervix_wasm_protocol::GuestSnapshot;
 
 fn dump_state(&mut self) -> i32 {
     let snapshot = GuestSnapshot {
@@ -414,14 +410,15 @@ fn dump_state(&mut self) -> i32 {
         pending_batch: self.pending_batch.clone(),
         init_metadata: self.init_metadata.clone(),
     };
-    self.buffer.clear();
-    ciborium::into_writer(&snapshot, &mut self.buffer)
-        .map(|()| self.buffer.len() as i32)
-        .unwrap_or(-1)
+    self.buffer = match snapshot.encode() {
+        Ok(buffer) => buffer,
+        Err(_) => return -1,
+    };
+    self.buffer.len() as i32
 }
 ```
 
-For Arrow IPC, use `arrow_ipc::reader::StreamReader` and `arrow_ipc::writer::StreamWriter`. For CBOR, use `ciborium`.
+For Arrow IPC, use `arrow_ipc::reader::StreamReader` and `arrow_ipc::writer::StreamWriter`. Use `nervix-wasm-protocol` for the ABI envelope and snapshot types.
 
 Build:
 
@@ -480,38 +477,40 @@ func nervixReadEmit() int32 {
 }
 ```
 
-The prototype Go guest uses `fxamacker/cbor` for state and sidecars. The
-sidecar structs should stay explicit:
+The Go guest uses bindings generated from `nervix_wasm.fbs`. FlatBuffers byte
+vectors are exposed as slices backed by the input buffer, so parse Arrow IPC
+directly from those slices while the ABI buffer remains alive. Guest-side
+domain structs should stay explicit before they are passed to the generated
+builders:
 
 ```go
 type ackSidecar struct {
-    Rows   []outputRow `cbor:"rows"`
-    Acked  []ackTokenSet `cbor:"acked"`
-    Nacked []nackSet   `cbor:"nacked"`
-    MessageErrors []messageErrorSet `cbor:"message_errors"`
+    Rows          []outputRow
+    Acked         []ackTokenSet
+    Nacked        []nackSet
+    MessageErrors []messageErrorSet
 }
 
 type outputRow struct {
-    Tokens []uint64 `cbor:"tokens"`
-    SourceToken *uint64 `cbor:"source_token"`
+    Tokens      []uint64
+    SourceToken *uint64
 }
 
 type ackTokenSet struct {
-    Tokens []uint64 `cbor:"tokens"`
+    Tokens []uint64
 }
 
 type nackSet struct {
-    Tokens []uint64 `cbor:"tokens"`
-    Reason string   `cbor:"reason"`
+    Tokens []uint64
+    Reason string
 }
 ```
 
-Use tagged `envelope` and `outputColumn` structs with exact snake-case CBOR
-keys. Validate the allowed fields for each `kind`; `omitempty` is not a variant
-validator. In particular, an input reference to column zero must still encode
-`column_index: 0`. The same filter contract applies in Go: preserve the complete
-row sidecar for rows you emit, add dropped rows to `Acked`, and add rejected
-rows to `Nacked` with a reason.
+Use the generated `MessagePayload` union and enum values rather than string
+tags. In particular, an input reference to column zero must set the generated
+column index to `0`. The same filter contract applies in Go: preserve the
+complete row sidecar for rows you emit, add dropped rows to `Acked`, and add
+rejected rows to `Nacked` with a reason.
 
 Build:
 

@@ -8,13 +8,12 @@ version.workspace = true
 workspace = true
 
 [dependencies]
-ciborium = { workspace = true }
+bytes = { workspace = true }
 nervix-models = { workspace = true }
+nervix-wasm-protocol = { workspace = true }
 parking_lot = { workspace = true }
-serde = { workspace = true }
-serde_bytes = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 wasmtime = { workspace = true }
 
 [dev-dependencies]

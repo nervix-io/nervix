@@ -25,7 +25,7 @@ The guest imports these functions from the `env` module:
 | `nervix_buffer_len` | `() -> i32` | Current logical buffer length. |
 | `nervix_buffer_capacity` | `() -> i32` | Current allocated buffer capacity. |
 | `nervix_alloc` | `(size: i32) -> i32` | Ensures the single reusable buffer can hold `size` bytes, resizes it, and returns `nervix_buffer_ptr()`. |
-| `nervix_init` | `(ptr: i32, size: i32) -> i32` | Reads CBOR init metadata from guest memory. Must be called before processing. |
+| `nervix_init` | `(ptr: i32, size: i32) -> i32` | Reads size-prefixed FlatBuffers init metadata from guest memory. Must be called before processing. |
 | `nervix_current_domain_time_nanos` | `() -> i64` | Returns the current domain-clock time by calling the host import. |
 | `nervix_process_batch` | `(size: i32) -> i32` | Processes `size` bytes of batch envelope from the guest buffer. Prototype behavior filters the input batch before emitting a new batch envelope. |
 | `nervix_on_timeout` | `(handle: i64) -> i32` | Host callback when a previously requested timeout fires. |
@@ -46,9 +46,16 @@ Return code `0` means success. Negative return codes are guest errors:
 
 ## Batch Envelope
 
-Each input or output payload is exactly one CBOR value. The ABI function's size
-argument or return value frames the payload; there are no internal length
-prefixes. Arrow IPC values are CBOR byte strings.
+Each input or output payload is one size-prefixed FlatBuffer whose root is the
+`Message` union in
+[`nervix_wasm.fbs`](../../crates/nervix-wasm-protocol/schema/nervix_wasm.fbs).
+Every buffer carries the `NVWX` file identifier. The ABI function's size
+argument or return value must agree with the internal FlatBuffers size prefix.
+Arrow IPC values are FlatBuffers byte vectors and are read as borrowed slices
+without deserializing or copying them. Crossing the WebAssembly linear-memory
+boundary still requires one host/guest memory transfer; after a guest emit, the
+host retains that transferred FlatBuffer and exposes its generated Arrow vector
+as a shared slice rather than copying the vector again.
 
 Host input:
 
@@ -141,16 +148,18 @@ pool column must be referenced at least once. All structural, schema, row,
 relay, and token validation completes before any route is dispatched or any
 terminal ACK decision is applied.
 
-All fields are required, including empty arrays and `source_token` (encoded as
-CBOR `null` when absent). Unknown fields, unknown kinds, missing fields,
-trailing bytes, malformed Arrow IPC, and schema mismatches reject the complete
-callback output before any dispatch or ACK decision is applied. The whole CBOR
-envelope remains subject to the configured guest-buffer limit.
+All vector and table fields are required, including empty vectors.
+`source_token` is an optional scalar. FlatBuffers permits unknown fields for
+forward schema evolution, while unknown union or enum variants, missing
+required fields, a wrong identifier or size prefix, trailing bytes, malformed
+Arrow IPC, and schema mismatches reject the complete callback output before any
+dispatch or ACK decision is applied. The whole FlatBuffer remains subject to
+the configured guest-buffer limit.
 
-This CBOR format completely replaces the former length-prefixed envelope.
-There is no protocol version, magic prefix, negotiation, or legacy decoder.
-Guests must be rebuilt with the current contract. A snapshot containing a
-pending old-format envelope must be rejected during guest-state restoration.
+This FlatBuffers format completely replaces the former CBOR envelope. There is
+no format negotiation or legacy decoder. Guests must be rebuilt with the
+current schema. A snapshot containing a pending old-format envelope is rejected
+during guest-state restoration.
 
 Global errors are not part of the ACK sidecar. They are guest/node state and use
 a separate optional export channel:
@@ -185,9 +194,9 @@ the guest-owned bytes returned from `nervix_dump_state`, then restores them with
 
 ## Init Payload
 
-`nervix_init` receives CBOR encoded metadata. Bundled guests retain the exact
-bytes for snapshots and parse the input and output schemas needed to construct
-column descriptors.
+`nervix_init` receives a `BranchInit` FlatBuffer message. Bundled guests retain
+the exact bytes for snapshots and use zero-copy FlatBuffers accessors to read
+the input and output schemas needed to construct column descriptors.
 
 The shape is:
 
@@ -226,7 +235,8 @@ encoding the init payload.
 
 ## Prototype State
 
-The Rust and Go prototype guests serialize their branch-local state as CBOR.
+The Rust and Go prototype guests serialize their branch-local state as the
+`GuestSnapshot` variant of the same size-prefixed FlatBuffers `Message` union.
 The state includes:
 
 - processed batch count

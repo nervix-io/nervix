@@ -295,13 +295,13 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
 DESCRIBE WASM PROCESSOR <name>;
 ```
 
-A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix resource and runs one guest instance per concrete branch. Source `FROM ... WHERE` runs first, then `FILTER WHERE` runs before the guest receives a row. Multiple `FROM` relays are consumed as one same-schema stream; the guest still sees a single source schema. The guest receives one CBOR envelope containing an Arrow IPC input batch and an ACK sidecar. Each output envelope names a declared `TO` relay and provides one destination-aligned column descriptor per field: either an unchanged input-column reference or a guest-generated single-column Arrow IPC stream. Nervix reconstructs the exact destination batch, then applies that route's `SET` and `WHERE` clauses.
+A WASM processor loads a native `wasm32-unknown-unknown` module from a Nervix resource and runs one guest instance per concrete branch. Source `FROM ... WHERE` runs first, then `FILTER WHERE` runs before the guest receives a row. Multiple `FROM` relays are consumed as one same-schema stream; the guest still sees a single source schema. The guest receives one verified, size-prefixed FlatBuffer containing an Arrow IPC input batch and an ACK sidecar. Arrow IPC byte vectors are accessed without deserialization or copying inside the host/guest memory that owns the FlatBuffer. Each output envelope names a declared `TO` relay and provides one destination-aligned column descriptor per field: either an unchanged input-column reference or a guest-generated single-column Arrow IPC stream. Nervix reconstructs the exact destination batch, then applies that route's `SET` and `WHERE` clauses.
 
 See [WASM Processor Guests](wasm-processor-guests.md) for the guest ABI and Rust/Go authoring examples.
 
 The declared `BRANCHED BY` branch must match the input and output relays. WASM processors preserve the upstream branch group exactly as received; they do not consume from a mixed logical relay and they do not fan in records across branches. WASM processors do not inherit input fields implicitly: the guest must explicitly select every destination column. An input reference reuses retained host Arrow arrays without guest-side copying, and its row's `source_token` selects both the referenced source row and the original record visible through `input.field`. Route `SET` clauses may read guest output fields through the destination relay namespace, and may read that selected source row through the `input` namespace, for example `TO out1 SET out1.name = lower(out1.name), out1.surname = input.surname`. A generated row without a source token cannot use `input.field`. `UNSET` is not valid on WASM output routes.
 
-The host initializes each branch instance with CBOR metadata:
+The host initializes each branch instance with the FlatBuffers `BranchInit` message:
 
 - domain name
 - domain type
@@ -315,7 +315,7 @@ ACK tokens and retained input-column sources are different: they are host-local 
 
 Flush is guest-controlled for WASM processors. Nervix calls the guest `process` export when input arrives and forwards any batches returned by the guest. The guest may also request a domain-clock timeout through the host timeout import. When the timeout fires, the host calls the guest timeout export and forwards any emitted batches through the same ACK sidecar path as normal processing.
 
-`DESCRIBE WASM PROCESSOR` reports the scheduled owner and replicas, input/output relays, resource, resource version, file, guest-controlled flush marker, branch-local marker, persistent/replicated state markers, and runtime metrics when available.
+`DESCRIBE WASM PROCESSOR` reports the scheduled owner and replicas, input/output relays, resource, resource version, file, FlatBuffers ABI serialization, guest-controlled flush marker, branch-local marker, persistent/replicated state markers, and runtime metrics when available.
 
 ## Window Processor
 
