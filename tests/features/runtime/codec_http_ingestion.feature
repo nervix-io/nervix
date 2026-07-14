@@ -111,6 +111,57 @@ Feature: HTTP codec ingestion
       | 3            | JSON        | ARRAY<F32, 3> | VEC<STRING> |
       | 3            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
 
+  Scenario Outline: HTTP endpoint ingestor preserves multidimensional fixed and variable array shapes
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA shaped_metrics (
+        device STRING,
+        matrix <matrix_type>,
+        samples <samples_type>
+      );
+      CREATE STRICT WIRE JSON SCHEMA shaped_metrics_wire (
+        device STRING,
+        matrix ARRAY,
+        samples ARRAY
+      );
+      CREATE CODEC shaped_metrics_codec
+        FROM WIRE JSON SCHEMA shaped_metrics_wire
+        TO SCHEMA shaped_metrics;
+      CREATE RELAY shaped_metrics_stream SCHEMA shaped_metrics UNBRANCHED;
+      CREATE VHOST edge shaped-arrays-{{test_id}}.example.com;
+      CREATE ENDPOINT shaped_metrics_endpoint
+        ON edge
+        PATH '/ingest'
+        TYPE HTTP;
+      CREATE INGESTOR shaped_metrics_ingestor
+        TO shaped_metrics_stream
+        DECODE USING shaped_metrics_codec
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        FROM ENDPOINT shaped_metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      SUBSCRIBE SESSION TO shaped_metrics_stream;
+      START;
+      """
+    When http payload encoded as "JSON" is posted to host "shaped-arrays-{{test_id}}.example.com" path "/ingest"
+      """
+      {"device":"edge-1","matrix":[[1.0,2.0,3.0],[4.0,5.0,6.0]],"samples":[[10.0,11.0],[20.0,21.0],[30.0,31.0]]}
+      """
+    Then the relay subscription receives a payload
+      """
+      {"device":"edge-1","matrix":[[1.0,2.0,3.0],[4.0,5.0,6.0]],"samples":[[10.0,11.0],[20.0,21.0],[30.0,31.0]]}
+      """
+
+    Examples:
+      | cluster_size | matrix_type      | samples_type       |
+      | 1            | ARRAY<F32, 2, 3> | VEC<ARRAY<F32, 2>> |
+      | 3            | ARRAY<F32, 2, 3> | VEC<ARRAY<F32, 2>> |
+
   Scenario Outline: Schemaful <wire_format> wire schemas enforce strictness for extra fields
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

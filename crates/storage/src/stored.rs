@@ -78,6 +78,12 @@ pub enum StoredAvroType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    __S::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
 pub enum StoredParseAsType {
     U8,
     I8,
@@ -93,29 +99,14 @@ pub enum StoredParseAsType {
     F32,
     F64,
     Array {
-        element: StoredScalarParseAsType,
+        #[rkyv(omit_bounds)]
+        element: Box<StoredParseAsType>,
         len: u32,
     },
     Vec {
-        element: StoredScalarParseAsType,
+        #[rkyv(omit_bounds)]
+        element: Box<StoredParseAsType>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredScalarParseAsType {
-    U8,
-    I8,
-    U16,
-    I16,
-    U32,
-    I32,
-    U64,
-    I64,
-    Bool,
-    String,
-    Datetime,
-    F32,
-    F64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -456,11 +447,11 @@ impl From<ParseAsType> for StoredParseAsType {
             ParseAsType::F32 => Self::F32,
             ParseAsType::F64 => Self::F64,
             ParseAsType::Array { element, len } => Self::Array {
-                element: StoredScalarParseAsType::from_parse_as(*element),
+                element: Box::new((*element).into()),
                 len,
             },
             ParseAsType::Vec { element } => Self::Vec {
-                element: StoredScalarParseAsType::from_parse_as(*element),
+                element: Box::new((*element).into()),
             },
         }
     }
@@ -483,55 +474,12 @@ impl From<StoredParseAsType> for ParseAsType {
             StoredParseAsType::F32 => Self::F32,
             StoredParseAsType::F64 => Self::F64,
             StoredParseAsType::Array { element, len } => Self::Array {
-                element: Box::new(element.into()),
+                element: Box::new((*element).into()),
                 len,
             },
             StoredParseAsType::Vec { element } => Self::Vec {
-                element: Box::new(element.into()),
+                element: Box::new((*element).into()),
             },
-        }
-    }
-}
-
-impl StoredScalarParseAsType {
-    fn from_parse_as(value: ParseAsType) -> Self {
-        match value {
-            ParseAsType::U8 => Self::U8,
-            ParseAsType::I8 => Self::I8,
-            ParseAsType::U16 => Self::U16,
-            ParseAsType::I16 => Self::I16,
-            ParseAsType::U32 => Self::U32,
-            ParseAsType::I32 => Self::I32,
-            ParseAsType::U64 => Self::U64,
-            ParseAsType::I64 => Self::I64,
-            ParseAsType::Bool => Self::Bool,
-            ParseAsType::String => Self::String,
-            ParseAsType::Datetime => Self::Datetime,
-            ParseAsType::F32 => Self::F32,
-            ParseAsType::F64 => Self::F64,
-            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
-                panic!("nested array and vector schema types are not stored")
-            }
-        }
-    }
-}
-
-impl From<StoredScalarParseAsType> for ParseAsType {
-    fn from(value: StoredScalarParseAsType) -> Self {
-        match value {
-            StoredScalarParseAsType::U8 => Self::U8,
-            StoredScalarParseAsType::I8 => Self::I8,
-            StoredScalarParseAsType::U16 => Self::U16,
-            StoredScalarParseAsType::I16 => Self::I16,
-            StoredScalarParseAsType::U32 => Self::U32,
-            StoredScalarParseAsType::I32 => Self::I32,
-            StoredScalarParseAsType::U64 => Self::U64,
-            StoredScalarParseAsType::I64 => Self::I64,
-            StoredScalarParseAsType::Bool => Self::Bool,
-            StoredScalarParseAsType::String => Self::String,
-            StoredScalarParseAsType::Datetime => Self::Datetime,
-            StoredScalarParseAsType::F32 => Self::F32,
-            StoredScalarParseAsType::F64 => Self::F64,
         }
     }
 }

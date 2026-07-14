@@ -264,6 +264,7 @@ impl OnnxTensorMetadata {
                     InferencerTensorDimension::Fixed(declared) => {
                         *actual >= 0 && *actual != i64::from(*declared)
                     }
+                    InferencerTensorDimension::Dynamic => *actual >= 0,
                     InferencerTensorDimension::Batch => *actual >= 0,
                 },
             );
@@ -11251,20 +11252,16 @@ fn validate_inferencer_field_type(
     field_type: &ParseAsType,
 ) -> Result<(), String> {
     if !mapping.schema.is_compatible_with_field_type(field_type) {
-        let element_count = mapping
-            .schema
-            .fixed_element_count()
-            .map(|count| count.to_string())
-            .unwrap_or_else(|| "overflow".to_string());
         return Err(format!(
             "inferencer '{}' {} tensor '{}' field '{}.{}' has incompatible element type or shape: \
-             declared tensor slice requires {} F32 element(s), internal field is {}",
+             declared tensor dimensions {:?} require one matching ARRAY axis per fixed dimension \
+             and one VEC axis per DYNAMIC dimension; internal field is {}",
             processor.name.as_str(),
             direction,
             mapping.tensor,
             mapping.relay.as_str(),
             mapping.field.as_str(),
-            element_count,
+            mapping.schema.dimensions,
             inferencer_parse_as_label(field_type)
         ));
     }

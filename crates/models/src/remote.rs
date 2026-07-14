@@ -83,6 +83,12 @@ pub enum RemoteRuntimeValue {
 #[derive(
     Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    __S::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
 pub enum RemoteRuntimeElementValue {
     U8(u8),
     I8(i8),
@@ -97,4 +103,6 @@ pub enum RemoteRuntimeElementValue {
     Datetime(String),
     F32(f32),
     F64(f64),
+    Array(#[rkyv(omit_bounds)] Vec<RemoteRuntimeElementValue>),
+    Vec(#[rkyv(omit_bounds)] Vec<RemoteRuntimeElementValue>),
 }

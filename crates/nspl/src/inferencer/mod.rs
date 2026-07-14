@@ -45,9 +45,13 @@ fn tensor_schema<'src>()
 -> impl Parser<'src, &'src [Token], InferencerTensorSchema, extra::Err<ParseError<'src>>> + Clone {
     let dimension = choice((
         kw(Identifier::Batch).to(InferencerTensorDimension::Batch),
+        kw(Identifier::Dynamic).to(InferencerTensorDimension::Dynamic),
         select! { Token::NumberLiteral(raw) => raw }.try_map(|raw, span| {
             let size = raw.parse::<u32>().map_err(|_| {
-                Rich::custom(span, "tensor dimension must be a positive integer or BATCH")
+                Rich::custom(
+                    span,
+                    "tensor dimension must be a positive integer, DYNAMIC, or BATCH",
+                )
             })?;
             if size == 0 {
                 return Err(Rich::custom(
@@ -251,12 +255,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_scalar_fixed_and_non_leading_batch_tensor_dimensions() {
+    fn parses_scalar_fixed_dynamic_and_non_leading_batch_tensor_dimensions() {
         let input = r#"
             CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS {
                 "scalar" DENSE TENSOR<F32>[] = a.scalar,
                 "image" DENSE TENSOR<F32>[3, 224, 224] = a.image,
+                "sequence" DENSE TENSOR<F32>[DYNAMIC, 64] = a.sequence,
                 "tokens" DENSE TENSOR<F32>[128, BATCH] = a.tokens
             }
             OUTPUTS { "score" DENSE TENSOR<F32>[10, BATCH] = b.score }
@@ -274,7 +279,14 @@ mod tests {
                 nervix_models::InferencerTensorDimension::Fixed(224),
             ]
         );
-        assert_eq!(parsed.inputs[2].schema.batch_axis(), Some(1));
+        assert_eq!(
+            parsed.inputs[2].schema.dimensions,
+            vec![
+                nervix_models::InferencerTensorDimension::Dynamic,
+                nervix_models::InferencerTensorDimension::Fixed(64),
+            ]
+        );
+        assert_eq!(parsed.inputs[3].schema.batch_axis(), Some(1));
         assert_eq!(parsed.outputs[0].schema.batch_axis(), Some(1));
     }
 

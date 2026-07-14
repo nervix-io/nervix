@@ -1291,7 +1291,13 @@ async fn given_node_has_onnx_fixture_resource_directory(
         .join("fixtures")
         .join("onnx")
         .join("simple_score.onnx");
-    for fixture in ["simple_score.onnx", "batch_score.onnx", "f64_score.onnx"] {
+    for fixture in [
+        "simple_score.onnx",
+        "batch_score.onnx",
+        "dynamic_batch_score.onnx",
+        "matrix_identity.onnx",
+        "f64_score.onnx",
+    ] {
         let source_path = source_path.with_file_name(fixture);
         let destination_path = resource_dir.join("models").join(fixture);
         std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {

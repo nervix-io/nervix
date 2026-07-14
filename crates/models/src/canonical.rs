@@ -1119,6 +1119,7 @@ fn inference_mappings_to_nspl(
                     .iter()
                     .map(|dimension| match dimension {
                         InferencerTensorDimension::Fixed(size) => size.to_string(),
+                        InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
                         InferencerTensorDimension::Batch => "BATCH".to_string(),
                     })
                     .collect::<Vec<_>>()
@@ -1859,8 +1860,22 @@ fn parse_as_to_keyword(parse_as: &ParseAsType) -> String {
         ParseAsType::Datetime => "DATETIME".to_string(),
         ParseAsType::F32 => "F32".to_string(),
         ParseAsType::F64 => "F64".to_string(),
-        ParseAsType::Array { element, len } => {
-            format!("ARRAY<{}, {}>", parse_as_to_keyword(element), len)
+        ParseAsType::Array { .. } => {
+            let mut element = parse_as;
+            let mut lengths = Vec::new();
+            while let ParseAsType::Array {
+                element: nested,
+                len,
+            } = element
+            {
+                lengths.push(len.to_string());
+                element = nested;
+            }
+            format!(
+                "ARRAY<{}, {}>",
+                parse_as_to_keyword(element),
+                lengths.join(", ")
+            )
         }
         ParseAsType::Vec { element } => format!("VEC<{}>", parse_as_to_keyword(element)),
     }
@@ -2050,6 +2065,30 @@ mod tests {
         assert_eq!(
             nspl,
             "CREATE SCHEMA latency (p99 F64, created_at DATETIME);"
+        );
+    }
+
+    #[test]
+    fn renders_multidimensional_internal_arrays_canonical() {
+        let schema = CreateSchema {
+            name: identifier("tensors"),
+            fields: vec![SchemaField {
+                name: identifier("matrix"),
+                ty: ParseAsType::Array {
+                    len: 2,
+                    element: Box::new(ParseAsType::Array {
+                        len: 3,
+                        element: Box::new(ParseAsType::F32),
+                    }),
+                },
+                optional: false,
+                sensitive: false,
+            }],
+        };
+
+        assert_eq!(
+            schema.to_canonical_nspl().expect("must render"),
+            "CREATE SCHEMA tensors (matrix ARRAY<F32, 2, 3>);"
         );
     }
 

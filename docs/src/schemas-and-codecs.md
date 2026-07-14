@@ -12,7 +12,8 @@ CREATE [IF NOT EXISTS] SCHEMA notification (
   created_at DATETIME,
   payload STRING OPTIONAL,
   cpu_last_64 ARRAY<F32, 64>,
-  labels VEC<STRING> OPTIONAL
+  image ARRAY<F32, 3, 224, 224>,
+  detections VEC<ARRAY<F32, 6>> OPTIONAL
 );
 ```
 
@@ -20,10 +21,19 @@ Schemas must declare at least one field.
 
 These types are the values Nervix stores in runtime records and uses for branch grouping, subscription matching, and processor logic.
 
-`ARRAY<T, N>` stores a fixed-size list and maps to Arrow `FixedSizeList<T, N>`.
-`VEC<T>` stores a variable-length list and maps to Arrow `List<T>`.
-The element type `T` may be any internal primitive type.
-JSON and CBOR represent both as JSON-style arrays; AVRO represents both as array fields with item types inferred from the internal schema.
+`ARRAY<T, D1, ..., Dn>` is a fixed rectangular array. Each dimension maps to one
+nested Arrow `FixedSizeList` level, so `ARRAY<F32, 2, 3>` maps to
+`FixedSizeList<FixedSizeList<Float32, 3>, 2>` and remains a 2-by-3 value.
+`VEC<T>` is a variable-length sequence and maps to Arrow `List<T>`. The element
+type is recursive, so fixed and variable axes can be mixed, for example
+`VEC<ARRAY<F32, 6>>` and `ARRAY<VEC<STRING>, 4>`.
+
+`ARRAY` and `VEC` are distinct and are never implicitly converted. Every fixed
+axis must have a positive length, fixed arrays must contain exactly that many
+elements at runtime, and dense multidimensional values must retain their nested
+shape. JSON and CBOR represent both with nested JSON-style arrays. AVRO uses
+nested array schemas with item types inferred recursively from the internal
+schema.
 
 Append `OPTIONAL` to either an internal schema field or a wire schema field when the value may be absent. Optional fields are omitted from runtime records and emitted JSON payloads when no value is present.
 
