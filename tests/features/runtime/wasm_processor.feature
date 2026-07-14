@@ -165,6 +165,10 @@ Feature: WASM processor runtime behavior
       """
     And the last command output contains
       """
+      ABI serialization: FlatBuffers
+      """
+    And the last command output contains
+      """
       persistent state: true
       """
     And the last command output contains

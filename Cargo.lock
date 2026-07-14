@@ -6288,14 +6288,21 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
- "ciborium",
+ "bytes",
  "nervix-models",
+ "nervix-wasm-protocol",
  "parking_lot",
- "serde",
- "serde_bytes",
  "thiserror 2.0.18",
  "tokio",
  "wasmtime",
+]
+
+[[package]]
+name = "nervix-wasm-protocol"
+version = "0.1.0-dev"
+dependencies = [
+ "flatbuffers",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

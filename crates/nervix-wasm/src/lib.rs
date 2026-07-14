@@ -1,5 +1,4 @@
 use std::{
-    io::Cursor,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -8,74 +7,16 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use nervix_models::{ParseAsType, Timestamp};
+use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use wasmtime::{
     Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel, Store,
     TypedFunc,
 };
-
-mod cbor_byte_string {
-    use std::fmt;
-
-    use serde::{Deserializer, Serializer, de::Visitor};
-
-    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serde::Serialize::serialize(serde_bytes::Bytes::new(bytes), serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_byte_buf(ByteStringVisitor)
-    }
-
-    struct ByteStringVisitor;
-
-    impl Visitor<'_> for ByteStringVisitor {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a CBOR byte string")
-        }
-
-        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value.to_vec())
-        }
-
-        fn visit_borrowed_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value.to_vec())
-        }
-
-        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value)
-        }
-    }
-}
-
-fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
 
 const ENV_MODULE: &str = "env";
 const EXPORT_MEMORY: &str = "memory";
@@ -84,6 +25,7 @@ const ERR_INVALID_SIZE: i32 = -1;
 const DEFAULT_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(1);
 const DEFAULT_EPOCH_DEADLINE_TICKS: u64 = 1;
 const DEFAULT_MAX_GUEST_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
 
 #[derive(Debug, Error)]
 pub enum WasmProcessorError {
@@ -117,8 +59,6 @@ pub enum WasmProcessorError {
     InvalidOffset(i32),
     #[error("guest returned invalid byte size {0}")]
     InvalidSize(i32),
-    #[error("failed to encode branch init metadata as CBOR: {0}")]
-    EncodeInit(#[source] ciborium::ser::Error<std::io::Error>),
     #[error(transparent)]
     Protocol(#[from] WasmProtocolError),
     #[error("guest global error bytes are not valid UTF-8: {0}")]
@@ -129,12 +69,8 @@ pub enum WasmProcessorError {
 
 #[derive(Debug, Error)]
 pub enum WasmProtocolError {
-    #[error("failed to encode WASM envelope as CBOR: {0}")]
-    EncodeEnvelope(#[source] ciborium::ser::Error<std::io::Error>),
-    #[error("failed to decode WASM envelope from CBOR: {0}")]
-    DecodeEnvelope(#[source] ciborium::de::Error<std::io::Error>),
-    #[error("WASM envelope has {remaining} trailing bytes")]
-    TrailingEnvelopeBytes { remaining: usize },
+    #[error(transparent)]
+    FlatBuffers(#[from] protocol::ProtocolError),
 }
 
 #[derive(Debug, Clone)]
@@ -244,7 +180,7 @@ fn spawn_epoch_driver(engine: Engine, stop: Arc<AtomicBool>, interval: Duration)
         .expect("failed to spawn nervix wasm epoch driver");
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WasmBranchInit {
     pub domain_name: String,
     pub domain_type: String,
@@ -253,20 +189,20 @@ pub struct WasmBranchInit {
     pub output_schemas: Vec<WasmProcessorSchema>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmProcessorSchema {
     pub name: String,
     pub fields: Vec<WasmProcessorField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmProcessorField {
     pub name: String,
     pub ty: WasmProcessorType,
     pub optional: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmProcessorType {
     U8,
     I8,
@@ -336,6 +272,73 @@ impl From<&ParseAsType> for WasmProcessorType {
     }
 }
 
+impl WasmBranchInit {
+    fn encode(&self) -> Vec<u8> {
+        protocol::BranchInit {
+            domain_name: self.domain_name.clone(),
+            domain_type: self.domain_type.clone(),
+            branch_key: self.branch_key.clone(),
+            input_schema: self.input_schema.to_protocol(),
+            output_schemas: self
+                .output_schemas
+                .iter()
+                .map(WasmProcessorSchema::to_protocol)
+                .collect(),
+        }
+        .encode()
+    }
+}
+
+impl WasmProcessorSchema {
+    fn to_protocol(&self) -> protocol::ProcessorSchema {
+        protocol::ProcessorSchema {
+            name: self.name.clone(),
+            fields: self
+                .fields
+                .iter()
+                .map(WasmProcessorField::to_protocol)
+                .collect(),
+        }
+    }
+}
+
+impl WasmProcessorField {
+    fn to_protocol(&self) -> protocol::ProcessorField {
+        protocol::ProcessorField {
+            name: self.name.clone(),
+            ty: self.ty.to_protocol(),
+            optional: self.optional,
+        }
+    }
+}
+
+impl WasmProcessorType {
+    fn to_protocol(&self) -> protocol::ProcessorType {
+        match self {
+            Self::U8 => protocol::ProcessorType::U8,
+            Self::I8 => protocol::ProcessorType::I8,
+            Self::U16 => protocol::ProcessorType::U16,
+            Self::I16 => protocol::ProcessorType::I16,
+            Self::U32 => protocol::ProcessorType::U32,
+            Self::I32 => protocol::ProcessorType::I32,
+            Self::U64 => protocol::ProcessorType::U64,
+            Self::I64 => protocol::ProcessorType::I64,
+            Self::Bool => protocol::ProcessorType::Bool,
+            Self::String => protocol::ProcessorType::String,
+            Self::Datetime => protocol::ProcessorType::Datetime,
+            Self::F32 => protocol::ProcessorType::F32,
+            Self::F64 => protocol::ProcessorType::F64,
+            Self::Array { element, len } => protocol::ProcessorType::Array {
+                element: Box::new(element.to_protocol()),
+                len: *len,
+            },
+            Self::Vec { element } => protocol::ProcessorType::Vec {
+                element: Box::new(element.to_protocol()),
+            },
+        }
+    }
+}
+
 pub trait DomainClock: Send + Sync {
     fn now(&self) -> Timestamp;
 }
@@ -379,39 +382,33 @@ pub struct WasmTimeoutRequest {
     pub delay: Duration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WasmAckToken(pub u64);
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WasmAckTokenSet {
     pub tokens: Vec<WasmAckToken>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WasmOutputRow {
     pub tokens: Vec<WasmAckToken>,
-    #[serde(deserialize_with = "deserialize_required_option")]
     pub source_token: Option<WasmAckToken>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmNackSet {
     pub tokens: Vec<WasmAckToken>,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmMessageErrorSet {
     pub tokens: Vec<WasmAckToken>,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WasmAckSidecar {
     pub rows: Vec<WasmOutputRow>,
     pub acked: Vec<WasmAckTokenSet>,
@@ -419,23 +416,19 @@ pub struct WasmAckSidecar {
     pub message_errors: Vec<WasmMessageErrorSet>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmEnvelope {
     Input {
-        #[serde(with = "cbor_byte_string")]
         arrow_ipc_batch: Vec<u8>,
         acks: WasmAckSidecar,
     },
     Output {
-        #[serde(with = "cbor_byte_string")]
-        generated_arrow_ipc_batch: Vec<u8>,
+        generated_arrow_ipc_batch: Bytes,
         outputs: Vec<WasmRoutedOutput>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmRoutedOutput {
     pub output_relay: String,
     pub columns: Vec<WasmOutputColumnRef>,
@@ -456,8 +449,7 @@ impl WasmRoutedOutput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmOutputColumnRef {
     Generated { column_index: u32 },
     Input { column_index: u32 },
@@ -499,7 +491,7 @@ impl WasmEnvelope {
 
     pub fn output(generated_arrow_ipc_batch: Vec<u8>, outputs: Vec<WasmRoutedOutput>) -> Self {
         Self::Output {
-            generated_arrow_ipc_batch,
+            generated_arrow_ipc_batch: generated_arrow_ipc_batch.into(),
             outputs,
         }
     }
@@ -512,22 +504,212 @@ impl WasmEnvelope {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, WasmProtocolError> {
-        let mut encoded = Vec::new();
-        ciborium::into_writer(self, &mut encoded).map_err(WasmProtocolError::EncodeEnvelope)?;
-        Ok(encoded)
+        Ok(self.to_protocol().encode())
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, WasmProtocolError> {
-        let mut cursor = Cursor::new(bytes);
-        let envelope =
-            ciborium::from_reader(&mut cursor).map_err(WasmProtocolError::DecodeEnvelope)?;
-        let consumed = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
-        if consumed != bytes.len() {
-            return Err(WasmProtocolError::TrailingEnvelopeBytes {
-                remaining: bytes.len().saturating_sub(consumed),
-            });
+        Self::decode_owned(bytes.to_vec())
+    }
+
+    pub fn decode_borrowed(bytes: &[u8]) -> Result<protocol::EnvelopeRef<'_>, WasmProtocolError> {
+        Ok(protocol::EnvelopeRef::decode(bytes)?)
+    }
+
+    fn to_protocol(&self) -> protocol::Envelope {
+        match self {
+            Self::Input {
+                arrow_ipc_batch,
+                acks,
+            } => protocol::Envelope::Input {
+                arrow_ipc_batch: arrow_ipc_batch.clone(),
+                acks: acks.to_protocol(),
+            },
+            Self::Output {
+                generated_arrow_ipc_batch,
+                outputs,
+            } => protocol::Envelope::Output {
+                generated_arrow_ipc_batch: generated_arrow_ipc_batch.to_vec(),
+                outputs: outputs.iter().map(WasmRoutedOutput::to_protocol).collect(),
+            },
         }
-        Ok(envelope)
+    }
+
+    fn decode_owned(bytes: Vec<u8>) -> Result<Self, WasmProtocolError> {
+        let bytes = Bytes::from(bytes);
+        let envelope = protocol::EnvelopeRef::decode(&bytes)?;
+        match envelope {
+            protocol::EnvelopeRef::Input(input) => Ok(Self::Input {
+                arrow_ipc_batch: input.arrow_ipc_batch().to_vec(),
+                acks: WasmAckSidecar::from_protocol(input.acks()),
+            }),
+            protocol::EnvelopeRef::Output(output) => {
+                let generated = output.generated_arrow_ipc_batch();
+                let generated_arrow_ipc_batch = if generated.is_empty() {
+                    Bytes::new()
+                } else {
+                    let offset = generated.as_ptr() as usize - bytes.as_ptr() as usize;
+                    bytes.slice(offset..offset + generated.len())
+                };
+                Ok(Self::Output {
+                    generated_arrow_ipc_batch,
+                    outputs: output
+                        .outputs()?
+                        .into_iter()
+                        .map(WasmRoutedOutput::from_protocol)
+                        .collect(),
+                })
+            }
+        }
+    }
+}
+
+impl WasmAckSidecar {
+    fn to_protocol(&self) -> protocol::AckSidecar {
+        protocol::AckSidecar {
+            rows: self
+                .rows
+                .iter()
+                .map(|row| protocol::OutputRow {
+                    tokens: row
+                        .tokens
+                        .iter()
+                        .map(|token| protocol::AckToken(token.0))
+                        .collect(),
+                    source_token: row.source_token.map(|token| protocol::AckToken(token.0)),
+                })
+                .collect(),
+            acked: self
+                .acked
+                .iter()
+                .map(|set| protocol::AckTokenSet {
+                    tokens: set
+                        .tokens
+                        .iter()
+                        .map(|token| protocol::AckToken(token.0))
+                        .collect(),
+                })
+                .collect(),
+            nacked: self
+                .nacked
+                .iter()
+                .map(|set| protocol::NackSet {
+                    tokens: set
+                        .tokens
+                        .iter()
+                        .map(|token| protocol::AckToken(token.0))
+                        .collect(),
+                    reason: set.reason.clone(),
+                })
+                .collect(),
+            message_errors: self
+                .message_errors
+                .iter()
+                .map(|set| protocol::MessageErrorSet {
+                    tokens: set
+                        .tokens
+                        .iter()
+                        .map(|token| protocol::AckToken(token.0))
+                        .collect(),
+                    reason: set.reason.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn from_protocol(sidecar: protocol::AckSidecar) -> Self {
+        Self {
+            rows: sidecar
+                .rows
+                .into_iter()
+                .map(|row| WasmOutputRow {
+                    tokens: row
+                        .tokens
+                        .into_iter()
+                        .map(|token| WasmAckToken(token.0))
+                        .collect(),
+                    source_token: row.source_token.map(|token| WasmAckToken(token.0)),
+                })
+                .collect(),
+            acked: sidecar
+                .acked
+                .into_iter()
+                .map(|set| WasmAckTokenSet {
+                    tokens: set
+                        .tokens
+                        .into_iter()
+                        .map(|token| WasmAckToken(token.0))
+                        .collect(),
+                })
+                .collect(),
+            nacked: sidecar
+                .nacked
+                .into_iter()
+                .map(|set| WasmNackSet {
+                    tokens: set
+                        .tokens
+                        .into_iter()
+                        .map(|token| WasmAckToken(token.0))
+                        .collect(),
+                    reason: set.reason,
+                })
+                .collect(),
+            message_errors: sidecar
+                .message_errors
+                .into_iter()
+                .map(|set| WasmMessageErrorSet {
+                    tokens: set
+                        .tokens
+                        .into_iter()
+                        .map(|token| WasmAckToken(token.0))
+                        .collect(),
+                    reason: set.reason,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl WasmRoutedOutput {
+    fn to_protocol(&self) -> protocol::RoutedOutput {
+        protocol::RoutedOutput {
+            output_relay: self.output_relay.clone(),
+            columns: self
+                .columns
+                .iter()
+                .map(|column| match column {
+                    WasmOutputColumnRef::Generated { column_index } => {
+                        protocol::OutputColumnRef::Generated {
+                            column_index: *column_index,
+                        }
+                    }
+                    WasmOutputColumnRef::Input { column_index } => {
+                        protocol::OutputColumnRef::Input {
+                            column_index: *column_index,
+                        }
+                    }
+                })
+                .collect(),
+            acks: self.acks.to_protocol(),
+        }
+    }
+
+    fn from_protocol(output: protocol::RoutedOutput) -> Self {
+        Self {
+            output_relay: output.output_relay,
+            columns: output
+                .columns
+                .into_iter()
+                .map(|column| match column {
+                    protocol::OutputColumnRef::Generated { column_index } => {
+                        WasmOutputColumnRef::Generated { column_index }
+                    }
+                    protocol::OutputColumnRef::Input { column_index } => {
+                        WasmOutputColumnRef::Input { column_index }
+                    }
+                })
+                .collect(),
+            acks: WasmAckSidecar::from_protocol(output.acks),
+        }
     }
 }
 
@@ -677,8 +859,7 @@ impl WasmBranchInstance {
     }
 
     pub async fn init(&mut self, init: WasmBranchInit) -> Result<(), WasmProcessorError> {
-        let mut encoded = Vec::new();
-        ciborium::into_writer(&init, &mut encoded).map_err(WasmProcessorError::EncodeInit)?;
+        let encoded = init.encode();
         let (ptr, size) = self.write_to_guest_buffer(&encoded).await?;
         let code = self
             .init
@@ -957,7 +1138,7 @@ impl WasmBranchInstance {
                 }
                 ensure_success("nervix_read_emit", size)?;
             }
-            let batch = WasmEnvelope::decode(&self.read_guest_buffer(size).await?)
+            let batch = WasmEnvelope::decode_owned(self.read_guest_buffer(size).await?)
                 .map_err(|error| WasmProcessorError::GuestGlobalError(error.to_string()))?;
             if let Some(sender) = self.store.data().emitted_batch_sender.as_ref() {
                 let _ = sender.send(batch.clone());
@@ -1367,7 +1548,7 @@ mod tests {
     }
 
     #[test]
-    fn input_envelope_cbor_round_trip_uses_byte_string_for_arrow_ipc() {
+    fn input_envelope_flatbuffer_round_trip_borrows_arrow_ipc() {
         let envelope = WasmEnvelope::input(
             vec![0, 1, 2, 255],
             WasmAckSidecar {
@@ -1383,22 +1564,20 @@ mod tests {
             WasmEnvelope::decode(&encoded).expect("input envelope must decode"),
             envelope
         );
-        let value: ciborium::Value =
-            ciborium::from_reader(encoded.as_slice()).expect("encoded envelope must be CBOR");
-        let ciborium::Value::Map(fields) = value else {
-            panic!("envelope must encode as a CBOR map");
+        assert_eq!(&encoded[8..12], protocol::FILE_IDENTIFIER.as_bytes());
+        let protocol::EnvelopeRef::Input(view) =
+            WasmEnvelope::decode_borrowed(&encoded).expect("borrowed input must decode")
+        else {
+            panic!("expected borrowed input envelope");
         };
-        let arrow = fields
-            .into_iter()
-            .find_map(|(key, value)| {
-                (key == ciborium::Value::Text("arrow_ipc_batch".into())).then_some(value)
-            })
-            .expect("input envelope must contain arrow_ipc_batch");
-        assert_eq!(arrow, ciborium::Value::Bytes(vec![0, 1, 2, 255]));
+        assert_eq!(view.arrow_ipc_batch(), [0, 1, 2, 255]);
+        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_end = encoded_start + encoded.len();
+        assert!((encoded_start..encoded_end).contains(&(view.arrow_ipc_batch().as_ptr() as usize)));
     }
 
     #[test]
-    fn shared_generated_output_envelope_cbor_round_trip() {
+    fn shared_generated_output_flatbuffer_round_trip_borrows_generated_ipc() {
         let generated_arrow_ipc_batch = vec![9, 8, 7];
         let envelope = WasmEnvelope::output(
             generated_arrow_ipc_batch.clone(),
@@ -1438,19 +1617,28 @@ mod tests {
             WasmEnvelope::decode(&encoded).expect("output envelope must decode"),
             envelope
         );
-        let value: ciborium::Value =
-            ciborium::from_reader(encoded.as_slice()).expect("encoded envelope must be CBOR");
-        let ciborium::Value::Map(fields) = value else {
-            panic!("envelope must encode as a CBOR map");
+        let protocol::EnvelopeRef::Output(view) =
+            WasmEnvelope::decode_borrowed(&encoded).expect("borrowed output must decode")
+        else {
+            panic!("expected borrowed output envelope");
         };
-        let generated_payloads = fields
-            .iter()
-            .filter(|(key, value)| {
-                key == &ciborium::Value::Text("generated_arrow_ipc_batch".into())
-                    && value == &ciborium::Value::Bytes(generated_arrow_ipc_batch.clone())
-            })
-            .count();
-        assert_eq!(generated_payloads, 1);
+        assert_eq!(view.generated_arrow_ipc_batch(), generated_arrow_ipc_batch);
+        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_end = encoded_start + encoded.len();
+        assert!(
+            (encoded_start..encoded_end)
+                .contains(&(view.generated_arrow_ipc_batch().as_ptr() as usize))
+        );
+        let WasmEnvelope::Output {
+            generated_arrow_ipc_batch,
+            ..
+        } = WasmEnvelope::decode_owned(encoded).expect("owned output must decode")
+        else {
+            panic!("expected owned output envelope");
+        };
+        assert!(
+            (encoded_start..encoded_end).contains(&(generated_arrow_ipc_batch.as_ptr() as usize))
+        );
     }
 
     #[test]
@@ -1472,169 +1660,14 @@ mod tests {
     }
 
     #[test]
-    fn envelope_decode_rejects_unknown_missing_and_trailing_data() {
-        let unknown_field = ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Text("kind".into()),
-                ciborium::Value::Text("input".into()),
-            ),
-            (
-                ciborium::Value::Text("arrow_ipc_batch".into()),
-                ciborium::Value::Bytes(Vec::new()),
-            ),
-            (
-                ciborium::Value::Text("acks".into()),
-                empty_ack_sidecar_value(),
-            ),
-            (ciborium::Value::Text("extra".into()), ciborium::Value::Null),
-        ]);
-        let missing_field = ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Text("kind".into()),
-                ciborium::Value::Text("input".into()),
-            ),
-            (
-                ciborium::Value::Text("acks".into()),
-                empty_ack_sidecar_value(),
-            ),
-        ]);
-        let unknown_kind = ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Text("kind".into()),
-                ciborium::Value::Text("legacy".into()),
-            ),
-            (
-                ciborium::Value::Text("acks".into()),
-                empty_ack_sidecar_value(),
-            ),
-        ]);
-        let integer_array_arrow_payload = ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Text("kind".into()),
-                ciborium::Value::Text("input".into()),
-            ),
-            (
-                ciborium::Value::Text("arrow_ipc_batch".into()),
-                ciborium::Value::Array(vec![ciborium::Value::Integer(1.into())]),
-            ),
-            (
-                ciborium::Value::Text("acks".into()),
-                empty_ack_sidecar_value(),
-            ),
-        ]);
-        let unknown_column_kind = output_envelope_value(ciborium::Value::Map(vec![(
-            ciborium::Value::Text("kind".into()),
-            ciborium::Value::Text("legacy".into()),
-        )]));
-        let malformed_ack_sidecar = ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Text("kind".into()),
-                ciborium::Value::Text("input".into()),
-            ),
-            (
-                ciborium::Value::Text("arrow_ipc_batch".into()),
-                ciborium::Value::Bytes(Vec::new()),
-            ),
-            (
-                ciborium::Value::Text("acks".into()),
-                ciborium::Value::Map(vec![
-                    (
-                        ciborium::Value::Text("rows".into()),
-                        ciborium::Value::Array(vec![ciborium::Value::Map(vec![(
-                            ciborium::Value::Text("tokens".into()),
-                            ciborium::Value::Array(Vec::new()),
-                        )])]),
-                    ),
-                    (
-                        ciborium::Value::Text("acked".into()),
-                        ciborium::Value::Array(Vec::new()),
-                    ),
-                    (
-                        ciborium::Value::Text("nacked".into()),
-                        ciborium::Value::Array(Vec::new()),
-                    ),
-                    (
-                        ciborium::Value::Text("message_errors".into()),
-                        ciborium::Value::Array(Vec::new()),
-                    ),
-                ]),
-            ),
-        ]);
-        for (case, value) in [
-            ("unknown field", unknown_field),
-            ("missing field", missing_field),
-            ("unknown kind", unknown_kind),
-            ("integer-array Arrow payload", integer_array_arrow_payload),
-            ("unknown column kind", unknown_column_kind),
-            ("malformed ACK sidecar", malformed_ack_sidecar),
-        ] {
-            let mut encoded = Vec::new();
-            ciborium::into_writer(&value, &mut encoded).expect("test CBOR must encode");
-            assert!(
-                WasmEnvelope::decode(&encoded).is_err(),
-                "{case} must be rejected"
-            );
-        }
+    fn envelope_decode_rejects_non_flatbuffer_and_trailing_data() {
+        assert!(WasmEnvelope::decode(&[0xa0]).is_err());
 
         let mut trailing = WasmEnvelope::input_arrow_only(Vec::new())
             .encode()
             .expect("input envelope must encode");
         trailing.push(0);
-        assert!(matches!(
-            WasmEnvelope::decode(&trailing),
-            Err(WasmProtocolError::TrailingEnvelopeBytes { remaining: 1 })
-        ));
-    }
-
-    fn empty_ack_sidecar_value() -> ciborium::Value {
-        ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Text("rows".into()),
-                ciborium::Value::Array(Vec::new()),
-            ),
-            (
-                ciborium::Value::Text("acked".into()),
-                ciborium::Value::Array(Vec::new()),
-            ),
-            (
-                ciborium::Value::Text("nacked".into()),
-                ciborium::Value::Array(Vec::new()),
-            ),
-            (
-                ciborium::Value::Text("message_errors".into()),
-                ciborium::Value::Array(Vec::new()),
-            ),
-        ])
-    }
-
-    fn output_envelope_value(column: ciborium::Value) -> ciborium::Value {
-        ciborium::Value::Map(vec![
-            (
-                ciborium::Value::Text("kind".into()),
-                ciborium::Value::Text("output".into()),
-            ),
-            (
-                ciborium::Value::Text("generated_arrow_ipc_batch".into()),
-                ciborium::Value::Bytes(Vec::new()),
-            ),
-            (
-                ciborium::Value::Text("outputs".into()),
-                ciborium::Value::Array(vec![ciborium::Value::Map(vec![
-                    (
-                        ciborium::Value::Text("output_relay".into()),
-                        ciborium::Value::Text("events".into()),
-                    ),
-                    (
-                        ciborium::Value::Text("columns".into()),
-                        ciborium::Value::Array(vec![column]),
-                    ),
-                    (
-                        ciborium::Value::Text("acks".into()),
-                        empty_ack_sidecar_value(),
-                    ),
-                ])]),
-            ),
-        ])
+        assert!(WasmEnvelope::decode(&trailing).is_err());
     }
 
     #[test]
@@ -1910,7 +1943,7 @@ mod tests {
         })
     }
 
-    async fn guest_emits_cbor_input_reference_output(path: &Path) {
+    async fn guest_emits_flatbuffer_input_reference_output(path: &Path) {
         let runtime = runtime();
         let compiled = runtime
             .compile_processor(read_guest(path))
@@ -1971,8 +2004,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rust_guest_interoperates_with_host_cbor_format() {
-        guest_emits_cbor_input_reference_output(&rust_guest_path()).await;
+    async fn rust_guest_interoperates_with_host_flatbuffer_format() {
+        guest_emits_flatbuffer_input_reference_output(&rust_guest_path()).await;
     }
 
     #[tokio::test]
@@ -2100,7 +2133,7 @@ mod tests {
             assert_eq!(output.acks.rows, vec![output_row(20)]);
         }
         let reader =
-            arrow_ipc::reader::StreamReader::try_new(generated_arrow_ipc_batch.as_slice(), None)
+            arrow_ipc::reader::StreamReader::try_new(generated_arrow_ipc_batch.as_ref(), None)
                 .expect("generated Arrow IPC must decode");
         assert_eq!(reader.schema().fields().len(), 1);
         assert!(reader.schema().field(0).name().is_empty());
@@ -2164,8 +2197,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn go_guest_interoperates_with_host_cbor_format() {
-        guest_emits_cbor_input_reference_output(&go_guest_path()).await;
+    async fn go_guest_interoperates_with_host_flatbuffer_format() {
+        guest_emits_flatbuffer_input_reference_output(&go_guest_path()).await;
     }
 
     #[tokio::test]

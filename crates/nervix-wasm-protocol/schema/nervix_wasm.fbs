@@ -1,0 +1,123 @@
+namespace nervix_wasm;
+
+enum ProcessorTypeKind : ubyte {
+  U8,
+  I8,
+  U16,
+  I16,
+  U32,
+  I32,
+  U64,
+  I64,
+  Bool,
+  String,
+  Datetime,
+  F32,
+  F64,
+  Array,
+  Vec
+}
+
+table ProcessorType {
+  kind:ProcessorTypeKind;
+  element:ProcessorType;
+  array_len:uint;
+}
+
+table ProcessorField {
+  name:string (required);
+  type:ProcessorType (required);
+  optional:bool;
+}
+
+table ProcessorSchema {
+  name:string (required);
+  fields:[ProcessorField] (required);
+}
+
+table BranchInit {
+  domain_name:string (required);
+  domain_type:string (required);
+  branch_key:[ubyte];
+  input_schema:ProcessorSchema (required);
+  output_schemas:[ProcessorSchema] (required);
+}
+
+table OutputRow {
+  tokens:[ulong] (required);
+  source_token:ulong = null;
+}
+
+table AckTokenSet {
+  tokens:[ulong] (required);
+}
+
+table NackSet {
+  tokens:[ulong] (required);
+  reason:string (required);
+}
+
+table MessageErrorSet {
+  tokens:[ulong] (required);
+  reason:string (required);
+}
+
+table AckSidecar {
+  rows:[OutputRow] (required);
+  acked:[AckTokenSet] (required);
+  nacked:[NackSet] (required);
+  message_errors:[MessageErrorSet] (required);
+}
+
+table InputEnvelope {
+  arrow_ipc_batch:[ubyte] (required);
+  acks:AckSidecar (required);
+}
+
+enum ColumnSource : ubyte {
+  Input,
+  Generated
+}
+
+table OutputColumnRef {
+  source:ColumnSource;
+  column_index:uint;
+}
+
+table RoutedOutput {
+  output_relay:string (required);
+  columns:[OutputColumnRef] (required);
+  acks:AckSidecar (required);
+}
+
+table OutputEnvelope {
+  generated_arrow_ipc_batch:[ubyte] (required);
+  outputs:[RoutedOutput] (required);
+}
+
+table GuestSnapshot {
+  processed_batches:ulong;
+  processed_rows:ulong;
+  pending_start_row:ulong;
+  last_domain_time_nanos:long;
+  last_timeout_handle:long;
+  pending_batch:[ubyte] (required);
+  init_metadata:[ubyte] (required);
+  saved_state:[ubyte] (required);
+  error_state:string;
+}
+
+union MessagePayload {
+  BranchInit,
+  InputEnvelope,
+  OutputEnvelope,
+  GuestSnapshot
+}
+
+table Message {
+  payload:MessagePayload (required);
+}
+
+root_type Message;
+file_identifier "NVWX";
+file_extension "nvwx";

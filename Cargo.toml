@@ -181,6 +181,7 @@ members = [
   "crates/dataflow-graph",
   "crates/interconnect",
   "crates/nervix-wasm",
+  "crates/nervix-wasm-protocol",
   "crates/web-console",
   "crates/nervix-vm",
   "crates/nspl",
@@ -244,6 +245,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 error-stack = "0.5"
 fastrand = "2.4.1"
 fjall = "3.0.4"
+flatbuffers = "25.12.19"
 futures-channel = "0.3"
 futures-util = "0.3"
 gloo-net = "0.7"
@@ -287,6 +289,7 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
 nervix-proto = { package = "nervix-proto", path = "crates/proto" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
+nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
 opendal = { version = "0.55.0", features = [
   "services-s3",
   "services-gcs",

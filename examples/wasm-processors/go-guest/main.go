@@ -3,11 +3,9 @@
 package main
 
 import (
-	"errors"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/nervix-wasm-processor-go-guest/tinyipc"
-	"github.com/fxamacker/cbor/v2"
 )
 
 const (
@@ -46,90 +44,60 @@ var lastTimeoutHandle int64
 var errorState string
 
 type guestSnapshot struct {
-	ProcessedBatches    uint64 `cbor:"processed_batches"`
-	ProcessedRows       uint64 `cbor:"processed_rows"`
-	PendingStartRow     uint64 `cbor:"pending_start_row"`
-	LastDomainTimeNanos int64  `cbor:"last_domain_time_nanos"`
-	LastTimeoutHandle   int64  `cbor:"last_timeout_handle"`
-	PendingBatch        []byte `cbor:"pending_batch"`
-	InitMetadata        []byte `cbor:"init_metadata"`
-	SavedState          []byte `cbor:"saved_state"`
-	ErrorState          string `cbor:"error_state"`
+	ProcessedBatches    uint64
+	ProcessedRows       uint64
+	PendingStartRow     uint64
+	LastDomainTimeNanos int64
+	LastTimeoutHandle   int64
+	PendingBatch        []byte
+	InitMetadata        []byte
+	SavedState          []byte
+	ErrorState          string
 }
 
 type envelope struct {
-	Kind                   string         `cbor:"kind"`
-	ArrowIPCBatch          []byte         `cbor:"arrow_ipc_batch,omitempty"`
-	Acks                   ackSidecar     `cbor:"acks,omitempty"`
-	GeneratedArrowIPCBatch []byte         `cbor:"generated_arrow_ipc_batch,omitempty"`
-	Outputs                []routedOutput `cbor:"outputs,omitempty"`
+	Kind                   string
+	ArrowIPCBatch          []byte
+	Acks                   ackSidecar
+	GeneratedArrowIPCBatch []byte
+	Outputs                []routedOutput
 }
 
 type routedOutput struct {
-	OutputRelay string         `cbor:"output_relay"`
-	Columns     []outputColumn `cbor:"columns"`
-	Acks        ackSidecar     `cbor:"acks"`
+	OutputRelay string
+	Columns     []outputColumn
+	Acks        ackSidecar
 }
 
 type outputColumn struct {
-	Kind        string `cbor:"kind"`
-	ColumnIndex uint32 `cbor:"column_index"`
-}
-
-func (column outputColumn) MarshalCBOR() ([]byte, error) {
-	if column.Kind == "input" || column.Kind == "generated" {
-		return cbor.Marshal(struct {
-			Kind        string `cbor:"kind"`
-			ColumnIndex uint32 `cbor:"column_index"`
-		}{Kind: column.Kind, ColumnIndex: column.ColumnIndex})
-	}
-	return nil, errors.New("invalid output column kind")
-}
-
-type inputEnvelopeWire struct {
-	Kind          string     `cbor:"kind"`
-	ArrowIPCBatch []byte     `cbor:"arrow_ipc_batch"`
-	Acks          ackSidecar `cbor:"acks"`
-}
-
-type outputEnvelopeWire struct {
-	Kind                   string         `cbor:"kind"`
-	GeneratedArrowIPCBatch []byte         `cbor:"generated_arrow_ipc_batch"`
-	Outputs                []routedOutput `cbor:"outputs"`
-}
-
-type branchInitMetadata struct {
-	OutputSchemas []processorSchema `cbor:"output_schemas"`
-}
-
-type processorSchema struct {
-	Name string `cbor:"name"`
+	Kind        string
+	ColumnIndex uint32
 }
 
 type ackSidecar struct {
-	Rows          []outputRow       `cbor:"rows"`
-	Acked         []ackTokenSet     `cbor:"acked"`
-	Nacked        []nackSet         `cbor:"nacked"`
-	MessageErrors []messageErrorSet `cbor:"message_errors"`
+	Rows          []outputRow
+	Acked         []ackTokenSet
+	Nacked        []nackSet
+	MessageErrors []messageErrorSet
 }
 
 type outputRow struct {
-	Tokens      []uint64 `cbor:"tokens"`
-	SourceToken *uint64  `cbor:"source_token"`
+	Tokens      []uint64
+	SourceToken *uint64
 }
 
 type ackTokenSet struct {
-	Tokens []uint64 `cbor:"tokens"`
+	Tokens []uint64
 }
 
 type nackSet struct {
-	Tokens []uint64 `cbor:"tokens"`
-	Reason string   `cbor:"reason"`
+	Tokens []uint64
+	Reason string
 }
 
 type messageErrorSet struct {
-	Tokens []uint64 `cbor:"tokens"`
-	Reason string   `cbor:"reason"`
+	Tokens []uint64
+	Reason string
 }
 
 func main() {}
@@ -308,7 +276,7 @@ func nervixReadEmit() int32 {
 //export nervix_dump_state
 func nervixDumpState() int32 {
 	return guardedStateExport(false, func() int32 {
-		encoded, err := cbor.Marshal(guestSnapshot{
+		encoded, ok := encodeSnapshot(guestSnapshot{
 			ProcessedBatches:    processedBatches,
 			ProcessedRows:       processedRows,
 			PendingStartRow:     pendingStartRow,
@@ -319,7 +287,7 @@ func nervixDumpState() int32 {
 			SavedState:          savedState,
 			ErrorState:          errorState,
 		})
-		if err != nil {
+		if !ok {
 			return errInvalidSize
 		}
 
@@ -420,42 +388,7 @@ func flushPending() int32 {
 }
 
 func encodeEnvelope(value envelope) ([]byte, int32) {
-	if value.Kind == "input" {
-		value.Acks.normalize()
-		encoded, err := cbor.Marshal(inputEnvelopeWire{
-			Kind:          value.Kind,
-			ArrowIPCBatch: value.ArrowIPCBatch,
-			Acks:          value.Acks,
-		})
-		if err != nil {
-			return nil, errEnvelope
-		}
-		return encoded, success
-	}
-	if value.Kind == "output" {
-		if value.GeneratedArrowIPCBatch == nil {
-			value.GeneratedArrowIPCBatch = make([]byte, 0)
-		}
-		if value.Outputs == nil {
-			value.Outputs = make([]routedOutput, 0)
-		}
-		for i := 0; i < len(value.Outputs); i++ {
-			if value.Outputs[i].Columns == nil {
-				value.Outputs[i].Columns = make([]outputColumn, 0)
-			}
-			value.Outputs[i].Acks.normalize()
-		}
-		encoded, err := cbor.Marshal(outputEnvelopeWire{
-			Kind:                   value.Kind,
-			GeneratedArrowIPCBatch: value.GeneratedArrowIPCBatch,
-			Outputs:                value.Outputs,
-		})
-		if err != nil {
-			return nil, errEnvelope
-		}
-		return encoded, success
-	}
-	return nil, errEnvelope
+	return encodeFlatBufferEnvelope(value)
 }
 
 func (acks *ackSidecar) normalize() {
@@ -494,155 +427,7 @@ func (acks *ackSidecar) normalize() {
 }
 
 func decodeEnvelope(data []byte) (envelope, int32) {
-	mode, err := cbor.DecOptions{
-		IndefLength:       cbor.IndefLengthForbidden,
-		ExtraReturnErrors: cbor.ExtraDecErrorUnknownField,
-	}.DecMode()
-	if err != nil {
-		return envelope{}, errEnvelope
-	}
-	var raw map[string]cbor.RawMessage
-	if err := mode.Unmarshal(data, &raw); err != nil {
-		return envelope{}, errEnvelope
-	}
-	kindBytes, ok := raw["kind"]
-	if !ok {
-		return envelope{}, errEnvelope
-	}
-	var kind string
-	if err := mode.Unmarshal(kindBytes, &kind); err != nil {
-		return envelope{}, errEnvelope
-	}
-	if kind == "input" {
-		if !hasExactFields(raw, "kind", "arrow_ipc_batch", "acks") {
-			return envelope{}, errEnvelope
-		}
-		if !isCBORByteString(raw["arrow_ipc_batch"]) {
-			return envelope{}, errEnvelope
-		}
-		if !validAckSidecar(mode, raw["acks"]) {
-			return envelope{}, errEnvelope
-		}
-		var wire inputEnvelopeWire
-		if err := mode.Unmarshal(data, &wire); err != nil {
-			return envelope{}, errEnvelope
-		}
-		return envelope{
-			Kind:          wire.Kind,
-			ArrowIPCBatch: wire.ArrowIPCBatch,
-			Acks:          wire.Acks,
-		}, success
-	}
-	if kind == "output" {
-		if !hasExactFields(raw, "kind", "generated_arrow_ipc_batch", "outputs") {
-			return envelope{}, errEnvelope
-		}
-		if !isCBORByteString(raw["generated_arrow_ipc_batch"]) {
-			return envelope{}, errEnvelope
-		}
-		var rawOutputs []cbor.RawMessage
-		if err := mode.Unmarshal(raw["outputs"], &rawOutputs); err != nil {
-			return envelope{}, errEnvelope
-		}
-		for i := 0; i < len(rawOutputs); i++ {
-			if !validRoutedOutput(mode, rawOutputs[i]) {
-				return envelope{}, errEnvelope
-			}
-		}
-		var wire outputEnvelopeWire
-		if err := mode.Unmarshal(data, &wire); err != nil {
-			return envelope{}, errEnvelope
-		}
-		return envelope{
-			Kind:                   wire.Kind,
-			GeneratedArrowIPCBatch: wire.GeneratedArrowIPCBatch,
-			Outputs:                wire.Outputs,
-		}, success
-	}
-	return envelope{}, errEnvelope
-}
-
-func validRoutedOutput(mode cbor.DecMode, data []byte) bool {
-	var raw map[string]cbor.RawMessage
-	if err := mode.Unmarshal(data, &raw); err != nil {
-		return false
-	}
-	if !hasExactFields(raw, "output_relay", "columns", "acks") || !validAckSidecar(mode, raw["acks"]) {
-		return false
-	}
-	var rawColumns []cbor.RawMessage
-	if err := mode.Unmarshal(raw["columns"], &rawColumns); err != nil {
-		return false
-	}
-	for i := 0; i < len(rawColumns); i++ {
-		if !validOutputColumn(mode, rawColumns[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func validAckSidecar(mode cbor.DecMode, data []byte) bool {
-	var raw map[string]cbor.RawMessage
-	if err := mode.Unmarshal(data, &raw); err != nil {
-		return false
-	}
-	if !hasExactFields(raw, "rows", "acked", "nacked", "message_errors") {
-		return false
-	}
-	return validObjectArray(mode, raw["rows"], "tokens", "source_token") &&
-		validObjectArray(mode, raw["acked"], "tokens") &&
-		validObjectArray(mode, raw["nacked"], "tokens", "reason") &&
-		validObjectArray(mode, raw["message_errors"], "tokens", "reason")
-}
-
-func validObjectArray(mode cbor.DecMode, data []byte, expected ...string) bool {
-	var entries []cbor.RawMessage
-	if err := mode.Unmarshal(data, &entries); err != nil {
-		return false
-	}
-	for i := 0; i < len(entries); i++ {
-		var entry map[string]cbor.RawMessage
-		if err := mode.Unmarshal(entries[i], &entry); err != nil || !hasExactFields(entry, expected...) {
-			return false
-		}
-	}
-	return true
-}
-
-func validOutputColumn(mode cbor.DecMode, data []byte) bool {
-	var raw map[string]cbor.RawMessage
-	if err := mode.Unmarshal(data, &raw); err != nil {
-		return false
-	}
-	kindBytes, ok := raw["kind"]
-	if !ok {
-		return false
-	}
-	var kind string
-	if err := mode.Unmarshal(kindBytes, &kind); err != nil {
-		return false
-	}
-	if kind == "input" || kind == "generated" {
-		return hasExactFields(raw, "kind", "column_index")
-	}
-	return false
-}
-
-func isCBORByteString(data []byte) bool {
-	return len(data) > 0 && data[0]>>5 == 2 && data[0]&31 != 31
-}
-
-func hasExactFields(fields map[string]cbor.RawMessage, expected ...string) bool {
-	if len(fields) != len(expected) {
-		return false
-	}
-	for i := 0; i < len(expected); i++ {
-		if _, ok := fields[expected[i]]; !ok {
-			return false
-		}
-	}
-	return true
+	return decodeFlatBufferEnvelope(data)
 }
 
 func readBufferRange(ptr int32, size int32) ([]byte, int32) {
@@ -665,20 +450,12 @@ func readBufferRange(ptr int32, size int32) ([]byte, int32) {
 }
 
 func outputRelaysFromInitMetadata(data []byte) ([]string, int32) {
-	var metadata branchInitMetadata
-	if err := cbor.Unmarshal(data, &metadata); err != nil {
-		return nil, errInvalidSize
-	}
-	relays := make([]string, 0, len(metadata.OutputSchemas))
-	for i := 0; i < len(metadata.OutputSchemas); i++ {
-		relays = append(relays, metadata.OutputSchemas[i].Name)
-	}
-	return relays, success
+	return decodeBranchInitOutputRelays(data)
 }
 
 func loadStateBytes(data []byte) int32 {
-	var snapshot guestSnapshot
-	if err := cbor.Unmarshal(data, &snapshot); err != nil {
+	snapshot, ok := decodeSnapshot(data)
+	if !ok {
 		return errInvalidSize
 	}
 

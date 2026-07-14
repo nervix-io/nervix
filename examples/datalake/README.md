@@ -46,7 +46,7 @@ the equivalent CSV shape. `reference-data/edge_sites.jsonl` is the edge-location
 hash map used to compare IoT-reported positions with the selected edge site.
 The WASM guest emits `geoip_geohash` using the Rust `geohash` crate and computes
 hub distances with the `geo` crate.
-Its CBOR output references the 14 unchanged input columns by index and serializes
+Its FlatBuffers output references the 14 unchanged input columns by index and serializes
 only the ten generated GeoIP columns as independent single-column Arrow IPC
 streams. Nervix materializes the referenced columns from retained host arrays.
 

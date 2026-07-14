@@ -9,66 +9,10 @@ use arrow_schema::{DataType, Field, Schema};
 use geo::{Distance, Haversine, Point};
 use geohash::{Coord, encode};
 use maxminddb::{geoip2, Reader};
-use serde::{Deserialize, Serialize};
-
-mod cbor_byte_string {
-    use std::fmt;
-
-    use serde::{Deserializer, Serializer, de::Visitor};
-
-    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serde::Serialize::serialize(serde_bytes::Bytes::new(bytes), serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_byte_buf(ByteStringVisitor)
-    }
-
-    struct ByteStringVisitor;
-
-    impl Visitor<'_> for ByteStringVisitor {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("a CBOR byte string")
-        }
-
-        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value.to_vec())
-        }
-
-        fn visit_borrowed_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value.to_vec())
-        }
-
-        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value)
-        }
-    }
-}
-
-fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
+use nervix_wasm_protocol::{
+    AckSidecar, BranchInit as BranchInitMetadata, Envelope, EnvelopeRef, GuestSnapshot,
+    OutputColumnRef, RoutedOutput,
+};
 
 const SUCCESS: i32 = 0;
 const ERR_INVALID_SIZE: i32 = -1;
@@ -104,101 +48,6 @@ struct GuestState {
     last_domain_time_nanos: i64,
     error_state: Option<String>,
 }
-
-#[derive(Serialize, Deserialize)]
-struct GuestSnapshot {
-    init_metadata: Vec<u8>,
-    processed_batches: u64,
-    processed_rows: u64,
-    last_domain_time_nanos: i64,
-    #[serde(default)]
-    error_state: Option<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Envelope {
-    Input {
-        #[serde(with = "cbor_byte_string")]
-        arrow_ipc_batch: Vec<u8>,
-        acks: AckSidecar,
-    },
-    Output {
-        #[serde(with = "cbor_byte_string")]
-        generated_arrow_ipc_batch: Vec<u8>,
-        outputs: Vec<RoutedOutput>,
-    },
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RoutedOutput {
-    output_relay: String,
-    columns: Vec<OutputColumnRef>,
-    acks: AckSidecar,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum OutputColumnRef {
-    Generated {
-        column_index: u32,
-    },
-    Input {
-        column_index: u32,
-    },
-}
-
-#[derive(Clone, Deserialize)]
-struct BranchInitMetadata {
-    #[serde(default)]
-    output_schemas: Vec<ProcessorSchema>,
-}
-
-#[derive(Clone, Deserialize)]
-struct ProcessorSchema {
-    name: String,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AckSidecar {
-    rows: Vec<OutputRow>,
-    acked: Vec<AckTokenSet>,
-    nacked: Vec<NackSet>,
-    message_errors: Vec<WasmMessageErrorSet>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OutputRow {
-    tokens: Vec<AckToken>,
-    #[serde(deserialize_with = "deserialize_required_option")]
-    source_token: Option<AckToken>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AckTokenSet {
-    tokens: Vec<AckToken>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NackSet {
-    tokens: Vec<AckToken>,
-    reason: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WasmMessageErrorSet {
-    tokens: Vec<AckToken>,
-    reason: String,
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-struct AckToken(u64);
 
 struct ResolvedGeo {
     continent: String,
@@ -283,23 +132,23 @@ impl GuestState {
 
     fn dump_state(&mut self) -> i32 {
         let snapshot = GuestSnapshot {
-            init_metadata: self.init_metadata.clone(),
             processed_batches: self.processed_batches,
             processed_rows: self.processed_rows,
+            pending_start_row: 0,
             last_domain_time_nanos: self.last_domain_time_nanos,
+            last_timeout_handle: 0,
+            pending_batch: Vec::new(),
+            init_metadata: self.init_metadata.clone(),
+            saved_state: Vec::new(),
             error_state: self.error_state.clone(),
         };
 
-        self.buffer.clear();
-        if ciborium::into_writer(&snapshot, &mut self.buffer).is_err() {
-            return ERR_INVALID_SIZE;
-        }
+        self.buffer = snapshot.encode();
         self.buffer.len() as i32
     }
 
     fn load_state_bytes(&mut self, saved_state: Vec<u8>) -> i32 {
-        let Ok(snapshot) = ciborium::from_reader::<GuestSnapshot, _>(Cursor::new(saved_state))
-        else {
+        let Ok(snapshot) = GuestSnapshot::decode(&saved_state) else {
             return ERR_INVALID_SIZE;
         };
 
@@ -336,23 +185,6 @@ impl GuestState {
         self.error_state = Some(reason.clone());
         self.global_error.clear();
         self.global_error.extend_from_slice(reason.as_bytes());
-    }
-}
-
-impl Envelope {
-    fn encode(&self) -> Result<Vec<u8>, i32> {
-        let mut encoded = Vec::new();
-        ciborium::into_writer(self, &mut encoded).map_err(|_| ERR_ENVELOPE)?;
-        Ok(encoded)
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, i32> {
-        let mut cursor = Cursor::new(bytes);
-        let envelope = ciborium::from_reader(&mut cursor).map_err(|_| ERR_ENVELOPE)?;
-        if usize::try_from(cursor.position()).map_err(|_| ERR_ENVELOPE)? != bytes.len() {
-            return Err(ERR_ENVELOPE);
-        }
-        Ok(envelope)
     }
 }
 
@@ -503,30 +335,26 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
 
         state.processed_batches = state.processed_batches.saturating_add(1);
         state.last_domain_time_nanos = unsafe { nervix_domain_time_nanos() };
-        let envelope = match Envelope::decode(&state.buffer[..size]) {
-            Ok(envelope) => envelope,
-            Err(error) => return error,
-        };
-        let Envelope::Input {
-            arrow_ipc_batch,
-            acks,
-        } = envelope
-        else {
-            return ERR_ENVELOPE;
-        };
-        let row_count = match arrow_ipc_row_count(&arrow_ipc_batch) {
-            Ok(row_count) => row_count,
-            Err(error) => return error,
+        let (row_count, enriched) = {
+            let envelope = match EnvelopeRef::decode(&state.buffer[..size]) {
+                Ok(EnvelopeRef::Input(envelope)) => envelope,
+                Ok(EnvelopeRef::Output(_)) | Err(_) => return ERR_ENVELOPE,
+            };
+            let arrow_ipc_batch = envelope.arrow_ipc_batch();
+            let row_count = match arrow_ipc_row_count(arrow_ipc_batch) {
+                Ok(row_count) => row_count,
+                Err(error) => return error,
+            };
+            let Some(reader) = state.geoip_reader.as_ref() else {
+                return ERR_NOT_INITIALIZED;
+            };
+            let enriched = match geo_enrich_envelope(arrow_ipc_batch, envelope.acks(), reader) {
+                Ok(envelope) => envelope,
+                Err(error) => return error,
+            };
+            (row_count, enriched)
         };
         state.processed_rows = state.processed_rows.saturating_add(row_count);
-
-        let Some(reader) = state.geoip_reader.as_ref() else {
-            return ERR_NOT_INITIALIZED;
-        };
-        let enriched = match geo_enrich_envelope(arrow_ipc_batch, acks, reader) {
-            Ok(envelope) => envelope,
-            Err(error) => return error,
-        };
         if state.output_relays.is_empty() {
             return ERR_NOT_INITIALIZED;
         }
@@ -556,15 +384,12 @@ pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
             })
             .collect();
         state.pending_emit.clear();
-        match (Envelope::Output {
+        let encoded = (Envelope::Output {
             generated_arrow_ipc_batch,
             outputs,
         })
-        .encode()
-        {
-            Ok(encoded) => state.pending_emit.push(encoded),
-            Err(error) => return error,
-            }
+        .encode();
+        state.pending_emit.push(encoded);
         SUCCESS
     })
 }
@@ -608,7 +433,7 @@ pub extern "C" fn nervix_reset_state() -> i32 {
 }
 
 fn output_relays_from_init_metadata(metadata: &[u8]) -> Result<Vec<String>, i32> {
-    ciborium::from_reader::<BranchInitMetadata, _>(Cursor::new(metadata))
+    BranchInitMetadata::decode(metadata)
         .map(|metadata| {
             metadata
                 .output_schemas
@@ -630,11 +455,11 @@ fn arrow_ipc_row_count(bytes: &[u8]) -> Result<u64, i32> {
 }
 
 fn geo_enrich_envelope(
-    arrow_ipc_batch: Vec<u8>,
+    arrow_ipc_batch: &[u8],
     acks: AckSidecar,
     reader: &Reader<&'static [u8]>,
 ) -> Result<Envelope, i32> {
-    let ipc_reader = StreamReader::try_new(Cursor::new(&arrow_ipc_batch), None)
+    let ipc_reader = StreamReader::try_new(Cursor::new(arrow_ipc_batch), None)
         .map_err(|_| ERR_ARROW_IPC)?;
     let batches = ipc_reader
         .collect::<Result<Vec<_>, _>>()
