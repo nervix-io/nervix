@@ -33,7 +33,7 @@ use nervix_models::{
 use nervix_nspl::{
     vm_program::{
         Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
-        SpannedExpr, parse_program,
+        SpannedExpr, SpannedNode, parse_program,
     },
     window_processor::aggregate::{parse_aggregate_program, referenced_field_refs},
 };
@@ -53,6 +53,8 @@ use tracing::{info, warn};
 
 const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
+const INNER_INPUT_NAMESPACE: &str = "inner_input";
+const INNER_OUTPUT_NAMESPACE: &str = "inner_output";
 const WASM_INPUT_NAMESPACE: &str = "input";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -974,7 +976,6 @@ impl DomainState {
                         processor,
                         &input_schemas,
                     )?;
-                    ensure_inferencer_output_targets_declared(domain, identifier, processor)?;
                     for output in processor.output_routes.outputs() {
                         let consumer_schema =
                             schema_for_ack_model(domain, identifier, models, &output.relay)?;
@@ -986,20 +987,7 @@ impl DomainState {
                             output,
                             consumer_schema,
                             branch_schema,
-                        )?;
-                        ensure_inferencer_output_mappings(
-                            domain,
-                            identifier,
                             processor,
-                            &output.relay,
-                            consumer_schema,
-                        )?;
-                        ensure_inferencer_output_schema_compatibility(
-                            domain,
-                            identifier,
-                            processor,
-                            output,
-                            consumer_schema,
                         )?;
                     }
                     add_message_error_policy_edges(
@@ -4130,32 +4118,6 @@ fn effective_processor_output_filter_map_schema(
     Ok(output_schema.clone())
 }
 
-fn processor_output_filter_map_set_fields(
-    domain: &Domain,
-    identifier: &Identifier,
-    output: &ProcessorOutput,
-) -> Result<HashSet<String>, Report<RegistryError>> {
-    let Some(filter_map) = output.filter_map.as_deref() else {
-        return Ok(HashSet::default());
-    };
-
-    let parsed = parse_program(filter_map).map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP parse failed: {}", first_vm_program_error(error)),
-        })
-    })?;
-    Ok(parsed
-        .inner
-        .set
-        .into_iter()
-        .filter_map(|(field_ref, _expr)| {
-            (field_ref.relay == output.relay.as_str()).then_some(field_ref.field)
-        })
-        .collect())
-}
-
 fn ensure_processor_output_schemas(
     domain: &Domain,
     identifier: &Identifier,
@@ -5858,53 +5820,6 @@ fn ensure_inferencer_input_mappings(
     Ok(())
 }
 
-fn ensure_inferencer_output_targets_declared(
-    domain: &Domain,
-    identifier: &Identifier,
-    processor: &CreateInferencer,
-) -> Result<(), Report<RegistryError>> {
-    for mapping in &processor.outputs {
-        if !processor
-            .output_routes
-            .relays()
-            .any(|relay| *relay == mapping.relay)
-        {
-            return Err(Report::new(RegistryError::IncompatibleSchema {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "inference output '{}' must write to one of the declared output relays",
-                    mapping.tensor
-                ),
-            }));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_inferencer_output_mappings(
-    domain: &Domain,
-    identifier: &Identifier,
-    processor: &CreateInferencer,
-    output_relay: &Identifier,
-    output_schema: &CreateSchema,
-) -> Result<(), Report<RegistryError>> {
-    for mapping in &processor.outputs {
-        if mapping.relay != *output_relay {
-            continue;
-        }
-        ensure_field_exists(
-            domain,
-            identifier,
-            output_schema,
-            &mapping.field,
-            &format!("inference output '{}'", mapping.tensor),
-        )?;
-    }
-
-    Ok(())
-}
-
 fn validate_inferencer_output_filter_map(
     domain: &Domain,
     identifier: &Identifier,
@@ -5913,18 +5828,27 @@ fn validate_inferencer_output_filter_map(
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
+    processor: &CreateInferencer,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(filter_map) = output.filter_map.as_deref() else {
-        return Ok(());
+    let mut parsed = if let Some(filter_map) = output.filter_map.as_deref() {
+        parse_program(filter_map).map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("FILTER-MAP parse failed: {}", first_vm_program_error(error)),
+            })
+        })?
+    } else {
+        SpannedNode {
+            inner: Program {
+                filter: None,
+                branch_filters: Vec::new(),
+                set: Vec::new(),
+                unset: Vec::new(),
+            },
+            span: (0..0).into(),
+        }
     };
-
-    let parsed = parse_program(filter_map).map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP parse failed: {}", first_vm_program_error(error)),
-        })
-    })?;
     if !parsed.inner.branch_filters.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5932,24 +5856,14 @@ fn validate_inferencer_output_filter_map(
             reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
         }));
     }
-
-    let set_fields = parsed
-        .inner
-        .set
+    let input_relay_names = input_schemas
         .iter()
-        .filter_map(|(field_ref, _expr)| {
-            (field_ref.relay == output.relay.as_str()).then_some(field_ref.field.as_str())
-        })
-        .collect::<HashSet<_>>();
-    let explicit_output_schema = CreateSchema {
-        name: output_schema.name.clone(),
-        fields: output_schema
-            .fields
-            .iter()
-            .filter(|field| set_fields.contains(field.name.as_str()))
-            .cloned()
-            .collect(),
-    };
+        .map(|(relay, _schema)| relay.as_str().to_string())
+        .collect::<Vec<_>>();
+    parsed
+        .inner
+        .rewrite_unset_sources_to_destination(&input_relay_names, output.relay.as_str());
+
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
@@ -5957,6 +5871,16 @@ fn validate_inferencer_output_filter_map(
         .iter()
         .map(|(relay, schema)| readonly_binding_for_internal_schema(relay.as_str(), schema))
         .collect::<Vec<_>>();
+    let inner_input_schema = processor.inner_input_schema(domain, identifier, input_schemas)?;
+    let inner_output_schema = processor.inner_output_schema(domain, identifier)?;
+    bindings.push(readonly_binding_for_internal_schema(
+        INNER_INPUT_NAMESPACE,
+        &inner_input_schema,
+    ));
+    bindings.push(readonly_binding_for_internal_schema(
+        INNER_OUTPUT_NAMESPACE,
+        &inner_output_schema,
+    ));
     bindings.push(writeonly_binding_for_internal_schema(
         output.relay.as_str(),
         output_schema,
@@ -5972,6 +5896,9 @@ fn validate_inferencer_output_filter_map(
         .map(|(relay, _schema)| relay.as_str().to_string())
         .collect::<HashSet<_>>();
     local_namespaces.insert(output.relay.as_str().to_string());
+    local_namespaces.insert(INNER_INPUT_NAMESPACE.to_string());
+    local_namespaces.insert(INNER_OUTPUT_NAMESPACE.to_string());
+    local_namespaces.insert(BRANCH_NAMESPACE.to_string());
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
@@ -5984,13 +5911,10 @@ fn validate_inferencer_output_filter_map(
 
     compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
-        arrow_schema_for_internal_schema(&explicit_output_schema),
-        schema_sensitivity_for_internal_schema(&explicit_output_schema),
+        arrow_schema_for_internal_schema(output_schema),
+        schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            ..CompileOptions::default()
-        },
+        CompileOptions::default(),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -6003,40 +5927,100 @@ fn validate_inferencer_output_filter_map(
     Ok(())
 }
 
-fn ensure_inferencer_output_schema_compatibility(
-    domain: &Domain,
-    identifier: &Identifier,
-    processor: &CreateInferencer,
-    output: &ProcessorOutput,
-    output_schema: &CreateSchema,
-) -> Result<(), Report<RegistryError>> {
-    let mut generated_fields = processor
-        .outputs
-        .iter()
-        .filter(|mapping| mapping.relay == output.relay)
-        .map(|mapping| mapping.field.as_str().to_string())
-        .collect::<HashSet<_>>();
-    generated_fields.extend(processor_output_filter_map_set_fields(
-        domain, identifier, output,
-    )?);
+trait InferencerRegistrySchema {
+    fn inner_input_schema(
+        &self,
+        domain: &Domain,
+        identifier: &Identifier,
+        input_schemas: &[(&Identifier, &CreateSchema)],
+    ) -> Result<CreateSchema, Report<RegistryError>>;
 
-    for output_field in &output_schema.fields {
-        if generated_fields.contains(output_field.name.as_str()) {
-            continue;
-        }
+    fn inner_output_schema(
+        &self,
+        domain: &Domain,
+        identifier: &Identifier,
+    ) -> Result<CreateSchema, Report<RegistryError>>;
+}
 
-        return Err(Report::new(RegistryError::IncompatibleSchema {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "inferencer flow must explicitly produce output field '{}.{}'",
-                output.relay.as_str(),
-                output_field.name.as_str()
-            ),
-        }));
+impl InferencerRegistrySchema for CreateInferencer {
+    fn inner_input_schema(
+        &self,
+        domain: &Domain,
+        identifier: &Identifier,
+        input_schemas: &[(&Identifier, &CreateSchema)],
+    ) -> Result<CreateSchema, Report<RegistryError>> {
+        let fields = self
+            .inputs
+            .iter()
+            .map(|mapping| {
+                let name = Identifier::parse(&mapping.tensor).map_err(|error| {
+                    Report::new(RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason: format!(
+                            "ONNX input tensor '{}' cannot be referenced as '{}.{}': {}",
+                            mapping.tensor, INNER_INPUT_NAMESPACE, mapping.tensor, error
+                        ),
+                    })
+                })?;
+                let sensitive = input_schemas
+                    .iter()
+                    .find(|(relay, _schema)| **relay == mapping.relay)
+                    .and_then(|(_relay, schema)| {
+                        schema
+                            .fields
+                            .iter()
+                            .find(|field| field.name == mapping.field)
+                    })
+                    .is_some_and(|field| field.sensitive);
+                Ok(SchemaField {
+                    name,
+                    ty: mapping.schema.message_type(),
+                    optional: false,
+                    sensitive,
+                })
+            })
+            .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
+        Ok(CreateSchema {
+            name: Identifier::parse(INNER_INPUT_NAMESPACE)
+                .expect("public inferencer namespace must be a valid identifier"),
+            fields,
+        })
     }
 
-    Ok(())
+    fn inner_output_schema(
+        &self,
+        domain: &Domain,
+        identifier: &Identifier,
+    ) -> Result<CreateSchema, Report<RegistryError>> {
+        let fields = self
+            .output_schema
+            .iter()
+            .map(|declaration| {
+                let name = Identifier::parse(&declaration.tensor).map_err(|error| {
+                    Report::new(RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason: format!(
+                            "ONNX output tensor '{}' cannot be referenced as '{}.{}': {}",
+                            declaration.tensor, INNER_OUTPUT_NAMESPACE, declaration.tensor, error
+                        ),
+                    })
+                })?;
+                Ok(SchemaField {
+                    name,
+                    ty: declaration.schema.message_type(),
+                    optional: false,
+                    sensitive: false,
+                })
+            })
+            .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
+        Ok(CreateSchema {
+            name: Identifier::parse(INNER_OUTPUT_NAMESPACE)
+                .expect("public inferencer namespace must be a valid identifier"),
+            fields,
+        })
+    }
 }
 
 fn ensure_field_exists(
@@ -8672,7 +8656,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_accepts_inferencer_generated_output_schema() {
+    fn apply_batch_accepts_inferencer_inheritance_and_inner_output() {
         let (domain, models) = example_graph_models(
             "inferencer generated output schema",
             r#"
@@ -8694,12 +8678,12 @@ mod tests {
 
             CREATE INFERENCER score_model
               FROM features
-              TO scored SET scored.tenant = features.tenant
+              TO scored SET scored.score = inner_output.score UNSET features.vector
               BRANCHED BY by_tenant_branch
               USING RESOURCE fraud_model VERSION 1
               FILE 'models/simple_score.onnx'
               INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector }
-              OUTPUTS { "score" DENSE TENSOR<F32>[1] = scored.score }
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
               FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
@@ -8708,7 +8692,7 @@ mod tests {
 
         registry
             .apply_batch(&domain, models)
-            .expect("inferencer tensor outputs should define non-input output fields");
+            .expect("inferencer should inherit tenant and map its inner output");
 
         let _ = fs::remove_dir_all(path);
     }
@@ -8723,10 +8707,10 @@ mod tests {
             CREATE RELAY features SCHEMA features UNBRANCHED;
             CREATE RELAY scored SCHEMA scored UNBRANCHED;
             CREATE INFERENCER score_model
-              FROM features TO scored UNBRANCHED
+              FROM features TO scored SET scored.score = inner_output.score UNBRANCHED
               USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
               INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = features.vector }
-              OUTPUTS { "score" DENSE TENSOR<F32>[1] = scored.score }
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
               FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
@@ -8751,10 +8735,10 @@ mod tests {
             CREATE RELAY features SCHEMA features UNBRANCHED;
             CREATE RELAY scored SCHEMA scored UNBRANCHED;
             CREATE INFERENCER score_model
-              FROM features TO scored UNBRANCHED
+              FROM features TO scored SET scored.score = inner_output.score UNBRANCHED
               USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
               INPUTS { "features" DENSE TENSOR<F32>[BATCH, BATCH, 2] = features.vector }
-              OUTPUTS { "score" DENSE TENSOR<F32>[BATCH, 1] = scored.score }
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] }
               FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );

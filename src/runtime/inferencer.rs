@@ -1,8 +1,8 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use nervix_models::{
-    InferencerExecutionMode, InferencerTensorDimension, InferencerTensorMapping,
-    InferencerTensorSchema,
+    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorMapping, InferencerTensorSchema,
 };
 use ordered_float::OrderedFloat;
 use ort::{
@@ -54,10 +54,10 @@ impl OnnxInferencerSession {
         &self,
         records: &[RuntimeRecord],
         inputs: &[InferencerTensorMapping],
-        outputs: &[InferencerTensorMapping],
+        output_schema: &[InferencerTensorDeclaration],
         mode: InferencerExecutionMode,
     ) -> Result<Vec<HashMap<String, RuntimeValue>>, String> {
-        let prepared = PreparedExecution::from_records(records, inputs, outputs, mode)?;
+        let prepared = PreparedExecution::from_records(records, inputs, output_schema, mode)?;
         let session = Arc::clone(&self.session);
         tokio::task::spawn_blocking(move || prepared.run(&mut session.lock()))
             .await
@@ -67,7 +67,7 @@ impl OnnxInferencerSession {
 
 struct PreparedExecution {
     invocations: Vec<PreparedInvocation>,
-    outputs: Vec<InferencerTensorMapping>,
+    output_schema: Vec<InferencerTensorDeclaration>,
     message_count: usize,
     mode: InferencerExecutionMode,
 }
@@ -76,7 +76,7 @@ impl PreparedExecution {
     fn from_records(
         records: &[RuntimeRecord],
         inputs: &[InferencerTensorMapping],
-        outputs: &[InferencerTensorMapping],
+        output_schema: &[InferencerTensorDeclaration],
         mode: InferencerExecutionMode,
     ) -> Result<Self, String> {
         if records.is_empty() {
@@ -96,7 +96,7 @@ impl PreparedExecution {
         };
         Ok(Self {
             invocations,
-            outputs: outputs.to_vec(),
+            output_schema: output_schema.to_vec(),
             message_count: records.len(),
             mode,
         })
@@ -111,11 +111,11 @@ impl PreparedExecution {
                         return Err("per-message ONNX invocation has invalid routing".to_string());
                     };
                     let message_index = *message_index;
-                    let output_tensors = invocation.run(session, &self.outputs, 1)?;
-                    for (mapping, tensor) in self.outputs.iter().zip(output_tensors) {
+                    let output_tensors = invocation.run(session, &self.output_schema, 1)?;
+                    for (declaration, tensor) in self.output_schema.iter().zip(output_tensors) {
                         records[message_index].insert(
-                            mapping.field.as_str().to_string(),
-                            mapping
+                            declaration.tensor.clone(),
+                            declaration
                                 .schema
                                 .runtime_value_from_tensor(&tensor.values, &tensor.shape)?,
                         );
@@ -126,18 +126,19 @@ impl PreparedExecution {
                 for invocation in self.invocations {
                     let message_indices = invocation.message_indices.clone();
                     let batch_size = message_indices.len();
-                    let output_tensors = invocation.run(session, &self.outputs, batch_size)?;
-                    for (mapping, tensor) in self.outputs.iter().zip(output_tensors) {
-                        let slices = mapping.schema.split_batch_values(
+                    let output_tensors =
+                        invocation.run(session, &self.output_schema, batch_size)?;
+                    for (declaration, tensor) in self.output_schema.iter().zip(output_tensors) {
+                        let slices = declaration.schema.split_batch_values(
                             &tensor.values,
                             batch_size,
                             &tensor.shape,
                         )?;
-                        let slice_shape = mapping.schema.shape_without_batch(&tensor.shape)?;
+                        let slice_shape = declaration.schema.shape_without_batch(&tensor.shape)?;
                         for (message_index, values) in message_indices.iter().zip(slices) {
                             records[*message_index].insert(
-                                mapping.field.as_str().to_string(),
-                                mapping
+                                declaration.tensor.clone(),
+                                declaration
                                     .schema
                                     .runtime_value_from_tensor(&values, &slice_shape)?,
                             );
@@ -256,7 +257,7 @@ impl PreparedInvocation {
     fn run(
         self,
         session: &mut Session,
-        outputs: &[InferencerTensorMapping],
+        output_schema: &[InferencerTensorDeclaration],
         batch_size: usize,
     ) -> Result<Vec<ExecutedTensor>, String> {
         let inputs = self
@@ -272,16 +273,19 @@ impl PreparedInvocation {
         let session_outputs = session
             .run(inputs)
             .map_err(|error| format!("ONNX model invocation failed: {error}"))?;
-        outputs
+        output_schema
             .iter()
-            .map(|mapping| {
-                let output = session_outputs.get(&mapping.tensor).ok_or_else(|| {
-                    format!("ONNX invocation omitted output tensor '{}'", mapping.tensor)
+            .map(|declaration| {
+                let output = session_outputs.get(&declaration.tensor).ok_or_else(|| {
+                    format!(
+                        "ONNX invocation omitted output tensor '{}'",
+                        declaration.tensor
+                    )
                 })?;
                 let (shape, values) = output.try_extract_tensor::<f32>().map_err(|error| {
                     format!(
                         "failed to extract ONNX output tensor '{}' as F32: {error}",
-                        mapping.tensor
+                        declaration.tensor
                     )
                 })?;
                 let shape = shape
@@ -291,14 +295,14 @@ impl PreparedInvocation {
                     .map_err(|_| {
                         format!(
                             "ONNX output tensor '{}' returned a negative shape {:?}",
-                            mapping.tensor,
+                            declaration.tensor,
                             shape.as_ref()
                         )
                     })?;
-                mapping.schema.validate_concrete_shape(
+                declaration.schema.validate_concrete_shape(
                     &shape,
                     batch_size,
-                    mapping.schema.batch_axis().is_some(),
+                    declaration.schema.batch_axis().is_some(),
                 )?;
                 Ok(ExecutedTensor {
                     shape,

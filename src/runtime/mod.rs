@@ -42,13 +42,14 @@ use nervix_models::{
     CreateRelay, CreateSignalingProtocol, CreateWireSchemaStmt, Domain, DomainConfig, DomainPace,
     DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorFieldMapping,
     ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    Identifier, InferencerExecutionMode, IngestSource, IngestTimestampSource, KafkaIngestMode,
-    KafkaOffsetMode, KafkaPartitionSchedule, KinesisIngestMode, MessageErrorPolicy, Model,
-    ModelKind, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, PostgresConflictAction, PostgresValueMapping,
-    PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, ScheduledNode,
-    SqsIngestMode, Timestamp,
+    Identifier, InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping,
+    IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    KinesisIngestMode, MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction,
+    MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+    MySqlValueMapping, PostgresConflictAction, PostgresValueMapping, PulsarIngestMode,
+    RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, ScheduledNode, SqsIngestMode,
+    Timestamp,
 };
 use nervix_nspl::{
     vm_program::{
@@ -206,6 +207,8 @@ const INGEST_MESSAGE_NAMESPACE: &str = "message";
 const INGEST_METADATA_NAMESPACE: &str = "metadata";
 const INGEST_HEADERS_NAMESPACE: &str = "headers";
 const BRANCH_NAMESPACE: &str = "branch";
+const INNER_INPUT_NAMESPACE: &str = "inner_input";
+const INNER_OUTPUT_NAMESPACE: &str = "inner_output";
 const WASM_INPUT_NAMESPACE: &str = "input";
 
 pub(crate) type IngestHeaders = Vec<(String, String)>;
@@ -3593,7 +3596,7 @@ impl RelayProcessorNode {
                     resource_version,
                     file,
                     inputs,
-                    outputs,
+                    output_schema,
                     flush_each,
                     pending,
                     next_flush,
@@ -3620,7 +3623,7 @@ impl RelayProcessorNode {
                                     resource_version: *resource_version,
                                     file,
                                     inputs,
-                                    outputs,
+                                    output_schema,
                                     input_relays: &self.input_relays,
                                     session,
                                 },
@@ -3652,7 +3655,7 @@ impl RelayProcessorNode {
                                         resource_version: *resource_version,
                                         file,
                                         inputs,
-                                        outputs,
+                                        output_schema,
                                         input_relays: &self.input_relays,
                                         session,
                                     },
@@ -3897,7 +3900,7 @@ impl RelayProcessorNode {
                     resource_version,
                     file,
                     inputs,
-                    outputs,
+                    output_schema,
                     flush_each,
                     pending,
                     next_flush,
@@ -3918,7 +3921,7 @@ impl RelayProcessorNode {
                                 resource_version: *resource_version,
                                 file,
                                 inputs,
-                                outputs,
+                                output_schema,
                                 input_relays: &self.input_relays,
                                 session,
                             },
@@ -4269,7 +4272,7 @@ impl RelayProcessorTemplate {
                     resource_version,
                     file,
                     inputs,
-                    outputs,
+                    output_schema,
                     flush_each,
                 } => RelayProcessorOperationNode::Inferencer {
                     output_routes: Self::instantiate_outputs(output_routes),
@@ -4277,7 +4280,7 @@ impl RelayProcessorTemplate {
                     resource_version: *resource_version,
                     file: file.clone(),
                     inputs: inputs.clone(),
-                    outputs: outputs.clone(),
+                    output_schema: output_schema.clone(),
                     flush_each: *flush_each,
                     pending: Vec::new(),
                     next_flush: None,
@@ -6130,7 +6133,7 @@ pub(crate) fn compile_filter_map_program(
     }))
 }
 
-pub(crate) fn compile_processor_output_filter_map_program(
+fn compile_processor_output_filter_map_program(
     domain: &Domain,
     identifier: &Identifier,
     input_relays: &[Identifier],
@@ -6138,6 +6141,7 @@ pub(crate) fn compile_processor_output_filter_map_program(
     filter_map: Option<&str>,
     input_schema: Arc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
+    inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
     output_schema: Arc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
@@ -6187,6 +6191,16 @@ pub(crate) fn compile_processor_output_filter_map_program(
             );
         }
     }
+    if let Some(tensors) = inferencer_tensors {
+        bindings.push(
+            VmCompileBinding::readonly(INNER_INPUT_NAMESPACE, tensors.input_arrow_schema())
+                .with_sensitivity(tensors.input_sensitivity(&input_sensitivity)),
+        );
+        bindings.push(VmCompileBinding::readonly(
+            INNER_OUTPUT_NAMESPACE,
+            tensors.output_arrow_schema(),
+        ));
+    }
     if !output_bound {
         bindings.push(
             VmCompileBinding::writeonly(output_relay.as_str(), output_schema.clone())
@@ -6201,6 +6215,12 @@ pub(crate) fn compile_processor_output_filter_map_program(
         .map(|relay| relay.as_str().to_string())
         .chain(std::iter::once(output_relay.as_str().to_string()))
         .chain(std::iter::once(BRANCH_NAMESPACE.to_string()))
+        .chain(inferencer_tensors.into_iter().flat_map(|_| {
+            [
+                INNER_INPUT_NAMESPACE.to_string(),
+                INNER_OUTPUT_NAMESPACE.to_string(),
+            ]
+        }))
         .collect::<HashSet<_>>();
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
         &original_parsed,
@@ -8062,15 +8082,103 @@ pub(crate) async fn execute_filter_map_on_record(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ProcessorOutputFilterSource {
-    InputRelays,
-    OutputRelay,
+struct InferencerFilterMapTensors<'a> {
+    inputs: &'a [InferencerTensorMapping],
+    output_schema: &'a [InferencerTensorDeclaration],
 }
 
-impl ProcessorOutputFilterSource {
-    fn relays(self, input_relays: &[Identifier]) -> Vec<Identifier> {
+impl InferencerFilterMapTensors<'_> {
+    fn input_arrow_schema(&self) -> Arc<arrow_schema::Schema> {
+        Arc::new(arrow_schema::Schema::new(
+            self.inputs
+                .iter()
+                .map(|mapping| {
+                    arrow_schema::Field::new(
+                        &mapping.tensor,
+                        crate::runtime_schema::arrow_data_type(&mapping.schema.message_type()),
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    fn output_arrow_schema(&self) -> Arc<arrow_schema::Schema> {
+        Arc::new(arrow_schema::Schema::new(
+            self.output_schema
+                .iter()
+                .map(|declaration| {
+                    arrow_schema::Field::new(
+                        &declaration.tensor,
+                        crate::runtime_schema::arrow_data_type(&declaration.schema.message_type()),
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    fn input_sensitivity(&self, source: &VmSchemaSensitivity) -> VmSchemaSensitivity {
+        VmSchemaSensitivity::from_sensitive_fields(
+            self.inputs
+                .iter()
+                .filter(|mapping| source.is_sensitive(mapping.field.as_str()))
+                .map(|mapping| mapping.tensor.clone()),
+        )
+    }
+
+    fn augment_record(
+        &self,
+        record: &RuntimeRecord,
+        outputs: std::collections::HashMap<String, RuntimeValue>,
+    ) -> Result<RuntimeRecord, String> {
+        let mut fields = record
+            .fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        for mapping in self.inputs {
+            let value = record.value(mapping.field.as_str()).ok_or_else(|| {
+                format!(
+                    "ONNX input tensor '{}' field '{}.{}' is missing",
+                    mapping.tensor,
+                    mapping.relay.as_str(),
+                    mapping.field.as_str()
+                )
+            })?;
+            fields.insert(
+                format!("{INNER_INPUT_NAMESPACE}.{}", mapping.tensor),
+                value.clone(),
+            );
+        }
+        for (tensor, value) in outputs {
+            fields.insert(format!("{INNER_OUTPUT_NAMESPACE}.{tensor}"), value);
+        }
+        Ok(RuntimeRecord::from_fields_with_metadata(
+            fields,
+            record.metadata().clone(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProcessorOutputFilterSource<'a> {
+    InputRelays,
+    OutputRelay,
+    Inferencer(InferencerFilterMapTensors<'a>),
+}
+
+impl ProcessorOutputFilterSource<'_> {
+    fn relays(&self, input_relays: &[Identifier]) -> Vec<Identifier> {
         match self {
-            Self::InputRelays | Self::OutputRelay => input_relays.to_vec(),
+            Self::InputRelays | Self::OutputRelay | Self::Inferencer(_) => input_relays.to_vec(),
+        }
+    }
+
+    fn inferencer_tensors(&self) -> Option<InferencerFilterMapTensors<'_>> {
+        if let Self::Inferencer(tensors) = self {
+            Some(*tensors)
+        } else {
+            None
         }
     }
 }
@@ -8083,7 +8191,7 @@ struct ProcessorOutputDispatchContext<'a> {
     processor: &'a Identifier,
     error_policies: &'a ErrorPolicies,
     input_relays: &'a [Identifier],
-    filter_source: ProcessorOutputFilterSource,
+    filter_source: ProcessorOutputFilterSource<'a>,
 }
 
 struct PendingProcessorOutputMessage {
@@ -8209,6 +8317,7 @@ async fn evaluate_processor_output_events(
             output.filter_map.as_deref(),
             batch.arrow_schema(),
             input_sensitivity,
+            context.filter_source.inferencer_tensors(),
             output_schema.arrow_schema(),
             output_schema.vm_sensitivity(),
             RuntimeVmCompileContext {
@@ -11603,7 +11712,7 @@ async fn flush_branch_inferencer(
         resource_version,
         file,
         inputs,
-        outputs,
+        output_schema,
         input_relays,
         session,
     } = context;
@@ -11706,6 +11815,8 @@ async fn flush_branch_inferencer(
         }
     }
 
+    let input_key = forwarded.key.clone();
+    let input_batch = forwarded.batch.clone();
     let messages = match forwarded.try_into_messages() {
         Ok(messages) => messages,
         Err(error_and_batch) => {
@@ -11728,9 +11839,10 @@ async fn flush_branch_inferencer(
 
     let execution_mode = inputs
         .first()
-        .or_else(|| outputs.first())
-        .map(|mapping| {
-            if mapping.schema.batch_axis().is_some() {
+        .map(|mapping| &mapping.schema)
+        .or_else(|| output_schema.first().map(|declaration| &declaration.schema))
+        .map(|schema| {
+            if schema.batch_axis().is_some() {
                 InferencerExecutionMode::Batched
             } else {
                 InferencerExecutionMode::PerMessage
@@ -11756,7 +11868,7 @@ async fn flush_branch_inferencer(
         .map(|message| message.record.clone())
         .collect::<Vec<_>>();
     let output_fields = match session
-        .execute(&input_records, inputs, outputs, execution_mode)
+        .execute(&input_records, inputs, output_schema, execution_mode)
         .await
     {
         Ok(output_fields) => output_fields,
@@ -11795,59 +11907,48 @@ async fn flush_branch_inferencer(
         );
         return;
     }
-    let output_messages = messages
-        .into_iter()
-        .zip(output_fields)
-        .map(|(message, fields)| RelayMessage {
-            key: message.key,
-            record: RuntimeRecord::from_fields_with_metadata(
-                fields,
-                message.record.metadata().clone(),
-            ),
-            acks: message.acks,
-        })
-        .collect::<Vec<_>>();
-    let Some(base_output_relay) = output_routes.base_relay() else {
-        for message in output_messages {
-            branch
-                .runtime
-                .handle_message_error(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    message,
-                    format!("inferencer '{}' has no output routes", processor.as_str()),
-                )
-                .await;
-        }
-        return;
+    let inferencer_tensors = InferencerFilterMapTensors {
+        inputs,
+        output_schema,
     };
-    let output_schema =
-        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &base_output_relay) {
-            Ok(schema) => schema,
-            Err(error) => {
-                for message in output_messages {
-                    branch
-                        .runtime
-                        .handle_message_error(
-                            &branch.domain,
-                            node_kind,
-                            processor,
-                            error_policies,
-                            message,
-                            error.clone(),
-                        )
-                        .await;
-                }
-                return;
-            }
-        };
-    let output_error_acks = output_messages
+    let output_records = match messages
+        .iter()
+        .zip(output_fields)
+        .map(|(message, fields)| inferencer_tensors.augment_record(&message.record, fields))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(records) => records,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                messages.iter().map(|message| &message.acks),
+                format!(
+                    "inferencer '{}' failed to prepare output mapping values: {}",
+                    processor.as_str(),
+                    error
+                ),
+            );
+            return;
+        }
+    };
+    let output_metadata = messages
+        .iter()
+        .map(|message| message.record.metadata().clone())
+        .collect::<Vec<_>>();
+    let output_acks = messages
         .iter()
         .map(|message| message.acks.clone())
         .collect::<Vec<_>>();
-    let output_batch = match RelayRecordBatch::from_messages(output_schema, output_messages) {
+    let output_batch = match RelayRecordBatch::from_filtered_parts(
+        input_key,
+        input_batch,
+        output_records,
+        output_metadata,
+        output_acks,
+    ) {
         Ok(batch) => batch,
         Err(error) => {
             branch.runtime.handle_internal_processor_error_for_acks(
@@ -11855,7 +11956,7 @@ async fn flush_branch_inferencer(
                 node_kind,
                 processor,
                 error_policies,
-                output_error_acks.iter(),
+                messages.iter().map(|message| &message.acks),
                 format!(
                     "inferencer '{}' failed to build output batch: {}",
                     processor.as_str(),
@@ -11874,7 +11975,7 @@ async fn flush_branch_inferencer(
             processor,
             error_policies,
             input_relays,
-            filter_source: ProcessorOutputFilterSource::InputRelays,
+            filter_source: ProcessorOutputFilterSource::Inferencer(inferencer_tensors),
         },
         output_routes,
         output_batch,

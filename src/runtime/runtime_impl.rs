@@ -6408,6 +6408,7 @@ impl Runtime {
                 output.filter_map.as_deref(),
                 batch.arrow_schema(),
                 input_schema.vm_sensitivity(),
+                None,
                 output_schema.arrow_schema(),
                 output_schema.vm_sensitivity(),
                 RuntimeVmCompileContext {

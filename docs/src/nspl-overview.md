@@ -112,7 +112,7 @@ TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHE
 
 On relay-consuming processors, `FROM ... WHERE` is a source-level input filter and runs first. Most processors may declare multiple comma-separated `FROM` relays, and those relays must share the same schema. Correlators use repeated `LEFT FROM` and `RIGHT FROM` clauses instead; relays within each side must share that side's schema. `FILTER WHERE` runs after source filtering, before the node accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the node.
 
-Passthrough inheritance only applies to processors that naturally map one input row to one output row. Generated-output processors such as windows, inferencers, and WASM processors do not inherit input fields; their output routes operate on the aggregate record, ONNX output record, or WASM guest output record.
+Passthrough inheritance applies to processors that naturally map one input row to one output row, including inferencers. Inferencer routes inherit the inbound record and expose model values through `inner_input` and `inner_output`. Generated-output processors such as windows and WASM processors instead operate on the aggregate record or WASM guest output record.
 
 WASM output routes are generated-output routes with one additional input binding: `SET` may read guest output fields through the destination relay namespace and original source fields through `input.<field>`. WASM output routes support `SET` and `WHERE`; they do not support `UNSET`.
 

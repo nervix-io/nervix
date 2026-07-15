@@ -1364,7 +1364,7 @@ pub struct CreateInferencer {
     pub resource_version: Option<u64>,
     pub file: String,
     pub inputs: Vec<InferencerTensorMapping>,
-    pub outputs: Vec<InferencerTensorMapping>,
+    pub output_schema: Vec<InferencerTensorDeclaration>,
     pub flush_each: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_size: Option<String>,
@@ -1378,16 +1378,25 @@ pub struct CreateInferencer {
 impl CreateInferencer {
     pub fn execution_mode(&self) -> Result<InferencerExecutionMode, InferencerTensorSchemaError> {
         let mut execution_mode = None;
-        for mapping in self.inputs.iter().chain(&self.outputs) {
-            let batch_axis_count = mapping.schema.batch_axis_count();
+        for (tensor, schema) in self
+            .inputs
+            .iter()
+            .map(|mapping| (mapping.tensor.as_str(), &mapping.schema))
+            .chain(
+                self.output_schema
+                    .iter()
+                    .map(|declaration| (declaration.tensor.as_str(), &declaration.schema)),
+            )
+        {
+            let batch_axis_count = schema.batch_axis_count();
             if batch_axis_count > 1 {
                 return Err(InferencerTensorSchemaError::MultipleBatchAxes {
-                    tensor: mapping.tensor.clone(),
+                    tensor: tensor.to_string(),
                 });
             }
-            if mapping.schema.fixed_element_count().is_none() {
+            if schema.fixed_element_count().is_none() {
                 return Err(InferencerTensorSchemaError::ElementCountOverflow {
-                    tensor: mapping.tensor.clone(),
+                    tensor: tensor.to_string(),
                 });
             }
             let mapping_mode = if batch_axis_count == 1 {
@@ -1449,6 +1458,12 @@ pub struct InferencerTensorMapping {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferencerTensorDeclaration {
+    pub tensor: String,
+    pub schema: InferencerTensorSchema,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferencerTensorSchema {
     pub representation: InferencerTensorRepresentation,
     pub element_type: InferencerTensorElementType,
@@ -1502,6 +1517,22 @@ impl InferencerTensorSchema {
             }
         }
         field_type == &ParseAsType::F32
+    }
+
+    pub fn message_type(&self) -> ParseAsType {
+        self.dimensions
+            .iter()
+            .rev()
+            .fold(ParseAsType::F32, |element, dimension| match dimension {
+                InferencerTensorDimension::Fixed(len) => ParseAsType::Array {
+                    element: Box::new(element),
+                    len: *len,
+                },
+                InferencerTensorDimension::Dynamic => ParseAsType::Vec {
+                    element: Box::new(element),
+                },
+                InferencerTensorDimension::Batch => element,
+            })
     }
 }
 
@@ -2281,6 +2312,7 @@ mod tests {
 
         assert!(schema.is_compatible_with_field_type(&exact));
         assert!(!schema.is_compatible_with_field_type(&flattened));
+        assert_eq!(schema.message_type(), exact);
     }
 
     #[test]

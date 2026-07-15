@@ -14,15 +14,16 @@ use nervix_models::{
     CreateSignalingProtocol, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
     CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType,
     ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend,
-    Identifier, InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, IngestSource, IngestTimestampSource,
-    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode,
-    MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode,
-    MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode, ParseAsType,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
-    SchemaField, SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode,
-    WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
+    KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
+    MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, NameError, NatsIngestMode, ParseAsType, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
+    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField,
+    SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode, WindowBound,
+    WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -524,7 +525,7 @@ pub struct StoredCreateInferencer {
     pub resource_version: Option<u64>,
     pub file: String,
     pub inputs: Vec<StoredInferencerTensorMapping>,
-    pub outputs: Vec<StoredInferencerTensorMapping>,
+    pub output_schema: Vec<StoredInferencerTensorDeclaration>,
     pub flush_each: String,
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
@@ -553,6 +554,12 @@ pub struct StoredInferencerTensorMapping {
     pub schema: StoredInferencerTensorSchema,
     pub relay: String,
     pub field: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredInferencerTensorDeclaration {
+    pub tensor: String,
+    pub schema: StoredInferencerTensorSchema,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -2765,7 +2772,7 @@ impl From<CreateInferencer> for StoredCreateInferencer {
             resource_version: value.resource_version,
             file: value.file,
             inputs: value.inputs.into_iter().map(Into::into).collect(),
-            outputs: value.outputs.into_iter().map(Into::into).collect(),
+            output_schema: value.output_schema.into_iter().map(Into::into).collect(),
             flush_each: value.flush_each,
             max_batch_size: value.max_batch_size,
             mode: value.mode,
@@ -2792,8 +2799,8 @@ impl TryFrom<StoredCreateInferencer> for CreateInferencer {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<_>, _>>()?,
-            outputs: value
-                .outputs
+            output_schema: value
+                .output_schema
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<_>, _>>()?,
@@ -2848,30 +2855,7 @@ impl From<InferencerTensorMapping> for StoredInferencerTensorMapping {
     fn from(value: InferencerTensorMapping) -> Self {
         Self {
             tensor: value.tensor,
-            schema: StoredInferencerTensorSchema {
-                representation: match value.schema.representation {
-                    InferencerTensorRepresentation::Dense => {
-                        StoredInferencerTensorRepresentation::Dense
-                    }
-                },
-                element_type: match value.schema.element_type {
-                    InferencerTensorElementType::F32 => StoredInferencerTensorElementType::F32,
-                },
-                dimensions: value
-                    .schema
-                    .dimensions
-                    .into_iter()
-                    .map(|dimension| match dimension {
-                        InferencerTensorDimension::Fixed(size) => {
-                            StoredInferencerTensorDimension::Fixed(size)
-                        }
-                        InferencerTensorDimension::Dynamic => {
-                            StoredInferencerTensorDimension::Dynamic
-                        }
-                        InferencerTensorDimension::Batch => StoredInferencerTensorDimension::Batch,
-                    })
-                    .collect(),
-            },
+            schema: value.schema.into(),
             relay: value.relay.to_string(),
             field: value.field.to_string(),
         }
@@ -2884,33 +2868,82 @@ impl TryFrom<StoredInferencerTensorMapping> for InferencerTensorMapping {
     fn try_from(value: StoredInferencerTensorMapping) -> Result<Self, Self::Error> {
         Ok(Self {
             tensor: value.tensor,
-            schema: InferencerTensorSchema {
-                representation: match value.schema.representation {
-                    StoredInferencerTensorRepresentation::Dense => {
-                        InferencerTensorRepresentation::Dense
-                    }
-                },
-                element_type: match value.schema.element_type {
-                    StoredInferencerTensorElementType::F32 => InferencerTensorElementType::F32,
-                },
-                dimensions: value
-                    .schema
-                    .dimensions
-                    .into_iter()
-                    .map(|dimension| match dimension {
-                        StoredInferencerTensorDimension::Fixed(size) => {
-                            InferencerTensorDimension::Fixed(size)
-                        }
-                        StoredInferencerTensorDimension::Dynamic => {
-                            InferencerTensorDimension::Dynamic
-                        }
-                        StoredInferencerTensorDimension::Batch => InferencerTensorDimension::Batch,
-                    })
-                    .collect(),
-            },
+            schema: value.schema.into(),
             relay: Identifier::parse(&value.relay)?,
             field: Identifier::parse(&value.field)?,
         })
+    }
+}
+
+impl From<InferencerTensorDeclaration> for StoredInferencerTensorDeclaration {
+    fn from(value: InferencerTensorDeclaration) -> Self {
+        Self {
+            tensor: value.tensor,
+            schema: value.schema.into(),
+        }
+    }
+}
+
+impl TryFrom<StoredInferencerTensorDeclaration> for InferencerTensorDeclaration {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredInferencerTensorDeclaration) -> Result<Self, Self::Error> {
+        Ok(Self {
+            tensor: value.tensor,
+            schema: value.schema.into(),
+        })
+    }
+}
+
+impl From<InferencerTensorSchema> for StoredInferencerTensorSchema {
+    fn from(value: InferencerTensorSchema) -> Self {
+        Self {
+            representation: match value.representation {
+                InferencerTensorRepresentation::Dense => {
+                    StoredInferencerTensorRepresentation::Dense
+                }
+            },
+            element_type: match value.element_type {
+                InferencerTensorElementType::F32 => StoredInferencerTensorElementType::F32,
+            },
+            dimensions: value
+                .dimensions
+                .into_iter()
+                .map(|dimension| match dimension {
+                    InferencerTensorDimension::Fixed(size) => {
+                        StoredInferencerTensorDimension::Fixed(size)
+                    }
+                    InferencerTensorDimension::Dynamic => StoredInferencerTensorDimension::Dynamic,
+                    InferencerTensorDimension::Batch => StoredInferencerTensorDimension::Batch,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<StoredInferencerTensorSchema> for InferencerTensorSchema {
+    fn from(value: StoredInferencerTensorSchema) -> Self {
+        Self {
+            representation: match value.representation {
+                StoredInferencerTensorRepresentation::Dense => {
+                    InferencerTensorRepresentation::Dense
+                }
+            },
+            element_type: match value.element_type {
+                StoredInferencerTensorElementType::F32 => InferencerTensorElementType::F32,
+            },
+            dimensions: value
+                .dimensions
+                .into_iter()
+                .map(|dimension| match dimension {
+                    StoredInferencerTensorDimension::Fixed(size) => {
+                        InferencerTensorDimension::Fixed(size)
+                    }
+                    StoredInferencerTensorDimension::Dynamic => InferencerTensorDimension::Dynamic,
+                    StoredInferencerTensorDimension::Batch => InferencerTensorDimension::Batch,
+                })
+                .collect(),
+        }
     }
 }
 

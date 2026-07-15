@@ -45,12 +45,13 @@ Feature: Inferencer resources
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER score_model
         FROM features
-        TO scored SET scored.tenant = features.tenant
+        TO scored SET scored.tenant = features.tenant, scored.score = inner_output.score
+          UNSET features.vector
         BRANCHED BY by_feature_source
         USING RESOURCE fraud_model VERSION 1
         FILE 'models/simple_score.onnx'
         INPUTS { "features" <tensor_type>[2] = features.vector }
-        OUTPUTS { "score" <tensor_type>[1] = scored.score }
+        OUTPUT SCHEMA { "score" <tensor_type>[1] }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     Then the last command output contains
@@ -109,12 +110,13 @@ Feature: Inferencer resources
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER score_model
         FROM features
-        TO scored SET scored.tenant = features.tenant
+        TO scored SET scored.tenant = features.tenant, scored.score = inner_output.<output_tensor>
+          UNSET features.vector
         BRANCHED BY by_feature_source
         USING RESOURCE fraud_model VERSION 1
         FILE 'models/<model_file>'
         INPUTS { "<input_tensor>" <tensor_type>[<input_dimensions>] = features.vector }
-        OUTPUTS { "<output_tensor>" <tensor_type>[<output_dimensions>] = scored.score }
+        OUTPUT SCHEMA { "<output_tensor>" <tensor_type>[<output_dimensions>] }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
 
@@ -147,13 +149,14 @@ Feature: Inferencer resources
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER invalid_batch_schema
-        FROM features TO scored UNBRANCHED
+        FROM features TO scored SET scored.scores = inner_output.scores
+          UNSET features.features, features.mask UNBRANCHED
         USING RESOURCE inference VERSION 1 FILE 'models/batch_score.onnx'
         INPUTS {
           "features" <tensor_type>[<features_dimensions>] = features.features,
           "mask" <tensor_type>[<mask_dimensions>] = features.mask
         }
-        OUTPUTS { "scores" <tensor_type>[<output_dimensions>] = scored.scores }
+        OUTPUT SCHEMA { "scores" <tensor_type>[<output_dimensions>] }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
 
@@ -172,10 +175,11 @@ Feature: Inferencer resources
     When these NSPL commands fail
       """
       CREATE INFERENCER unsupported_schema
-        FROM features TO scored UNBRANCHED
+        FROM features TO scored SET scored.scores = inner_output.scores
+          UNSET features.features UNBRANCHED
         USING RESOURCE inference FILE 'model.onnx'
         INPUTS { "features" <unsupported_tensor_type>[2] = features.features }
-        OUTPUTS { "scores" <supported_tensor_type>[2] = scored.scores }
+        OUTPUT SCHEMA { "scores" <supported_tensor_type>[2] }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
 
@@ -201,10 +205,11 @@ Feature: Inferencer resources
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER incomplete_bindings
-        FROM features TO scored UNBRANCHED
+        FROM features TO scored SET scored.scores = inner_output.scores
+          UNSET features.features UNBRANCHED
         USING RESOURCE inference VERSION 1 FILE 'models/batch_score.onnx'
         INPUTS { "features" <tensor_type>[BATCH, 2] = features.features }
-        OUTPUTS { "scores" <tensor_type>[BATCH, 2] = scored.scores }
+        OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, 2] }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
 
@@ -232,13 +237,14 @@ Feature: Inferencer resources
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER fixed_dynamic_axis
-        FROM features TO scored UNBRANCHED
+        FROM features TO scored SET scored.scores = inner_output.scores
+          UNSET features.features, features.mask UNBRANCHED
         USING RESOURCE inference VERSION 1 FILE 'models/batch_score.onnx'
         INPUTS {
           "features" <tensor_type>[3, 2] = features.features,
           "mask" <tensor_type>[3, 2] = features.mask
         }
-        OUTPUTS { "scores" <tensor_type>[3, 2] = scored.scores }
+        OUTPUT SCHEMA { "scores" <tensor_type>[3, 2] }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     Then the last command output contains
@@ -274,10 +280,13 @@ Feature: Inferencer resources
         TO matrices DECODE USING matrices_codec UNBRANCHED FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER transform_matrix
-        FROM matrices TO transformed_matrices UNBRANCHED
+        FROM matrices
+        TO transformed_matrices SET transformed_matrices.transformed = inner_output.transformed
+          UNSET matrices.matrix
+        UNBRANCHED
         USING RESOURCE inference VERSION 1 FILE 'models/matrix_identity.onnx'
         INPUTS { "matrix" <tensor_type>[2, 3] = matrices.matrix }
-        OUTPUTS { "transformed" <tensor_type>[2, 3] = transformed_matrices.transformed }
+        OUTPUT SCHEMA { "transformed" <tensor_type>[2, 3] }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
@@ -323,13 +332,14 @@ Feature: Inferencer resources
         TO sequences DECODE USING sequences_codec UNBRANCHED FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER score_sequence
-        FROM sequences TO scored_sequences UNBRANCHED
+        FROM sequences TO scored_sequences SET scored_sequences.scores = inner_output.scores
+          UNSET sequences.features, sequences.mask UNBRANCHED
         USING RESOURCE inference VERSION 1 FILE 'models/batch_score.onnx'
         INPUTS {
           "features" <tensor_type>[DYNAMIC, 2] = sequences.features,
           "mask" <tensor_type>[DYNAMIC, 2] = sequences.mask
         }
-        OUTPUTS { "scores" <tensor_type>[DYNAMIC, 2] = scored_sequences.scores }
+        OUTPUT SCHEMA { "scores" <tensor_type>[DYNAMIC, 2] }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
@@ -375,13 +385,14 @@ Feature: Inferencer resources
         TO sequences DECODE USING sequences_codec UNBRANCHED FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER score_sequence_batch
-        FROM sequences TO scored_sequences UNBRANCHED
+        FROM sequences TO scored_sequences SET scored_sequences.scores = inner_output.scores
+          UNSET sequences.features, sequences.mask UNBRANCHED
         USING RESOURCE inference VERSION 1 FILE 'models/dynamic_batch_score.onnx'
         INPUTS {
           "features" <tensor_type>[BATCH, DYNAMIC, 2] = sequences.features,
           "mask" <tensor_type>[BATCH, DYNAMIC, 2] = sequences.mask
         }
-        OUTPUTS { "scores" <tensor_type>[BATCH, DYNAMIC, 2] = scored_sequences.scores }
+        OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, DYNAMIC, 2] }
         FLUSH EACH 500ms MAX BATCH SIZE 16mb ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
@@ -413,7 +424,7 @@ Feature: Inferencer resources
       | 1            | VEC<ARRAY<F32, 2>> | DENSE TENSOR<F32> |
       | 3            | VEC<ARRAY<F32, 2>> | DENSE TENSOR<F32> |
 
-  Scenario Outline: Per-message inferencer invokes ONNX once for every collected message
+  Scenario Outline: Per-message inferencer inherits inputs and maps inner values per output route
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
@@ -426,26 +437,38 @@ Feature: Inferencer resources
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       CREATE SCHEMA features ( vector <input_field_type> );
-      CREATE SCHEMA scored ( score <output_field_type> );
+      CREATE SCHEMA scored (
+        vector <input_field_type>,
+        score <output_field_type>
+      );
+      CREATE SCHEMA audited (
+        vector <input_field_type>,
+        model_input <input_field_type>
+      );
       CREATE STRICT WIRE JSON SCHEMA features_wire ( vector array );
       CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
+      CREATE RELAY audited SCHEMA audited UNBRANCHED;
       CREATE VHOST edge infer-per-message-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
       CREATE INGESTOR feature_source
         TO features DECODE USING features_codec UNBRANCHED FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER score_messages
-        FROM features TO scored UNBRANCHED
+        FROM features
+        TO scored SET scored.score = inner_output.score
+        TO audited SET audited.model_input = inner_input.features
+        UNBRANCHED
         USING RESOURCE inference VERSION 1 FILE 'models/simple_score.onnx'
         INPUTS { "features" <tensor_type>[2] = features.vector }
-        OUTPUTS { "score" <tensor_type>[1] = scored.score }
+        OUTPUT SCHEMA { "score" <tensor_type>[1] }
         FLUSH EACH 500ms MAX BATCH SIZE 16mb ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
+      CREATE SUBSCRIPTION audited_subscription TO audited;
       START;
       """
     And http payload is posted to host "infer-per-message-{{test_id}}.example.com" path "/features"
@@ -462,9 +485,12 @@ Feature: Inferencer resources
       """
     Then within "5s" the relay subscription receives payloads
       """
-      {"score":[0.875]}
-      {"score":[-0.375]}
-      {"score":[1.125]}
+      {"score":[0.875],"vector":[1.0,0.0]}
+      {"model_input":[1.0,0.0],"vector":[1.0,0.0]}
+      {"score":[-0.375],"vector":[0.0,1.0]}
+      {"model_input":[0.0,1.0],"vector":[0.0,1.0]}
+      {"score":[1.125],"vector":[2.0,1.0]}
+      {"model_input":[2.0,1.0],"vector":[2.0,1.0]}
       """
 
     Examples:
@@ -502,13 +528,14 @@ Feature: Inferencer resources
         TO features DECODE USING features_codec UNBRANCHED FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER batch_score_messages
-        FROM features TO scored UNBRANCHED
+        FROM features TO scored SET scored.scores = inner_output.scores
+          UNSET features.features, features.mask UNBRANCHED
         USING RESOURCE inference VERSION 1 FILE 'models/batch_score.onnx'
         INPUTS {
           "features" <tensor_type>[BATCH, 2] = features.features,
           "mask" <tensor_type>[BATCH, 2] = features.mask
         }
-        OUTPUTS { "scores" <tensor_type>[BATCH, 2] = scored.scores }
+        OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, 2] }
         FLUSH EACH 500ms MAX BATCH SIZE 16mb ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node
@@ -576,13 +603,14 @@ Feature: Inferencer resources
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER branch_batch_score
-        FROM features TO scored BRANCHED BY by_tenant
+        FROM features TO scored SET scored.scores = inner_output.scores
+          UNSET features.tenant, features.features, features.mask BRANCHED BY by_tenant
         USING RESOURCE inference VERSION 1 FILE 'models/batch_score.onnx'
         INPUTS {
           "features" <tensor_type>[BATCH, 2] = features.features,
           "mask" <tensor_type>[BATCH, 2] = features.mask
         }
-        OUTPUTS { "scores" <tensor_type>[BATCH, 2] = scored.scores }
+        OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, 2] }
         FLUSH EACH 500ms MAX BATCH SIZE 16mb ON MESSAGE ERROR LOG;
       """
     And these NSPL commands are executed on the leader node

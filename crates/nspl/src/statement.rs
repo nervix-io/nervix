@@ -1514,7 +1514,7 @@ mod tests {
     #[test]
     fn parses_inferencer_statement() {
         let parsed = parse_statement(
-            r#"CREATE INFERENCER score_model FROM features TO scored UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUTS { "score" DENSE TENSOR<F32>[1] = scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
+            r#"CREATE INFERENCER score_model FROM features TO scored SET scored.score = inner_output.score UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
@@ -1528,8 +1528,13 @@ mod tests {
         assert_eq!(processor.resource.as_str(), "fraud_model");
         assert_eq!(processor.resource_version, Some(3));
         assert_eq!(processor.inputs.len(), 1);
-        assert_eq!(processor.outputs.len(), 1);
+        assert_eq!(processor.output_schema.len(), 1);
         assert_eq!(processor.flush_each, "IMMEDIATE");
+        let canonical = processor
+            .to_canonical_nspl()
+            .expect("inferencer should render canonically");
+        assert!(canonical.contains("TO scored SET scored.score = inner_output.score"));
+        assert!(canonical.contains("OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }"));
     }
 
     #[test]
@@ -1698,7 +1703,7 @@ mod tests {
             ),
             (
                 "inferencer",
-                r#"CREATE INFERENCER score_model FROM features TO scored UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUTS { "score" DENSE TENSOR<F32>[1] = scored.score } FLUSH IMMEDIATE"#,
+                r#"CREATE INFERENCER score_model FROM features TO scored SET scored.score = inner_output.score UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } FLUSH IMMEDIATE"#,
             ),
         ];
 
@@ -1759,10 +1764,11 @@ mod tests {
             "CREATE WINDOW PROCESSOR window_metrics FROM raw TO projected UNBRANCHED WIDTH 2 \
              MESSAGES STEP 2 MESSAGES AGGREGATE projected.value = COUNT(raw.value) ON MESSAGE \
              ERROR LOG;",
-            "CREATE INFERENCER score FROM features TO scored UNBRANCHED USING RESOURCE \
-             fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { \"features\" DENSE \
-             TENSOR<F32>[2] = features.vector } OUTPUTS { \"score\" DENSE TENSOR<F32>[1] = \
-             scored.score } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE INFERENCER score FROM features TO scored SET scored.score = \
+             inner_output.score UNBRANCHED USING RESOURCE fraud_model VERSION 1 FILE \
+             'models/simple_score.onnx' INPUTS { \"features\" DENSE TENSOR<F32>[2] = \
+             features.vector } OUTPUT SCHEMA { \"score\" DENSE TENSOR<F32>[1] } FLUSH IMMEDIATE \
+             ON MESSAGE ERROR LOG;",
             "CREATE WASM PROCESSOR filter_even USING RESOURCE wasm_filter VERSION 1 FILE \
              'processors/filter_even.wasm' FROM raw TO projected UNBRANCHED ON MESSAGE ERROR LOG \
              ON GLOBAL ERROR LOG;",

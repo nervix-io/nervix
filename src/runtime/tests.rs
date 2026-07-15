@@ -23,13 +23,13 @@ use nervix_models::{
     CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
     CreateSchema, CreateWasmProcessor, CreateWindowProcessor, Domain, DomainConfig, DomainPace,
     DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink, ErrorPolicies,
-    GeneralErrorPolicy, Identifier, InferencerTensorDimension, InferencerTensorElementType,
-    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestSource,
-    IngestTimestampSource, JsonType, MessageErrorPolicy, ModelKind, MqttIngestMode, MqttQos,
-    MqttSession, ParseAsType, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RelayBranching, RemoteAckOutcome, RemoteAckResolution, ResourceId,
-    ResourceVersion, ResourceVersionStatus, RetryPolicy, ScheduledNode, SchemaField, Timestamp,
-    WindowBound, WireSchemaField, ZeroMqIngestMode,
+    GeneralErrorPolicy, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, MessageErrorPolicy,
+    ModelKind, MqttIngestMode, MqttQos, MqttSession, ParseAsType, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, RemoteAckOutcome,
+    RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus, RetryPolicy,
+    ScheduledNode, SchemaField, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmEnvelope, WasmOutputColumnRef,
@@ -2514,11 +2514,9 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                     relay: identifier("orders"),
                     field: identifier("features"),
                 }],
-                outputs: vec![InferencerTensorMapping {
+                output_schema: vec![InferencerTensorDeclaration {
                     tensor: "score".to_string(),
                     schema: inferencer_tensor_schema(1),
-                    relay: identifier("scores"),
-                    field: identifier("score"),
                 }],
                 flush_each: "IMMEDIATE".to_string(),
                 max_batch_size: None,
@@ -5134,11 +5132,9 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                         relay: identifier("features"),
                         field: identifier("vector"),
                     }],
-                    outputs: vec![InferencerTensorMapping {
+                    output_schema: vec![InferencerTensorDeclaration {
                         tensor: "score".to_string(),
                         schema: inferencer_tensor_schema(1),
-                        relay: identifier("scores"),
-                        field: identifier("score"),
                     }],
                     flush_each: "IMMEDIATE".to_string(),
                     max_batch_size: None,
@@ -5181,7 +5177,7 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
         resource_version,
         file,
         inputs,
-        outputs,
+        output_schema,
         flush_each,
         ..
     } = &spec.roots[0].operation
@@ -5199,7 +5195,7 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
     assert_eq!(*resource_version, Some(3));
     assert_eq!(file, "models/fraud.onnx");
     assert_eq!(inputs.len(), 1);
-    assert_eq!(outputs.len(), 1);
+    assert_eq!(output_schema.len(), 1);
     assert_eq!(flush_each, "IMMEDIATE");
     assert_eq!(spec.roots[0].filter_where.as_deref(), Some("WHERE active"));
 }

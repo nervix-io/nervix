@@ -15,16 +15,17 @@ use crate::{
     CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
     CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
     GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
-    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry,
-    KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConfigEntry,
-    MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
-    MySqlConflictAction, NatsConfigEntry, NatsIngestMode, ParseAsType, PostgresConfigEntry,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
-    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
-    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
-    S3ConfigEntry, SchemaField, SqsConfigEntry, SqsIngestMode, WebsocketsConfigEntry,
-    WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+    KinesisConfigEntry, KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model,
+    MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
+    ParseAsType, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
+    RelayBranching, RetryPolicy, S3ConfigEntry, SchemaField, SqsConfigEntry, SqsIngestMode,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry,
+    ZeroMqIngestMode,
 };
 
 fn branch_values_to_nspl(values: &[BranchValueMapping]) -> String {
@@ -1061,7 +1062,7 @@ impl CreateInferencer {
             .unwrap_or_default();
         Ok(format!(
             "CREATE {} INFERENCER {} FROM {}{}{} {} USING RESOURCE {}{} FILE {} INPUTS {{ {} }} \
-             OUTPUTS {{ {} }} {} {};",
+             OUTPUT SCHEMA {{ {} }} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             processor_inputs_to_nspl(&self.from),
@@ -1072,7 +1073,7 @@ impl CreateInferencer {
             version,
             string_literal(&self.file)?,
             inference_mappings_to_nspl(&self.inputs)?,
-            inference_mappings_to_nspl(&self.outputs)?,
+            inference_output_schema_to_nspl(&self.output_schema)?,
             flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
             message_error_policy_to_nspl(&self.message_error_policy)
         ))
@@ -1126,6 +1127,34 @@ fn inference_mappings_to_nspl(
                     .join(", "),
                 mapping.relay.as_str(),
                 mapping.field.as_str()
+            ))
+        })
+        .collect::<Result<Vec<_>, CanonicalNsplError>>()
+        .map(|items| items.join(", "))
+}
+
+fn inference_output_schema_to_nspl(
+    declarations: &[InferencerTensorDeclaration],
+) -> Result<String, CanonicalNsplError> {
+    declarations
+        .iter()
+        .map(|declaration| {
+            Ok(format!(
+                "{} {} TENSOR<{}>[{}]",
+                string_literal(&declaration.tensor)?,
+                declaration.schema.representation.as_ref(),
+                declaration.schema.element_type.as_ref(),
+                declaration
+                    .schema
+                    .dimensions
+                    .iter()
+                    .map(|dimension| match dimension {
+                        InferencerTensorDimension::Fixed(size) => size.to_string(),
+                        InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
+                        InferencerTensorDimension::Batch => "BATCH".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
             ))
         })
         .collect::<Result<Vec<_>, CanonicalNsplError>>()

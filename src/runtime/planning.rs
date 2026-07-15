@@ -273,7 +273,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         resource_version: inferencer.resource_version,
                         file: inferencer.file.clone(),
                         inputs: inferencer.inputs.clone(),
-                        outputs: inferencer.outputs.clone(),
+                        output_schema: inferencer.output_schema.clone(),
                         flush_each: inferencer.flush_each.clone(),
                         max_batch_size: inferencer.max_batch_size.clone(),
                     },
@@ -726,7 +726,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         resource_version,
                         file,
                         inputs,
-                        outputs,
+                        output_schema,
                         flush_each,
                         max_batch_size,
                     } => RelayProcessorOperationTemplate::Inferencer {
@@ -735,7 +735,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         resource_version: *resource_version,
                         file: file.clone(),
                         inputs: inputs.clone(),
-                        outputs: outputs.clone(),
+                        output_schema: output_schema.clone(),
                         flush_each: parse_branch_flush_policy(
                             "inferencer",
                             &node.processor,

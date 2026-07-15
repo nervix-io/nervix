@@ -3,8 +3,8 @@ use std::{sync::Arc, time::Duration};
 use ahash::{HashMap, HashSet};
 use nervix_models::{
     AckMode, BranchValueMapping, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-    CorrelatorMatchPolicy, ErrorPolicies, Identifier, InferencerTensorMapping, ModelKind,
-    Timestamp, WindowBound,
+    CorrelatorMatchPolicy, ErrorPolicies, Identifier, InferencerTensorDeclaration,
+    InferencerTensorMapping, ModelKind, Timestamp, WindowBound,
 };
 use nervix_nspl::window_processor::aggregate::WindowAggregateProgram;
 use nervix_vm::CompiledProgram as VmCompiledProgram;
@@ -111,7 +111,7 @@ pub(super) enum BranchedProcessorOperationSpec {
         resource_version: Option<u64>,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
-        outputs: Vec<InferencerTensorMapping>,
+        output_schema: Vec<InferencerTensorDeclaration>,
         flush_each: String,
         max_batch_size: Option<String>,
     },
@@ -292,7 +292,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         resource_version: Option<u64>,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
-        outputs: Vec<InferencerTensorMapping>,
+        output_schema: Vec<InferencerTensorDeclaration>,
         flush_each: RuntimeFlushPolicy,
     },
     WasmProcessor {
@@ -386,7 +386,7 @@ pub(super) enum RelayProcessorOperationNode {
         resource_version: Option<u64>,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
-        outputs: Vec<InferencerTensorMapping>,
+        output_schema: Vec<InferencerTensorDeclaration>,
         flush_each: RuntimeFlushPolicy,
         pending: Vec<RelayRecordBatch>,
         next_flush: Option<Timestamp>,
@@ -514,7 +514,7 @@ pub(super) struct InferencerFlushContext<'a> {
     pub(super) resource_version: Option<u64>,
     pub(super) file: &'a str,
     pub(super) inputs: &'a [InferencerTensorMapping],
-    pub(super) outputs: &'a [InferencerTensorMapping],
+    pub(super) output_schema: &'a [InferencerTensorDeclaration],
     pub(super) input_relays: &'a [Identifier],
     pub(super) session: &'a mut Option<OnnxInferencerSession>,
 }
