@@ -76,14 +76,14 @@ Feature: Ingestor branch consistency
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Multiple ingestors can share one branch schema for one relay
+  Scenario Outline: Differently named branches with the same schema are incompatible
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these NSPL commands fail with "conflicting branch names"
       """
       CREATE SCHEMA notification (
         tenant STRING,

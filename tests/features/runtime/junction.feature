@@ -34,8 +34,7 @@ Feature: Relay junction
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA user_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
-        CREATE IF NOT EXISTS BRANCH by_source_two SCHEMA user_id_branch TTL 5m;
-        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification_projection BRANCHED BY by_source_one;
         CREATE RELAY ss20 SCHEMA notification_projection BRANCHED BY by_source_one;
         CREATE VHOST edge http-{{test_id}}.example.com;
@@ -56,7 +55,7 @@ Feature: Relay junction
         CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        BRANCHED BY by_source_two VALUES { user_id = ss2.user_id }
+        BRANCHED BY by_source_one VALUES { user_id = ss2.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams
@@ -123,8 +122,7 @@ Feature: Relay junction
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
-        CREATE IF NOT EXISTS BRANCH by_source_two SCHEMA tenant_branch TTL 5m;
-        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress_one
@@ -144,7 +142,7 @@ Feature: Relay junction
         CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        BRANCHED BY by_source_two VALUES { tenant = ss2.tenant }
+        BRANCHED BY by_source_one VALUES { tenant = ss2.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams
@@ -217,10 +215,8 @@ Feature: Relay junction
         CREATE RELAY state_notifications
         SCHEMA notification BRANCHED BY by_state_source
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-        CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA user_id_branch TTL 5m;
-        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
-        CREATE IF NOT EXISTS BRANCH by_source_two SCHEMA user_id_branch TTL 5m;
-        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
+        CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_state_source;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_state_source;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_state_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT state_ingress
@@ -244,13 +240,13 @@ Feature: Relay junction
         CREATE INGESTOR source_one
         TO ss1
         DECODE USING notification_codec
-        BRANCHED BY by_source_one VALUES { user_id = ss1.user_id }
+        BRANCHED BY by_state_source VALUES { user_id = ss1.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        BRANCHED BY by_source_two VALUES { user_id = ss2.user_id }
+        BRANCHED BY by_state_source VALUES { user_id = ss2.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams

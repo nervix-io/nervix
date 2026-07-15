@@ -52,12 +52,9 @@ Feature: Relay correlation
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
-        CREATE IF NOT EXISTS BRANCH by_left_profile_alias_ingestor SCHEMA tenant_branch TTL 5m;
-        CREATE RELAY left_profile_aliases SCHEMA left_profile BRANCHED BY by_left_profile_alias_ingestor;
-        CREATE IF NOT EXISTS BRANCH by_right_profile_ingestor SCHEMA tenant_branch TTL 5m;
-        CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_right_profile_ingestor;
-        CREATE IF NOT EXISTS BRANCH by_right_profile_alias_ingestor SCHEMA tenant_branch TTL 5m;
-        CREATE RELAY right_profile_aliases SCHEMA right_profile BRANCHED BY by_right_profile_alias_ingestor;
+        CREATE RELAY left_profile_aliases SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
+        CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
+        CREATE RELAY right_profile_aliases SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
         CREATE RELAY correlated_profiles SCHEMA correlated_profile BRANCHED BY by_left_profile_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT left_ingress
@@ -85,19 +82,19 @@ Feature: Relay correlation
         CREATE INGESTOR left_profile_alias_ingestor
         TO left_profile_aliases
         DECODE USING left_profile_codec
-        BRANCHED BY by_left_profile_alias_ingestor VALUES { tenant = left_profile_aliases.tenant }
+        BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profile_aliases.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE INGESTOR right_profile_ingestor
         TO right_profiles
         DECODE USING right_profile_codec
-        BRANCHED BY by_right_profile_ingestor VALUES { tenant = right_profiles.tenant }
+        BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profiles.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE INGESTOR right_profile_alias_ingestor
         TO right_profile_aliases
         DECODE USING right_profile_codec
-        BRANCHED BY by_right_profile_alias_ingestor VALUES { tenant = right_profile_aliases.tenant }
+        BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profile_aliases.tenant }
         FLUSH IMMEDIATE
         FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE CORRELATOR correlate_profiles

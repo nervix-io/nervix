@@ -69,11 +69,10 @@ Feature: Multi-source DAG routing
         DEDUPLICATE ON kafka_ingress.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        CREATE DEDUPLICATOR rabbit_branch
+        CREATE REINGESTOR rabbit_branch
         FROM rabbit_ingress
         TO rabbit_projected BRANCHED BY by_kafka_notifications
-        DEDUPLICATE ON rabbit_ingress.user_id
-        MAX TIME 10m
+        VALUES { user_id = rabbit_projected.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
         CREATE DEDUPLICATOR kafka_shared
         FROM kafka_projected

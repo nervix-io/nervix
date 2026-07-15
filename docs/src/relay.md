@@ -41,7 +41,7 @@ Processing node state also belongs to the branch. That gives each group independ
 Runtime branch rules:
 
 - an `INGESTOR` starts a branch for one concrete branch key through `BRANCHED BY <branch>`
-- normal downstream processors keep the same branch group
+- normal downstream processors keep the same named branch and concrete branch key
 - output routes and forwarders send records to downstream relay names inside the same branch
 - stateful processors keep branch-local state for that group
 - a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <branch>`

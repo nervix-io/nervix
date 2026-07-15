@@ -371,15 +371,14 @@ Feature: Web console NSPL REPL
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
       CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
-      CREATE IF NOT EXISTS BRANCH by_right_profile_ingestor SCHEMA tenant_branch TTL 5m;
-      CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_right_profile_ingestor;
+      CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
       CREATE RELAY correlated_profiles SCHEMA correlated_profile BRANCHED BY by_left_profile_ingestor;
       CREATE RELAY uncorrelated_left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
       CREATE RELAY uncorrelated_right_profiles SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
       CREATE RELAY correlator_errors SCHEMA correlator_error BRANCHED BY by_left_profile_ingestor;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT left_ingress ON edge PATH '/left' TYPE HTTP;
-      CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP; CREATE INGESTOR left_profile_ingestor TO left_profiles DECODE USING left_profile_codec BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profiles.tenant } FLUSH IMMEDIATE FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR right_profile_ingestor TO right_profiles DECODE USING right_profile_codec BRANCHED BY by_right_profile_ingestor VALUES { tenant = right_profiles.tenant } FLUSH IMMEDIATE FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP; CREATE INGESTOR left_profile_ingestor TO left_profiles DECODE USING left_profile_codec BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profiles.tenant } FLUSH IMMEDIATE FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR right_profile_ingestor TO right_profiles DECODE USING right_profile_codec BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profiles.tenant } FLUSH IMMEDIATE FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CORRELATOR correlate_profiles
         LEFT FROM left_profiles
         RIGHT FROM right_profiles
@@ -838,10 +837,8 @@ Feature: Web console NSPL REPL
       CREATE IF NOT EXISTS SCHEMA device_branch ( tenant_id STRING, device_id STRING );
       CREATE IF NOT EXISTS BRANCH by_iot_device_activity SCHEMA device_branch TTL 30m;
       CREATE RELAY device_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
-      CREATE IF NOT EXISTS BRANCH by_edge_server_activity SCHEMA device_branch TTL 30m;
-      CREATE RELAY edge_activity_landing SCHEMA activity BRANCHED BY by_edge_server_activity;
-      CREATE IF NOT EXISTS BRANCH by_auth_server_activity SCHEMA device_branch TTL 30m;
-      CREATE RELAY auth_activity_landing SCHEMA activity BRANCHED BY by_auth_server_activity;
+      CREATE RELAY edge_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
+      CREATE RELAY auth_activity_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
       CREATE RELAY edge_activity_enriched_landing SCHEMA activity BRANCHED BY by_iot_device_activity;
       CREATE RELAY edge_connect_events SCHEMA activity BRANCHED BY by_iot_device_activity;
       CREATE RELAY edge_disconnect_events SCHEMA activity BRANCHED BY by_iot_device_activity;
@@ -876,7 +873,7 @@ Feature: Web console NSPL REPL
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR edge_server_activity
         TO edge_activity_landing
         DECODE USING activity_codec
-        BRANCHED BY by_edge_server_activity VALUES {
+        BRANCHED BY by_iot_device_activity VALUES {
           tenant_id = edge_activity_landing.tenant_id,
           device_id = edge_activity_landing.device_id
         }
@@ -889,7 +886,7 @@ Feature: Web console NSPL REPL
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR auth_server_activity
         TO auth_activity_landing
         DECODE USING activity_codec
-        BRANCHED BY by_auth_server_activity VALUES {
+        BRANCHED BY by_iot_device_activity VALUES {
           tenant_id = auth_activity_landing.tenant_id,
           device_id = auth_activity_landing.device_id
         }
@@ -1036,7 +1033,7 @@ Feature: Web console NSPL REPL
     When these NSPL commands are executed on the leader node
       """
       CREATE ENDPOINT backup_telemetry_endpoint ON edge PATH '/backup' TYPE HTTP;
-      CREATE IF NOT EXISTS BRANCH by_backup_telemetry SCHEMA site_branch TTL 5m; CREATE INGESTOR backup_telemetry TO telemetry_by_site DECODE USING telemetry_codec BRANCHED BY by_backup_telemetry VALUES { site = telemetry_by_site.site } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT backup_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR backup_telemetry TO telemetry_by_site DECODE USING telemetry_codec BRANCHED BY by_primary_telemetry VALUES { site = telemetry_by_site.site } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT backup_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then selector ".graph-hit-layer" contains "backup_telemetry"
@@ -1369,7 +1366,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY rr1 SCHEMA txn BRANCHED BY by_state_txns_ingestor;
       CREATE ENDPOINT state_txns_endpoint ON edge PATH '/state' TYPE HTTP;
       CREATE INGESTOR state_txns_ingestor TO state_txns DECODE USING txn_codec BRANCHED BY by_state_txns_ingestor VALUES { value = state_txns.value } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT state_txns_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE DEDUPLICATOR fwd FROM ss2 TO rr1 BRANCHED BY by_state_txns_ingestor DEDUPLICATE ON ss2.value MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE REINGESTOR fwd FROM ss2 TO rr1 BRANCHED BY by_state_txns_ingestor VALUES { value = rr1.value } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "state_txns_ingestor"
     And selector ".graph-hit-layer" contains "state_txns"

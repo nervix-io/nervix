@@ -97,8 +97,7 @@ Feature: Cluster leader failover
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS BRANCH by_notifications_a_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_a SCHEMA notification BRANCHED BY by_notifications_a_source;
-      CREATE IF NOT EXISTS BRANCH by_notifications_b_source SCHEMA user_id_branch TTL 5m;
-      CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_b_source;
+      CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_all SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
       CREATE IF NOT EXISTS BRANCH by_transaction_source SCHEMA transaction_id_branch TTL 5m;
@@ -135,7 +134,7 @@ Feature: Cluster leader failover
       CREATE INGESTOR notifications_b_source
         TO notifications_b
         DECODE USING notification_codec
-        BRANCHED BY by_notifications_b_source VALUES { user_id = notifications_b.user_id }
+        BRANCHED BY by_notifications_a_source VALUES { user_id = notifications_b.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INGESTOR transaction_source
@@ -258,8 +257,7 @@ Feature: Cluster leader failover
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
       CREATE IF NOT EXISTS BRANCH by_notifications_a_source SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications_a SCHEMA notification BRANCHED BY by_notifications_a_source;
-      CREATE IF NOT EXISTS BRANCH by_notifications_b_source SCHEMA user_id_branch TTL 5m;
-      CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_b_source;
+      CREATE RELAY notifications_b SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE RELAY notifications_all SCHEMA notification BRANCHED BY by_notifications_a_source;
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
       CREATE IF NOT EXISTS BRANCH by_transaction_source SCHEMA transaction_id_branch TTL 5m;
@@ -296,7 +294,7 @@ Feature: Cluster leader failover
       CREATE INGESTOR notifications_b_source
         TO notifications_b
         DECODE USING notification_codec
-        BRANCHED BY by_notifications_b_source VALUES { user_id = notifications_b.user_id }
+        BRANCHED BY by_notifications_a_source VALUES { user_id = notifications_b.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INGESTOR transaction_source

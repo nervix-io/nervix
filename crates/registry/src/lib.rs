@@ -6794,11 +6794,10 @@ impl ProcessorBranchingCheck<'_> {
         relay: &Identifier,
     ) -> Result<(), Report<RegistryError>> {
         let declared =
-            resolved_branch_selection(self.domain, self.identifier, self.models, branched_by)?
-                .fields;
-        let relay_fields =
-            if let Some(relay_fields) = relay_branching_fields(self.indices, self.graph, relay) {
-                relay_fields
+            resolved_branch_selection(self.domain, self.identifier, self.models, branched_by)?;
+        let relay_branching =
+            if let Some(relay_branching) = relay_branching(self.indices, self.graph, relay) {
+                relay_branching
             } else if declared.is_empty() {
                 return Ok(());
             } else {
@@ -6810,12 +6809,12 @@ impl ProcessorBranchingCheck<'_> {
                         self.model_kind,
                         self.identifier.as_str(),
                         relay.as_str(),
-                        format_branched_by(&declared),
+                        format_branched_by(&declared.fields),
                     ),
                 }));
             };
 
-        if relay_fields.is_empty() && !declared.is_empty() {
+        if relay_branching.fields.is_empty() && !declared.fields.is_empty() {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: self.domain.as_str().to_string(),
                 identifier: self.identifier.as_str().to_string(),
@@ -6824,12 +6823,27 @@ impl ProcessorBranchingCheck<'_> {
                     self.model_kind,
                     self.identifier.as_str(),
                     relay.as_str(),
-                    format_branched_by(&declared),
+                    format_branched_by(&declared.fields),
                 ),
             }));
         }
 
-        if relay_fields == declared {
+        if relay_branching.fields != declared.fields {
+            return Err(Report::new(RegistryError::IncompatibleSchema {
+                domain: self.domain.as_str().to_string(),
+                identifier: self.identifier.as_str().to_string(),
+                reason: format!(
+                    "{} '{}' branch fields ({}) do not match relay '{}' branch fields ({})",
+                    self.model_kind,
+                    self.identifier.as_str(),
+                    format_branched_by(&declared.fields),
+                    relay.as_str(),
+                    format_branched_by(&relay_branching.fields),
+                ),
+            }));
+        }
+
+        if relay_branching.branch == declared.branch {
             return Ok(());
         }
 
@@ -6837,12 +6851,12 @@ impl ProcessorBranchingCheck<'_> {
             domain: self.domain.as_str().to_string(),
             identifier: self.identifier.as_str().to_string(),
             reason: format!(
-                "{} '{}' branch fields ({}) do not match relay '{}' branch fields ({})",
+                "{} '{}' branch name '{}' does not match relay '{}' branch name '{}'",
                 self.model_kind,
                 self.identifier.as_str(),
-                format_branched_by(&declared),
+                format_branch_name(declared.branch.as_ref()),
                 relay.as_str(),
-                format_branched_by(&relay_fields),
+                format_branch_name(relay_branching.branch.as_ref()),
             ),
         }))
     }
@@ -6888,20 +6902,34 @@ fn ensure_processing_source_branching(
     }))
 }
 
-fn relay_branching_fields(
+fn relay_branching(
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
     relay: &Identifier,
-) -> Option<Vec<Identifier>> {
+) -> Option<ResolvedBranching> {
     let index = indices.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))?;
     let node = graph.node_weight(*index)?;
-    node.effective_branching.clone()
+    let Model::Relay(relay) = node.config.as_ref() else {
+        return None;
+    };
+    Some(ResolvedBranching {
+        branch: relay.branching.branch().cloned(),
+        schema: node.effective_branching_schema.clone(),
+        fields: node.effective_branching.clone()?,
+    })
 }
 
 #[derive(Clone)]
 struct ResolvedBranching {
+    branch: Option<Identifier>,
     schema: Option<Identifier>,
     fields: Vec<Identifier>,
+}
+
+impl ResolvedBranching {
+    fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
 }
 
 trait BranchReference {
@@ -6928,12 +6956,14 @@ fn resolved_branch_selection(
 ) -> Result<ResolvedBranching, Report<RegistryError>> {
     let Some(branch_ref) = branched_by.branch_ref() else {
         return Ok(ResolvedBranching {
+            branch: None,
             schema: None,
             fields: Vec::new(),
         });
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
     Ok(ResolvedBranching {
+        branch: Some(branch_ref.clone()),
         schema: Some(branch.schema.clone()),
         fields: branching_schema_fields(domain, identifier, models, &branch.schema)?,
     })
@@ -7019,6 +7049,23 @@ fn assign_stream_branching(
             Ok(true)
         }
         Some(existing) if *existing == branching.fields => {
+            let Model::Relay(relay_model) = node.config.as_ref() else {
+                unreachable!("stream branching may only be assigned to a relay")
+            };
+            if relay_model.branching.branch() != branching.branch.as_ref() {
+                return Err(Report::new(RegistryError::IncompatibleSchema {
+                    domain: domain.as_str().to_string(),
+                    identifier: producer.as_str().to_string(),
+                    reason: format!(
+                        "stream '{}' receives conflicting branch names: existing '{}' vs producer \
+                         '{}' with '{}'",
+                        relay.as_str(),
+                        format_branch_name(relay_model.branching.branch()),
+                        producer.as_str(),
+                        format_branch_name(branching.branch.as_ref()),
+                    ),
+                }));
+            }
             if node.effective_branching_schema.is_none() && branching.schema.is_some() {
                 node.effective_branching_schema = branching.schema;
                 return Ok(true);
@@ -7038,6 +7085,10 @@ fn assign_stream_branching(
             ),
         })),
     }
+}
+
+fn format_branch_name(branch: Option<&Identifier>) -> &str {
+    branch.map(Identifier::as_str).unwrap_or("UNBRANCHED")
 }
 
 fn format_branched_by(branched_by: &[Identifier]) -> String {
@@ -9215,23 +9266,21 @@ mod tests {
                     relay_branched_like("branch_a", "event_schema", "root_a"),
                     relay_branched_like("branch_b", "event_schema", "root_b"),
                     relay_branched_like("branch_c", "event_schema", "root_c"),
-                    relay_branched_like("shared", "event_schema", "branch_a"),
+                    relay_branched_by_relay_branch("shared", "event_schema"),
                     branch_schema("value_branch", &["value"]),
                     branch_for_relay("root_a", "value_branch", &["value"]),
                     branch_for_relay("root_b", "value_branch", &["value"]),
                     branch_for_relay("root_c", "value_branch", &["value"]),
-                    branch_for_relay("branch_a", "value_branch", &["value"]),
-                    branch_for_relay("branch_b", "value_branch", &["value"]),
-                    branch_for_relay("branch_c", "value_branch", &["value"]),
+                    branch_for_relay("shared", "value_branch", &["value"]),
                     ingestor_with_params("ing_a", "root_a", "event_codec", "broker_a", &["value"]),
                     ingestor_with_params("ing_b", "root_b", "event_codec", "broker_b", &["value"]),
                     ingestor_with_params("ing_c", "root_c", "event_codec", "broker_c", &["value"]),
                     processor("proc_a", "root_a", "branch_a"),
                     processor("proc_b", "root_b", "branch_b"),
                     processor("proc_c", "root_c", "branch_c"),
-                    processor("shared_a", "branch_a", "shared"),
-                    processor("shared_b", "branch_b", "shared"),
-                    processor("shared_c", "branch_c", "shared"),
+                    reingestor("shared_a", "branch_a", "shared", &["value"]),
+                    reingestor("shared_b", "branch_b", "shared", &["value"]),
+                    reingestor("shared_c", "branch_c", "shared", &["value"]),
                     emitter("emit_shared", "shared", "event_codec", "broker_out"),
                 ],
             )
@@ -11106,6 +11155,97 @@ mod tests {
         ));
         assert!(
             format!("{err}").contains("conflicting branch fields"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_ingestor_branch_name_mismatch_with_same_schema() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Ingestor(mut ingestor) = ingestor_with_params(
+            "ing",
+            "notifications",
+            "event_codec",
+            "broker_in",
+            &["value"],
+        ) else {
+            unreachable!("ingestor helper must build an ingestor model")
+        };
+        let BranchInitiatorSelection::BranchedBy {
+            branch: ingestor_branch,
+            ..
+        } = &mut ingestor.branched_by
+        else {
+            unreachable!("ingestor helper must build a branched ingestor")
+        };
+        *ingestor_branch = identifier("branch_b");
+
+        let err = registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                    client_model("broker_in"),
+                    relay_branched_by("notifications", "event_schema", "branch_a"),
+                    branch_schema("value_branch", &["value"]),
+                    branch("branch_a", "value_branch", "notifications", &["value"]),
+                    branch("branch_b", "value_branch", "notifications", &["value"]),
+                    Model::Ingestor(ingestor),
+                ],
+            )
+            .expect_err("differently named ingestor and relay branches must be incompatible");
+
+        assert!(matches!(
+            err.current_context(),
+            RegistryError::IncompatibleSchema { .. }
+        ));
+        assert!(
+            format!("{err}").contains("conflicting branch names"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_processor_crossing_same_schema_branch_names() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Deduplicator(mut processor) = processor("project", "input", "output") else {
+            unreachable!("processor helper must build a deduplicator model")
+        };
+        processor.branched_by = BranchSelection::branched_by(identifier("branch_b"));
+
+        let err = registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    relay_branched_by("input", "event_schema", "branch_a"),
+                    relay_branched_by("output", "event_schema", "branch_b"),
+                    branch_schema("value_branch", &["value"]),
+                    branch("branch_a", "value_branch", "input", &["value"]),
+                    branch("branch_b", "value_branch", "output", &["value"]),
+                    Model::Deduplicator(processor),
+                ],
+            )
+            .expect_err("normal processors must not cross differently named branches");
+
+        assert!(matches!(
+            err.current_context(),
+            RegistryError::IncompatibleSchema { .. }
+        ));
+        assert!(
+            format!("{err}").contains(
+                "branch name 'branch_b' does not match relay 'input' branch name 'branch_a'"
+            ),
             "unexpected error: {err}"
         );
 

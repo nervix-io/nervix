@@ -242,8 +242,7 @@ Feature: Branched branch behavior
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
-        CREATE IF NOT EXISTS BRANCH by_source_two SCHEMA tenant_branch TTL 5m;
-        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_two;
+        CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_source_one;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress_one
@@ -263,7 +262,7 @@ Feature: Branched branch behavior
         CREATE INGESTOR source_two
         TO ss2
         DECODE USING notification_codec
-        BRANCHED BY by_source_two VALUES { tenant = ss2.tenant }
+        BRANCHED BY by_source_one VALUES { tenant = ss2.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams

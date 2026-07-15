@@ -445,12 +445,6 @@ CREATE IF NOT EXISTS SCHEMA device_branch (
 CREATE BRANCH by_device
   SCHEMA device_branch TTL 30m;
 
-CREATE BRANCH by_edge_device
-  SCHEMA device_branch TTL 30m;
-
-CREATE BRANCH by_auth_device
-  SCHEMA device_branch TTL 30m;
-
 CREATE RELAY device_activity_landing SCHEMA device_activity BRANCHED BY by_device CAPACITY 1024;
 CREATE RELAY edge_activity_landing SCHEMA edge_activity BRANCHED BY by_device CAPACITY 1024;
 CREATE RELAY auth_activity_landing SCHEMA auth_activity BRANCHED BY by_device CAPACITY 1024;
@@ -557,7 +551,7 @@ CREATE INGESTOR edge_server_activity
         edge_activity_landing.edge_name = lower(trim(message.edge_name)),
         edge_activity_landing.protocol = lower(trim(message.protocol))
   DECODE USING edge_activity_protobuf_codec
-  BRANCHED BY by_edge_device VALUES {
+  BRANCHED BY by_device VALUES {
     tenant_id = edge_activity_landing.tenant_id,
     device_id = edge_activity_landing.device_id
   }
@@ -577,7 +571,7 @@ CREATE INGESTOR auth_server_activity
         auth_activity_landing.auth_result = lower(trim(message.auth_result)),
         auth_activity_landing.edge_id = lower(trim(message.edge_id))
   DECODE USING auth_activity_json_codec
-  BRANCHED BY by_auth_device VALUES {
+  BRANCHED BY by_device VALUES {
     tenant_id = auth_activity_landing.tenant_id,
     device_id = auth_activity_landing.device_id
   }
