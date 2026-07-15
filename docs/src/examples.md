@@ -35,15 +35,15 @@ Per-message execution omits `BATCH` from every binding:
 ```nspl
 CREATE INFERENCER score_message
   FROM input
-  TO output
+  TO output SET output.scores = inner_output.scores UNSET input.features
   BRANCHED BY tenant
   USING RESOURCE inference
   FILE 'score.onnx'
   INPUTS {
     "features" DENSE TENSOR<F32>[128] = input.features
   }
-  OUTPUTS {
-    "scores" DENSE TENSOR<F32>[10] = output.scores
+  OUTPUT SCHEMA {
+    "scores" DENSE TENSOR<F32>[10]
   }
   FLUSH IMMEDIATE
   ON MESSAGE ERROR DROP;
@@ -56,7 +56,7 @@ messages, this example invokes the model once with `features` and `mask` shaped
 ```nspl
 CREATE INFERENCER batch_score_messages
   FROM input
-  TO output
+  TO output SET output.scores = inner_output.scores UNSET input.features, input.mask
   BRANCHED BY tenant
   USING RESOURCE inference
   FILE 'batch-score.onnx'
@@ -64,8 +64,8 @@ CREATE INFERENCER batch_score_messages
     "features" DENSE TENSOR<F32>[BATCH, 128] = input.features,
     "mask" DENSE TENSOR<F32>[BATCH, 128] = input.mask
   }
-  OUTPUTS {
-    "scores" DENSE TENSOR<F32>[BATCH, 10] = output.scores
+  OUTPUT SCHEMA {
+    "scores" DENSE TENSOR<F32>[BATCH, 10]
   }
   FLUSH EACH 10ms MAX BATCH SIZE 16mb
   ON MESSAGE ERROR DROP;

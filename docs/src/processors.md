@@ -49,7 +49,7 @@ Each `TO` route may carry its own destination filter-map. `SET` and `UNSET` are 
 
 Passthrough inheritance only exists for processors with a natural one-input-row to one-output-row shape, such as deduplicators, reorderers, junctions, and reingestors. For those processors, a destination without a filter-map inherits same-named fields from the source row; if the destination schema should not receive a source field, write `UNSET`.
 
-Generated-output processors do not inherit input fields. Window processors emit the `AGGREGATE` record, inferencers emit ONNX tensor outputs plus explicitly `SET` fields, correlators emit their `OUTPUT` record, and WASM processors emit the guest's Arrow output. Their route clauses run after that generated record exists.
+Window processors, correlators, and WASM processors route their generated records rather than inheriting input fields. Inferencers are different: each model result starts with the inbound record, and each `TO` route may add model values with `SET`.
 
 Per-output clauses are row-level filter-map programs:
 
@@ -130,7 +130,7 @@ Generator rules:
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] JUNCTION <name>
   FROM <input> [WHERE <expr>], ...
-  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
+  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]]
   [TO <output> ...]
   BRANCHED BY <branch>
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
@@ -157,8 +157,8 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
     "<onnx_input_name>" DENSE TENSOR<F32>[<dimensions>] = <input>.<field>,
     ...
   }
-  OUTPUTS {
-    "<onnx_output_name>" DENSE TENSOR<F32>[<dimensions>] = <output>.<field>,
+  OUTPUT SCHEMA {
+    "<onnx_output_name>" DENSE TENSOR<F32>[<dimensions>],
     ...
   }
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
@@ -167,12 +167,12 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
 
 An inferencer declares a branch-local ONNX model execution node. The model file is loaded from a versioned `RESOURCE`; if `VERSION` is omitted, Nervix resolves the latest uploaded resource version.
 
-The optional `FILTER WHERE` clause runs before tensor construction. `INPUTS` maps ONNX input tensor names to fields on one of the declared input relays after that arrival filter. `OUTPUTS` maps ONNX output tensor names to fields on the output relay. Inferencers do not pass input fields through automatically; every required output field must come from `OUTPUTS` or a route-level `SET`.
+The optional `FILTER WHERE` clause runs before tensor construction. `INPUTS` maps every ONNX input tensor name to a field on one of the declared input relays after that arrival filter. `OUTPUT SCHEMA` declares every ONNX output tensor name and type without choosing a destination. Each inbound record is inherited by every `TO` route. A route-level `SET` maps model results through `inner_output.<tensor>` and may reuse the actual per-message model inputs through `inner_input.<tensor>`. Because `SET` belongs to a `TO` clause, separate output routes can project different model values.
 
-Every binding declares its complete tensor schema. The supported schema is currently
+Every input mapping and output declaration includes its complete tensor schema. The supported schema is currently
 `DENSE TENSOR<F32>`. Each dimension is a positive fixed size, `DYNAMIC`, or the
 optional `BATCH` axis. An empty list (`DENSE TENSOR<F32>[]`) is a scalar. All
-bindings in one inferencer must either contain exactly one `BATCH` axis each or
+tensor declarations in one inferencer must either contain exactly one `BATCH` axis each or
 contain no `BATCH` axes. The batch axis may occur at any rank position.
 
 Tensor dimensions map structurally to one message's schema field: a fixed
@@ -198,8 +198,8 @@ Per-message schema:
 INPUTS {
   "features" DENSE TENSOR<F32>[128] = input.features
 }
-OUTPUTS {
-  "scores" DENSE TENSOR<F32>[10] = output.scores
+OUTPUT SCHEMA {
+  "scores" DENSE TENSOR<F32>[10]
 }
 ```
 
@@ -210,8 +210,8 @@ INPUTS {
   "features" DENSE TENSOR<F32>[BATCH, 128] = input.features,
   "mask" DENSE TENSOR<F32>[BATCH, 128] = input.mask
 }
-OUTPUTS {
-  "scores" DENSE TENSOR<F32>[BATCH, 10] = output.scores
+OUTPUT SCHEMA {
+  "scores" DENSE TENSOR<F32>[BATCH, 10]
 }
 ```
 

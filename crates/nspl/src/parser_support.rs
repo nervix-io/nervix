@@ -616,7 +616,6 @@ fn processor_output_boundary_token(token: &Token) -> bool {
                     | Identifier::On
                     | Identifier::Using
                     | Identifier::Inputs
-                    | Identifier::Outputs
                     | Identifier::File
                     | Identifier::Deduplicate
                     | Identifier::Max

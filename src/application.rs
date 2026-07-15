@@ -83,8 +83,8 @@ use nervix_models::{
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeWasmProcessor,
     DescribeWindowProcessor, Domain, DomainConfig, DomainPace, DomainStartPoint, DomainState,
     DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier, InferencerTensorDimension,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, KafkaOffsetMode,
-    KafkaPartitionSchedule, LookupQuery, Model, ModelKind, MongoDbConflictAction,
+    InferencerTensorMapping, InferencerTensorSchema, IngestSource, IngestTimestampSource,
+    KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind, MongoDbConflictAction,
     MySqlConflictAction, ParseAsType, PostgresConflictAction, ProcessorInputs, ProcessorOutputs,
     ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
     ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
@@ -174,38 +174,49 @@ struct OnnxTensorMetadata {
 
 impl OnnxModelMetadata {
     fn validate_binding_names(&self, processor: &CreateInferencer) -> Result<(), String> {
-        self.validate_direction_binding_names(processor, "input", &processor.inputs, &self.inputs)?;
+        self.validate_direction_binding_names(
+            processor,
+            "input",
+            processor
+                .inputs
+                .iter()
+                .map(|mapping| mapping.tensor.as_str()),
+            &self.inputs,
+        )?;
         self.validate_direction_binding_names(
             processor,
             "output",
-            &processor.outputs,
+            processor
+                .output_schema
+                .iter()
+                .map(|declaration| declaration.tensor.as_str()),
             &self.outputs,
         )
     }
 
-    fn validate_direction_binding_names(
+    fn validate_direction_binding_names<'a>(
         &self,
         processor: &CreateInferencer,
         direction: &str,
-        mappings: &[InferencerTensorMapping],
+        tensors: impl IntoIterator<Item = &'a str>,
         model_tensors: &HashMap<String, OnnxTensorMetadata>,
     ) -> Result<(), String> {
         let mut declared = HashSet::default();
-        for mapping in mappings {
-            if !declared.insert(mapping.tensor.as_str()) {
+        for tensor in tensors {
+            if !declared.insert(tensor) {
                 return Err(format!(
                     "inferencer '{}' has duplicate {} binding for ONNX tensor '{}'",
                     processor.name.as_str(),
                     direction,
-                    mapping.tensor
+                    tensor
                 ));
             }
-            if !model_tensors.contains_key(&mapping.tensor) {
+            if !model_tensors.contains_key(tensor) {
                 return Err(format!(
                     "inferencer '{}' missing ONNX {} tensor '{}'",
                     processor.name.as_str(),
                     direction,
-                    mapping.tensor
+                    tensor
                 ));
             }
         }
@@ -222,7 +233,7 @@ impl OnnxModelMetadata {
                 if direction == "input" {
                     "INPUTS"
                 } else {
-                    "OUTPUTS"
+                    "OUTPUT SCHEMA"
                 },
                 direction,
                 tensor
@@ -237,14 +248,15 @@ impl OnnxTensorMetadata {
         &self,
         processor: &CreateInferencer,
         direction: &str,
-        mapping: &InferencerTensorMapping,
+        tensor: &str,
+        schema: &InferencerTensorSchema,
     ) -> Result<(), String> {
         let ValueType::Tensor { ty, shape, .. } = &self.value_type else {
             return Err(format!(
                 "inferencer '{}' {} tensor '{}' expected dense ONNX tensor, got {}",
                 processor.name.as_str(),
                 direction,
-                mapping.tensor,
+                tensor,
                 self.value_type
             ));
         };
@@ -254,28 +266,29 @@ impl OnnxTensorMetadata {
                  declared F32",
                 processor.name.as_str(),
                 direction,
-                mapping.tensor,
+                tensor,
                 ty
             ));
         }
-        let incompatible_shape = shape.len() != mapping.schema.dimensions.len()
-            || shape.iter().zip(&mapping.schema.dimensions).any(
-                |(actual, declared)| match declared {
+        let incompatible_shape = shape.len() != schema.dimensions.len()
+            || shape
+                .iter()
+                .zip(&schema.dimensions)
+                .any(|(actual, declared)| match declared {
                     InferencerTensorDimension::Fixed(declared) => {
                         *actual >= 0 && *actual != i64::from(*declared)
                     }
                     InferencerTensorDimension::Dynamic => *actual >= 0,
                     InferencerTensorDimension::Batch => *actual >= 0,
-                },
-            );
+                });
         if incompatible_shape {
             return Err(format!(
                 "inferencer '{}' {} tensor '{}' has incompatible shape: ONNX {:?} vs declared {:?}",
                 processor.name.as_str(),
                 direction,
-                mapping.tensor,
+                tensor,
                 shape.as_ref(),
-                mapping.schema.dimensions
+                schema.dimensions
             ));
         }
         Ok(())
@@ -3697,33 +3710,26 @@ impl SessionServiceImpl {
             let field_type = self
                 .relay_field_type(domain, &mapping.relay, &mapping.field)
                 .await?;
-            model_type.validate_declared_schema(processor, "input", mapping)?;
+            model_type.validate_declared_schema(
+                processor,
+                "input",
+                &mapping.tensor,
+                &mapping.schema,
+            )?;
             validate_inferencer_field_type(processor, "input", mapping, &field_type)?;
         }
 
-        for mapping in &processor.outputs {
-            if !processor
-                .output_routes
-                .relays()
-                .any(|relay| relay == &mapping.relay)
-            {
-                return Err(format!(
-                    "inferencer '{}' OUTPUTS tensor '{}' must map into a declared output relay, \
-                     got '{}'",
-                    processor.name.as_str(),
-                    mapping.tensor,
-                    mapping.relay.as_str()
-                ));
-            }
+        for declaration in &processor.output_schema {
             let model_type = model_metadata
                 .outputs
-                .get(&mapping.tensor)
+                .get(&declaration.tensor)
                 .expect("validated ONNX output binding must exist");
-            let field_type = self
-                .relay_field_type(domain, &mapping.relay, &mapping.field)
-                .await?;
-            model_type.validate_declared_schema(processor, "output", mapping)?;
-            validate_inferencer_field_type(processor, "output", mapping, &field_type)?;
+            model_type.validate_declared_schema(
+                processor,
+                "output",
+                &declaration.tensor,
+                &declaration.schema,
+            )?;
         }
 
         Ok(())

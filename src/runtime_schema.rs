@@ -2456,7 +2456,7 @@ fn avro_value_is_null(value: &AvroValue) -> bool {
     matches!(avro_value_payload(value), AvroValue::Null)
 }
 
-fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
+pub(crate) fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
     match ty {
         ParseAsType::U8 => ArrowDataType::UInt8,
         ParseAsType::I8 => ArrowDataType::Int8,
