@@ -41,7 +41,7 @@ Feature: Relay deduplication
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss2;
+        CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup"
@@ -103,7 +103,7 @@ Feature: Relay deduplication
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 300ms
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss2;
+        CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup-expire"
@@ -180,7 +180,7 @@ Feature: Relay deduplication
         DEDUPLICATE ON lower(trim(ss1.transaction_id)), abs(ss1.amount)
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss2 WHERE ss2.tenant = 'acme';
+        CREATE SUBSCRIPTION ss2_subscription TO ss2 WHERE ss2.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup-functions"
@@ -346,7 +346,7 @@ Feature: Relay deduplication
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss2;
+        CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"

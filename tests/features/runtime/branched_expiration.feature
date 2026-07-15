@@ -48,7 +48,7 @@ Feature: Branched branch expiration
         DEDUPLICATE ON reingested_notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO projected_notifications;
+        CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"

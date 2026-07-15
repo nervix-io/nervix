@@ -66,8 +66,8 @@ Feature: Relay junction
         TO ss20 SET ss20.lane = "right" UNSET ss20.raw WHERE ss1.source = "right"
         BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss10;
-        SUBSCRIBE SESSION TO ss20;
+        CREATE SUBSCRIPTION ss10_subscription TO ss10;
+        CREATE SUBSCRIPTION ss20_subscription TO ss20;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-a"
@@ -150,7 +150,7 @@ Feature: Relay junction
         TO ss10
         BRANCHED BY by_source_one
         <flush_policy> ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss10;
+        CREATE SUBSCRIPTION ss10_subscription TO ss10;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/branch-a"
@@ -253,7 +253,7 @@ Feature: Relay junction
         FROM ss1, ss2
         TO ss10 SET ss10.source = state_notifications.source BRANCHED BY by_state_source
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss10;
+        CREATE SUBSCRIPTION ss10_subscription TO ss10;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"

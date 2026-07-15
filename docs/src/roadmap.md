@@ -23,7 +23,7 @@ The current roadmap items are:
 - Revise the struct with many Arc's
 - docs: Kinesis in Introduction;
 - revise START and cleanup of maternialized state
-- RACE between subscribe session and START/STOP domain. also check that it is preserved while switching between nodes
+- RACE between creating a subscription and START/STOP domain. also check that it is preserved while switching between nodes
 
 ## Before Release
 - Check type safety

@@ -46,7 +46,7 @@ Feature: Kafka TLS resource mounts
         TOPIC tls_notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP tls_notifications_group_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" repeatedly publishing Kafka message to topic "tls_notifications_{{test_id}}" yields a relay subscription payload

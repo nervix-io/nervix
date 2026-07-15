@@ -31,7 +31,7 @@ Feature: HTTP endpoint ingestion
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
@@ -87,7 +87,7 @@ Feature: HTTP endpoint ingestion
         FLUSH IMMEDIATE
         FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO raw_metrics;
+      CREATE SUBSCRIPTION raw_metrics_subscription TO raw_metrics;
       START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -161,7 +161,7 @@ Feature: HTTP endpoint ingestion
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      SUBSCRIBE SESSION TO notifications;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
     And https payload is posted to host "http-{{test_id}}.example.com" path "/ingest" using CA from resource directory "tls_bundle"

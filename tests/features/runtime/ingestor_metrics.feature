@@ -29,7 +29,7 @@ Feature: Ingestor metrics
         BRANCHED BY by_ingestor_metrics_source VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/ingestor-metrics"

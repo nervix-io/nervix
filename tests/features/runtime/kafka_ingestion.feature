@@ -35,7 +35,7 @@ Feature: Kafka ingestion
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         INSTANCES <instances>
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -94,7 +94,7 @@ Feature: Kafka ingestion
         TOPIC notifications_reconnect_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_reconnect_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
@@ -334,7 +334,7 @@ Feature: Kafka ingestion
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 500ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And Kafka message is published to topic "notifications_{{test_id}}"
@@ -391,7 +391,7 @@ Feature: Kafka ingestion
         FROM notifications
         ENCODE USING notification_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And emitter "kafka_forward" enters fault mode
@@ -449,7 +449,7 @@ Feature: Kafka ingestion
         FROM notifications
         ENCODE USING notification_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And emitter "kafka_forward" enters fault mode
@@ -518,7 +518,7 @@ Feature: Kafka ingestion
         FROM forwarded_notifications
         ENCODE USING notification_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And Kafka message is published to topic "notifications_{{test_id}}"
@@ -588,8 +588,8 @@ Feature: Kafka ingestion
         FROM forwarded_notifications
         ENCODE USING notification_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO forwarded_notifications;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION forwarded_notifications_subscription TO forwarded_notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And Kafka message is published to topic "notifications_{{test_id}}"

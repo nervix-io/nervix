@@ -476,6 +476,16 @@ pub fn subscription_ref<'src>()
     parse_identifier("subscription_name")
 }
 
+pub fn session_subscription_name<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("session_subscription_name")
+}
+
+pub fn session_subscription_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:session_subscription")
+}
+
 pub fn string_lit<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     select! {

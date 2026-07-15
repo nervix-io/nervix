@@ -51,7 +51,7 @@ Feature: Window processor runtime behavior
           metric_summaries.first_latency = FIRST(metrics.latency),
           metric_summaries.last_latency = LAST(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -158,7 +158,7 @@ Feature: Window processor runtime behavior
           metric_summaries.max_latency = MAX(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency),
           metric_summaries.latency_p50 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 50, 10, 0, 100, '0ms') ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -268,7 +268,7 @@ Feature: Window processor runtime behavior
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+      CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -343,7 +343,7 @@ Feature: Window processor runtime behavior
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.latency_p50 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 50, 10, 0, 100, '2s'),
           metric_summaries.latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 90, 10, 0, 100, '2s') ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -572,7 +572,7 @@ Feature: Window processor runtime behavior
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 0, 10, 0, 100, '2s') ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -648,7 +648,7 @@ Feature: Window processor runtime behavior
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 0, 10, 0, 100, '1s') ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -725,7 +725,7 @@ Feature: Window processor runtime behavior
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -797,7 +797,7 @@ Feature: Window processor runtime behavior
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -910,7 +910,7 @@ Feature: Window processor runtime behavior
           chain_summaries.tenant = FIRST(high_summaries.tenant),
           chain_summaries.high_window_count = COUNT(high_summaries.total_latency) ON MESSAGE ERROR LOG;
         START;
-        SUBSCRIBE SESSION TO chain_summaries WHERE chain_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION chain_summaries_subscription TO chain_summaries WHERE chain_summaries.tenant = 'acme';
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -1012,7 +1012,7 @@ Feature: Window processor runtime behavior
         FROM metric_summaries
         ENCODE USING metric_summary_codec
         TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO metrics;
+        CREATE SUBSCRIPTION metrics_subscription TO metrics;
         START;
       """
     When emitter "kafka_forward" enters fault mode
@@ -1100,7 +1100,7 @@ Feature: Window processor runtime behavior
         FROM metric_summaries
         ENCODE USING metric_summary_codec
         TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO metrics;
+        CREATE SUBSCRIPTION metrics_subscription TO metrics;
         START;
       """
     And emitter "kafka_forward" enters fault mode

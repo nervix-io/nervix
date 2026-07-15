@@ -48,7 +48,7 @@ Feature: Prometheus TLS resource mounts
         FROM PROMETHEUS prom_tls
         QUERY 'label_replace(vector(42.5), "source", "prometheus", "", "")'
         EVERY 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO samples;
+        CREATE SUBSCRIPTION samples_subscription TO samples;
         START;
       """
     Then the relay subscription receives a payload

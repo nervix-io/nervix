@@ -38,7 +38,7 @@ Feature: Prometheus ingestion
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
         EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO samples;
+        CREATE SUBSCRIPTION samples_subscription TO samples;
         START;
       """
     Then the relay subscription receives a payload
@@ -93,7 +93,7 @@ Feature: Prometheus ingestion
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(43.5), "source", "recover", "", "")'
         EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO samples;
+        CREATE SUBSCRIPTION samples_subscription TO samples;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
@@ -155,7 +155,7 @@ Feature: Prometheus ingestion
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(time()), "source", "local", "", "")'
         EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO samples;
+        CREATE SUBSCRIPTION samples_subscription TO samples;
       """
     When these NSPL commands are executed on the leader node
       """

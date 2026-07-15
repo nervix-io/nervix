@@ -2186,6 +2186,12 @@ impl Drop for BrokerObserver {
 }
 
 impl TestSession {
+    pub(crate) fn set_domain(&mut self, domain: String) {
+        match self {
+            Self::Raw(session) => session.domain = domain,
+        }
+    }
+
     pub(crate) async fn run_command(&mut self, query: &str) -> io::Result<String> {
         match self {
             Self::Raw(session) => session.run_command(query).await,

@@ -313,8 +313,8 @@ If `VERSION <n>` is omitted from `WITH TLS`, the VHOST resolves the latest uploa
 Session-only commands:
 
 ```nspl
-SUBSCRIBE SESSION TO <relay> [BLOCKING|DROPPING] [BATCH SAMPLE RATE <rate>] [SET ...] [UNSET ...] [WHERE ...];
-UNSUBSCRIBE SESSION FROM <relay> [BLOCKING|DROPPING] [BATCH SAMPLE RATE <rate>] [SET ...] [UNSET ...] [WHERE ...];
+CREATE SUBSCRIPTION <name> TO <relay> [BLOCKING|DROPPING] [BATCH SAMPLE RATE <rate>] [SET ...] [UNSET ...] [WHERE ...];
+DELETE SUBSCRIPTION <name>;
 DESCRIBE RELAY <relay> WHERE (...);
 DESCRIBE INGESTOR <ingestor>;
 DESCRIBE DEDUPLICATOR <deduplicator>;
@@ -342,6 +342,7 @@ General notes:
 - autocomplete is derived from the parser surface
 - transport/client configs are generally preserved as pass-through string key/value pairs
 - native schema fields may use the `SENSITIVE` modifier; session subscription output masks those values as `<masked>`, while emitters may send sensitive values to their configured external sink
-- `SUBSCRIBE SESSION` and `UNSUBSCRIBE SESSION` are not persisted in the registry
+- `CREATE SUBSCRIPTION` and `DELETE SUBSCRIPTION` are not persisted in the registry
+- session subscription names are unique within a connected session; one session may subscribe to relays from multiple domains, and `DELETE SUBSCRIPTION` uses the name rather than repeating subscription parameters
 - `RELAY` names a connection between runtime nodes; ingestors and reingestors create branch instances with runtime relay instances inside them
 - `DESCRIBE INGESTOR` exposes runtime-facing ingestor state, including memory-backpressure state and committed Kafka `OFFSET BY DOMAIN` partition assignment

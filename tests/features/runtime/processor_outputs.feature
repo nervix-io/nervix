@@ -58,8 +58,8 @@ Feature: Processor output routing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO error_events;
-      SUBSCRIBE SESSION TO audit_events;
+      CREATE SUBSCRIPTION error_events_subscription TO error_events;
+      CREATE SUBSCRIPTION audit_events_subscription TO audit_events;
 
       START;
       """
@@ -157,9 +157,9 @@ Feature: Processor output routing
         DEDUPLICATE ON incoming_logs_a.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO errors_ss;
-        SUBSCRIBE SESSION TO warnings_ss;
-        SUBSCRIBE SESSION TO info_ss;
+        CREATE SUBSCRIPTION errors_ss_subscription TO errors_ss;
+        CREATE SUBSCRIPTION warnings_ss_subscription TO warnings_ss;
+        CREATE SUBSCRIPTION info_ss_subscription TO info_ss;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/route-a"
@@ -261,7 +261,7 @@ Feature: Processor output routing
         DEDUPLICATE ON notifications.tenant, notifications.user_id
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO projected_notifications;
+        CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications;
         START;
       """
     When http payload is posted to node "node-1" with host "http-output-route-{{test_id}}.example.com" path "/output-route"
@@ -361,9 +361,9 @@ Feature: Processor output routing
         DEDUPLICATE ON incoming_logs.id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO errors_ss;
-        SUBSCRIBE SESSION TO warnings_ss;
-        SUBSCRIBE SESSION TO info_ss;
+        CREATE SUBSCRIPTION errors_ss_subscription TO errors_ss;
+        CREATE SUBSCRIPTION warnings_ss_subscription TO warnings_ss;
+        CREATE SUBSCRIPTION info_ss_subscription TO info_ss;
         START;
       """
     When http payload is posted to node "node-1" with host "http-project-output-{{test_id}}.example.com" path "/project-output"

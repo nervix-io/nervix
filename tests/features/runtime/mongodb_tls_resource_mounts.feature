@@ -66,7 +66,7 @@ Feature: MongoDB TLS resource mounts
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" repeatedly publishing MQTT message to topic "mongodb_tls_notifications_in_{{test_id}}" yields a relay subscription payload

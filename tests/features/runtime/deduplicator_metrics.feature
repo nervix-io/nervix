@@ -39,7 +39,7 @@ Feature: Deduplicator metrics
         DEDUPLICATE ON raw_txns.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO deduped_txns;
+        CREATE SUBSCRIPTION deduped_txns_subscription TO deduped_txns;
         START;
       """
     And http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/dedup-metrics"

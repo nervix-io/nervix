@@ -24,8 +24,6 @@ pub enum Statement {
     CordonNode(CordonNode),
     UncordonNode(UncordonNode),
     DrainNode(DrainNode),
-    SubscribeSession(SubscribeSession),
-    UnsubscribeSession(UnsubscribeSession),
     DescribeRelay(DescribeRelay),
     DescribeDomain(DescribeDomain),
     DescribeIngestor(DescribeIngestor),
@@ -319,7 +317,8 @@ fn default_subscription_delivery_behavior() -> SubscriptionDeliveryBehavior {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubscribeSession {
+pub struct CreateSubscription {
+    pub name: Identifier,
     pub relay: Identifier,
     #[serde(default = "default_subscription_delivery_behavior")]
     pub delivery_behavior: SubscriptionDeliveryBehavior,
@@ -329,13 +328,8 @@ pub struct SubscribeSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnsubscribeSession {
-    pub relay: Identifier,
-    #[serde(default = "default_subscription_delivery_behavior")]
-    pub delivery_behavior: SubscriptionDeliveryBehavior,
-    #[serde(default)]
-    pub batch_sample_rate: Option<String>,
-    pub filter_map: Option<String>,
+pub struct DeleteSubscription {
+    pub name: Identifier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

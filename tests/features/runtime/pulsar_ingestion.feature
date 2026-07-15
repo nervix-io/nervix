@@ -35,7 +35,7 @@ Feature: Pulsar ingestion
         SUBSCRIPTION nervix_cucumber_{{test_id}}
         INSTANCES <instances>
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When Pulsar message is published to topic "notifications_{{test_id}}"
@@ -93,7 +93,7 @@ Feature: Pulsar ingestion
         TOPIC notifications_reconnect_{{test_id}}
         SUBSCRIPTION nervix_cucumber_reconnect_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "pulsar_notifications" on the leader node contains

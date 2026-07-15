@@ -1,5 +1,5 @@
 use chumsky::prelude::*;
-use nervix_models::{Domain, Statement, SubscribeSession, UnsubscribeSession, UploadResource};
+use nervix_models::{CreateSubscription, DeleteSubscription, Domain, Statement, UploadResource};
 
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
@@ -17,8 +17,8 @@ pub enum ClientStatement {
     CommitTransaction,
     RevertTransaction,
     UploadResource(UploadResource),
-    SubscribeSession(SubscribeSession),
-    UnsubscribeSession(UnsubscribeSession),
+    CreateSubscription(CreateSubscription),
+    DeleteSubscription(DeleteSubscription),
     Server(Statement),
 }
 
@@ -29,8 +29,8 @@ impl ClientStatement {
             Self::BeginTransaction
             | Self::CommitTransaction
             | Self::RevertTransaction
-            | Self::SubscribeSession(_)
-            | Self::UnsubscribeSession(_)
+            | Self::CreateSubscription(_)
+            | Self::DeleteSubscription(_)
             | Self::Server(_) => false,
         }
     }
@@ -87,8 +87,8 @@ pub fn client_command_parser<'src>()
         commit_transaction_parser().to(ClientStatement::CommitTransaction),
         revert_transaction_parser().to(ClientStatement::RevertTransaction),
         crate::upload_resource::upload_resource_parser().map(ClientStatement::UploadResource),
-        crate::subscribe::subscribe_session_parser().map(ClientStatement::SubscribeSession),
-        crate::subscribe::unsubscribe_session_parser().map(ClientStatement::UnsubscribeSession),
+        crate::subscribe::create_subscription_parser().map(ClientStatement::CreateSubscription),
+        crate::subscribe::delete_subscription_parser().map(ClientStatement::DeleteSubscription),
     ))
 }
 
@@ -192,6 +192,12 @@ fn starts_with_client_command_keyword(tokens: &[Token]) -> bool {
     let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.first() else {
         return false;
     };
+    if *iden == Keyword::Create || *iden == Keyword::Delete {
+        let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.get(1) else {
+            return false;
+        };
+        return *iden == Keyword::Subscription;
+    }
     if *iden == Keyword::Use {
         return true;
     }
@@ -210,19 +216,22 @@ fn starts_with_client_command_keyword(tokens: &[Token]) -> bool {
     if *iden == Keyword::Upload {
         return true;
     }
-    if *iden == Keyword::Subscribe {
-        return true;
-    }
-    if *iden == Keyword::Unsubscribe {
-        return true;
-    }
     false
 }
 
 fn starts_with_server_command_keyword(tokens: &[Token]) -> bool {
-    let Some(Token::Word(Word::KnownWord { .. })) = tokens.first() else {
+    let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.first() else {
         return false;
     };
+    if *iden == Keyword::Create || *iden == Keyword::Delete {
+        return if let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.get(1) {
+            *iden != Keyword::Subscription
+        } else if let Some(Token::Word(Word::UnknownWord(_))) | None = tokens.get(1) {
+            false
+        } else {
+            true
+        };
+    }
     !starts_with_client_command_keyword(tokens)
 }
 
@@ -333,11 +342,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_subscribe_as_client_statement() {
-        let parsed = parse_client_statement("SUBSCRIBE SESSION TO notifications;")
-            .expect("parse should succeed");
+    fn parses_create_subscription_as_client_statement() {
+        let parsed =
+            parse_client_statement("CREATE SUBSCRIPTION live_notifications TO notifications;")
+                .expect("parse should succeed");
         match parsed {
-            ClientStatement::SubscribeSession(subscription) => {
+            ClientStatement::CreateSubscription(subscription) => {
+                assert_eq!(subscription.name.as_str(), "live_notifications");
                 assert_eq!(subscription.relay.as_str(), "notifications");
             }
             other => panic!("unexpected statement: {other:?}"),
@@ -441,8 +452,12 @@ mod tests {
     fn suggests_client_statement_keywords() {
         let suggestions = suggest_client_statement("UP", 2);
         assert!(suggestions.contains(&"UPLOAD".to_string()));
-        let suggestions = suggest_client_statement("SUB", 3);
-        assert!(suggestions.contains(&"SUBSCRIBE SESSION".to_string()));
+        let suggestions = suggest_client_statement("CR", 2);
+        assert!(suggestions.contains(&"CREATE SUBSCRIPTION".to_string()));
+        let suggestions = suggest_client_statement("CREATE ", "CREATE ".len());
+        assert!(suggestions.contains(&"SUBSCRIPTION".to_string()));
+        let suggestions = suggest_client_statement("DEL", 3);
+        assert!(suggestions.contains(&"DELETE SUBSCRIPTION".to_string()));
         let suggestions = suggest_client_statement("LI", 2);
         assert!(suggestions.contains(&"LIST".to_string()));
         let suggestions = suggest_client_statement("BE", 2);

@@ -282,7 +282,7 @@ Feature: Inferencer resources
       """
     And these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO transformed_matrices;
+      CREATE SUBSCRIPTION transformed_matrices_subscription TO transformed_matrices;
       START;
       """
     And http payload is posted to host "infer-matrix-{{test_id}}.example.com" path "/matrix"
@@ -334,7 +334,7 @@ Feature: Inferencer resources
       """
     And these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO scored_sequences;
+      CREATE SUBSCRIPTION scored_sequences_subscription TO scored_sequences;
       START;
       """
     And http payload is posted to host "infer-dynamic-{{test_id}}.example.com" path "/sequence"
@@ -386,7 +386,7 @@ Feature: Inferencer resources
       """
     And these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO scored_sequences;
+      CREATE SUBSCRIPTION scored_sequences_subscription TO scored_sequences;
       START;
       """
     And http payload is posted to host "infer-dynamic-batch-{{test_id}}.example.com" path "/sequence"
@@ -445,7 +445,7 @@ Feature: Inferencer resources
       """
     And these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO scored;
+      CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
       """
     And http payload is posted to host "infer-per-message-{{test_id}}.example.com" path "/features"
@@ -513,7 +513,7 @@ Feature: Inferencer resources
       """
     And these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO scored;
+      CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
       """
     And http payload is posted to host "infer-batch-{{test_id}}.example.com" path "/features"
@@ -587,7 +587,7 @@ Feature: Inferencer resources
       """
     And these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO scored;
+      CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
       """
     And http payload is posted to host "infer-branch-batch-{{test_id}}.example.com" path "/features"

@@ -101,6 +101,7 @@ pub struct AutocompleteSuggestion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionRequest {
+    pub name: String,
     pub relay: String,
     pub delivery_behavior: SubscriptionDeliveryBehavior,
     pub batch_sample_rate: Option<String>,
@@ -423,11 +424,11 @@ impl Client {
                 )
                 .await
             }
-            ClientStatement::SubscribeSession(_)
+            ClientStatement::CreateSubscription(_)
             | ClientStatement::BeginTransaction
             | ClientStatement::CommitTransaction
             | ClientStatement::RevertTransaction
-            | ClientStatement::UnsubscribeSession(_)
+            | ClientStatement::DeleteSubscription(_)
             | ClientStatement::Server(_) => self.execute_remote_once(source).await,
         }
     }
@@ -458,6 +459,11 @@ impl Client {
         request: &SubscriptionRequest,
     ) -> Result<CommandOutcome, ClientError> {
         self.execute(request.to_query()).await
+    }
+
+    pub async fn unsubscribe(&self, name: &str) -> Result<CommandOutcome, ClientError> {
+        self.execute(nervix_nspl::subscribe::delete_subscription_query(name))
+            .await
     }
 
     pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
@@ -972,8 +978,9 @@ fn command_error_outcome(message: String) -> CommandOutcome {
 }
 
 impl SubscriptionRequest {
-    pub fn new(relay: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, relay: impl Into<String>) -> Self {
         Self {
+            name: name.into(),
             relay: relay.into(),
             delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
             batch_sample_rate: None,
@@ -1002,7 +1009,8 @@ impl SubscriptionRequest {
     }
 
     pub fn to_query(&self) -> String {
-        nervix_nspl::subscribe::subscribe_session_query(
+        nervix_nspl::subscribe::create_subscription_query(
+            &self.name,
             &self.relay,
             self.delivery_behavior,
             self.batch_sample_rate.as_deref(),
@@ -1161,23 +1169,33 @@ mod tests {
 
     #[test]
     fn subscription_query_is_rendered() {
-        let request = SubscriptionRequest::new("orders");
-        assert_eq!(request.to_query(), "SUBSCRIBE SESSION TO orders;");
+        let request = SubscriptionRequest::new("live_orders", "orders");
+        assert_eq!(
+            request.to_query(),
+            "CREATE SUBSCRIPTION live_orders TO orders;"
+        );
 
-        let filtered = SubscriptionRequest::new("orders")
+        let filtered = SubscriptionRequest::new("acme_orders", "orders")
             .with_filter_map("SET seen = true UNSET raw WHERE tenant = \"acme\"");
         assert_eq!(
             filtered.to_query(),
-            "SUBSCRIBE SESSION TO orders SET seen = true UNSET raw WHERE tenant = \"acme\";"
+            "CREATE SUBSCRIPTION acme_orders TO orders SET seen = true UNSET raw WHERE tenant = \
+             \"acme\";"
         );
 
-        let sampled = SubscriptionRequest::new("orders")
+        let sampled = SubscriptionRequest::new("sampled_orders", "orders")
             .dropping()
             .with_batch_sample_rate("0.1")
             .with_filter_map("WHERE tenant = \"acme\"");
         assert_eq!(
             sampled.to_query(),
-            "SUBSCRIBE SESSION TO orders DROPPING BATCH SAMPLE RATE 0.1 WHERE tenant = \"acme\";"
+            "CREATE SUBSCRIPTION sampled_orders TO orders DROPPING BATCH SAMPLE RATE 0.1 WHERE \
+             tenant = \"acme\";"
+        );
+
+        assert_eq!(
+            nervix_nspl::subscribe::delete_subscription_query("sampled_orders"),
+            "DELETE SUBSCRIPTION sampled_orders;"
         );
     }
 

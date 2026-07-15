@@ -61,6 +61,8 @@ enum Command {
     },
     /// Subscribe to one relay and print events until interrupted
     Subscribe {
+        /// Session-local subscription name
+        name: String,
         /// Relay name to subscribe to
         relay: String,
         /// Drop delivered events when the session transport queue is full
@@ -188,6 +190,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             return Ok(());
         }
         Some(Command::Subscribe {
+            name,
             relay,
             dropping,
             blocking,
@@ -199,6 +202,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 &args.server,
                 connect_options,
                 args.domain,
+                name,
                 relay,
                 if dropping {
                     SubscriptionDeliveryBehavior::Dropping
@@ -457,6 +461,7 @@ async fn run_subscribe_mode(
     server: &str,
     connect_options: ConnectOptions,
     domain: String,
+    name: String,
     relay: String,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<String>,
@@ -467,6 +472,7 @@ async fn run_subscribe_mode(
         .map_err(|err| StackReport::new(ClientError::from(err)))?;
     spawn_event_loggers(client.clone());
     let request = subscribe_request(
+        &name,
         &relay,
         delivery_behavior,
         batch_sample_rate.as_deref(),
@@ -751,14 +757,15 @@ fn format_server_event(event: &nervix_client_core::ServerEvent) -> String {
 }
 
 fn subscribe_request(
+    name: &str,
     relay: &str,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<&str>,
     filter_map: Option<&str>,
 ) -> SubscriptionRequest {
     let request = match delivery_behavior {
-        SubscriptionDeliveryBehavior::Blocking => SubscriptionRequest::new(relay).blocking(),
-        SubscriptionDeliveryBehavior::Dropping => SubscriptionRequest::new(relay).dropping(),
+        SubscriptionDeliveryBehavior::Blocking => SubscriptionRequest::new(name, relay).blocking(),
+        SubscriptionDeliveryBehavior::Dropping => SubscriptionRequest::new(name, relay).dropping(),
     };
     let request = match batch_sample_rate {
         Some(batch_sample_rate) => request.with_batch_sample_rate(batch_sample_rate),
@@ -845,16 +852,18 @@ mod tests {
 
     #[test]
     fn subscribe_command_is_parsed() {
-        let args = Args::parse_from(["nervix-cli", "subscribe", "myss"]);
+        let args = Args::parse_from(["nervix-cli", "subscribe", "live_events", "events"]);
         match args.subcommand {
             Some(Command::Subscribe {
+                name,
                 relay,
                 dropping,
                 blocking,
                 batch_sample_rate,
                 filter_map,
             }) => {
-                assert_eq!(relay, "myss");
+                assert_eq!(name, "live_events");
+                assert_eq!(relay, "events");
                 assert!(!dropping);
                 assert!(!blocking);
                 assert_eq!(batch_sample_rate, None);
@@ -901,31 +910,40 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_query_uses_collect_form() {
+    fn subscribe_query_uses_named_form() {
         assert_eq!(
-            subscribe_request("myss", SubscriptionDeliveryBehavior::Blocking, None, None)
-                .to_query(),
-            "SUBSCRIBE SESSION TO myss;"
+            subscribe_request(
+                "live_myss",
+                "myss",
+                SubscriptionDeliveryBehavior::Blocking,
+                None,
+                None
+            )
+            .to_query(),
+            "CREATE SUBSCRIPTION live_myss TO myss;"
         );
         assert_eq!(
             subscribe_request(
+                "live_myss",
                 "myss",
                 SubscriptionDeliveryBehavior::Blocking,
                 None,
                 Some("SET seen = true WHERE tenant = \"acme\"")
             )
             .to_query(),
-            "SUBSCRIBE SESSION TO myss SET seen = true WHERE tenant = \"acme\";"
+            "CREATE SUBSCRIPTION live_myss TO myss SET seen = true WHERE tenant = \"acme\";"
         );
         assert_eq!(
             subscribe_request(
+                "sampled_myss",
                 "myss",
                 SubscriptionDeliveryBehavior::Dropping,
                 Some("0.1"),
                 Some("WHERE tenant = \"acme\"")
             )
             .to_query(),
-            "SUBSCRIBE SESSION TO myss DROPPING BATCH SAMPLE RATE 0.1 WHERE tenant = \"acme\";"
+            "CREATE SUBSCRIPTION sampled_myss TO myss DROPPING BATCH SAMPLE RATE 0.1 WHERE tenant \
+             = \"acme\";"
         );
     }
 
@@ -1101,8 +1119,14 @@ mod tests {
 
     #[test]
     fn subscribe_request_targets_requested_stream() {
-        let request =
-            subscribe_request("events", SubscriptionDeliveryBehavior::Blocking, None, None);
+        let request = subscribe_request(
+            "live_events",
+            "events",
+            SubscriptionDeliveryBehavior::Blocking,
+            None,
+            None,
+        );
+        assert_eq!(request.name, "live_events");
         assert_eq!(request.relay, "events");
         assert_eq!(request.filter_map, None);
     }
@@ -1112,14 +1136,19 @@ mod tests {
         let args = Args::parse_from([
             "nervix-cli",
             "subscribe",
+            "live_events",
             "events",
             "--filter-map",
             "SET seen = true WHERE tenant = \"acme\"",
         ]);
         match args.subcommand {
             Some(Command::Subscribe {
-                relay, filter_map, ..
+                name,
+                relay,
+                filter_map,
+                ..
             }) => {
+                assert_eq!(name, "live_events");
                 assert_eq!(relay, "events");
                 assert_eq!(
                     filter_map.as_deref(),

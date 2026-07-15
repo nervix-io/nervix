@@ -47,7 +47,7 @@ Feature: SQS TLS resource mounts
         QUEUE notifications_{{test_id}}
         INSTANCES 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" repeatedly publishing TLS SQS message to queue "notifications_{{test_id}}" yields a relay subscription payload

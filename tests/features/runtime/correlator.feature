@@ -115,7 +115,7 @@ Feature: Relay correlation
         MAX TIME 5s
         ON CORRELATION TIMEOUT DROP, DROP
         ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO correlated_profiles WHERE correlated_profiles.tenant = 'acme';
+        CREATE SUBSCRIPTION correlated_profiles_subscription TO correlated_profiles WHERE correlated_profiles.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"

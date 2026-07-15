@@ -44,7 +44,7 @@ Feature: Branched branch inheritance
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO projected_notifications;
+        CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications;
         START;
       """
     And MQTT message is published to topic "notifications_{{test_id}}"

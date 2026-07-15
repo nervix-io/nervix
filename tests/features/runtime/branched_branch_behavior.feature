@@ -46,7 +46,7 @@ Feature: Branched branch behavior
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO notifications;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/notifications"
@@ -107,7 +107,7 @@ Feature: Branched branch behavior
         DEDUPLICATE ON ss1.transaction_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss2;
+        CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup"
@@ -188,7 +188,7 @@ Feature: Branched branch behavior
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency) ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -269,7 +269,7 @@ Feature: Branched branch behavior
         FROM ss1, ss2
         TO ss10 BRANCHED BY by_source_one
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ss10 WHERE ss10.tenant = 'acme';
+        CREATE SUBSCRIPTION ss10_subscription TO ss10 WHERE ss10.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-a"
@@ -337,7 +337,7 @@ Feature: Branched branch behavior
         TO tenant_notifications
         BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO tenant_notifications WHERE tenant_notifications.tenant = 'acme';
+        CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications WHERE tenant_notifications.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"

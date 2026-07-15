@@ -35,7 +35,7 @@ Feature: NATS ingestion
         QUEUE GROUP nats_notifications_group_{{test_id}}
         INSTANCES <instances>
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And NATS message is published to subject "notifications_{{test_id}}"
@@ -95,7 +95,7 @@ Feature: NATS ingestion
         QUEUE GROUP nats_notifications_reconnect_group_{{test_id}}
         INSTANCES 1
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains

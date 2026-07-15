@@ -33,7 +33,7 @@ Feature: Redis ingestion
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And Redis message is published to channel "notifications_{{test_id}}"
@@ -87,7 +87,7 @@ Feature: Redis ingestion
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_reconnect_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "redis_notifications" on the leader node contains

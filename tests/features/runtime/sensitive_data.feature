@@ -40,7 +40,7 @@ Feature: Sensitive data
         FLUSH IMMEDIATE
         FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO notifications;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/sensitive"
@@ -121,7 +121,7 @@ Feature: Sensitive data
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO public_notifications;
+      CREATE SUBSCRIPTION public_notifications_subscription TO public_notifications;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/sensitive"

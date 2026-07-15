@@ -37,7 +37,7 @@ Feature: Optional fields
         BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
@@ -104,7 +104,7 @@ Feature: Optional fields
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         INSTANCES 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -168,7 +168,7 @@ Feature: Optional fields
         BRANCHED BY by_ws_notifications VALUES { tenant = notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And websocket message is published to host "ws-{{test_id}}.example.com" path "/ws"
@@ -233,7 +233,7 @@ Feature: Optional fields
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ZEROMQ zeromq_main
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And ZeroMQ message is published

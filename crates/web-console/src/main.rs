@@ -126,8 +126,11 @@ impl PendingRequest {
 #[derive(Clone)]
 struct SubscriptionTabView {
     id: u64,
+    name: String,
+    domain: String,
     relay: String,
-    definition: String,
+    filter: String,
+    sample_rate_index: usize,
     title: String,
     subscribe_command: String,
     unsubscribe_command: String,
@@ -429,30 +432,35 @@ fn App() -> impl IntoView {
     };
     let subscription_session = web_console_session.clone();
     let start_subscription = move |relay: String, filter: String, sample_rate_index: usize| {
-        if active_domain.get_untracked().is_none() {
+        let Some(domain) = active_domain.get_untracked() else {
             active_subscription_tab.set(None);
             terminal_lines.update(|lines| lines.push(TermLine::error("no active domain selected")));
             return;
-        }
-        let subscribe_command = subscribe_session_command(&relay, &filter, sample_rate_index);
-        let unsubscribe_command = unsubscribe_session_command(&relay, &filter, sample_rate_index);
-        let definition = subscription_definition(&relay, &filter, sample_rate_index);
+        };
         let title = subscription_tab_title(&relay, &filter);
-        if let Some(existing) = subscription_tabs
-            .get_untracked()
-            .into_iter()
-            .find(|tab| tab.relay == relay && tab.definition == definition)
-        {
+        if let Some(existing) = subscription_tabs.get_untracked().into_iter().find(|tab| {
+            tab.domain == domain
+                && tab.relay == relay
+                && tab.filter == filter
+                && tab.sample_rate_index == sample_rate_index
+        }) {
             active_subscription_tab.set(Some(existing.id));
             return;
         }
         let tab_id = next_subscription_tab_id.get_untracked();
         next_subscription_tab_id.set(tab_id + 1);
+        let name = format!("web_console_subscription_{tab_id}");
+        let subscribe_command =
+            subscribe_session_command(&name, &relay, &filter, sample_rate_index);
+        let unsubscribe_command = unsubscribe_session_command(&name);
         subscription_tabs.update(|tabs| {
             tabs.push(SubscriptionTabView {
                 id: tab_id,
+                name,
+                domain: domain.clone(),
                 relay,
-                definition,
+                filter,
+                sample_rate_index,
                 title,
                 subscribe_command: subscribe_command.clone(),
                 unsubscribe_command,
@@ -464,7 +472,7 @@ fn App() -> impl IntoView {
             request: Some(nervix_proto::session_request::Request::Command(
                 nervix_proto::CommandRequest {
                     query: subscribe_command,
-                    domain: active_domain_name(),
+                    domain,
                 },
             )),
         };
@@ -506,7 +514,7 @@ fn App() -> impl IntoView {
             request: Some(nervix_proto::session_request::Request::Command(
                 nervix_proto::CommandRequest {
                     query: tab.unsubscribe_command,
-                    domain: active_domain_name(),
+                    domain: tab.domain,
                 },
             )),
         };
@@ -1167,7 +1175,7 @@ fn append_subscription_event(
             .iter()
             .enumerate()
             .filter_map(|(index, tab)| {
-                (tab.relay == relay && tab.definition == subscription).then_some(index)
+                (tab.relay == relay && tab.name == subscription).then_some(index)
             })
             .collect::<Vec<_>>();
         for index in matching_tabs {
@@ -1179,62 +1187,13 @@ fn append_subscription_event(
     });
 }
 
-fn subscribe_session_command(relay: &str, filter: &str, sample_rate_index: usize) -> String {
-    subscription_command("SUBSCRIBE SESSION TO", relay, filter, sample_rate_index)
-}
-
-fn unsubscribe_session_command(relay: &str, filter: &str, sample_rate_index: usize) -> String {
-    subscription_command("UNSUBSCRIBE SESSION FROM", relay, filter, sample_rate_index)
-}
-
-fn subscription_tab_title(relay: &str, filter: &str) -> String {
-    let filter = filter.trim();
-    if filter.is_empty() {
-        relay.to_string()
-    } else {
-        format!("{relay} {filter}")
-    }
-}
-
-fn subscription_definition(relay: &str, filter: &str, sample_rate_index: usize) -> String {
-    let query = subscribe_session_command(relay, filter, sample_rate_index);
-    if let Ok(ClientStatement::SubscribeSession(subscription)) = parse_client_statement(&query) {
-        let mut definition = format!("TO {}", subscription.relay.as_str());
-        if subscription.delivery_behavior != nervix_models::SubscriptionDeliveryBehavior::Blocking {
-            definition.push(' ');
-            definition.push_str(subscription.delivery_behavior.as_ref());
-        }
-        if let Some(sample_rate) = subscription.batch_sample_rate {
-            definition.push_str(" BATCH SAMPLE RATE ");
-            definition.push_str(&sample_rate);
-        }
-        if let Some(filter_map) = subscription.filter_map {
-            definition.push(' ');
-            definition.push_str(&filter_map);
-        }
-        return definition;
-    }
-
-    let mut fallback = format!("TO {relay}");
-    if let Some(sample_rate) = subscription_sample_rate(sample_rate_index) {
-        fallback.push_str(" BATCH SAMPLE RATE ");
-        fallback.push_str(sample_rate);
-    }
-    let filter = filter.trim();
-    if !filter.is_empty() {
-        fallback.push(' ');
-        fallback.push_str(&subscription_filter_map_clause(filter));
-    }
-    fallback
-}
-
-fn subscription_command(
-    prefix: &str,
+fn subscribe_session_command(
+    name: &str,
     relay: &str,
     filter: &str,
     sample_rate_index: usize,
 ) -> String {
-    let mut command = format!("{prefix} {relay}");
+    let mut command = format!("CREATE SUBSCRIPTION {name} TO {relay}");
     if let Some(sample_rate) = subscription_sample_rate(sample_rate_index) {
         command.push_str(" BATCH SAMPLE RATE ");
         command.push_str(sample_rate);
@@ -1246,6 +1205,19 @@ fn subscription_command(
     }
     command.push(';');
     command
+}
+
+fn unsubscribe_session_command(name: &str) -> String {
+    format!("DELETE SUBSCRIPTION {name};")
+}
+
+fn subscription_tab_title(relay: &str, filter: &str) -> String {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        relay.to_string()
+    } else {
+        format!("{relay} {filter}")
+    }
 }
 
 fn subscription_filter_map_clause(filter: &str) -> String {
@@ -7456,16 +7428,28 @@ mod tests {
     #[test]
     fn subscription_command_accepts_full_where_clause() {
         assert_eq!(
-            subscribe_session_command("notifications", "WHERE notifications.user_id = 42", 0),
-            "SUBSCRIBE SESSION TO notifications WHERE notifications.user_id = 42;"
+            subscribe_session_command(
+                "live_notifications",
+                "notifications",
+                "WHERE notifications.user_id = 42",
+                0,
+            ),
+            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE notifications.user_id \
+             = 42;"
         );
     }
 
     #[test]
     fn subscription_command_wraps_bare_filter_as_where_clause() {
         assert_eq!(
-            subscribe_session_command("notifications", "notifications.user_id = 42", 0),
-            "SUBSCRIBE SESSION TO notifications WHERE notifications.user_id = 42;"
+            subscribe_session_command(
+                "live_notifications",
+                "notifications",
+                "notifications.user_id = 42",
+                0,
+            ),
+            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE notifications.user_id \
+             = 42;"
         );
     }
 
@@ -7473,25 +7457,22 @@ mod tests {
     fn subscription_command_preserves_set_clause() {
         assert_eq!(
             subscribe_session_command(
+                "live_notifications",
                 "notifications",
                 "SET notifications.normalized = notifications.user_id WHERE notifications.user_id \
                  = 42",
                 0,
             ),
-            "SUBSCRIBE SESSION TO notifications SET notifications.normalized = \
-             notifications.user_id WHERE notifications.user_id = 42;"
+            "CREATE SUBSCRIPTION live_notifications TO notifications SET notifications.normalized \
+             = notifications.user_id WHERE notifications.user_id = 42;"
         );
     }
 
     #[test]
-    fn subscription_definition_matches_server_subscription_key() {
+    fn unsubscribe_command_uses_only_the_session_subscription_name() {
         assert_eq!(
-            subscription_definition("notifications", "WHERE notifications.tenant = 'acme'", 0),
-            "TO notifications WHERE notifications.tenant = \"acme\""
-        );
-        assert_eq!(
-            subscription_definition("notifications", "notifications.tenant = 'beta'", 1),
-            "TO notifications BATCH SAMPLE RATE 0.1 WHERE notifications.tenant = \"beta\""
+            unsubscribe_session_command("live_notifications"),
+            "DELETE SUBSCRIPTION live_notifications;"
         );
     }
 

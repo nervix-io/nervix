@@ -793,7 +793,7 @@ Feature: Iceberg emission
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         COMMIT EACH 100ms MAX SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And emitter "iceberg_notifications" enters stall mode
