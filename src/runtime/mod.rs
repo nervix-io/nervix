@@ -1626,11 +1626,17 @@ struct GeneratorTaskSpec {
     generator: CreateGenerator,
     program: Arc<CompiledFilterMapProgram>,
     source_relays: Vec<Identifier>,
-    source_nodes: HashMap<Identifier, Option<String>>,
     output_branching: Vec<Identifier>,
     output_schema: Arc<CompiledSchema>,
     output_registry: RelayRegistry,
     output_services: Arc<RelayBoundaryServices>,
+}
+
+#[derive(Default)]
+struct GeneratorBranchTaskState {
+    next_generation: Option<Timestamp>,
+    next_flush: Option<Timestamp>,
+    pending: Vec<RelayMessage>,
 }
 
 #[derive(Debug)]
@@ -2300,25 +2306,6 @@ impl RelayBoundaryBuilder {
     fn runtime_consumer_fan_in_for_mode(&mut self, mode: AckMode) -> RelayRuntimeFanIn {
         RelayRuntimeFanIn::new(self.runtime_consumer_receiver_for_mode(mode))
     }
-}
-
-fn push_grouped_by_key<K, T>(
-    groups: &mut Vec<(K, Vec<T>)>,
-    positions: &mut HashMap<K, usize>,
-    key: K,
-    item: T,
-) where
-    K: Clone + Eq + std::hash::Hash,
-{
-    let index = if let Some(index) = positions.get(&key).copied() {
-        index
-    } else {
-        let index = groups.len();
-        positions.insert(key.clone(), index);
-        groups.push((key, Vec::new()));
-        index
-    };
-    groups[index].1.push(item);
 }
 
 #[derive(Debug, Clone, Copy)]

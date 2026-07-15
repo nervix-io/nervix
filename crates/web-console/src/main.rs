@@ -126,6 +126,7 @@ impl PendingRequest {
 #[derive(Clone)]
 struct SubscriptionTabView {
     id: u64,
+    state: SubscriptionTabState,
     name: String,
     domain: String,
     relay: String,
@@ -135,6 +136,12 @@ struct SubscriptionTabView {
     subscribe_command: String,
     unsubscribe_command: String,
     lines: Vec<TermLine>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubscriptionTabState {
+    Pending,
+    Open,
 }
 
 #[derive(Clone, Default)]
@@ -444,7 +451,9 @@ fn App() -> impl IntoView {
                 && tab.filter == filter
                 && tab.sample_rate_index == sample_rate_index
         }) {
-            active_subscription_tab.set(Some(existing.id));
+            if existing.state == SubscriptionTabState::Open {
+                active_subscription_tab.set(Some(existing.id));
+            }
             return;
         }
         let tab_id = next_subscription_tab_id.get_untracked();
@@ -456,6 +465,7 @@ fn App() -> impl IntoView {
         subscription_tabs.update(|tabs| {
             tabs.push(SubscriptionTabView {
                 id: tab_id,
+                state: SubscriptionTabState::Pending,
                 name,
                 domain: domain.clone(),
                 relay,
@@ -467,7 +477,6 @@ fn App() -> impl IntoView {
                 lines: Vec::new(),
             });
         });
-        active_subscription_tab.set(Some(tab_id));
         let request = nervix_proto::SessionRequest {
             request: Some(nervix_proto::session_request::Request::Command(
                 nervix_proto::CommandRequest {
@@ -993,6 +1002,11 @@ fn handle_session_response(
                 if lines.iter().any(|line| line.kind == TermLineKind::Error) {
                     append_subscription_tab_lines(subscription_tabs, tab_id, lines);
                 }
+                subscription_tabs.update(|tabs| {
+                    if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.state = SubscriptionTabState::Open;
+                    }
+                });
                 active_subscription_tab.set(Some(tab_id));
                 return SessionResponseAction::Continue;
             }
@@ -3467,7 +3481,13 @@ fn ReplPanel(
                     <span>"NSPL REPL"</span>
                 </button>
                 <For
-                    each=move || subscription_tabs.get()
+                    each=move || {
+                        subscription_tabs
+                            .get()
+                            .into_iter()
+                            .filter(|tab| tab.state == SubscriptionTabState::Open)
+                            .collect::<Vec<_>>()
+                    }
                     key=|tab| tab.id
                     children={move |tab| {
                         let tab_id = tab.id;

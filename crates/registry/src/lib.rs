@@ -6657,6 +6657,21 @@ fn validate_processing_branch_selections(
     // here must already have an inferred branch shape.
     for (key, model) in models {
         match model {
+            Model::Generator(generator) => {
+                let check = ProcessorBranchingCheck {
+                    domain,
+                    identifier: &key.identifier,
+                    model_kind: "generator",
+                    models,
+                    indices,
+                    graph,
+                };
+                for source_relay in
+                    generator_program_materialized_relays(domain, &key.identifier, generator)?
+                {
+                    check.matches_relay(&generator.branched_by, &source_relay)?;
+                }
+            }
             Model::Inferencer(processor) => {
                 let check = ProcessorBranchingCheck {
                     domain,
@@ -7674,8 +7689,8 @@ mod tests {
         BranchValueMapping, ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
         CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction,
         CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientKafka,
-        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateIngestor,
-        CreateJunction, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
+        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator,
+        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
         CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain,
         DomainSchedule, DropModel, EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier,
         IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
@@ -11244,6 +11259,55 @@ mod tests {
         assert!(
             format!("{err}").contains(
                 "branch name 'branch_b' does not match relay 'input' branch name 'branch_a'"
+            ),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_generator_crossing_same_schema_branch_names() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Relay(mut input) = relay_branched_by("input", "event_schema", "branch_a") else {
+            unreachable!("relay helper must build a relay model")
+        };
+        input.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+
+        let err = registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    Model::Relay(input),
+                    relay_branched_by("output", "event_schema", "branch_b"),
+                    branch_schema("value_branch", &["value"]),
+                    branch("branch_a", "value_branch", "input", &["value"]),
+                    branch("branch_b", "value_branch", "output", &["value"]),
+                    Model::Generator(CreateGenerator {
+                        name: identifier("generate"),
+                        into_relay: identifier("output"),
+                        branched_by: BranchSelection::branched_by(identifier("branch_b")),
+                        each: "100ms".to_string(),
+                        flush_each: "IMMEDIATE".to_string(),
+                        max_batch_size: None,
+                        set: "SET output.value = input.value".to_string(),
+                        message_error_policy: MessageErrorPolicy::Log,
+                    }),
+                ],
+            )
+            .expect_err("generators must not cross differently named branches");
+
+        assert!(matches!(
+            err.current_context(),
+            RegistryError::IncompatibleSchema { .. }
+        ));
+        assert!(
+            format!("{err}").contains(
+                "generator 'generate' branch name 'branch_b' does not match relay 'input' branch \
+                 name 'branch_a'"
             ),
             "unexpected error: {err}"
         );

@@ -488,7 +488,11 @@ Feature: Cluster scheduling
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
-    And emitter "kafka_forward" enters stall mode
+    Then within "10s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
+      """
+      status: running
+      """
+    When emitter "kafka_forward" enters stall mode
     And Kafka message is published to topic "notifications_{{test_id}}"
       """
       {"user_id":42}
