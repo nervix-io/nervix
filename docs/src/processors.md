@@ -4,7 +4,7 @@ Nervix supports several runtime node types that transform or route records betwe
 
 Processing nodes operate on one concrete branch at a time. This keeps tenant-specific, user-specific, or other group-specific state isolated while records move through the graph. A processor receives branch-local relay batches and keeps branch-local buffers or state unless its node type explicitly crosses a branch boundary.
 
-Every normal processor that consumes relays must declare `BRANCHED BY <branch>`. The branch's schema must match the input and output relays. The declaration is a contract: the processor is materialized once per concrete branch and must not consume the mixed logical relay. Reingestors are different because they reference an explicit branch whose `VALUES` map creates a new downstream branch key. Emitters are terminal drains and do not declare processor branch selection.
+Every normal processor that consumes relays must declare `BRANCHED BY <branch>`. The exact branch name must match the input and output relays; another branch backed by the same schema is not compatible. The declaration is a contract: the processor is materialized once per concrete branch and must not consume the mixed logical relay. Reingestors are different because they reference an explicit branch whose `VALUES` map creates a new downstream branch key. Emitters are terminal drains and do not declare processor branch selection.
 
 `GENERATOR` is a periodic source runtime node.
 

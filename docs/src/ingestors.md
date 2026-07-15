@@ -53,7 +53,7 @@ Ingestors are where external mixed flows enter branch-isolated processing. The i
 - `MAX INSTANCES <n> EVICT LRU` may be added to cap active concrete branch instances and evict the least recently used branch when capacity is reached
 - `BRANCHED BY <branch>` tells the ingestor to use that explicit branch
 - `UNBRANCHED` uses the single root group without declaring or referencing a branch schema, and does not declare TTL
-- the branching schema defines the branch key shape shared by downstream relays and branch-preserving processors
+- the named branch defines both the branch identity and its key shape; downstream relays and branch-preserving processors must reference that same branch name
 - decoded rows are appended to matching destination relays inside that group's branch
 - downstream normal processors keep the same group until a `REINGESTOR` or `EMITTER` boundary
 

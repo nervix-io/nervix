@@ -121,8 +121,7 @@ Feature: Processor output routing
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
         CREATE IF NOT EXISTS BRANCH by_source_logs_a SCHEMA id_branch TTL 5m;
         CREATE RELAY incoming_logs_a SCHEMA notification BRANCHED BY by_source_logs_a;
-        CREATE IF NOT EXISTS BRANCH by_source_logs_b SCHEMA id_branch TTL 5m;
-        CREATE RELAY incoming_logs_b SCHEMA notification BRANCHED BY by_source_logs_b;
+        CREATE RELAY incoming_logs_b SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE RELAY errors_ss SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE RELAY warnings_ss SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE RELAY info_ss SCHEMA notification BRANCHED BY by_source_logs_a;
@@ -144,7 +143,7 @@ Feature: Processor output routing
         CREATE INGESTOR source_logs_b
         TO incoming_logs_b
         DECODE USING notification_codec
-        BRANCHED BY by_source_logs_b VALUES { id = incoming_logs_b.id }
+        BRANCHED BY by_source_logs_a VALUES { id = incoming_logs_b.id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR log_splitter
