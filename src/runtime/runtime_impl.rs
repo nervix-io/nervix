@@ -812,6 +812,45 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         after_lsm: u64,
     ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
+        if let RuntimeStateKind::MaterializedRelay = placement.state
+            && placement.branch_key.is_none()
+        {
+            let mut entries = Vec::new();
+            let mut latest_lsm = 0;
+            let mut found = false;
+            let mut metrics_snapshot = crate::metrics::RuntimeMetricsSnapshot::default();
+            for state in self.replicated_materialized_stream_states.iter() {
+                let concrete = state.key();
+                if concrete.domain != placement.domain
+                    || concrete.state != placement.state
+                    || concrete.kind != placement.kind
+                    || concrete.identifier != placement.identifier
+                {
+                    continue;
+                }
+                found = true;
+                latest_lsm = latest_lsm.max(state.current_lsm.load(Ordering::SeqCst));
+                if concrete.branch_key.is_none() {
+                    metrics_snapshot = state.metrics_snapshot(&self.metrics);
+                }
+                entries.extend(
+                    self.visible_materialized_stream_remote_entries(concrete, state.value()),
+                );
+            }
+            if found {
+                if latest_lsm <= after_lsm {
+                    return Ok(None);
+                }
+                return Ok(Some(PersistedRuntimeStateEntry {
+                    lsm: latest_lsm,
+                    payload: encode_materialized_stream_snapshot_entries(
+                        &entries,
+                        metrics_snapshot,
+                    )
+                    .map_err(|error| error.to_string())?,
+                }));
+            }
+        }
         if let Some(state) = self.replicated_deduplicator_states.get(placement) {
             let snapshot = state.latest_snapshot().map_err(|error| error.to_string())?;
             if snapshot.lsm > after_lsm {
@@ -3730,7 +3769,6 @@ impl Runtime {
                         });
                     }
                     let mut source_schemas = Vec::with_capacity(source_streams.len());
-                    let mut source_nodes = HashMap::default();
                     for source_stream in &source_streams {
                         let Some(source_schema) = relay_schemas.get(source_stream).cloned() else {
                             return Err(RuntimeError::BuildDomainExecution {
@@ -3742,13 +3780,6 @@ impl Runtime {
                             });
                         };
                         source_schemas.push((source_stream.clone(), source_schema.arrow_schema()));
-                        let owner = schedule.nodes.iter().find_map(|scheduled| {
-                            (scheduled.kind == ModelKind::Materializer
-                                && scheduled.identifier == *source_stream)
-                                .then(|| scheduled.execution_node().map(str::to_string))
-                                .flatten()
-                        });
-                        source_nodes.insert(source_stream.clone(), owner);
                     }
                     let program = compile_generator_set_program(
                         domain,
@@ -3761,7 +3792,6 @@ impl Runtime {
                         generator.clone(),
                         program,
                         source_streams,
-                        source_nodes,
                         output_branching,
                         output_schema,
                     ));
@@ -4110,8 +4140,7 @@ impl Runtime {
             lookups: &lookup_runtimes,
         };
 
-        for (generator, program, source_streams, source_nodes, output_branching, output_schema) in
-            generator_specs
+        for (generator, program, source_streams, output_branching, output_schema) in generator_specs
         {
             let Some(output_registry) = relay_registries.get(&generator.into_relay).cloned() else {
                 return Err(RuntimeError::BuildDomainExecution {
@@ -4138,7 +4167,6 @@ impl Runtime {
                     generator,
                     program,
                     source_relays: source_streams,
-                    source_nodes,
                     output_branching,
                     output_schema,
                     output_registry,
@@ -5395,7 +5423,6 @@ impl Runtime {
                         });
                     }
                     let mut source_schemas = Vec::with_capacity(source_streams.len());
-                    let mut source_nodes = HashMap::default();
                     for source_stream in &source_streams {
                         let Some(source_schema) = relay_schemas.get(source_stream).cloned() else {
                             return Err(RuntimeError::BuildDomainExecution {
@@ -5407,7 +5434,6 @@ impl Runtime {
                             });
                         };
                         source_schemas.push((source_stream.clone(), source_schema.arrow_schema()));
-                        source_nodes.insert(source_stream.clone(), None);
                     }
                     let program = compile_generator_set_program(
                         domain,
@@ -5420,7 +5446,6 @@ impl Runtime {
                         generator.clone(),
                         program,
                         source_streams,
-                        source_nodes,
                         output_branching,
                         output_schema,
                     ));
@@ -5562,8 +5587,7 @@ impl Runtime {
             lookups: &lookup_runtimes,
         };
 
-        for (generator, program, source_streams, source_nodes, output_branching, output_schema) in
-            generator_specs
+        for (generator, program, source_streams, output_branching, output_schema) in generator_specs
         {
             let Some(output_registry) = relay_registries.get(&generator.into_relay).cloned() else {
                 return Err(RuntimeError::BuildDomainExecution {
@@ -5590,7 +5614,6 @@ impl Runtime {
                     generator,
                     program,
                     source_relays: source_streams,
-                    source_nodes,
                     output_branching,
                     output_schema,
                     output_registry,
@@ -5843,7 +5866,6 @@ impl Runtime {
             generator,
             program,
             source_relays: source_streams,
-            source_nodes,
             output_branching,
             output_schema,
             output_registry,
@@ -5867,17 +5889,15 @@ impl Runtime {
         let task_generator = generator.name.clone();
         let task_output_relay = generator.into_relay.clone();
         let task_source_streams = source_streams;
-        let task_source_nodes = source_nodes;
         let task_output_branching = output_branching;
         let mut shutdown_rx = shutdown_tx.subscribe();
         let runtime = self.clone();
         let task_events = self.events.clone();
 
         Ok(tokio::spawn(async move {
-            let mut next_generation = None::<Timestamp>;
-            let mut next_flush = None::<Timestamp>;
-            let mut pending_groups = Vec::<(Option<BranchKey>, Vec<RelayMessage>)>::new();
-            let mut pending_positions = HashMap::default();
+            let mut next_state_refresh = None::<Timestamp>;
+            let mut branch_states =
+                HashMap::<Option<BranchKey>, GeneratorBranchTaskState>::default();
 
             loop {
                 tokio::task::consume_budget().await;
@@ -5895,8 +5915,11 @@ impl Runtime {
                     .is_some_and(|(pace, _, _)| *pace == DomainPace::Paced);
                 if let Some((DomainPace::Paced, ref clock, ref latest_tick)) = paced_state {
                     let Some(clock) = clock else {
-                        next_generation = None;
-                        next_flush = None;
+                        next_state_refresh = None;
+                        for state in branch_states.values_mut() {
+                            state.next_generation = None;
+                            state.next_flush = None;
+                        }
                         tokio::select! {
                             changed = shutdown_rx.changed() => {
                                 if changed.is_err() || *shutdown_rx.borrow() {
@@ -5933,57 +5956,39 @@ impl Runtime {
                     execution_now = current_timestamp();
                 }
 
-                if next_generation.is_none() {
-                    next_generation = Some(execution_now);
+                if next_state_refresh.is_none() {
+                    next_state_refresh = Some(execution_now);
                 }
-                if next_flush.is_none()
-                    && let RuntimeFlushPolicy::Each {
-                        interval: flush_each,
-                        ..
-                    } = flush_each
-                {
-                    next_flush = Some(checked_add_duration_to_timestamp(execution_now, flush_each));
-                }
+                let should_refresh_state =
+                    next_state_refresh.is_some_and(|next| execution_now >= next);
+                let mut did_scheduled_work = false;
+                let mut generated_branches = HashSet::default();
 
-                let should_generate = next_generation.is_some_and(|next| execution_now >= next);
-                let should_flush = match flush_each {
-                    RuntimeFlushPolicy::Immediate => should_generate,
-                    RuntimeFlushPolicy::Each { .. } => {
-                        next_flush.is_some_and(|next| execution_now >= next)
-                    }
-                };
-
-                if should_generate {
-                    advance_scheduled_timestamp(&mut next_generation, interval, execution_now);
+                if should_refresh_state {
+                    advance_scheduled_timestamp(&mut next_state_refresh, interval, execution_now);
+                    did_scheduled_work = true;
 
                     let local_node_id = runtime.local_node_id.read().clone();
-                    let mut source_state_by_stream =
-                        HashMap::<Identifier, HashMap<String, RuntimeRecord>>::default();
-                    let mut source_keys = BTreeSet::<String>::new();
+                    let mut source_state_by_branch = HashMap::<
+                        Option<BranchKey>,
+                        (
+                            HashMap<Identifier, HashMap<String, RuntimeRecord>>,
+                            BTreeSet<String>,
+                        ),
+                    >::default();
                     let mut state_load_failed = false;
+                    let remote_dispatcher = { runtime.remote_dispatcher.read().clone() };
+                    let remote_nodes = if let Some(dispatcher) = remote_dispatcher {
+                        dispatcher.cluster.live_node_ids().await
+                    } else {
+                        Vec::new()
+                    };
 
                     for source_stream in &task_source_streams {
                         tokio::task::consume_budget().await;
-                        let owner = task_source_nodes
-                            .get(source_stream)
-                            .and_then(|node| node.as_ref())
-                            .cloned();
-                        let state = if let Some(owner) = owner {
-                            if local_node_id.as_deref() == Some(owner.as_str()) {
-                                runtime.local_materialized_stream_state(&task_domain, source_stream)
-                            } else {
-                                runtime
-                                    .remote_materialized_stream_state(
-                                        &owner,
-                                        &task_domain,
-                                        source_stream,
-                                    )
-                                    .await
-                            }
-                        } else {
-                            runtime.local_materialized_stream_state(&task_domain, source_stream)
-                        };
-                        let state = match state {
+                        let mut state = match runtime
+                            .local_materialized_stream_state(&task_domain, source_stream)
+                        {
                             Ok(state) => state,
                             Err(error) => {
                                 state_load_failed = true;
@@ -5998,141 +6003,303 @@ impl Runtime {
                                 break;
                             }
                         };
-                        let mut keyed_state = HashMap::default();
-                        for (key, record) in state {
-                            source_keys.insert(key.clone());
-                            keyed_state.insert(key, record);
-                        }
-                        source_state_by_stream.insert(source_stream.clone(), keyed_state);
-                    }
-
-                    if !state_load_failed {
-                        for key in source_keys {
+                        for remote_node in &remote_nodes {
                             tokio::task::consume_budget().await;
-                            let mut values = HashMap::default();
-                            for source_stream in &task_source_streams {
-                                let Some(record) = source_state_by_stream
-                                    .get(source_stream)
-                                    .and_then(|entries| entries.get(&key))
-                                else {
-                                    continue;
-                                };
-                                for field in record.to_remote().fields {
-                                    values.insert(
-                                        format!("{}.{}", source_stream.as_str(), field.name),
-                                        RuntimeValue::from_remote(field.value),
-                                    );
-                                }
+                            if local_node_id.as_deref() == Some(remote_node.as_str()) {
+                                continue;
                             }
-
-                            let input =
-                                match generator_context_batch(&program.input_schema, &values) {
-                                    Ok(input) => input,
-                                    Err(error) => {
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
-                                            "failed to prepare generator input for '{}' in domain \
-                                             '{}': {}",
-                                            task_generator.as_str(),
-                                            task_domain.as_str(),
-                                            error
-                                        )));
-                                        continue;
-                                    }
-                                };
-                            let record = match execute_generator_program_on_context(
-                                &program,
-                                &input,
-                                execution_now,
-                            )
-                            .await
+                            match runtime
+                                .remote_materialized_stream_state(
+                                    remote_node,
+                                    &task_domain,
+                                    source_stream,
+                                )
+                                .await
                             {
-                                Ok(Some(record)) => record,
-                                Ok(None) => continue,
+                                Ok(remote_state) => state.extend(remote_state),
                                 Err(error) => {
+                                    state_load_failed = true;
                                     let _ = task_events.send(RuntimeEvent::Error(format!(
-                                        "failed to execute generator '{}' in domain '{}': {}",
+                                        "failed to read materialized state for generator '{}' \
+                                         from relay '{}' on node '{}' in domain '{}': {}",
                                         task_generator.as_str(),
+                                        source_stream.as_str(),
+                                        remote_node,
                                         task_domain.as_str(),
                                         error
                                     )));
-                                    continue;
+                                    break;
                                 }
-                            };
-                            let output_key = if task_output_branching.is_empty() {
+                            }
+                        }
+                        if state_load_failed {
+                            break;
+                        }
+                        let mut latest_state = HashMap::<String, RuntimeRecord>::default();
+                        for (key, record) in state {
+                            let replace = latest_state.get(&key).is_none_or(|existing| {
+                                let existing = existing.metadata();
+                                let candidate = record.metadata();
+                                candidate.ingested_at_high_watermark()
+                                    > existing.ingested_at_high_watermark()
+                                    || (candidate.ingested_at_high_watermark()
+                                        == existing.ingested_at_high_watermark()
+                                        && candidate.ingested_at_low_watermark()
+                                            > existing.ingested_at_low_watermark())
+                            });
+                            if replace {
+                                latest_state.insert(key, record);
+                            }
+                        }
+                        for (key, record) in latest_state {
+                            let branch_key = if task_output_branching.is_empty() {
                                 None
                             } else {
-                                let key = match BranchKey::from_record(
-                                    &record,
-                                    task_output_branching.iter(),
-                                ) {
-                                    Ok(Some(key)) => key,
+                                match BranchKey::from_record(&record, task_output_branching.iter())
+                                {
+                                    Ok(Some(key)) => Some(key),
                                     Ok(None) => {
                                         let _ = task_events.send(RuntimeEvent::Error(format!(
-                                            "generator '{}' produced record missing destination \
-                                             branching for relay '{}'",
+                                            "generator '{}' source relay '{}' record is missing \
+                                             concrete branch fields",
                                             task_generator.as_str(),
-                                            task_output_relay.as_str(),
+                                            source_stream.as_str(),
                                         )));
                                         continue;
                                     }
                                     Err(error) => {
                                         let _ = task_events.send(RuntimeEvent::Error(format!(
-                                            "generator '{}' produced invalid destination \
-                                             branching for relay '{}': {}",
+                                            "generator '{}' source relay '{}' has invalid \
+                                             concrete branch fields: {}",
                                             task_generator.as_str(),
-                                            task_output_relay.as_str(),
+                                            source_stream.as_str(),
+                                            error,
+                                        )));
+                                        continue;
+                                    }
+                                }
+                            };
+                            let (state_by_stream, source_keys) = source_state_by_branch
+                                .entry(branch_key)
+                                .or_insert_with(|| (HashMap::default(), BTreeSet::new()));
+                            source_keys.insert(key.clone());
+                            state_by_stream
+                                .entry(source_stream.clone())
+                                .or_default()
+                                .insert(key, record);
+                        }
+                    }
+
+                    if !state_load_failed {
+                        let active_branch_keys = source_state_by_branch
+                            .keys()
+                            .cloned()
+                            .collect::<HashSet<_>>();
+                        for (branch_key, branch_state) in &mut branch_states {
+                            if !active_branch_keys.contains(branch_key) {
+                                branch_state.next_generation = None;
+                            }
+                        }
+                        for (branch_key, (source_state_by_stream, source_keys)) in
+                            source_state_by_branch
+                        {
+                            tokio::task::consume_budget().await;
+                            let branch_state = branch_states.entry(branch_key.clone()).or_default();
+                            if branch_state.next_generation.is_none() {
+                                branch_state.next_generation = Some(execution_now);
+                            }
+                            if branch_state.next_flush.is_none()
+                                && let RuntimeFlushPolicy::Each {
+                                    interval: flush_each,
+                                    ..
+                                } = flush_each
+                            {
+                                branch_state.next_flush = Some(checked_add_duration_to_timestamp(
+                                    execution_now,
+                                    flush_each,
+                                ));
+                            }
+                            if !branch_state
+                                .next_generation
+                                .is_some_and(|next| execution_now >= next)
+                            {
+                                continue;
+                            }
+                            advance_scheduled_timestamp(
+                                &mut branch_state.next_generation,
+                                interval,
+                                execution_now,
+                            );
+                            generated_branches.insert(branch_key.clone());
+
+                            for key in source_keys {
+                                tokio::task::consume_budget().await;
+                                let mut values = HashMap::default();
+                                for source_stream in &task_source_streams {
+                                    let Some(record) = source_state_by_stream
+                                        .get(source_stream)
+                                        .and_then(|entries| entries.get(&key))
+                                    else {
+                                        continue;
+                                    };
+                                    for field in record.to_remote().fields {
+                                        values.insert(
+                                            format!("{}.{}", source_stream.as_str(), field.name),
+                                            RuntimeValue::from_remote(field.value),
+                                        );
+                                    }
+                                }
+
+                                let input =
+                                    match generator_context_batch(&program.input_schema, &values) {
+                                        Ok(input) => input,
+                                        Err(error) => {
+                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                "failed to prepare generator input for '{}' in \
+                                                 domain '{}' branch '{}': {}",
+                                                task_generator.as_str(),
+                                                task_domain.as_str(),
+                                                branch_key_display(&branch_key),
+                                                error
+                                            )));
+                                            continue;
+                                        }
+                                    };
+                                let record = match execute_generator_program_on_context(
+                                    &program,
+                                    &input,
+                                    execution_now,
+                                )
+                                .await
+                                {
+                                    Ok(Some(record)) => record,
+                                    Ok(None) => continue,
+                                    Err(error) => {
+                                        let _ = task_events.send(RuntimeEvent::Error(format!(
+                                            "failed to execute generator '{}' in domain '{}' \
+                                             branch '{}': {}",
+                                            task_generator.as_str(),
+                                            task_domain.as_str(),
+                                            branch_key_display(&branch_key),
                                             error
                                         )));
                                         continue;
                                     }
                                 };
-                                Some(key)
-                            };
-                            push_grouped_by_key(
-                                &mut pending_groups,
-                                &mut pending_positions,
-                                output_key.clone(),
-                                RelayMessage {
-                                    key: output_key,
+                                let output_key = if task_output_branching.is_empty() {
+                                    None
+                                } else {
+                                    match BranchKey::from_record(
+                                        &record,
+                                        task_output_branching.iter(),
+                                    ) {
+                                        Ok(Some(key)) => Some(key),
+                                        Ok(None) => {
+                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                "generator '{}' produced record missing \
+                                                 destination branching for relay '{}'",
+                                                task_generator.as_str(),
+                                                task_output_relay.as_str(),
+                                            )));
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                                "generator '{}' produced invalid destination \
+                                                 branching for relay '{}': {}",
+                                                task_generator.as_str(),
+                                                task_output_relay.as_str(),
+                                                error
+                                            )));
+                                            continue;
+                                        }
+                                    }
+                                };
+                                if output_key != branch_key {
+                                    let _ = task_events.send(RuntimeEvent::Error(format!(
+                                        "generator '{}' attempted to cross concrete branch '{}' \
+                                         into '{}'",
+                                        task_generator.as_str(),
+                                        branch_key_display(&branch_key),
+                                        branch_key_display(&output_key),
+                                    )));
+                                    continue;
+                                }
+                                branch_state.pending.push(RelayMessage {
+                                    key: branch_key.clone(),
                                     record,
                                     acks: AckSet::empty(),
-                                },
-                            );
+                                });
+                            }
                         }
+                        branch_states.retain(|branch_key, branch_state| {
+                            active_branch_keys.contains(branch_key)
+                                || !branch_state.pending.is_empty()
+                        });
                     }
                 }
 
-                let should_flush_now = should_flush;
-                if should_flush_now {
+                let mut flushed_any_branch = false;
+                for (branch_key, branch_state) in &mut branch_states {
+                    tokio::task::consume_budget().await;
+                    let should_flush = match flush_each {
+                        RuntimeFlushPolicy::Immediate => generated_branches.contains(branch_key),
+                        RuntimeFlushPolicy::Each { .. } => branch_state
+                            .next_flush
+                            .is_some_and(|next| execution_now >= next),
+                    };
+                    if !should_flush {
+                        continue;
+                    }
                     if let RuntimeFlushPolicy::Each {
                         interval: flush_each,
                         ..
                     } = flush_each
                     {
-                        advance_scheduled_timestamp(&mut next_flush, flush_each, execution_now);
+                        advance_scheduled_timestamp(
+                            &mut branch_state.next_flush,
+                            flush_each,
+                            execution_now,
+                        );
                     }
-                    flush_generator_groups(
-                        GeneratorFlushContext {
-                            runtime: &runtime,
-                            domain: &task_domain,
-                            generator: &task_generator,
-                            output_relay: &task_output_relay,
-                            output_schema: &output_schema,
-                            output_registry: &output_registry,
-                            output_services: &output_services,
-                            task_events: &task_events,
-                        },
-                        &mut pending_groups,
-                    )
-                    .await;
-                    pending_positions.clear();
+                    if !branch_state.pending.is_empty() {
+                        let mut pending_group = vec![(
+                            branch_key.clone(),
+                            std::mem::take(&mut branch_state.pending),
+                        )];
+                        flush_generator_groups(
+                            GeneratorFlushContext {
+                                runtime: &runtime,
+                                domain: &task_domain,
+                                generator: &task_generator,
+                                output_relay: &task_output_relay,
+                                output_schema: &output_schema,
+                                output_registry: &output_registry,
+                                output_services: &output_services,
+                                task_events: &task_events,
+                            },
+                            &mut pending_group,
+                        )
+                        .await;
+                    }
+                    flushed_any_branch = true;
                 }
+                did_scheduled_work |= flushed_any_branch;
 
-                if should_generate || should_flush_now {
+                if did_scheduled_work {
                     continue;
                 }
 
-                let mut sleep_duration = next_generation
+                let next_deadline = next_state_refresh
+                    .into_iter()
+                    .chain(
+                        branch_states
+                            .values()
+                            .filter_map(|state| state.next_generation),
+                    )
+                    .chain(branch_states.values().filter_map(|state| state.next_flush))
+                    .min();
+                let sleep_duration = next_deadline
                     .map(|next| {
                         if is_paced {
                             paced_state
@@ -6148,21 +6315,6 @@ impl Runtime {
                         }
                     })
                     .unwrap_or(interval);
-                if let Some(next) = next_flush {
-                    let flush_sleep = if is_paced {
-                        paced_state
-                            .as_ref()
-                            .and_then(|(_, clock, _)| clock.as_ref())
-                            .map(|clock| {
-                                wall_duration_until_logical_target(clock, execution_now, next)
-                                    .unwrap_or(Duration::from_millis(100))
-                            })
-                            .unwrap_or(Duration::from_millis(50))
-                    } else {
-                        wall_duration_until_timestamp(execution_now, next)
-                    };
-                    sleep_duration = sleep_duration.min(flush_sleep);
-                }
 
                 tokio::select! {
                     changed = shutdown_rx.changed() => {

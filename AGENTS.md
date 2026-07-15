@@ -88,9 +88,9 @@ Primary goals:
    - Model non-branched execution as an absent branch key and branched execution as a non-empty typed key. Do not encode non-branched execution as an empty string, empty map, zero-field schema, or synthetic root branch.
    - There are exactly two node families that may erase or cross branch boundaries:
      `REINGESTOR` may change branch grouping, and `EMITTER` may fan in records for external output.
-   - Every other processing node (`DEDUPLICATOR`, `JUNCTION`, `WINDOW PROCESSOR`, and future processing nodes unless explicitly promoted to this list) must execute inside one concrete branch at a time.
+   - Every other processing node (`GENERATOR`, `DEDUPLICATOR`, `JUNCTION`, `WINDOW PROCESSOR`, and future processing nodes unless explicitly promoted to this list) must execute inside one concrete branch at a time.
    - Non-reingestor/non-emitter processors must consume concrete relay instances and publish concrete relay instances for the same branch fields. They must not subscribe to the logical/global relay, mix branch keys, aggregate across branches, or use a shared processor state for multiple concrete branches.
-   - `DEDUPLICATOR`, `JUNCTION`, and `WINDOW PROCESSOR` must preserve the branch fields they receive.
+   - `GENERATOR`, `DEDUPLICATOR`, `JUNCTION`, and `WINDOW PROCESSOR` must preserve the branch fields they receive.
    - A global mixed-consumer implementation for a normal processor is a correctness bug, even if it is simpler or appears to work for singleton cases. Do not implement fallback paths that bypass concrete branch routing.
    - Runtime code should make this invariant obvious in names, types, and comments. Processor templates/nodes should carry concrete branch context; any logical-stream registration path must explicitly reject or skip normal processors that are handled by branch materialization.
    - Tests and cucumber scenarios for processors must explicitly prove branch isolation and branch-field preservation, including interleaved records from at least two branches when stateful behavior is involved.
