@@ -46,7 +46,7 @@ Feature: NATS TLS resource mounts
         QUEUE GROUP nats_tls_notifications_group_{{test_id}}
         INSTANCES 1
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" repeatedly publishing NATS TLS message to subject "notifications_{{test_id}}" yields a relay subscription payload

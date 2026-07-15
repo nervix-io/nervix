@@ -30,7 +30,7 @@ Feature: JAQ transformation
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
@@ -83,7 +83,7 @@ Feature: JAQ transformation
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -137,7 +137,7 @@ Feature: JAQ transformation
         FROM RABBITMQ rabbit_main
         QUEUE notifications_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then RabbitMQ queue "notifications_{{test_id}}" eventually has 1 consumers
@@ -190,7 +190,7 @@ Feature: JAQ transformation
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And Redis message is published to channel "notifications_{{test_id}}"
@@ -243,7 +243,7 @@ Feature: JAQ transformation
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And MQTT message is published to topic "notifications_{{test_id}}"
@@ -297,7 +297,7 @@ Feature: JAQ transformation
         QUEUE GROUP nats_notifications_group_{{test_id}}
         INSTANCES 1
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And NATS message is published to subject "notifications_{{test_id}}"
@@ -349,7 +349,7 @@ Feature: JAQ transformation
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ZEROMQ zeromq_main
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And ZeroMQ message is published
@@ -403,7 +403,7 @@ Feature: JAQ transformation
         FROM SQS sqs_main
         QUEUE notifications_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And SQS message is published to queue "notifications_{{test_id}}"
@@ -453,7 +453,7 @@ Feature: JAQ transformation
         BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And websocket message is published to host "ws-{{test_id}}.example.com" path "/ws"
@@ -505,7 +505,7 @@ Feature: JAQ transformation
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM HTTP http_main EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "30s" the relay subscription receives a payload
@@ -551,7 +551,7 @@ Feature: JAQ transformation
         BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "30s" the relay subscription receives a payload
@@ -601,7 +601,7 @@ Feature: JAQ transformation
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
         EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO samples;
+        CREATE SUBSCRIPTION samples_subscription TO samples;
         START;
       """
     Then the relay subscription receives a payload

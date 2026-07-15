@@ -48,7 +48,7 @@ Feature: Protobuf codec
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And protobuf payload fixture "notification" is posted to host "http-{{test_id}}.example.com" path "/ingest"

@@ -33,7 +33,7 @@ Feature: HTTP client ingestion
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM HTTP http_main EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then the relay subscription receives a payload
@@ -83,7 +83,7 @@ Feature: HTTP client ingestion
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM HTTP http_main EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "http_notifications" on the leader node contains

@@ -46,7 +46,7 @@ Feature: RabbitMQ TLS resource mounts
         QUEUE notifications_{{test_id}}
         INSTANCES 1
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then RabbitMQ queue "notifications_{{test_id}}" eventually has 1 consumers

@@ -50,6 +50,7 @@ pub enum Word {
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum Identifier {
     Create,
+    Delete,
     Alter,
     Drop,
     Cordon,
@@ -85,8 +86,6 @@ pub enum Identifier {
     Time,
     Rate,
     Timestamp,
-    Subscribe,
-    Unsubscribe,
     Session,
     Subscription,
     Vhost,

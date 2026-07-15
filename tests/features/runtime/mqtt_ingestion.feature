@@ -34,7 +34,7 @@ Feature: MQTT ingestion
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
@@ -93,7 +93,7 @@ Feature: MQTT ingestion
         FROM MQTT mqtt_main
         TOPIC notifications_reconnect_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
@@ -156,7 +156,7 @@ Feature: MQTT ingestion
         TOPIC notifications_noack_parallel_{{test_id}}
         QOS 1 MODE NO_ACK PARALLEL MAX 2
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
@@ -265,7 +265,7 @@ Feature: MQTT ingestion
         SESSION PERSISTENT QOS 1
         MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
@@ -404,7 +404,7 @@ Feature: MQTT ingestion
         ENCODE USING notification_codec
         TO MQTT mqtt_out TOPIC notifications_ack_out_{{test_id}}
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
@@ -473,7 +473,7 @@ Feature: MQTT ingestion
         SESSION PERSISTENT QOS 1
         MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
         DRAIN NODE node-1;
         SHOW CLUSTER STATUS;

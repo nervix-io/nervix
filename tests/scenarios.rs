@@ -623,7 +623,7 @@ fn build_ingestor_logic_commands(
         };
         format!(
             r#"
-      SUBSCRIBE SESSION TO logic_notifications;
+      CREATE SUBSCRIPTION logic_notifications_subscription TO logic_notifications;
       {start_command}
 "#
         )
@@ -2231,7 +2231,7 @@ fn payload_matches_expected(actual: &str, expected: &str) -> bool {
 fn requires_persistent_session(commands: &str) -> bool {
     nspl_statements(commands).iter().any(|statement| {
         let normalized = statement.trim().to_ascii_uppercase();
-        normalized.starts_with("SUBSCRIBE SESSION TO ")
+        normalized.starts_with("CREATE SUBSCRIPTION ")
             || normalized == "BEGIN;"
             || normalized == "COMMIT;"
             || normalized == "REVERT;"
@@ -2240,10 +2240,10 @@ fn requires_persistent_session(commands: &str) -> bool {
 
 fn command_updates_subscription_state(current: bool, command: &str) -> bool {
     let normalized = command.trim_start().to_ascii_uppercase();
-    if normalized.starts_with("SUBSCRIBE SESSION ") {
+    if normalized.starts_with("CREATE SUBSCRIPTION ") {
         return true;
     }
-    if normalized.starts_with("UNSUBSCRIBE SESSION ") {
+    if normalized.starts_with("DELETE SUBSCRIPTION ") {
         return false;
     }
     current
@@ -2381,8 +2381,8 @@ async fn run_nspl_commands_on_node(
 fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
     nspl_statements(commands).into_iter().all(|command| {
         let normalized = command.trim().to_ascii_uppercase();
-        normalized.starts_with("SUBSCRIBE SESSION ")
-            || normalized.starts_with("UNSUBSCRIBE SESSION ")
+        normalized.starts_with("CREATE SUBSCRIPTION ")
+            || normalized.starts_with("DELETE SUBSCRIPTION ")
             || normalized == "DESCRIBE DOMAIN;"
             || normalized.starts_with("DESCRIBE ENDPOINT ")
             || normalized.starts_with("DESCRIBE RESOURCE ")
@@ -2419,6 +2419,60 @@ async fn run_nspl_commands_on_active_session(
     }
     record_mqtt_ingestors(world, commands);
     Ok(())
+}
+
+#[when(expr = "the active session targets domain {string}")]
+async fn when_the_active_session_targets_domain(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .active_session
+        .as_mut()
+        .expect("an active session must exist")
+        .set_domain(domain);
+}
+
+#[when("these NSPL commands are executed on the active session")]
+async fn when_these_nspl_commands_are_executed_on_the_active_session(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let commands = expand_placeholders(world, docstring(step));
+    run_nspl_commands_on_active_session(world, &commands)
+        .await
+        .expect("failed to execute NSPL commands on active session");
+}
+
+#[when("these NSPL commands fail on the active session")]
+async fn when_these_nspl_commands_fail_on_the_active_session(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let commands = expand_placeholders(world, docstring(step));
+    match run_nspl_commands_on_active_session(world, &commands).await {
+        Ok(()) => panic!("expected NSPL commands to fail on active session"),
+        Err(error) => world.last_command_error = Some(error),
+    }
+}
+
+#[when("a new session executes these NSPL commands")]
+async fn when_a_new_session_executes_these_nspl_commands(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    let commands = expand_placeholders(world, docstring(step));
+    let leader = current_leader_node(world).await;
+    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+        .await
+        .expect("failed to execute NSPL commands on a new session");
+    world.active_session = Some(session);
+    world.active_session_node = Some(leader);
+    world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
 async fn current_leader_node(world: &ScenarioWorld) -> String {

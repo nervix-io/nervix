@@ -112,7 +112,7 @@ Feature: Runtime node error policies
         TO ZEROMQ zeromq_main
         ON MESSAGE ERROR DLQ error_stream SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
         ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO error_stream;
+        CREATE SUBSCRIPTION error_stream_subscription TO error_stream;
         START;
       """
     And emitter "zeromq_notifications" enters fault mode
@@ -179,7 +179,7 @@ Feature: Runtime node error policies
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
         ON MESSAGE ERROR IGNORE
         ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And emitter "kafka_forward" enters fault mode

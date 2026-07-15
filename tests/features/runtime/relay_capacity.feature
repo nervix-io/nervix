@@ -76,7 +76,7 @@ Feature: Relay capacity
         TIMESTAMP NOW
         FROM ENDPOINT relay_capacity_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO notifications;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relay-capacity"

@@ -36,7 +36,7 @@ Feature: Branched session subscriptions
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When MQTT message is published to topic "notifications_{{test_id}}"
@@ -102,7 +102,7 @@ Feature: Branched session subscriptions
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
         MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications
+        CREATE SUBSCRIPTION notifications_subscription TO notifications
         SET notifications.normalized = lower(trim(notifications.raw))
         UNSET notifications.raw, notifications.active, notifications.user_id
         WHERE notifications.tenant = 'acme' AND notifications.active;

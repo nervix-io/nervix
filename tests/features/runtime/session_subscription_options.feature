@@ -36,7 +36,7 @@ Feature: Session subscription delivery options
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO telemetry DROPPING BATCH SAMPLE RATE 0.0 WHERE telemetry.active;
+        CREATE SUBSCRIPTION telemetry_subscription TO telemetry DROPPING BATCH SAMPLE RATE 0.0 WHERE telemetry.active;
         START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/telemetry"
@@ -87,7 +87,7 @@ Feature: Session subscription delivery options
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP NOW
         FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO telemetry BLOCKING BATCH SAMPLE RATE 1.0 WHERE telemetry.active;
+        CREATE SUBSCRIPTION telemetry_subscription TO telemetry BLOCKING BATCH SAMPLE RATE 1.0 WHERE telemetry.active;
         START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/telemetry"

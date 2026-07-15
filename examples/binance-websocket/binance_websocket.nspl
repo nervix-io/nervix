@@ -94,7 +94,7 @@ CREATE INGESTOR ingest_binance_ws
   FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-SUBSCRIBE SESSION TO binance_ws_events;
+CREATE SUBSCRIPTION binance_ws_events_subscription TO binance_ws_events;
 START;
 
 COMMIT;

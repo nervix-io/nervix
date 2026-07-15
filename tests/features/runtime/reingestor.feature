@@ -44,7 +44,7 @@ Feature: Reingestor repartitioning
         TO tenant_notifications
         BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO tenant_notifications;
+        CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
@@ -124,8 +124,8 @@ Feature: Reingestor repartitioning
         ENCODE USING notification_codec
         TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
 
-      SUBSCRIBE SESSION TO notifications WHERE notifications.user_id = 1;
-      SUBSCRIBE SESSION TO tenant_notifications WHERE tenant_notifications.user_id = 2;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE notifications.user_id = 1;
+      CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications WHERE tenant_notifications.user_id = 2;
       START;
       """
     And http payload is posted to host "http-{{test_id}}-fan-in.example.com" path "/ingest"
@@ -212,7 +212,7 @@ Feature: Reingestor repartitioning
         ENCODE USING notification_codec
         TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
 
-      SUBSCRIBE SESSION TO copied_notifications;
+      CREATE SUBSCRIPTION copied_notifications_subscription TO copied_notifications;
       START;
       """
     And http payload is posted to host "http-{{test_id}}-direct-fanout.example.com" path "/ingest"
@@ -282,7 +282,7 @@ Feature: Reingestor repartitioning
         FROM tenant_notifications
         ENCODE USING notification_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And emitter "kafka_forward" enters fault mode
@@ -354,7 +354,7 @@ Feature: Reingestor repartitioning
         FROM tenant_notifications
         ENCODE USING notification_codec
         TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And emitter "kafka_forward" enters fault mode

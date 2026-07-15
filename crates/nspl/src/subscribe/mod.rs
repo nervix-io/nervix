@@ -1,15 +1,15 @@
 use chumsky::prelude::*;
 use nervix_models::{
-    SubscribeSession, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    UnsubscribeSession,
+    CreateSubscription, DeleteSubscription, SubscriptionBinding, SubscriptionDeliveryBehavior,
+    SubscriptionLiteral,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, current_word_prefix, field_ref, filter_map_program,
-        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, string_lit,
-        suggestions_from_errors, tok, word_raw,
+        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, session_subscription_name,
+        session_subscription_ref, string_lit, suggestions_from_errors, tok, word_raw,
     },
 };
 
@@ -81,33 +81,38 @@ fn batch_sample_rate<'src>()
         )
 }
 
-pub fn subscribe_session_parser<'src>()
--> impl Parser<'src, &'src [Token], SubscribeSession, extra::Err<ParseError<'src>>> + Clone {
-    kw_phrase2(Identifier::Subscribe, Identifier::Session)
-        .ignore_then(kw(Identifier::To))
-        .ignore_then(relay_ref())
+pub fn create_subscription_parser<'src>()
+-> impl Parser<'src, &'src [Token], CreateSubscription, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Create, Identifier::Subscription)
+        .ignore_then(session_subscription_name())
+        .then_ignore(kw(Identifier::To))
+        .then(relay_ref())
         .then(subscription_delivery_behavior().or_not())
         .then(batch_sample_rate().or_not())
         .then(filter_map_program().or_not())
         .map(
-            |(((relay, delivery_behavior), batch_sample_rate), filter_map)| SubscribeSession {
-                relay,
-                delivery_behavior: delivery_behavior
-                    .unwrap_or(SubscriptionDeliveryBehavior::Blocking),
-                batch_sample_rate,
-                filter_map,
+            |((((name, relay), delivery_behavior), batch_sample_rate), filter_map)| {
+                CreateSubscription {
+                    name,
+                    relay,
+                    delivery_behavior: delivery_behavior
+                        .unwrap_or(SubscriptionDeliveryBehavior::Blocking),
+                    batch_sample_rate,
+                    filter_map,
+                }
             },
         )
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
-pub fn subscribe_session_query(
+pub fn create_subscription_query(
+    name: &str,
     relay: &str,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<&str>,
     filter_map: Option<&str>,
 ) -> String {
-    let mut query = format!("SUBSCRIBE SESSION TO {relay}");
+    let mut query = format!("CREATE SUBSCRIPTION {name} TO {relay}");
     if delivery_behavior != SubscriptionDeliveryBehavior::Blocking {
         query.push(' ');
         query.push_str(delivery_behavior.as_ref());
@@ -124,30 +129,24 @@ pub fn subscribe_session_query(
     query
 }
 
-pub fn unsubscribe_session_parser<'src>()
--> impl Parser<'src, &'src [Token], UnsubscribeSession, extra::Err<ParseError<'src>>> + Clone {
-    kw_phrase2(Identifier::Unsubscribe, Identifier::Session)
-        .ignore_then(kw(Identifier::From))
-        .ignore_then(relay_ref())
-        .then(subscription_delivery_behavior().or_not())
-        .then(batch_sample_rate().or_not())
-        .then(filter_map_program().or_not())
-        .map(
-            |(((relay, delivery_behavior), batch_sample_rate), filter_map)| UnsubscribeSession {
-                relay,
-                delivery_behavior: delivery_behavior
-                    .unwrap_or(SubscriptionDeliveryBehavior::Blocking),
-                batch_sample_rate,
-                filter_map,
-            },
-        )
+pub fn delete_subscription_parser<'src>()
+-> impl Parser<'src, &'src [Token], DeleteSubscription, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Delete, Identifier::Subscription)
+        .ignore_then(session_subscription_ref())
+        .map(|name| DeleteSubscription { name })
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
-pub fn parse_subscribe_session_tokens(
+pub fn delete_subscription_query(name: &str) -> String {
+    format!("DELETE SUBSCRIPTION {name};")
+}
+
+pub fn parse_create_subscription_tokens(
     tokens: &[Token],
-) -> Result<SubscribeSession, Vec<ParseError<'_>>> {
-    let out = subscribe_session_parser().then_ignore(end()).parse(tokens);
+) -> Result<CreateSubscription, Vec<ParseError<'_>>> {
+    let out = create_subscription_parser()
+        .then_ignore(end())
+        .parse(tokens);
     if out.has_errors() {
         Err(out.into_errors())
     } else {
@@ -157,13 +156,13 @@ pub fn parse_subscribe_session_tokens(
     }
 }
 
-pub fn parse_subscribe_session(input: &str) -> Result<SubscribeSession, ParseFromSourceError> {
+pub fn parse_create_subscription(input: &str) -> Result<CreateSubscription, ParseFromSourceError> {
     let (source, spanned_tokens, tokens) = lex_input(input)?;
-    parse_subscribe_session_tokens(&tokens)
+    parse_create_subscription_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn suggest_subscribe_session(input: &str, cursor: usize) -> Vec<String> {
+pub fn suggest_create_subscription(input: &str, cursor: usize) -> Vec<String> {
     let safe_cursor = cursor.min(input.len());
     let prefix_src = &input[..safe_cursor];
     let prefix = current_word_prefix(prefix_src);
@@ -173,7 +172,7 @@ pub fn suggest_subscribe_session(input: &str, cursor: usize) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    let out = subscribe_session_parser()
+    let out = create_subscription_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
     if !out.has_errors() {
@@ -197,20 +196,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_subscribe_session() {
-        let tokens = to_tokens("SUBSCRIBE SESSION TO notifications;");
-        let parsed = parse_subscribe_session_tokens(&tokens).expect("parse should succeed");
+    fn parses_create_subscription() {
+        let tokens = to_tokens("CREATE SUBSCRIPTION live_notifications TO notifications;");
+        let parsed = parse_create_subscription_tokens(&tokens).expect("parse should succeed");
+        assert_eq!(parsed.name.as_str(), "live_notifications");
         assert_eq!(parsed.relay.as_str(), "notifications");
         assert_eq!(parsed.filter_map, None);
     }
 
     #[test]
-    fn parses_subscribe_session_with_filter_map_program() {
+    fn parses_create_subscription_with_filter_map_program() {
         let tokens = to_tokens(
-            "SUBSCRIBE SESSION TO notifications SET notifications.normalized = \
-             lower(notifications.name) UNSET notifications.raw WHERE notifications.active;",
+            "CREATE SUBSCRIPTION live_notifications TO notifications SET notifications.normalized \
+             = lower(notifications.name) UNSET notifications.raw WHERE notifications.active;",
         );
-        let parsed = parse_subscribe_session_tokens(&tokens).expect("parse should succeed");
+        let parsed = parse_create_subscription_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.relay.as_str(), "notifications");
         assert_eq!(
             parsed.filter_map.as_deref(),
@@ -222,11 +222,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_subscribe_session_with_delivery_options() {
+    fn parses_create_subscription_with_delivery_options() {
         let tokens = to_tokens(
-            "SUBSCRIBE SESSION TO telemetry DROPPING BATCH SAMPLE RATE 0.1 WHERE telemetry.active;",
+            "CREATE SUBSCRIPTION sampled_telemetry TO telemetry DROPPING BATCH SAMPLE RATE 0.1 \
+             WHERE telemetry.active;",
         );
-        let parsed = parse_subscribe_session_tokens(&tokens).expect("parse should succeed");
+        let parsed = parse_create_subscription_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.relay.as_str(), "telemetry");
         assert_eq!(parsed.delivery_behavior.as_ref(), "DROPPING");
         assert_eq!(parsed.batch_sample_rate.as_deref(), Some("0.1"));
@@ -234,9 +235,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_subscribe_session_sample_rate_outside_probability_range() {
-        let tokens = to_tokens("SUBSCRIBE SESSION TO telemetry BATCH SAMPLE RATE 1.1;");
-        let result = subscribe_session_parser()
+    fn rejects_create_subscription_sample_rate_outside_probability_range() {
+        let tokens =
+            to_tokens("CREATE SUBSCRIPTION sampled_telemetry TO telemetry BATCH SAMPLE RATE 1.1;");
+        let result = create_subscription_parser()
             .then_ignore(end())
             .parse(tokens.as_slice())
             .into_result();
@@ -244,90 +246,153 @@ mod tests {
     }
 
     #[test]
-    fn renders_subscribe_session_query_with_delivery_options() {
+    fn renders_create_subscription_query_with_delivery_options() {
         assert_eq!(
-            subscribe_session_query(
+            create_subscription_query(
+                "sampled_telemetry",
                 "telemetry",
                 SubscriptionDeliveryBehavior::Dropping,
                 Some("0.1"),
                 Some("WHERE telemetry.active"),
             ),
-            "SUBSCRIBE SESSION TO telemetry DROPPING BATCH SAMPLE RATE 0.1 WHERE telemetry.active;"
+            "CREATE SUBSCRIPTION sampled_telemetry TO telemetry DROPPING BATCH SAMPLE RATE 0.1 \
+             WHERE telemetry.active;"
         );
     }
 
     #[test]
-    fn suggests_delivery_options_after_subscribe_session_relay() {
-        let input = "SUBSCRIBE SESSION TO telemetry D";
-        let suggestions = suggest_subscribe_session(input, input.len());
+    fn suggests_delivery_options_after_subscription_relay() {
+        let input = "CREATE SUBSCRIPTION sampled_telemetry TO telemetry D";
+        let suggestions = suggest_create_subscription(input, input.len());
         assert!(suggestions.contains(&"DROPPING".to_string()));
 
-        let input = "SUBSCRIBE SESSION TO telemetry B";
-        let suggestions = suggest_subscribe_session(input, input.len());
+        let input = "CREATE SUBSCRIPTION sampled_telemetry TO telemetry B";
+        let suggestions = suggest_create_subscription(input, input.len());
         assert!(suggestions.contains(&"BLOCKING".to_string()));
         assert!(suggestions.contains(&"BATCH".to_string()));
     }
 
     #[test]
-    fn suggests_relay_reference_after_subscribe_session_source() {
-        let input = "SUBSCRIBE SESSION TO ";
-        let suggestions = suggest_subscribe_session(input, input.len());
+    fn suggests_relay_reference_after_subscription_source() {
+        let input = "CREATE SUBSCRIPTION sampled_telemetry TO ";
+        let suggestions = suggest_create_subscription(input, input.len());
         assert!(suggestions.contains(&"ref:relay".to_string()));
     }
 
     #[test]
-    fn subscribe_session_after_stream_has_no_cross_branch_suggestions() {
-        let input = "SUBSCRIBE SESSION TO notifications ";
-        let suggestions = suggest_subscribe_session(input, input.len());
+    fn create_subscription_after_stream_has_no_cross_branch_suggestions() {
+        let input = "CREATE SUBSCRIPTION live_notifications TO notifications ";
+        let suggestions = suggest_create_subscription(input, input.len());
         assert!(!suggestions.contains(&"field_name".to_string()));
         assert!(!suggestions.contains(&"ref:relay".to_string()));
     }
 
     #[test]
-    fn suggests_subscribe_session_keyword_phrase() {
-        let input = "SUB";
-        let suggestions = suggest_subscribe_session(input, input.len());
-        assert!(suggestions.contains(&"SUBSCRIBE SESSION".to_string()));
+    fn suggests_create_subscription_keyword_phrase() {
+        let input = "CR";
+        let suggestions = suggest_create_subscription(input, input.len());
+        assert!(suggestions.contains(&"CREATE SUBSCRIPTION".to_string()));
     }
 
     #[test]
-    fn parses_unsubscribe_session() {
-        let tokens = to_tokens("UNSUBSCRIBE SESSION FROM notifications;");
-        let parsed = unsubscribe_session_parser()
-            .then_ignore(end())
-            .parse(tokens.as_slice())
-            .into_result()
-            .expect("parse should succeed");
-        assert_eq!(parsed.relay.as_str(), "notifications");
-        assert_eq!(parsed.filter_map, None);
+    fn suggests_name_then_to_without_cross_branch_leakage() {
+        let input = "CREATE SUBSCRIPTION ";
+        let suggestions = suggest_create_subscription(input, input.len());
+        assert!(suggestions.contains(&"session_subscription_name".to_string()));
+        assert!(!suggestions.contains(&"ref:relay".to_string()));
+
+        let input = "CREATE SUBSCRIPTION live_notifications ";
+        let suggestions = suggest_create_subscription(input, input.len());
+        assert!(suggestions.contains(&"TO".to_string()));
+        assert!(!suggestions.contains(&"ref:relay".to_string()));
     }
 
     #[test]
-    fn parses_unsubscribe_session_with_filter_map_program() {
-        let tokens = to_tokens(
-            "UNSUBSCRIBE SESSION FROM notifications SET notifications.normalized = \
-             lower(notifications.name) WHERE notifications.active;",
+    fn rejects_unnamed_create_subscription() {
+        let tokens = to_tokens("CREATE SUBSCRIPTION TO notifications;");
+        assert!(
+            create_subscription_parser()
+                .then_ignore(end())
+                .parse(tokens.as_slice())
+                .has_errors()
         );
-        let parsed = unsubscribe_session_parser()
+    }
+
+    #[test]
+    fn rejects_legacy_session_subscription_commands() {
+        for input in [
+            "SUBSCRIBE SESSION live_notifications TO notifications;",
+            "UNSUBSCRIBE SESSION live_notifications;",
+        ] {
+            assert!(crate::client_statement::parse_client_statement(input).is_err());
+        }
+    }
+
+    #[test]
+    fn parses_delete_subscription() {
+        let tokens = to_tokens("DELETE SUBSCRIPTION live_notifications;");
+        let parsed = delete_subscription_parser()
             .then_ignore(end())
             .parse(tokens.as_slice())
             .into_result()
             .expect("parse should succeed");
-        assert_eq!(parsed.relay.as_str(), "notifications");
+        assert_eq!(parsed.name.as_str(), "live_notifications");
+    }
+
+    #[test]
+    fn delete_accepts_only_the_session_subscription_name() {
         assert_eq!(
-            parsed.filter_map.as_deref(),
-            Some(
-                "SET notifications.normalized = lower ( notifications.name ) WHERE \
-                 notifications.active"
-            )
+            delete_subscription_query("live_notifications"),
+            "DELETE SUBSCRIPTION live_notifications;"
+        );
+        let tokens = to_tokens("DELETE SUBSCRIPTION live_notifications FROM notifications;");
+        assert!(
+            delete_subscription_parser()
+                .then_ignore(end())
+                .parse(tokens.as_slice())
+                .has_errors()
         );
     }
 
     #[test]
-    fn rejects_invalid_subscribe_session_filter_map_program() {
-        let tokens =
-            to_tokens("SUBSCRIBE SESSION TO notifications SET notifications.normalized =;");
-        let result = subscribe_session_parser()
+    fn delete_after_name_has_no_parameter_suggestions() {
+        let input = "DELETE SUBSCRIPTION live_notifications ";
+        let prefix = current_word_prefix(input);
+        let (_, _, tokens) = lex_input(input).expect("input should lex");
+        let output = delete_subscription_parser()
+            .then_ignore(end())
+            .parse(tokens.as_slice());
+        let suggestions = suggestions_from_errors(output.into_errors(), &prefix);
+        assert!(!suggestions.contains(&"FROM".to_string()));
+        assert!(!suggestions.contains(&"ref:relay".to_string()));
+        assert!(!suggestions.contains(&"BLOCKING".to_string()));
+        assert!(!suggestions.contains(&"DROPPING".to_string()));
+        assert!(!suggestions.contains(&"BATCH".to_string()));
+        assert!(!suggestions.contains(&"SET".to_string()));
+        assert!(!suggestions.contains(&"UNSET".to_string()));
+        assert!(!suggestions.contains(&"WHERE".to_string()));
+    }
+
+    #[test]
+    fn delete_suggests_a_session_subscription_reference() {
+        let input = "DELETE SUBSCRIPTION ";
+        let prefix = current_word_prefix(input);
+        let (_, _, tokens) = lex_input(input).expect("input should lex");
+        let output = delete_subscription_parser()
+            .then_ignore(end())
+            .parse(tokens.as_slice());
+        let suggestions = suggestions_from_errors(output.into_errors(), &prefix);
+        assert!(suggestions.contains(&"ref:session_subscription".to_string()));
+        assert!(!suggestions.contains(&"ref:relay".to_string()));
+    }
+
+    #[test]
+    fn rejects_invalid_create_subscription_filter_map_program() {
+        let tokens = to_tokens(
+            "CREATE SUBSCRIPTION live_notifications TO notifications SET notifications.normalized \
+             =;",
+        );
+        let result = create_subscription_parser()
             .then_ignore(end())
             .parse(tokens.as_slice())
             .into_result();

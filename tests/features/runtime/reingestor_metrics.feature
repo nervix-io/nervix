@@ -46,8 +46,8 @@ Feature: Reingestor metrics
         TO audit_notifications
         BRANCHED BY by_audit_reingestor_metrics_node VALUES { tenant = audit_notifications.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO tenant_notifications;
-        SUBSCRIBE SESSION TO audit_notifications;
+        CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications;
+        CREATE SUBSCRIPTION audit_notifications_subscription TO audit_notifications;
         START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/reingestor-metrics"

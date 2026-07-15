@@ -33,7 +33,7 @@ Feature: Relay metrics
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         TIMESTAMP AT occurred_at
         FROM ENDPOINT relay_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/relay-metrics"
@@ -168,7 +168,7 @@ Feature: Relay metrics
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO notifications WHERE notifications.user_id = 42;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE notifications.user_id = 42;
       START;
       """
     And http payload is posted to host "http-{{test_id}}-buffer.example.com" path "/relay-buffer"

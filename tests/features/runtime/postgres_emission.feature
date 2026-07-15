@@ -54,7 +54,7 @@ Feature: Postgres emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And emitter "to_pg" enters stall mode
@@ -138,7 +138,7 @@ Feature: Postgres emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "10s" repeatedly publishing MQTT message to topic "postgres_conflict_notifications_in_{{test_id}}" yields a relay subscription payload

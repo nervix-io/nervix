@@ -1294,7 +1294,7 @@ Feature: Web console NSPL REPL
         DEDUPLICATE ON notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      SUBSCRIBE SESSION TO notifications WHERE notifications.user_id = 42;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE notifications.user_id = 42;
       START;
       """
     And http payload is posted to host "http-{{test_id}}-buffer.example.com" path "/relay-buffer"

@@ -65,7 +65,7 @@ Feature: Branch namespace
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO projected_notifications WHERE projected_notifications.tenant = 'acme';
+      CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications WHERE projected_notifications.tenant = 'acme';
       START;
       """
     When MQTT message is published to topic "branch_namespace_{{test_id}}"
@@ -136,7 +136,7 @@ Feature: Branch namespace
         BRANCHED BY by_copy_notifications VALUES { tenant = branch.tenant }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO copied_notifications;
+      CREATE SUBSCRIPTION copied_notifications_subscription TO copied_notifications;
       START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"

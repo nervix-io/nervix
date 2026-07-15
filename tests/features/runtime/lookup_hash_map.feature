@@ -102,7 +102,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
         MAX TIME 10m
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO enriched_logs;
+      CREATE SUBSCRIPTION enriched_logs_subscription TO enriched_logs;
 
       START;
       """

@@ -322,7 +322,6 @@ static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 struct SessionSubscription {
     domain: Domain,
     relay: Identifier,
-    definition: String,
     stop_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -339,7 +338,7 @@ struct SubscriptionMatcher {
 }
 
 struct SessionSubscriptions {
-    subscriptions: HashMap<String, SessionSubscription>,
+    subscriptions: HashMap<Identifier, SessionSubscription>,
     transaction: SessionCommandTransaction,
 }
 
@@ -458,8 +457,8 @@ impl SessionSubscriptions {
 
     fn insert(
         &mut self,
+        name: Identifier,
         domain: Domain,
-        definition: String,
         relay: Identifier,
         config: SessionSubscriptionTaskConfig,
     ) {
@@ -475,7 +474,7 @@ impl SessionSubscriptions {
         } = config;
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let task_domain = domain.clone();
-        let event_definition = definition.clone();
+        let event_name = name.clone();
         let event_stream = relay.clone();
         let task = tokio::spawn(async move {
             let mut receiver = receiver;
@@ -495,7 +494,7 @@ impl SessionSubscriptions {
                                                     level: ServerEventLevel::Error as i32,
                                                     message: format!(
                                                         "session subscription '{}' failed to expand relay batch: {}",
-                                                        event_definition, error
+                                                        event_name, error
                                                     ),
                                                 },
                                             )),
@@ -530,7 +529,7 @@ impl SessionSubscriptions {
                                                                     level: ServerEventLevel::Error as i32,
                                                                     message: format!(
                                                                         "session subscription '{}' failed to load materialized side inputs: {}",
-                                                                        event_definition, error
+                                                                        event_name, error
                                                                     ),
                                                                 },
                                                             )),
@@ -561,7 +560,7 @@ impl SessionSubscriptions {
                                                             level: ServerEventLevel::Error as i32,
                                                             message: format!(
                                                                 "session subscription '{}' FILTER-MAP failed: {}",
-                                                                event_definition, error
+                                                                event_name, error
                                                             ),
                                                         },
                                                     )),
@@ -583,7 +582,7 @@ impl SessionSubscriptions {
                                     let event = SessionResponse {
                                         event: Some(proto::session_response::Event::Subscription(
                                             proto::SubscriptionEvent {
-                                                subscription: event_definition.clone(),
+                                                subscription: event_name.as_str().to_string(),
                                                 relay: event_stream.as_str().to_string(),
                                                 payload,
                                             }
@@ -621,11 +620,10 @@ impl SessionSubscriptions {
         });
 
         self.subscriptions.insert(
-            definition.clone(),
+            name,
             SessionSubscription {
                 domain,
                 relay,
-                definition,
                 stop_tx,
                 task,
             },
@@ -638,15 +636,20 @@ impl SessionSubscriptions {
             .any(|subscription| subscription.domain == *domain && subscription.relay == *relay)
     }
 
-    async fn remove(&mut self, key: &str) -> Option<(Domain, Identifier, String)> {
-        let subscription = self.subscriptions.remove(key)?;
+    fn matching_names(&self, prefix: &str) -> Vec<String> {
+        let prefix = prefix.to_ascii_lowercase();
+        self.subscriptions
+            .keys()
+            .filter(|name| prefix.is_empty() || name.as_str().starts_with(&prefix))
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    async fn remove(&mut self, name: &Identifier) -> Option<(Domain, Identifier)> {
+        let subscription = self.subscriptions.remove(name)?;
         let _ = subscription.stop_tx.send(true);
         let _ = subscription.task.await;
-        Some((
-            subscription.domain,
-            subscription.relay,
-            subscription.definition,
-        ))
+        Some((subscription.domain, subscription.relay))
     }
 
     async fn stop_all(self, service: &SessionServiceImpl) {
@@ -838,28 +841,6 @@ fn render_subscription_literal(literal: &SubscriptionLiteral) -> String {
         SubscriptionLiteral::Number(value) => value.clone(),
         SubscriptionLiteral::Bool(value) => value.to_string(),
     }
-}
-
-fn session_subscription_definition(
-    relay: &Identifier,
-    delivery_behavior: SubscriptionDeliveryBehavior,
-    batch_sample_rate: Option<&str>,
-    filter_map: Option<&str>,
-) -> String {
-    let mut definition = format!("TO {}", relay.as_str());
-    if delivery_behavior != SubscriptionDeliveryBehavior::Blocking {
-        definition.push(' ');
-        definition.push_str(delivery_behavior.as_ref());
-    }
-    if let Some(batch_sample_rate) = batch_sample_rate {
-        definition.push_str(" BATCH SAMPLE RATE ");
-        definition.push_str(batch_sample_rate);
-    }
-    if let Some(filter_map) = filter_map {
-        definition.push(' ');
-        definition.push_str(filter_map);
-    }
-    definition
 }
 
 fn parse_subscription_batch_sample_rate(rate: Option<&str>) -> Result<Option<f64>, String> {
@@ -5733,7 +5714,7 @@ impl SessionServiceImpl {
     async fn process_suggest(
         &self,
         req: SuggestRequest,
-        _subscriptions: &SessionSubscriptions,
+        subscriptions: &SessionSubscriptions,
     ) -> SuggestResponse {
         let cursor = usize::try_from(req.cursor).unwrap_or(req.input.len());
         let domain = parse_request_domain(&req.domain).ok();
@@ -5744,12 +5725,15 @@ impl SessionServiceImpl {
         let mut suggestions = Vec::new();
         let mut semantic_kinds = Vec::new();
         let mut expects_resource_ref = false;
+        let mut expects_session_subscription_ref = false;
         let requested_resource_versions = requested_resource_versions(&req.input, cursor);
         for item in &grammar {
             if let Some(kind) = ModelKind::from_completion_label(item) {
                 semantic_kinds.push(kind);
             } else if item == "ref:resource" {
                 expects_resource_ref = true;
+            } else if item == "ref:session_subscription" {
+                expects_session_subscription_ref = true;
             } else if prefix.is_empty()
                 || item
                     .to_ascii_lowercase()
@@ -5766,6 +5750,10 @@ impl SessionServiceImpl {
             {
                 suggestions.extend(ids.into_iter().map(|id| id.to_string()));
             }
+        }
+
+        if expects_session_subscription_ref {
+            suggestions.extend(subscriptions.matching_names(&prefix));
         }
 
         if expects_resource_ref {
@@ -5787,7 +5775,10 @@ impl SessionServiceImpl {
             ));
         }
 
-        if grammar_input.contains("DOMAIN") || (semantic_kinds.is_empty() && !expects_resource_ref)
+        if grammar_input.contains("DOMAIN")
+            || (semantic_kinds.is_empty()
+                && !expects_resource_ref
+                && !expects_session_subscription_ref)
         {
             let domains = self.consensus.current_domains().await;
             suggestions.extend(domains.into_keys().filter_map(|id| {
@@ -6211,7 +6202,7 @@ impl SessionServiceImpl {
             ClientStatement::UploadResource(upload) => {
                 return self.upload_resource_command(upload).await;
             }
-            ClientStatement::SubscribeSession(subscription) => {
+            ClientStatement::CreateSubscription(subscription) => {
                 let domain = match parse_request_domain(request_domain) {
                     Ok(domain) => domain,
                     Err(RequestDomainError::Missing) => {
@@ -6228,28 +6219,11 @@ impl SessionServiceImpl {
                     return command_error(error);
                 }
                 return self
-                    .subscribe_session(&domain, subscription, tx, subscriptions)
+                    .create_subscription(&domain, subscription, tx, subscriptions)
                     .await;
             }
-            ClientStatement::UnsubscribeSession(subscription) => {
-                let domain = match parse_request_domain(request_domain) {
-                    Ok(domain) => domain,
-                    Err(RequestDomainError::Missing) => {
-                        return command_error("no active domain selected".to_string());
-                    }
-                    Err(RequestDomainError::Invalid) => {
-                        return command_error("invalid domain".to_string());
-                    }
-                };
-                if self.consensus.current_domain(&domain).await.is_none() {
-                    return command_error(format!("domain '{}' does not exist", domain.as_str()));
-                }
-                if let Err(error) = self.reconcile_running_domain_runtime(&domain).await {
-                    return command_error(error);
-                }
-                return self
-                    .unsubscribe_session(&domain, subscription, subscriptions)
-                    .await;
+            ClientStatement::DeleteSubscription(subscription) => {
+                return self.delete_subscription(subscription, subscriptions).await;
             }
             ClientStatement::BeginTransaction
             | ClientStatement::CommitTransaction
@@ -6624,16 +6598,6 @@ impl SessionServiceImpl {
                 self.set_node_cordoned(uncordon.node_id, false).await
             }
             Statement::DrainNode(drain) => self.drain_node(drain.node_id).await,
-            Statement::SubscribeSession(subscription) => {
-                let domain = domain.as_ref().expect("domain required");
-                self.subscribe_session(domain, subscription, tx, subscriptions)
-                    .await
-            }
-            Statement::UnsubscribeSession(subscription) => {
-                let domain = domain.as_ref().expect("domain required");
-                self.unsubscribe_session(domain, subscription, subscriptions)
-                    .await
-            }
             Statement::DescribeRelay(describe) => {
                 let domain = domain.as_ref().expect("domain required");
                 self.describe_stream(domain, describe).await
@@ -9029,25 +8993,25 @@ impl SessionServiceImpl {
         Ok(Some((ingestor.clone(), ingestor_node.clone())))
     }
 
-    async fn subscribe_session(
+    async fn create_subscription(
         &self,
         domain: &Domain,
-        subscription: nervix_models::SubscribeSession,
+        subscription: nervix_models::CreateSubscription,
         tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        let definition = session_subscription_definition(
-            &subscription.relay,
-            subscription.delivery_behavior,
-            subscription.batch_sample_rate.as_deref(),
-            subscription.filter_map.as_deref(),
-        );
-        if subscriptions.subscriptions.contains_key(&definition) {
+        if subscriptions.subscriptions.contains_key(&subscription.name) {
             return CommandResult {
                 success: false,
-                message: format!("session subscription '{}' already exists", definition),
+                message: format!(
+                    "session subscription '{}' already exists",
+                    subscription.name
+                ),
                 diagnostics: vec![Diagnostic {
-                    message: format!("session subscription '{}' already exists", definition),
+                    message: format!(
+                        "session subscription '{}' already exists",
+                        subscription.name
+                    ),
                     span_start: 0,
                     span_end: 0,
                 }],
@@ -9062,7 +9026,10 @@ impl SessionServiceImpl {
                 Err(err) => {
                     return CommandResult {
                         success: false,
-                        message: format!("failed to subscribe session {}: {err}", definition),
+                        message: format!(
+                            "failed to subscribe session '{}': {err}",
+                            subscription.name
+                        ),
                         diagnostics: vec![Diagnostic {
                             message: err,
                             span_start: 0,
@@ -9210,12 +9177,12 @@ impl SessionServiceImpl {
                             success: false,
                             message: format!(
                                 "failed to compile session subscription '{}': {err}",
-                                definition
+                                subscription.name
                             ),
                             diagnostics: vec![Diagnostic {
                                 message: format!(
                                     "failed to compile session subscription '{}': {err}",
-                                    definition
+                                    subscription.name
                                 ),
                                 span_start: 0,
                                 span_end: 0,
@@ -9298,8 +9265,8 @@ impl SessionServiceImpl {
 
         self.register_subscription_interest(domain, &relay).await;
         subscriptions.insert(
+            subscription.name.clone(),
             domain.clone(),
-            definition.clone(),
             relay.clone(),
             SessionSubscriptionTaskConfig {
                 filter_map,
@@ -9316,8 +9283,8 @@ impl SessionServiceImpl {
         CommandResult {
             success: true,
             message: format!(
-                "subscribed session {} in domain '{}'",
-                definition,
+                "created subscription '{}' in domain '{}'",
+                subscription.name,
                 domain.as_str()
             ),
             diagnostics: Vec::new(),
@@ -9326,20 +9293,13 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn unsubscribe_session(
+    async fn delete_subscription(
         &self,
-        domain: &Domain,
-        subscription: nervix_models::UnsubscribeSession,
+        subscription: nervix_models::DeleteSubscription,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        let definition = session_subscription_definition(
-            &subscription.relay,
-            subscription.delivery_behavior,
-            subscription.batch_sample_rate.as_deref(),
-            subscription.filter_map.as_deref(),
-        );
-        match subscriptions.remove(&definition).await {
-            Some((subscription_domain, relay, removed_definition)) => {
+        match subscriptions.remove(&subscription.name).await {
+            Some((subscription_domain, relay)) => {
                 if !subscriptions.contains_domain_stream(&subscription_domain, &relay) {
                     self.unregister_subscription_interest(&subscription_domain, &relay)
                         .await;
@@ -9347,9 +9307,9 @@ impl SessionServiceImpl {
                 CommandResult {
                     success: true,
                     message: format!(
-                        "unsubscribed session {} in domain '{}'",
-                        removed_definition,
-                        domain.as_str()
+                        "deleted subscription '{}' from domain '{}'",
+                        subscription.name,
+                        subscription_domain.as_str()
                     ),
                     diagnostics: Vec::new(),
                     kind: CommandResultKind::Ok as i32,
@@ -9358,9 +9318,12 @@ impl SessionServiceImpl {
             }
             None => CommandResult {
                 success: false,
-                message: format!("session subscription '{}' does not exist", definition),
+                message: format!(
+                    "session subscription '{}' does not exist",
+                    subscription.name
+                ),
                 diagnostics: vec![Diagnostic {
-                    message: format!("session subscription '{}' not found", definition),
+                    message: format!("session subscription '{}' not found", subscription.name),
                     span_start: 0,
                     span_end: 0,
                 }],
@@ -10341,8 +10304,6 @@ fn requires_leader(statement: &Statement) -> bool {
     !matches!(
         statement,
         Statement::ShowClusterStatus(_)
-            | Statement::SubscribeSession(_)
-            | Statement::UnsubscribeSession(_)
             | Statement::DescribeResource(_)
             | Statement::DescribeDomain(_)
             | Statement::DescribeEndpoint(_)
@@ -14232,37 +14193,6 @@ mod tests {
     }
 
     #[test]
-    fn session_subscription_definition_uses_collect_form() {
-        assert_eq!(
-            session_subscription_definition(
-                &identifier("events"),
-                SubscriptionDeliveryBehavior::Blocking,
-                None,
-                None,
-            ),
-            "TO events"
-        );
-        assert_eq!(
-            session_subscription_definition(
-                &identifier("events"),
-                SubscriptionDeliveryBehavior::Blocking,
-                None,
-                Some("SET seen = true WHERE tenant == \"acme\"")
-            ),
-            "TO events SET seen = true WHERE tenant == \"acme\""
-        );
-        assert_eq!(
-            session_subscription_definition(
-                &identifier("events"),
-                SubscriptionDeliveryBehavior::Dropping,
-                Some("0.1"),
-                Some("WHERE tenant == \"acme\"")
-            ),
-            "TO events DROPPING BATCH SAMPLE RATE 0.1 WHERE tenant == \"acme\""
-        );
-    }
-
-    #[test]
     fn parse_subscription_literal_enforces_declared_types() {
         let field = identifier("created_at");
         assert!(matches!(
@@ -14353,7 +14283,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_subscriptions_track_definitions_and_cleanup_tasks() {
+    async fn session_subscriptions_track_names_and_cleanup_tasks() {
         let mut subscriptions = SessionSubscriptions::new();
         let (tx, _rx) = mpsc::channel(4);
         let events = crate::runtime::RelayBroadcast::with_capacity(
@@ -14361,8 +14291,8 @@ mod tests {
         );
         let events_rx = events.new_receiver();
         subscriptions.insert(
+            identifier("live_events"),
             Domain::parse("default").expect("valid domain"),
-            "TO events".to_string(),
             identifier("events"),
             SessionSubscriptionTaskConfig {
                 filter_map: None,
@@ -14375,15 +14305,24 @@ mod tests {
                 tx,
             },
         );
+        assert_eq!(
+            subscriptions.matching_names("LIVE"),
+            vec!["live_events".to_string()]
+        );
+        assert!(subscriptions.matching_names("missing").is_empty());
 
         let removed = subscriptions
-            .remove("TO events")
+            .remove(&identifier("live_events"))
             .await
             .expect("subscription should be removed");
         assert_eq!(removed.0.as_str(), "default");
         assert_eq!(removed.1.as_str(), "events");
-        assert_eq!(removed.2, "TO events");
-        assert!(subscriptions.remove("TO missing").await.is_none());
+        assert!(
+            subscriptions
+                .remove(&identifier("missing_events"))
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

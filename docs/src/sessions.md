@@ -5,15 +5,17 @@ Nervix supports session-local commands over its session protocol.
 These commands are not persisted in the registry:
 
 ```nspl
-SUBSCRIBE SESSION TO notifications SET notifications.normalized = lower(notifications.tenant) UNSET notifications.user_id WHERE notifications.tenant = 'acme';
-SUBSCRIBE SESSION TO telemetry DROPPING BATCH SAMPLE RATE 0.1 WHERE telemetry.tenant = 'acme';
-UNSUBSCRIBE SESSION FROM notifications SET notifications.normalized = lower(notifications.tenant) UNSET notifications.user_id WHERE notifications.tenant = 'acme';
+CREATE SUBSCRIPTION acme_notifications TO notifications SET notifications.normalized = lower(notifications.tenant) UNSET notifications.user_id WHERE notifications.tenant = 'acme';
+CREATE SUBSCRIPTION sampled_telemetry TO telemetry DROPPING BATCH SAMPLE RATE 0.1 WHERE telemetry.tenant = 'acme';
+DELETE SUBSCRIPTION acme_notifications;
 DESCRIBE RELAY notifications WHERE (tenant = 'acme');
 ```
 
 Current session behavior:
 
 - subscription creation validates that the referenced relay exists in the active runtime
+- subscription names are unique within one connected session and may refer to relays in different domains
+- `DELETE SUBSCRIPTION` resolves only the session-local subscription name, independent of the currently active domain
 - subscribing to a relay collects records from all active branch groups for that relay
 - optional `SET` / `UNSET` / `WHERE` clauses run at the session subscription boundary and filter-map the delivered records
 - optional `BATCH SAMPLE RATE <rate>` samples arrivals after `WHERE` has been evaluated

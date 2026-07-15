@@ -56,7 +56,7 @@ Feature: WASM processor runtime behavior
         TO enriched_events
         BRANCHED BY by_tenant
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO enriched_events;
+      CREATE SUBSCRIPTION enriched_events_subscription TO enriched_events;
       START;
       """
     When http payload is posted to host "wasm-reference-{{test_id}}.example.com" path "/events"
@@ -140,7 +140,7 @@ Feature: WASM processor runtime behavior
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -256,8 +256,8 @@ Feature: WASM processor runtime behavior
         BRANCHED BY by_tenant
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO enriched_metrics;
-      SUBSCRIBE SESSION TO audited_metrics;
+      CREATE SUBSCRIPTION enriched_metrics_subscription TO enriched_metrics;
+      CREATE SUBSCRIPTION audited_metrics_subscription TO audited_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -350,7 +350,7 @@ Feature: WASM processor runtime behavior
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO routed_metrics;
+      CREATE SUBSCRIPTION routed_metrics_subscription TO routed_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -462,7 +462,7 @@ Feature: WASM processor runtime behavior
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -474,7 +474,7 @@ Feature: WASM processor runtime behavior
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
     Then within "10s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
       """
@@ -527,7 +527,7 @@ Feature: WASM processor runtime behavior
         TO filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -584,7 +584,7 @@ Feature: WASM processor runtime behavior
         TO filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -651,8 +651,8 @@ Feature: WASM processor runtime behavior
         TO go_filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO rust_filtered_metrics;
-      SUBSCRIBE SESSION TO go_filtered_metrics;
+      CREATE SUBSCRIPTION rust_filtered_metrics_subscription TO rust_filtered_metrics;
+      CREATE SUBSCRIPTION go_filtered_metrics_subscription TO go_filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -736,7 +736,7 @@ Feature: WASM processor runtime behavior
         TO go_filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO go_filtered_metrics;
+      CREATE SUBSCRIPTION go_filtered_metrics_subscription TO go_filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -802,7 +802,7 @@ Feature: WASM processor runtime behavior
         TO rust_filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO rust_filtered_metrics;
+      CREATE SUBSCRIPTION rust_filtered_metrics_subscription TO rust_filtered_metrics;
       START;
       """
     When 100 sequential metric http payloads are posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -859,7 +859,7 @@ Feature: WASM processor runtime behavior
         UNBRANCHED
         ON MESSAGE ERROR DLQ error_stream SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
         ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO error_stream;
+      CREATE SUBSCRIPTION error_stream_subscription TO error_stream;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -919,7 +919,7 @@ Feature: WASM processor runtime behavior
         TO filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -972,7 +972,7 @@ Feature: WASM processor runtime behavior
         TO filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -1025,7 +1025,7 @@ Feature: WASM processor runtime behavior
         TO filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
@@ -1079,7 +1079,7 @@ Feature: WASM processor runtime behavior
         TO filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
 
@@ -1124,7 +1124,7 @@ Feature: WASM processor runtime behavior
         TO filtered_metrics
         UNBRANCHED
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      SUBSCRIBE SESSION TO filtered_metrics;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"

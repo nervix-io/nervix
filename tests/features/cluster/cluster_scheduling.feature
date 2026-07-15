@@ -100,7 +100,7 @@ Feature: Cluster scheduling
       """
     And these NSPL commands are executed on node "node-2"
       """
-      SUBSCRIBE SESSION TO forwarded_notifications;
+      CREATE SUBSCRIPTION forwarded_notifications_subscription TO forwarded_notifications;
       """
     And Kafka message is published to topic "notifications_{{test_id}}"
       """
@@ -234,7 +234,7 @@ Feature: Cluster scheduling
     And within "5s" node "{{leader}}" eventually reports scheduled "deduplicator" "remote_deduplicator" owner different from placeholder "leader"
     When these NSPL commands are executed on node "node-2"
       """
-      SUBSCRIBE SESSION TO routed_logs;
+      CREATE SUBSCRIPTION routed_logs_subscription TO routed_logs;
       """
     And Kafka message is published to topic "deduplicator_describe_{{test_id}}"
       """
@@ -485,10 +485,14 @@ Feature: Cluster scheduling
       """
     When these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO notifications;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
-    And emitter "kafka_forward" enters stall mode
+    Then within "10s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
+      """
+      status: running
+      """
+    When emitter "kafka_forward" enters stall mode
     And Kafka message is published to topic "notifications_{{test_id}}"
       """
       {"user_id":42}

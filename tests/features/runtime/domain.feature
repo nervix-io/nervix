@@ -141,7 +141,7 @@ Feature: Domain lifecycle
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest" and fails
@@ -207,7 +207,7 @@ Feature: Domain lifecycle
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -256,7 +256,7 @@ Feature: Domain lifecycle
         BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
     When websocket message is published to host "ws-{{test_id}}.example.com" path "/ws" and fails

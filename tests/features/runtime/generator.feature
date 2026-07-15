@@ -133,7 +133,7 @@ Feature: Generator node
             generated_notifications.total = left_notifications.amount + right_notifications.amount
         ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO generated_notifications;
+      CREATE SUBSCRIPTION generated_notifications_subscription TO generated_notifications;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/left"
@@ -217,7 +217,7 @@ Feature: Generator node
         SET generated_notifications.user_id = notifications.user_id,
             generated_notifications.amount = notifications.amount ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO generated_notifications;
+      CREATE SUBSCRIPTION generated_notifications_subscription TO generated_notifications;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
@@ -288,7 +288,7 @@ Feature: Generator node
         SET generated_notifications.user_id = notifications.user_id,
             generated_notifications.amount = notifications.amount ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO generated_notifications;
+      CREATE SUBSCRIPTION generated_notifications_subscription TO generated_notifications;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
@@ -359,7 +359,7 @@ Feature: Generator node
         SET generated_notifications.user_id = notifications.user_id,
             generated_notifications.amount = notifications.amount ON MESSAGE ERROR LOG;
 
-      SUBSCRIBE SESSION TO generated_notifications;
+      CREATE SUBSCRIPTION generated_notifications_subscription TO generated_notifications;
       START AT NOW TIME RATE 20.0;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"

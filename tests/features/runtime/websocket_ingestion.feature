@@ -31,7 +31,7 @@ Feature: Websocket endpoint ingestion
         BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     And websocket message is published to host "ws-{{test_id}}.example.com" path "/ws"
@@ -94,7 +94,7 @@ Feature: Websocket endpoint ingestion
         MODE NO_ACK SEQUENTIAL
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      SUBSCRIBE SESSION TO notifications;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
     And secure websocket message is published to host "ws-{{test_id}}.example.com" path "/ws" using CA from resource directory "tls_bundle"
@@ -159,7 +159,7 @@ Feature: Websocket endpoint ingestion
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO notifications;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
     And websocket text frames are exchanged with host "ws-{{test_id}}.example.com" path "/ws"

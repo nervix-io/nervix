@@ -7,7 +7,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = client.execute("SHOW CLUSTER STATUS;").await?;
     println!("{}", result.message);
 
-    let request = SubscriptionRequest::new("orders")
+    let request = SubscriptionRequest::new("acme_orders", "orders")
         .with_filter_map("SET normalized = lower(tenant) UNSET raw WHERE tenant = \"acme\"");
     let result = client.subscribe(&request).await?;
     println!("{}", result.message);

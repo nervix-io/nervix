@@ -8329,8 +8329,8 @@ mod tests {
                 | nervix_nspl::client_statement::ClientStatement::BeginTransaction
                 | nervix_nspl::client_statement::ClientStatement::CommitTransaction
                 | nervix_nspl::client_statement::ClientStatement::RevertTransaction
-                | nervix_nspl::client_statement::ClientStatement::SubscribeSession(_)
-                | nervix_nspl::client_statement::ClientStatement::UnsubscribeSession(_) => {}
+                | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                | nervix_nspl::client_statement::ClientStatement::DeleteSubscription(_) => {}
                 nervix_nspl::client_statement::ClientStatement::Server(statement) => {
                     match statement {
                         nervix_models::Statement::CreateDomain(create) => {
@@ -8341,7 +8341,6 @@ mod tests {
                         }
                         nervix_models::Statement::CreateResource(_)
                         | nervix_models::Statement::UploadResource(_)
-                        | nervix_models::Statement::SubscribeSession(_)
                         | nervix_models::Statement::StartDomain(_) => {}
                         other => panic!("unexpected {name} example statement: {other:?}"),
                     }

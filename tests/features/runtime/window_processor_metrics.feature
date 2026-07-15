@@ -45,7 +45,7 @@ Feature: Window processor metrics
         AGGREGATE
           metrics_summary.tenant = FIRST(metrics_input.tenant),
           metrics_summary.sample_count = COUNT(metrics_input.latency) ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO metrics_summary;
+        CREATE SUBSCRIPTION metrics_summary_subscription TO metrics_summary;
         START;
       """
     When http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/window-metrics"

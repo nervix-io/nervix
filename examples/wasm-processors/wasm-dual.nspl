@@ -91,10 +91,10 @@ CREATE WASM PROCESSOR go_filter_even_rows
   UNBRANCHED
   ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
 
-SUBSCRIBE SESSION TO rust_filtered_metrics;
-SUBSCRIBE SESSION TO rust_positive_metrics;
-SUBSCRIBE SESSION TO go_filtered_metrics;
-SUBSCRIBE SESSION TO go_positive_metrics;
+CREATE SUBSCRIPTION rust_filtered_metrics_subscription TO rust_filtered_metrics;
+CREATE SUBSCRIPTION rust_positive_metrics_subscription TO rust_positive_metrics;
+CREATE SUBSCRIPTION go_filtered_metrics_subscription TO go_filtered_metrics;
+CREATE SUBSCRIPTION go_positive_metrics_subscription TO go_positive_metrics;
 
 START;
 

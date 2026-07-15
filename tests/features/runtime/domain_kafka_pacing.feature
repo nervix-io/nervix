@@ -35,7 +35,7 @@ Feature: Kafka ingestor domain pacing
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -89,7 +89,7 @@ Feature: Kafka ingestor domain pacing
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
       """
@@ -150,7 +150,7 @@ Feature: Kafka ingestor domain pacing
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -207,7 +207,7 @@ Feature: Kafka ingestor domain pacing
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
       """
@@ -265,7 +265,7 @@ Feature: Kafka ingestor domain pacing
         TOPIC notifications_{{test_id}}
         OFFSET BY DOMAIN
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -279,7 +279,7 @@ Feature: Kafka ingestor domain pacing
     When the cluster is restarted
     And these NSPL commands are executed on the leader node
       """
-      SUBSCRIBE SESSION TO notifications;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     Then within "10s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
       """
@@ -337,7 +337,7 @@ Feature: Kafka ingestor domain pacing
         TOPIC notifications_{{test_id}}
         OFFSET BY DOMAIN
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -414,7 +414,7 @@ Feature: Kafka ingestor domain pacing
         OFFSET BY DOMAIN
         INSTANCES 2
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
@@ -495,7 +495,7 @@ Feature: Kafka ingestor domain pacing
         OFFSET BY DOMAIN
         INSTANCES 2
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
@@ -577,7 +577,7 @@ Feature: Kafka ingestor domain pacing
         TOPIC notifications_{{test_id}}
         OFFSET BY DOMAIN
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
       """

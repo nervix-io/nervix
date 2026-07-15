@@ -309,7 +309,7 @@ CREATE INGESTOR prom_samples
   QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
   EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-SUBSCRIBE SESSION TO samples;
+CREATE SUBSCRIPTION live_samples TO samples;
 ```
 
 Prometheus vector samples are flattened into JSON objects made of labels plus `value` and `timestamp`, then decoded through the configured codec.

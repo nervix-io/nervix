@@ -45,7 +45,7 @@ Feature: Reorderer
         MAX TIME 10s
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
+        CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
@@ -130,7 +130,7 @@ Feature: Reorderer
         MAX TIME 10s
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
+        CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"

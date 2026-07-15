@@ -33,7 +33,7 @@ Feature: HTTP codec ingestion
         BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When http payload encoded as "<wire_format>" is posted to host "http-{{test_id}}.example.com" path "/ingest"
@@ -91,7 +91,7 @@ Feature: HTTP codec ingestion
         BRANCHED BY by_metrics_ingestor VALUES { device = metrics_stream.device }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO metrics_stream;
+        CREATE SUBSCRIPTION metrics_stream_subscription TO metrics_stream;
         START;
       """
     When http payload encoded as "<wire_format>" is posted to host "http-arrays-{{test_id}}.example.com" path "/ingest"
@@ -145,7 +145,7 @@ Feature: HTTP codec ingestion
         UNBRANCHED
         FLUSH IMMEDIATE
         FROM ENDPOINT shaped_metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      SUBSCRIBE SESSION TO shaped_metrics_stream;
+      CREATE SUBSCRIPTION shaped_metrics_stream_subscription TO shaped_metrics_stream;
       START;
       """
     When http payload encoded as "JSON" is posted to host "shaped-arrays-{{test_id}}.example.com" path "/ingest"
@@ -223,8 +223,8 @@ Feature: HTTP codec ingestion
         FLUSH IMMEDIATE
         FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      SUBSCRIBE SESSION TO strict_notifications;
-      SUBSCRIBE SESSION TO loose_notifications;
+      CREATE SUBSCRIPTION strict_notifications_subscription TO strict_notifications;
+      CREATE SUBSCRIPTION loose_notifications_subscription TO loose_notifications;
       START;
       """
     When http payload encoded as "<wire_format>" is posted to host "strict-loose-{{test_id}}.example.com" path "/strict"
@@ -281,7 +281,7 @@ Feature: HTTP codec ingestion
         BRANCHED BY by_metrics_ingestor VALUES { device = metrics_stream.device }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO metrics_stream;
+        CREATE SUBSCRIPTION metrics_stream_subscription TO metrics_stream;
         START;
       """
     When http payload encoded as "<wire_format>" is posted to host "http-binary-arrays-{{test_id}}.example.com" path "/ingest"
@@ -330,7 +330,7 @@ Feature: HTTP codec ingestion
         BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     When http payload encoded as "<wire_format>" is posted to host "http-{{test_id}}.example.com" path "/ingest"

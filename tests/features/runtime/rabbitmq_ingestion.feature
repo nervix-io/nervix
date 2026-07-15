@@ -35,7 +35,7 @@ Feature: RabbitMQ ingestion
         QUEUE notifications_{{test_id}}
         INSTANCES <instances>
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then RabbitMQ queue "notifications_{{test_id}}" eventually has <instances> consumers
@@ -94,7 +94,7 @@ Feature: RabbitMQ ingestion
         FROM RABBITMQ rabbit_main
         QUEUE notifications_reconnect_{{test_id}}
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        SUBSCRIBE SESSION TO notifications;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
     Then within "5s" DESCRIBE INGESTOR "rabbit_notifications" on the leader node contains

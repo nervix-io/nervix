@@ -61,7 +61,7 @@ Feature: Materialized relay state
         DEDUPLICATE ON incoming_notifications.user_id
         MAX TIME 10m
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-        SUBSCRIBE SESSION TO enriched_notifications;
+        CREATE SUBSCRIPTION enriched_notifications_subscription TO enriched_notifications;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"

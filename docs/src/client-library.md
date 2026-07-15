@@ -7,6 +7,7 @@ Capabilities:
 - `Client::connect(...)`
 - `Client::execute(...)`
 - `Client::subscribe(...)`
+- `Client::unsubscribe(...)`
 - `Client::next_subscription()`
 - `Client::suggest(...)` behind the `autocomplete` feature
 
@@ -24,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = client.execute("SHOW CLUSTER STATUS;").await?;
     println!("{}", result.message);
 
-    let request = SubscriptionRequest::new("orders")
+    let request = SubscriptionRequest::new("sampled_orders", "orders")
         .dropping()
         .with_batch_sample_rate("0.1")
         .with_filter_map("SET orders.normalized = lower(orders.tenant) UNSET orders.raw WHERE orders.tenant = \"acme\"");
@@ -32,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let event = client.next_subscription().await?;
     println!("{}", event.payload);
+    client.unsubscribe("sampled_orders").await?;
     Ok(())
 }
 ```

@@ -98,9 +98,9 @@ Feature: Multi-source DAG routing
         FROM shared_dispatch
         ENCODE USING notification_codec
         TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        SUBSCRIBE SESSION TO kafka_projected;
-        SUBSCRIBE SESSION TO rabbit_projected;
-        SUBSCRIBE SESSION TO shared_dispatch;
+        CREATE SUBSCRIPTION kafka_projected_subscription TO kafka_projected;
+        CREATE SUBSCRIPTION rabbit_projected_subscription TO rabbit_projected;
+        CREATE SUBSCRIPTION shared_dispatch_subscription TO shared_dispatch;
         START;
       """
     When Kafka message is published to topic "dag_kafka_{{test_id}}"
