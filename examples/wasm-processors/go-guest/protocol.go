@@ -201,6 +201,8 @@ func buildRoutedOutput(
 			source = nervixwasm.ColumnSourceInput
 		} else if output.Columns[i].Kind == "generated" {
 			source = nervixwasm.ColumnSourceGenerated
+		} else if output.Columns[i].Kind == "uninitialized" && output.Columns[i].ColumnIndex == 0 {
+			source = nervixwasm.ColumnSourceUninitialized
 		} else {
 			return 0, false
 		}
@@ -291,6 +293,8 @@ func decodeRoutedOutput(output *nervixwasm.RoutedOutput) (routedOutput, bool) {
 			kind = "input"
 		} else if column.Source() == nervixwasm.ColumnSourceGenerated {
 			kind = "generated"
+		} else if column.Source() == nervixwasm.ColumnSourceUninitialized && column.ColumnIndex() == 0 {
+			kind = "uninitialized"
 		} else {
 			return routedOutput{}, false
 		}

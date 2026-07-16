@@ -43,6 +43,10 @@ pub enum RuntimeError {
     SchemaMismatch,
     #[error("invalid batch: {message}")]
     InvalidBatch { message: String },
+    #[error("required output column '{column}' is uninitialized")]
+    UninitializedRequiredColumn { column: String },
+    #[error("required output column '{column}' contains null values")]
+    NullForRequiredColumn { column: String },
     #[error("missing register {reg}")]
     MissingRegister { reg: RegisterRef },
     #[error("register {reg} does not contain {expected}")]

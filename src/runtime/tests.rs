@@ -1381,6 +1381,41 @@ fn wasm_zero_row_output_builds_exact_empty_destination_columns() {
 }
 
 #[test]
+fn wasm_uninitialized_column_uses_destination_type_and_ack_row_count() {
+    let input_schema = test_schema(&[("input", ParseAsType::I32)]);
+    let output_schema = test_optional_schema(&[("value", ParseAsType::I64, true)]);
+    let rows = vec![
+        WasmOutputRow {
+            tokens: Vec::new(),
+            source_token: None,
+        },
+        WasmOutputRow {
+            tokens: Vec::new(),
+            source_token: None,
+        },
+    ];
+
+    let outputs = validate_wasm_test_outputs(
+        &input_schema,
+        &output_schema,
+        &super::WasmAckMap::default(),
+        vec![wasm_test_output(
+            vec![WasmOutputColumnRef::uninitialized()],
+            rows,
+        )],
+    )
+    .expect("uninitialized output must pass host validation");
+
+    assert_eq!(outputs[0].batch.batch().num_rows(), 2);
+    assert_eq!(
+        outputs[0].batch.batch().column(0).data_type(),
+        &arrow_schema::DataType::Int64
+    );
+    assert_eq!(outputs[0].batch.batch().column(0).null_count(), 2);
+    assert!(outputs[0].uninitialized_columns.contains(&0));
+}
+
+#[test]
 fn wasm_mixed_input_and_generated_columns_match_destination_schema() {
     let input_schema = test_schema(&[("value", ParseAsType::I32)]);
     let output_schema =
@@ -1708,6 +1743,7 @@ async fn wasm_routed_output_fanout_waits_for_every_downstream_ack() {
         first.schema,
         first.batch,
         first.acks.rows,
+        HashSet::default(),
         &mut ack_map,
         &mut token_use_counts,
     )
@@ -1726,6 +1762,7 @@ async fn wasm_routed_output_fanout_waits_for_every_downstream_ack() {
         second.schema,
         second.batch,
         second.acks.rows,
+        HashSet::default(),
         &mut ack_map,
         &mut token_use_counts,
     )

@@ -797,22 +797,7 @@ impl IcebergEmitter {
     }
 
     fn typed_array_to_native_array_ref(array: &VmTypedArray) -> arrow_array::ArrayRef {
-        match array {
-            VmTypedArray::UInt8(values) => Arc::new(values.clone()),
-            VmTypedArray::Int8(values) => Arc::new(values.clone()),
-            VmTypedArray::UInt16(values) => Arc::new(values.clone()),
-            VmTypedArray::Int16(values) => Arc::new(values.clone()),
-            VmTypedArray::UInt32(values) => Arc::new(values.clone()),
-            VmTypedArray::Int32(values) => Arc::new(values.clone()),
-            VmTypedArray::UInt64(values) => Arc::new(values.clone()),
-            VmTypedArray::Int64(values) => Arc::new(values.clone()),
-            VmTypedArray::Float32(values) => Arc::new(values.clone()),
-            VmTypedArray::Float64(values) => Arc::new(values.clone()),
-            VmTypedArray::Boolean(values) => Arc::new(values.clone()),
-            VmTypedArray::Utf8(values) => Arc::new(values.clone()),
-            VmTypedArray::Datetime(values) => Arc::new(values.clone()),
-            VmTypedArray::Generic(values) => values.clone(),
-        }
+        array.to_array_ref()
     }
 
     fn next_staged_path(&mut self) -> PathBuf {

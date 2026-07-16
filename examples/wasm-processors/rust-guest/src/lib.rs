@@ -553,6 +553,9 @@ fn output_columns(
                     column_index: u32::try_from(column_index).map_err(|_| ERR_ENVELOPE)?,
                 });
             }
+            if destination.optional {
+                return Ok(OutputColumnRef::Uninitialized);
+            }
             let column_index = generated_fields
                 .iter()
                 .position(|field| {
@@ -578,6 +581,7 @@ fn generated_fields(
                 && source.optional == destination.optional
         });
         if !is_input
+            && !destination.optional
             && !generated.iter().any(|field| {
                 field.ty == destination.ty && field.optional == destination.optional
             })

@@ -48,6 +48,8 @@ jobs:
           components: rustfmt
 
       - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
@@ -95,7 +97,16 @@ jobs:
           go install github.com/antham/ghokin/v3@v3.9.0
 
       - name: Install apt deps
-        run: sudo apt update && sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -137,7 +148,8 @@ jobs:
           components: rustfmt,miri
 
       - uses: bufbuild/buf-setup-action@v1
-
+        with:
+          github_token: ${{ github.token }}
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
@@ -184,7 +196,16 @@ jobs:
           npm install -g playwright
 
       - name: Install apt deps
-        run: sudo apt update && sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
 
       - name: Checkout
         uses: actions/checkout@v4

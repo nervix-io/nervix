@@ -264,6 +264,10 @@ pub enum InstructionKind {
         dst: RegisterRef,
         data_type: DataType,
     },
+    Uninitialized {
+        dst: RegisterRef,
+        data_type: DataType,
+    },
     Unary {
         dst: RegisterRef,
         input: RegisterRef,

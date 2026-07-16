@@ -1,4 +1,5 @@
 [package]
+build = "build.rs"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-wasm-protocol"
@@ -10,3 +11,6 @@ workspace = true
 [dependencies]
 flatbuffers = { workspace = true }
 thiserror = { workspace = true }
+
+[build-dependencies]
+flatc-rust = { workspace = true }

@@ -133,7 +133,8 @@ Output envelopes have this shape:
       "output_relay": text,
       "columns": [
         { "kind": "input", "column_index": u32 },
-        { "kind": "generated", "column_index": u32 }
+        { "kind": "generated", "column_index": u32 },
+        { "kind": "uninitialized" }
       ],
       "acks": AckSidecar
     }
@@ -146,7 +147,10 @@ destination fields. An `input` column references the declared processor input
 schema by index; source and destination types and nullability must match
 exactly, although their names may differ. A `generated` column references the
 common generated Arrow batch by index. Index namespaces are determined by the
-variant.
+variant. An `uninitialized` descriptor is encoded as FlatBuffers
+`ColumnSource.Uninitialized` with canonical `column_index = 0`. It has no input
+or generated-pool index; its type and nullability come from the positionally
+aligned destination field, and its row count comes from `acks.rows.len()`.
 
 `generated_arrow_ipc_batch` is either an empty byte string or exactly one Arrow
 IPC stream containing one schema and one record batch. The empty byte string is
@@ -173,6 +177,15 @@ output envelopes and returned by separate positive `nervix_read_emit()` calls.
 Generated indexes never cross an envelope boundary. Route-level `SET` and
 `WHERE` processing occurs after this materialization and does not prevent
 sharing.
+
+Uninitialized columns pass through route processing as explicit VM state. Any
+expression read materializes a typed all-NULL column before applying ordinary
+NULL semantics, so `coalesce(uninitialized, value)` yields `value` and
+`is_null(uninitialized)` yields true. At the node boundary, an uninitialized
+optional field becomes typed NULLs, while an uninitialized required field is a
+schema error. The marker is not part of a Nervix relay schema and never crosses
+a relay, IPC, persistence, interconnect, or node boundary. An uninitialized
+descriptor does not by itself require `source_token`.
 
 The ACK sidecar is:
 
@@ -231,6 +244,7 @@ only once across the validated callback.
 The sidecars must be internally consistent:
 
 - `rows.len()` is the routed output row count and must equal the generated pool row count when that route references a generated column.
+- an uninitialized descriptor uses `rows.len()` directly and must use canonical `column_index = 0`.
 - every token in `rows`, `acked`, `nacked`, and `message_errors` must come from the current host-provided input sidecar.
 - a token may be carried into output rows, or terminally acked/nacked, but not both.
 - a token may have at most one terminal decision across `acked`, `nacked`, and `message_errors`.
@@ -254,7 +268,8 @@ variants, missing required fields, a wrong identifier or size prefix, trailing
 bytes, invalid column counts, bad source tokens, malformed or trailing Arrow
 IPC, and exact-schema mismatches are global processor errors. Empty output
 groups, out-of-range or unreferenced generated columns, and generated
-row-layout mismatches are also rejected. CBOR and per-output generated-column
+row-layout mismatches are also rejected. Nonzero uninitialized column indexes
+are rejected. CBOR and per-output generated-column
 envelopes are not supported. There is no format negotiation, legacy decoder,
 or fallback path. Rebuild every guest for this FlatBuffers contract.
 

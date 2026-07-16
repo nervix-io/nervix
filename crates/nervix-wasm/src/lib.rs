@@ -453,6 +453,7 @@ impl WasmRoutedOutput {
 pub enum WasmOutputColumnRef {
     Generated { column_index: u32 },
     Input { column_index: u32 },
+    Uninitialized,
 }
 
 impl WasmOutputColumnRef {
@@ -464,8 +465,20 @@ impl WasmOutputColumnRef {
         Self::Input { column_index }
     }
 
+    pub const fn uninitialized() -> Self {
+        Self::Uninitialized
+    }
+
     pub const fn is_input(&self) -> bool {
         if let Self::Input { .. } = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub const fn is_uninitialized(&self) -> bool {
+        if let Self::Uninitialized = self {
             true
         } else {
             false
@@ -687,6 +700,7 @@ impl WasmRoutedOutput {
                             column_index: *column_index,
                         }
                     }
+                    WasmOutputColumnRef::Uninitialized => protocol::OutputColumnRef::Uninitialized,
                 })
                 .collect(),
             acks: self.acks.to_protocol(),
@@ -706,6 +720,7 @@ impl WasmRoutedOutput {
                     protocol::OutputColumnRef::Input { column_index } => {
                         WasmOutputColumnRef::Input { column_index }
                     }
+                    protocol::OutputColumnRef::Uninitialized => WasmOutputColumnRef::Uninitialized,
                 })
                 .collect(),
             acks: WasmAckSidecar::from_protocol(output.acks),

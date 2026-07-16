@@ -7,7 +7,10 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use thiserror::Error;
 
 mod generated {
-    include!("generated/nervix_wasm_generated.rs");
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/flatbuffers/nervix_wasm_generated.rs"
+    ));
 }
 
 use generated::nervix_wasm as wire;
@@ -32,6 +35,8 @@ pub enum ProtocolError {
     UnknownEnum { kind: &'static str, value: u8 },
     #[error("WASM processor type '{kind}' is missing its element type")]
     MissingElementType { kind: &'static str },
+    #[error("WASM uninitialized output column must use column index 0, found {column_index}")]
+    InvalidUninitializedColumnIndex { column_index: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +137,7 @@ pub struct RoutedOutput {
 pub enum OutputColumnRef {
     Generated { column_index: u32 },
     Input { column_index: u32 },
+    Uninitialized,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -569,6 +575,7 @@ fn build_routed_output<'a>(
                 OutputColumnRef::Input { column_index } => {
                     (wire::ColumnSource::Input, *column_index)
                 }
+                OutputColumnRef::Uninitialized => (wire::ColumnSource::Uninitialized, 0),
             };
             wire::OutputColumnRef::create(
                 builder,
@@ -715,6 +722,15 @@ fn decode_routed_output(output: wire::RoutedOutput<'_>) -> Result<RoutedOutput, 
                 wire::ColumnSource::Generated => Ok(OutputColumnRef::Generated {
                     column_index: column.column_index(),
                 }),
+                wire::ColumnSource::Uninitialized => {
+                    if column.column_index() == 0 {
+                        Ok(OutputColumnRef::Uninitialized)
+                    } else {
+                        Err(ProtocolError::InvalidUninitializedColumnIndex {
+                            column_index: column.column_index(),
+                        })
+                    }
+                }
                 unknown => Err(ProtocolError::UnknownEnum {
                     kind: "output column source",
                     value: unknown.0,
@@ -767,6 +783,64 @@ mod tests {
         let borrowed = view.arrow_ipc_batch().as_ptr() as usize;
         assert!((start..end).contains(&borrowed));
         assert_eq!(Envelope::decode(&encoded).expect("must own"), envelope);
+    }
+
+    #[test]
+    fn uninitialized_output_column_round_trips() {
+        let envelope = Envelope::Output {
+            generated_arrow_ipc_batch: Vec::new(),
+            outputs: vec![RoutedOutput {
+                output_relay: "events".to_string(),
+                columns: vec![OutputColumnRef::Uninitialized],
+                acks: sidecar(),
+            }],
+        };
+
+        let encoded = envelope.encode();
+
+        assert_eq!(Envelope::decode(&encoded).expect("must decode"), envelope);
+    }
+
+    #[test]
+    fn uninitialized_output_column_rejects_nonzero_index() {
+        let mut builder = FlatBufferBuilder::new();
+        let column = wire::OutputColumnRef::create(
+            &mut builder,
+            &wire::OutputColumnRefArgs {
+                source: wire::ColumnSource::Uninitialized,
+                column_index: 1,
+            },
+        );
+        let columns = builder.create_vector(&[column]);
+        let output_relay = builder.create_string("events");
+        let acks = build_ack_sidecar(&mut builder, &AckSidecar::default());
+        let routed = wire::RoutedOutput::create(
+            &mut builder,
+            &wire::RoutedOutputArgs {
+                output_relay: Some(output_relay),
+                columns: Some(columns),
+                acks: Some(acks),
+            },
+        );
+        let outputs = builder.create_vector(&[routed]);
+        let generated = builder.create_vector(&[] as &[u8]);
+        let output = wire::OutputEnvelope::create(
+            &mut builder,
+            &wire::OutputEnvelopeArgs {
+                generated_arrow_ipc_batch: Some(generated),
+                outputs: Some(outputs),
+            },
+        );
+        let encoded = finish_message(
+            &mut builder,
+            wire::MessagePayload::OutputEnvelope,
+            output.as_union_value(),
+        );
+
+        assert!(matches!(
+            Envelope::decode(&encoded),
+            Err(ProtocolError::InvalidUninitializedColumnIndex { column_index: 1 })
+        ));
     }
 
     #[test]

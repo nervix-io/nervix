@@ -99,6 +99,7 @@ Supported blocks:
 General notes:
 
 - `SET` is a single clause with comma-separated assignments
+- assignments execute left to right; repeated destination fields are allowed and later expressions read the latest preceding value
 - `UNSET` is a single clause with comma-separated field names
 - if multiple filter-map blocks are present, they must appear in `SET`, `UNSET`, `WHERE` order
 - expressions are validated against the ingestor input scope; do not rely on `WHERE` to reference fields added by `SET`

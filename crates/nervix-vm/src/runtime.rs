@@ -1,3 +1,4 @@
+use ahash::{HashMap, HashMapExt};
 use arrow_arith::{
     aggregate::sum as arrow_sum,
     boolean::{and_kleene, is_null, not, or_kleene},
@@ -251,6 +252,7 @@ struct RegisterBank {
     temps: TypedBank,
     condition: TypedBank,
     outputs: TypedBank,
+    uninitialized: HashMap<RegisterRef, DataType>,
 }
 
 impl RegisterBank {
@@ -260,6 +262,7 @@ impl RegisterBank {
             temps: TypedBank::new(&layouts.temps),
             condition: TypedBank::new(&layouts.condition),
             outputs: TypedBank::new(&layouts.outputs),
+            uninitialized: HashMap::new(),
         }
     }
 
@@ -293,6 +296,7 @@ impl RegisterBank {
     }
 
     fn set_array(&mut self, reg: RegisterRef, value: TypedArray) -> Result<(), RuntimeError> {
+        self.uninitialized.remove(&reg);
         match value {
             TypedArray::UInt8(array) => self.set_uint8(reg, array),
             TypedArray::Int8(array) => self.set_int8(reg, array),
@@ -308,10 +312,26 @@ impl RegisterBank {
             TypedArray::Utf8(array) => self.set_utf8(reg, array),
             TypedArray::Datetime(array) => self.set_datetime(reg, array),
             TypedArray::Generic(array) => self.set_generic(reg, array),
+            TypedArray::Uninitialized { data_type, len } => {
+                let materialized = array_ref_to_typed_array(new_null_array(&data_type, len))?;
+                self.set_array(reg, materialized)?;
+                self.uninitialized.insert(reg, data_type);
+                Ok(())
+            }
         }
     }
 
     fn output_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
+        if let Some(data_type) = self.uninitialized.get(&reg) {
+            return Ok(TypedArray::uninitialized(
+                data_type.clone(),
+                self.read_array(reg)?.len(),
+            ));
+        }
+        self.read_array(reg)
+    }
+
+    fn read_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
         match reg.ty {
             RegisterType::UInt8 => Ok(TypedArray::UInt8(self.uint8(reg)?.clone())),
             RegisterType::Int8 => Ok(TypedArray::Int8(self.int8(reg)?.clone())),
@@ -708,7 +728,7 @@ impl Instruction {
     ) -> Result<(), RuntimeError> {
         match &self.kind {
             InstructionKind::Move { dst, input } => {
-                let output = registers.output_array(*input)?;
+                let output = registers.read_array(*input)?;
                 registers.set_array(*dst, output)
             }
             InstructionKind::Literal { dst, value } => {
@@ -717,6 +737,10 @@ impl Instruction {
             InstructionKind::NullLiteral { dst, data_type } => {
                 write_null_literal(registers, *dst, data_type, row_count)
             }
+            InstructionKind::Uninitialized { dst, data_type } => registers.set_array(
+                *dst,
+                TypedArray::uninitialized(data_type.clone(), row_count),
+            ),
             InstructionKind::Unary { dst, input, op } => {
                 let output = self.execute_unary(registers, *input, *op, row_errors)?;
                 registers.set_array(*dst, output)
@@ -1013,6 +1037,9 @@ fn typed_array_as_array(column: &TypedArray) -> &dyn Array {
         TypedArray::Utf8(array) => array,
         TypedArray::Datetime(array) => array,
         TypedArray::Generic(array) => array.as_ref(),
+        TypedArray::Uninitialized { .. } => {
+            unreachable!("uninitialized arrays must be materialized before Arrow kernel access")
+        }
     }
 }
 
@@ -1032,6 +1059,7 @@ fn typed_array_to_array_ref(column: TypedArray) -> ArrayRef {
         TypedArray::Utf8(array) => std::sync::Arc::new(array),
         TypedArray::Datetime(array) => std::sync::Arc::new(array),
         TypedArray::Generic(array) => array,
+        TypedArray::Uninitialized { data_type, len } => new_null_array(&data_type, len),
     }
 }
 
@@ -1051,6 +1079,7 @@ fn typed_array_is_null(column: &TypedArray, row: usize) -> bool {
         TypedArray::Utf8(array) => array.is_null(row),
         TypedArray::Datetime(array) => array.is_null(row),
         TypedArray::Generic(array) => array.is_null(row),
+        TypedArray::Uninitialized { .. } => true,
     }
 }
 
@@ -1607,7 +1636,7 @@ fn execute_cast(
     row_errors: &mut [Vec<SideError>],
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
-    let input = registers.output_array(input)?;
+    let input = registers.read_array(input)?;
     cast_typed_array(input, target, row_errors, span)
 }
 
@@ -1622,7 +1651,7 @@ fn execute_builtin(
 ) -> Result<TypedArray, RuntimeError> {
     let values = inputs
         .iter()
-        .map(|input| registers.output_array(*input))
+        .map(|input| registers.read_array(*input))
         .collect::<Result<Vec<_>, _>>()?;
 
     match lowering {
@@ -2353,6 +2382,7 @@ fn execute_is_null_typed(input: &TypedArray) -> BooleanArray {
         TypedArray::Utf8(array) => execute_is_null(array),
         TypedArray::Datetime(array) => execute_is_null(array),
         TypedArray::Generic(array) => execute_is_null(array.as_ref()),
+        TypedArray::Uninitialized { len, .. } => BooleanArray::from(vec![true; *len]),
     }
 }
 
@@ -2379,7 +2409,8 @@ fn execute_abs_typed(
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
         | TypedArray::Datetime(_)
-        | TypedArray::Generic(_) => Err(RuntimeError::InvalidBatch {
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
             message: format!("abs requires numeric input, found {:?}", input.data_type()),
         }),
     }
@@ -2478,7 +2509,8 @@ fn execute_ceil(
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
         | TypedArray::Datetime(_)
-        | TypedArray::Generic(_) => Err(RuntimeError::InvalidBatch {
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
             message: format!("ceil requires numeric input, found {:?}", input.data_type()),
         }),
     }
@@ -2547,7 +2579,8 @@ fn execute_floor(
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
         | TypedArray::Datetime(_)
-        | TypedArray::Generic(_) => Err(RuntimeError::InvalidBatch {
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
             message: format!(
                 "floor requires numeric input, found {:?}",
                 input.data_type()
@@ -2619,7 +2652,8 @@ fn execute_round(
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
         | TypedArray::Datetime(_)
-        | TypedArray::Generic(_) => Err(RuntimeError::InvalidBatch {
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
             message: format!(
                 "round requires numeric input, found {:?}",
                 input.data_type()
@@ -3071,7 +3105,8 @@ fn execute_to_hex(input: &TypedArray) -> Result<StringArray, RuntimeError> {
             | TypedArray::Boolean(_)
             | TypedArray::Utf8(_)
             | TypedArray::Datetime(_)
-            | TypedArray::Generic(_) => {
+            | TypedArray::Generic(_)
+            | TypedArray::Uninitialized { .. } => {
                 return Err(RuntimeError::InvalidBatch {
                     message: format!(
                         "to_hex requires integer input, found {:?}",
@@ -3132,7 +3167,8 @@ fn numeric_value_as_f64(input: &TypedArray, row: usize) -> Result<Option<f64>, R
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
         | TypedArray::Datetime(_)
-        | TypedArray::Generic(_) => Err(RuntimeError::InvalidBatch {
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
             message: format!(
                 "numeric builtin requires numeric input, found {:?}",
                 input.data_type()
@@ -3158,7 +3194,8 @@ fn integral_value_at(input: &TypedArray, row: usize) -> Result<Option<i64>, Runt
         | TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
         | TypedArray::Datetime(_)
-        | TypedArray::Generic(_) => Err(RuntimeError::InvalidBatch {
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
             message: format!(
                 "builtin requires integer input, found {:?}",
                 input.data_type()
@@ -3447,6 +3484,7 @@ fn cast_scalars(input: TypedArray) -> Vec<Option<CastScalar>> {
             values.iter().map(|v| v.map(CastScalar::Datetime)).collect()
         }
         TypedArray::Generic(_) => Vec::new(),
+        TypedArray::Uninitialized { len, .. } => vec![None; len],
     }
 }
 
@@ -3565,6 +3603,12 @@ fn filter_columns(
     columns
         .iter()
         .map(|column| {
+            if let TypedArray::Uninitialized { data_type, .. } = column {
+                return Ok(TypedArray::uninitialized(
+                    data_type.clone(),
+                    selected_rows(predicate).len(),
+                ));
+            }
             let filtered = filter
                 .filter(typed_array_as_array(column))
                 .map_err(|error| arrow_kernel_error("column filter kernel failed", error))?;
@@ -3792,6 +3836,55 @@ mod tests {
         assert_eq!(maybe.len(), 2);
         assert!(maybe.is_null(0));
         assert!(maybe.is_null(1));
+    }
+
+    #[test]
+    fn reading_uninitialized_input_uses_typed_null_semantics() {
+        let parsed =
+            parse_program("SET input.value = coalesce(input.value, 1);").expect("must parse");
+        let input_schema = schema(vec![Field::new("value", DataType::Int64, true)]);
+        let output_schema = schema(vec![Field::new("value", DataType::Int64, false)]);
+        let compiled = compile_program_for_bindings(
+            &parsed,
+            output_schema,
+            [CompileBinding::writable("input", input_schema.clone())],
+        )
+        .expect("coalesce must initialize the destination");
+        let batch = TypedBatch::try_new(
+            input_schema,
+            vec![TypedArray::uninitialized(DataType::Int64, 2)],
+        )
+        .expect("uninitialized input must enter VM execution");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Int64(values) = output_column(&output, "value") else {
+            panic!("value must be Int64");
+        };
+
+        assert_eq!(values.values(), &[1, 1]);
+        assert_eq!(values.null_count(), 0);
+    }
+
+    #[test]
+    fn directly_reading_uninitialized_input_initializes_nulls() {
+        let parsed = parse_program("SET input.value = input.value;").expect("must parse");
+        let schema = schema(vec![Field::new("value", DataType::Int64, true)]);
+        let compiled = compile_program_for_bindings(
+            &parsed,
+            schema.clone(),
+            [CompileBinding::writable("input", schema.clone())],
+        )
+        .expect("direct assignment must compile");
+        let batch =
+            TypedBatch::try_new(schema, vec![TypedArray::uninitialized(DataType::Int64, 2)])
+                .expect("uninitialized input must enter VM execution");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Int64(values) = output_column(&output, "value") else {
+            panic!("value must be initialized as Int64 NULLs");
+        };
+
+        assert_eq!(values.null_count(), 2);
     }
 
     #[test]
