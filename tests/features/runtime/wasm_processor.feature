@@ -86,6 +86,134 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: WASM uninitialized optional columns materialize as NULL at the node boundary
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_uninitialized_guest;
+      UPLOAD RESOURCE wasm_uninitialized_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA wasm_input_event (
+        value I32
+      );
+      CREATE SCHEMA wasm_output_event (
+        value I32,
+        note STRING OPTIONAL,
+        untouched STRING OPTIONAL
+      );
+      CREATE STRICT WIRE JSON SCHEMA wasm_input_wire (
+        value integer
+      );
+      CREATE CODEC wasm_input_codec
+        FROM WIRE JSON SCHEMA wasm_input_wire
+        TO SCHEMA wasm_input_event;
+      CREATE RELAY wasm_input_events SCHEMA wasm_input_event UNBRANCHED;
+      CREATE RELAY wasm_output_events SCHEMA wasm_output_event UNBRANCHED;
+      CREATE VHOST edge wasm-uninitialized-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR wasm_input_source
+        TO wasm_input_events
+        DECODE USING wasm_input_codec
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR emit_uninitialized_optional
+        USING RESOURCE wasm_uninitialized_guest VERSION 1
+        FILE 'processors/filter_even.wasm'
+        FROM wasm_input_events
+        TO wasm_output_events
+          SET wasm_output_events.note = coalesce(wasm_output_events.note, "fallback")
+        UNBRANCHED
+        ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION wasm_output_events_subscription TO wasm_output_events;
+      START;
+      """
+    When http payload is posted to host "wasm-uninitialized-{{test_id}}.example.com" path "/events"
+      """
+      {"value":1}
+      """
+    And http payload is posted to host "wasm-uninitialized-{{test_id}}.example.com" path "/events"
+      """
+      {"value":2}
+      """
+    Then within "10s" the relay subscription receives payloads
+      """
+      "note":"fallback","value":2
+      """
+    And the last relay subscription payload does not contain "untouched\""
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
+  Scenario Outline: WASM uninitialized required columns raise a runtime error at the node boundary
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has a WASM fixture returning an uninitialized column to relay "required_output" in resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_uninitialized_required_guest;
+      UPLOAD RESOURCE wasm_uninitialized_required_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA required_event (
+        value I32
+      );
+      CREATE STRICT WIRE JSON SCHEMA required_event_wire (
+        value integer
+      );
+      CREATE CODEC required_event_codec
+        FROM WIRE JSON SCHEMA required_event_wire
+        TO SCHEMA required_event;
+      CREATE RELAY required_input SCHEMA required_event UNBRANCHED;
+      CREATE RELAY required_output SCHEMA required_event UNBRANCHED;
+      CREATE VHOST edge wasm-required-uninitialized-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR required_source
+        TO required_input
+        DECODE USING required_event_codec
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR emit_uninitialized_required
+        USING RESOURCE wasm_uninitialized_required_guest VERSION 1
+        FILE 'processors/filter_even.wasm'
+        FROM required_input
+        TO required_output
+        UNBRANCHED
+        ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION required_output_subscription TO required_output;
+      START;
+      """
+    When http payload is posted to host "wasm-required-uninitialized-{{test_id}}.example.com" path "/events"
+      """
+      {"value":1}
+      """
+    Then within "10s" the active session observes a server error
+    And the last server error contains
+      """
+      Column 'value' is declared as non-nullable but contains null values
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: WASM processor filters records inside each concrete branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

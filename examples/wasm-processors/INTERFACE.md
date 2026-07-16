@@ -78,7 +78,8 @@ Guest output:
       "output_relay": text,
       "columns": [
         { "kind": "input", "column_index": u32 },
-        { "kind": "generated", "column_index": u32 }
+        { "kind": "generated", "column_index": u32 },
+        { "kind": "uninitialized" }
       ],
       "acks": AckSidecar
     }
@@ -92,6 +93,14 @@ schema. `generated` references a column in the envelope's common generated
 Arrow batch. A generated column may be reused by several routes or more than
 once in one route; the host decodes it once and clones the immutable
 `ArrayRef`.
+
+`uninitialized` is FlatBuffers `ColumnSource.Uninitialized` with canonical
+`column_index = 0`. Its type comes from the aligned destination field and its
+length comes from `acks.rows`. Reading it in route `SET` or `WHERE` processing
+materializes typed NULLs. If it reaches the node boundary unread, an optional
+field becomes typed NULLs and a required field fails. The marker never enters a
+relay or crosses a node boundary, and it does not require `source_token` unless
+another descriptor or expression needs that source row.
 
 The generated pool is either an empty byte string or one Arrow IPC stream with
 exactly one schema and one record batch. An empty byte string is required when

@@ -76,7 +76,8 @@ table InputEnvelope {
 
 enum ColumnSource : ubyte {
   Input,
-  Generated
+  Generated,
+  Uninitialized
 }
 
 table OutputColumnRef {

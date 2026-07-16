@@ -19,7 +19,7 @@ use arrow_array::{
         TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
         make_builder,
     },
-    new_empty_array,
+    new_empty_array, new_null_array,
 };
 use arrow_ipc::reader::StreamReader;
 use arrow_schema::DataType as ArrowDataType;
@@ -7223,6 +7223,7 @@ fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPart {
             }
         }
         VmTypedArray::Generic(_) => ReorderKeyPart::Null,
+        VmTypedArray::Uninitialized { .. } => ReorderKeyPart::Null,
     }
 }
 
@@ -9279,21 +9280,63 @@ async fn execute_filter_map_program(
     execution_now: Timestamp,
     acks: Vec<AckSet>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
-    let vm_batch =
-        match vm_typed_batch_from_runtime_records(input_records, &program.compiled.input_schema) {
-            Ok(vm_batch) => vm_batch,
-            Err(error) => {
-                return Err(PlannedGeneralError {
-                    acks,
-                    reason: format!(
-                        "{} '{}' failed to prepare FILTER-MAP input batch: {}",
-                        processor_kind,
-                        processor.as_str(),
-                        error
-                    ),
-                });
-            }
-        };
+    execute_filter_map_program_with_uninitialized(
+        processor_kind,
+        processor,
+        program,
+        input_records,
+        execution_now,
+        acks,
+        None,
+    )
+    .await
+}
+
+struct VmUninitializedInput<'a> {
+    namespace: &'a str,
+    fields: HashSet<String>,
+}
+
+impl VmUninitializedInput<'_> {
+    fn contains(&self, field: &arrow_schema::Field) -> bool {
+        if self.fields.contains(field.name()) {
+            return true;
+        }
+        if let Some((namespace, field_name)) = field.name().split_once('.') {
+            namespace == self.namespace && self.fields.contains(field_name)
+        } else {
+            false
+        }
+    }
+}
+
+async fn execute_filter_map_program_with_uninitialized(
+    processor_kind: &str,
+    processor: &Identifier,
+    program: &CompiledProgramWithMaterializedInterest,
+    input_records: &[RuntimeRecord],
+    execution_now: Timestamp,
+    acks: Vec<AckSet>,
+    uninitialized: Option<&VmUninitializedInput<'_>>,
+) -> Result<ExecutedFilterMap, PlannedGeneralError> {
+    let vm_batch = match vm_typed_batch_from_runtime_records_with_uninitialized(
+        input_records,
+        &program.compiled.input_schema,
+        uninitialized,
+    ) {
+        Ok(vm_batch) => vm_batch,
+        Err(error) => {
+            return Err(PlannedGeneralError {
+                acks,
+                reason: format!(
+                    "{} '{}' failed to prepare FILTER-MAP input batch: {}",
+                    processor_kind,
+                    processor.as_str(),
+                    error
+                ),
+            });
+        }
+    };
     let result = match execute_program_with_selection_in_context(
         program.compiled.as_ref(),
         &vm_batch,
@@ -10710,6 +10753,37 @@ fn vm_typed_batch_from_runtime_records(
     vm_typed_batch_from_runtime_records_with_metadata(records, None, schema)
 }
 
+fn vm_typed_batch_from_runtime_records_with_uninitialized(
+    records: &[RuntimeRecord],
+    schema: &Arc<arrow_schema::Schema>,
+    uninitialized: Option<&VmUninitializedInput<'_>>,
+) -> Result<VmTypedBatch, String> {
+    let Some(uninitialized) = uninitialized else {
+        return vm_typed_batch_from_runtime_records(records, schema);
+    };
+    let relaxed_schema = Arc::new(arrow_schema::Schema::new(
+        schema
+            .fields()
+            .iter()
+            .map(|field| {
+                if uninitialized.contains(field) {
+                    field.as_ref().clone().with_nullable(true)
+                } else {
+                    field.as_ref().clone()
+                }
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let batch = vm_typed_batch_from_runtime_records(records, &relaxed_schema)?;
+    let mut columns = batch.columns().to_vec();
+    for (index, field) in schema.fields().iter().enumerate() {
+        if uninitialized.contains(field) {
+            columns[index] = VmTypedArray::uninitialized(field.data_type().clone(), records.len());
+        }
+    }
+    VmTypedBatch::try_new(schema.clone(), columns).map_err(|error| error.to_string())
+}
+
 fn resolve_filter_map_input_value<'a>(
     record: &'a RuntimeRecord,
     filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
@@ -11569,6 +11643,7 @@ fn vm_output_row_to_decoded_record(
                         field.data_type()
                     ));
                 }
+                VmTypedArray::Uninitialized { .. } => None,
             };
             if let Some(value) = value {
                 Ok(Some((field.name().to_string(), value)))
@@ -12423,6 +12498,26 @@ struct WasmOutputContext<'a> {
 struct WasmDecodedOutputBatch {
     batch: RelayRecordBatch,
     input_records: Vec<Option<RuntimeRecord>>,
+    uninitialized_columns: HashSet<usize>,
+}
+
+impl WasmDecodedOutputBatch {
+    fn materialize_uninitialized_for_relay(&mut self) -> Result<(), String> {
+        let schema = self.batch.arrow_schema();
+        for column_index in &self.uninitialized_columns {
+            let field = schema.fields().get(*column_index).ok_or_else(|| {
+                format!("uninitialized output column {column_index} is outside the relay schema")
+            })?;
+            if !field.is_nullable() {
+                return Err(format!(
+                    "required relay field '{}' remains uninitialized",
+                    field.name()
+                ));
+            }
+        }
+        self.uninitialized_columns.clear();
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -12431,6 +12526,7 @@ struct WasmMaterializedOutput {
     schema: Arc<CompiledSchema>,
     batch: RuntimeRecordBatch,
     acks: WasmAckSidecar,
+    uninitialized_columns: HashSet<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -12735,6 +12831,7 @@ impl WasmOutputValidator<'_> {
         }
         let has_input_columns = columns.iter().any(WasmOutputColumnRef::is_input);
         self.validate_source_tokens(&output_relay, &acks.rows, has_input_columns)?;
+        let mut uninitialized_columns = HashSet::default();
         let arrays = columns
             .into_iter()
             .zip(destination_fields)
@@ -12803,6 +12900,13 @@ impl WasmOutputValidator<'_> {
                     column_index,
                     &acks.rows,
                 ),
+                WasmOutputColumnRef::Uninitialized => {
+                    uninitialized_columns.insert(field_index);
+                    Ok(new_null_array(
+                        destination_field.data_type(),
+                        acks.rows.len(),
+                    ))
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         let record_batch =
@@ -12822,6 +12926,7 @@ impl WasmOutputValidator<'_> {
             schema: Arc::clone(schema),
             batch,
             acks,
+            uninitialized_columns,
         })
     }
 
@@ -13078,6 +13183,7 @@ async fn dispatch_wasm_output_envelopes(
             output.schema,
             output.batch,
             output.acks.rows,
+            output.uninitialized_columns,
             ack_map,
             &mut token_use_counts,
         )?;
@@ -13130,7 +13236,7 @@ struct WasmRouteDispatchContext<'a> {
 
 async fn dispatch_wasm_output_route(
     context: WasmRouteDispatchContext<'_>,
-    decoded: WasmDecodedOutputBatch,
+    mut decoded: WasmDecodedOutputBatch,
     output: &mut RelayProcessorOutputNode,
 ) -> Option<Vec<AckSet>> {
     if output.compiled_program.is_none() && output.filter_map.is_some() {
@@ -13233,6 +13339,25 @@ async fn dispatch_wasm_output_route(
     }
 
     let Some(program) = output.compiled_program.as_ref() else {
+        if let Err(error) = decoded.materialize_uninitialized_for_relay() {
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    decoded.batch.acks.iter(),
+                    format!(
+                        "wasm processor '{}' failed to materialize output for relay '{}': {}",
+                        context.processor.as_str(),
+                        output.relay.as_str(),
+                        error
+                    ),
+                );
+            return None;
+        }
         let dispatched_acks = decoded.batch.acks.iter().cloned().collect::<Vec<_>>();
         if context
             .branch
@@ -13363,13 +13488,24 @@ async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let executed = match execute_filter_map_program(
+    let output_arrow_schema = decoded.batch.arrow_schema();
+    let uninitialized_input = VmUninitializedInput {
+        namespace: output.relay.as_str(),
+        fields: decoded
+            .uninitialized_columns
+            .iter()
+            .filter_map(|column_index| output_arrow_schema.fields().get(*column_index))
+            .map(|field| field.name().clone())
+            .collect(),
+    };
+    let executed = match execute_filter_map_program_with_uninitialized(
         context.node_kind,
         context.processor,
         program,
         &input_records,
         execution_now,
         decoded.batch.acks.clone(),
+        Some(&uninitialized_input),
     )
     .await
     {
@@ -13802,6 +13938,7 @@ fn relay_batch_from_wasm_output(
     schema: Arc<CompiledSchema>,
     batch: RuntimeRecordBatch,
     rows: Vec<WasmOutputRow>,
+    uninitialized_columns: HashSet<usize>,
     ack_map: &mut WasmAckMap,
     token_use_counts: &mut HashMap<u64, usize>,
 ) -> Result<WasmDecodedOutputBatch, String> {
@@ -13841,12 +13978,19 @@ fn relay_batch_from_wasm_output(
         }
         acks.push(AckSet::merged(row_ack_sets));
     }
-    RelayRecordBatch::from_runtime_batch(schema, key.clone(), batch, metadata, acks).map(|batch| {
-        WasmDecodedOutputBatch {
+    let records = schema
+        .decoded_records_from_arrow_batch_excluding(&batch, &uninitialized_columns)?
+        .into_iter()
+        .zip(metadata.iter().cloned())
+        .map(|(record, metadata)| record.into_runtime_record(metadata))
+        .collect::<Vec<_>>();
+    RelayRecordBatch::from_filtered_parts(key.clone(), batch, records, metadata, acks).map(
+        |batch| WasmDecodedOutputBatch {
             batch,
             input_records,
-        }
-    })
+            uninitialized_columns,
+        },
+    )
 }
 
 fn generator_context_batch(

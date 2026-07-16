@@ -1,6 +1,6 @@
 use std::{io::Cursor, str::FromStr, sync::Arc};
 
-use ahash::{HashMap, HashMapExt};
+use ahash::{HashMap, HashMapExt, HashSet};
 use apache_avro::{
     Schema as AvroSchema, from_avro_datum, to_avro_datum, types::Value as AvroValue,
 };
@@ -448,6 +448,14 @@ impl CompiledSchema {
         &self,
         batch: &RuntimeRecordBatch,
     ) -> Result<Vec<DecodedRecord>, String> {
+        self.decoded_records_from_arrow_batch_excluding(batch, &HashSet::default())
+    }
+
+    pub(crate) fn decoded_records_from_arrow_batch_excluding(
+        &self,
+        batch: &RuntimeRecordBatch,
+        excluded_columns: &HashSet<usize>,
+    ) -> Result<Vec<DecodedRecord>, String> {
         if batch.schema.as_ref() != self.arrow_schema.as_ref() {
             return Err("arrow batch schema does not match compiled schema".to_string());
         }
@@ -463,6 +471,9 @@ impl CompiledSchema {
         for row_index in 0..batch.batch.num_rows() {
             let mut fields = HashMap::with_capacity(self.fields.len());
             for (column_index, field) in self.fields.iter().enumerate() {
+                if excluded_columns.contains(&column_index) {
+                    continue;
+                }
                 let value = runtime_value_from_arrow_array(
                     batch.batch.column(column_index).as_ref(),
                     &field.ty,

@@ -88,6 +88,91 @@ Feature: Processor output routing
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: SET assignments observe earlier assignments to the same destination field
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA source_event (
+        id STRING
+      );
+      CREATE SCHEMA projected_event (
+        id STRING,
+        amount I64
+      );
+      CREATE STRICT WIRE JSON SCHEMA source_event_wire (
+        id string
+      );
+      CREATE CODEC source_event_codec
+        FROM WIRE JSON SCHEMA source_event_wire
+        TO SCHEMA source_event;
+      CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
+      CREATE VHOST edge sequential-set-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR source_events
+        TO projected_events
+          SET projected_events.amount = 1,
+              projected_events.amount = projected_events.amount + 1
+        DECODE USING source_event_codec
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION projected_events_subscription TO projected_events;
+      START;
+      """
+    When http payload is posted to host "sequential-set-{{test_id}}.example.com" path "/events"
+      """
+      {"id":"event-1"}
+      """
+    Then the relay subscription receives a payload
+      """
+      "amount":2,"id":"event-1"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
+  Scenario Outline: Validation rejects required output fields that are neither inherited nor assigned
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands fail with "required output field 'amount' remains uninitialized"
+      """
+      CREATE SCHEMA source_event (
+        note STRING OPTIONAL
+      );
+      CREATE SCHEMA projected_event (
+        amount I64,
+        note STRING OPTIONAL
+      );
+      CREATE RELAY source_events
+        SCHEMA source_event
+        UNBRANCHED
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
+      CREATE GENERATOR project_events
+        TO projected_events
+        UNBRANCHED
+        EACH 100ms
+        FLUSH IMMEDIATE
+        SET projected_events.note = source_events.note
+        ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: Processor output routes fan out to conditional and unconditional destinations
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

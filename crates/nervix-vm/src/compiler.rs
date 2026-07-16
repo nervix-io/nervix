@@ -25,7 +25,14 @@ struct ColumnBinding {
     data_type: DataType,
     nullable: bool,
     sensitive: bool,
-    reg: Option<RegisterRef>,
+    value: ColumnValue,
+}
+
+#[derive(Clone, Copy)]
+enum ColumnValue {
+    Initialized(RegisterRef),
+    Uninitialized,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -318,7 +325,7 @@ impl Compiler {
                         data_type: field.data_type().clone(),
                         nullable: field.is_nullable(),
                         sensitive: binding.sensitivity.is_sensitive(field.name()),
-                        reg,
+                        value: reg.map_or(ColumnValue::Unsupported, ColumnValue::Initialized),
                     },
                 );
                 input_index += 1;
@@ -381,6 +388,71 @@ impl Compiler {
         let mut names = self.writable_namespaces.iter().cloned().collect::<Vec<_>>();
         names.sort();
         names.join(", ")
+    }
+
+    fn enter_set_scope(&mut self, output_schema: &Schema, output_sensitivity: &SchemaSensitivity) {
+        for namespace in self.writable_namespaces.iter().cloned() {
+            self.readable_namespaces
+                .insert(CompileNamespace::User(namespace.clone()));
+            for field in output_schema.fields() {
+                self.columns
+                    .entry(BoundFieldRef::User(FieldRef {
+                        relay: namespace.clone(),
+                        field: field.name().clone(),
+                    }))
+                    .or_insert_with(|| ColumnBinding {
+                        data_type: field.data_type().clone(),
+                        nullable: true,
+                        sensitive: output_sensitivity.is_sensitive(field.name()),
+                        value: ColumnValue::Uninitialized,
+                    });
+            }
+        }
+    }
+
+    fn update_writable_field(&mut self, field_name: &str, binding: ColumnBinding) {
+        for namespace in self.writable_namespaces.iter().cloned() {
+            self.columns.insert(
+                BoundFieldRef::User(FieldRef {
+                    relay: namespace,
+                    field: field_name.to_string(),
+                }),
+                binding.clone(),
+            );
+        }
+        self.clear_expr_cache();
+    }
+
+    fn materialize_uninitialized_field(
+        &mut self,
+        field_ref: BoundFieldRef,
+        binding: ColumnBinding,
+        span: Span,
+    ) -> Result<RegisterRef, CompileError> {
+        let ty =
+            Self::register_type_for_data_type(&binding.data_type, span, "uninitialized column")?;
+        let dst = self.alloc_temp(ty);
+        self.instructions.push(Instruction {
+            kind: InstructionKind::Uninitialized {
+                dst,
+                data_type: binding.data_type.clone(),
+            },
+            span,
+        });
+        let initialized = ColumnBinding {
+            nullable: true,
+            value: ColumnValue::Initialized(dst),
+            ..binding
+        };
+        if let BoundFieldRef::User(field) = &field_ref
+            && self.writable_namespaces.contains(&field.relay)
+        {
+            self.update_writable_field(&field.field, initialized);
+        } else {
+            self.columns.insert(field_ref, initialized);
+            self.clear_expr_cache();
+        }
+        Ok(dst)
     }
 
     fn validate_field_ref<'a>(
@@ -838,28 +910,46 @@ impl Compiler {
                 Ok(dst)
             }
             Expr::FieldRef(field_ref) => {
-                let binding = self.validate_field_ref(field_ref, expr.span)?;
-                binding.reg.ok_or_else(|| CompileError {
-                    code: "unsupported_identifier",
-                    message: format!(
-                        "input column '{}.{}' has unsupported type {:?}",
-                        field_ref.relay, field_ref.field, binding.data_type
+                let binding = self.validate_field_ref(field_ref, expr.span)?.clone();
+                match binding.value {
+                    ColumnValue::Initialized(reg) => Ok(reg),
+                    ColumnValue::Uninitialized => self.materialize_uninitialized_field(
+                        BoundFieldRef::User(field_ref.clone()),
+                        binding,
+                        expr.span,
                     ),
-                    span: expr.span,
-                })
+                    ColumnValue::Unsupported => Err(CompileError {
+                        code: "unsupported_identifier",
+                        message: format!(
+                            "input column '{}.{}' has unsupported type {:?}",
+                            field_ref.relay, field_ref.field, binding.data_type
+                        ),
+                        span: expr.span,
+                    }),
+                }
             }
             Expr::InternalFieldRef(field_ref) => {
-                let binding = self.validate_internal_field_ref(field_ref, expr.span)?;
-                binding.reg.ok_or_else(|| CompileError {
-                    code: "unsupported_identifier",
-                    message: format!(
-                        "input column '{}.{}' has unsupported type {:?}",
-                        CompileNamespace::Internal(field_ref.namespace).label(),
-                        field_ref.field,
-                        binding.data_type
+                let binding = self
+                    .validate_internal_field_ref(field_ref, expr.span)?
+                    .clone();
+                match binding.value {
+                    ColumnValue::Initialized(reg) => Ok(reg),
+                    ColumnValue::Uninitialized => self.materialize_uninitialized_field(
+                        BoundFieldRef::Internal(field_ref.clone()),
+                        binding,
+                        expr.span,
                     ),
-                    span: expr.span,
-                })
+                    ColumnValue::Unsupported => Err(CompileError {
+                        code: "unsupported_identifier",
+                        message: format!(
+                            "input column '{}.{}' has unsupported type {:?}",
+                            CompileNamespace::Internal(field_ref.namespace).label(),
+                            field_ref.field,
+                            binding.data_type
+                        ),
+                        span: expr.span,
+                    }),
+                }
             }
             Expr::Unary { op, expr: inner } => {
                 let input = self.compile_expr(inner)?;
@@ -1517,15 +1607,36 @@ pub fn infer_set_expr_types_for_bindings(
     bindings: impl IntoIterator<Item = CompileBinding>,
 ) -> Result<Vec<(String, DataType, bool)>, CompileError> {
     let bindings = bindings.into_iter().collect::<Vec<_>>();
-    let (compiler, _input_schema) = Compiler::new(&bindings)?;
+    let (mut compiler, _input_schema) = Compiler::new(&bindings)?;
+    for namespace in compiler.writable_namespaces.iter().cloned() {
+        compiler
+            .readable_namespaces
+            .insert(CompileNamespace::User(namespace));
+    }
     let mut output = Vec::with_capacity(program.inner.set.len());
     for (field_ref, expr) in &program.inner.set {
         compiler.validate_target_field_ref(field_ref, expr.span)?;
-        output.push((
-            field_ref.field.clone(),
-            compiler.infer_expr_type(expr)?,
-            compiler.expr_may_be_null(expr)?,
-        ));
+        let data_type = compiler.infer_expr_type(expr)?;
+        let nullable = compiler.expr_may_be_null(expr)?;
+        let sensitive = compiler.expr_is_sensitive(expr)?;
+        compiler.update_writable_field(
+            &field_ref.field,
+            ColumnBinding {
+                data_type: data_type.clone(),
+                nullable,
+                sensitive,
+                value: ColumnValue::Unsupported,
+            },
+        );
+        if let Some((_, output_type, output_nullable)) = output
+            .iter_mut()
+            .find(|(field, _, _)| field == &field_ref.field)
+        {
+            *output_type = data_type;
+            *output_nullable = nullable;
+        } else {
+            output.push((field_ref.field.clone(), data_type, nullable));
+        }
     }
     Ok(output)
 }
@@ -1552,19 +1663,6 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
     bindings: impl IntoIterator<Item = CompileBinding>,
     options: CompileOptions,
 ) -> Result<CompiledProgram, CompileError> {
-    enum OutputSource<'a> {
-        Input(RegisterRef),
-        Expr {
-            expr: &'a SpannedExpr,
-            target_type: DataType,
-        },
-    }
-
-    struct OutputPlan<'a> {
-        binding: OutputBinding,
-        source: OutputSource<'a>,
-    }
-
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let (mut compiler, input_schema) = Compiler::new(&bindings)?;
     output_sensitivity.validate_against_schema(&output_schema, "output")?;
@@ -1573,20 +1671,13 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         .iter()
         .map(|field| field.name().clone())
         .collect::<HashSet<_>>();
-    let mut set_by_name = HashMap::new();
+
     for (field_ref, expr) in &program.inner.set {
         let name = compiler.validate_target_field_ref(field_ref, expr.span)?;
         if !output_field_names.contains(name) {
             return Err(CompileError {
                 code: "unknown_set",
                 message: format!("SET field '{name}' is not declared in the output schema"),
-                span: expr.span,
-            });
-        }
-        if set_by_name.insert(name.to_string(), expr).is_some() {
-            return Err(CompileError {
-                code: "duplicate_set",
-                message: format!("SET field '{name}' is assigned more than once"),
                 span: expr.span,
             });
         }
@@ -1648,153 +1739,166 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         }
     }
 
-    let filter = match &program.inner.filter {
-        Some(filter_expr) => {
-            let filter_type = compiler.infer_expr_type(filter_expr)?;
-            if filter_type != DataType::Boolean {
-                return Err(CompileError {
-                    code: "invalid_filter",
-                    message: "WHERE expression must evaluate to Boolean".to_string(),
-                    span: filter_expr.span,
-                });
-            }
-            Some(compiler.alloc_condition(RegisterType::Boolean))
-        }
-        None => None,
-    };
-    let mut output_fields = Vec::new();
-    let mut output_plans = Vec::new();
-
-    for (output_index, field) in output_schema.fields().iter().enumerate() {
-        let name = field.name().clone();
-        let field_sensitive = output_sensitivity.is_sensitive(&name);
-        if let Some(expr) = set_by_name.remove(&name) {
-            compiler.validate_assignment_expr(
-                &name,
-                expr,
-                field.data_type(),
-                field.is_nullable(),
-                field_sensitive,
-                options.allow_sensitive_output,
-            )?;
-            let output_type =
-                Compiler::register_type_for_data_type(field.data_type(), expr.span, "output")?;
-            let reg = compiler.alloc_output(output_type);
-            output_fields.push(field.as_ref().clone());
-            output_plans.push(OutputPlan {
-                binding: OutputBinding {
-                    output_index,
-                    name: name.clone(),
-                    reg,
-                },
-                source: OutputSource::Expr {
-                    expr,
-                    target_type: field.data_type().clone(),
-                },
-            });
-        } else if let OutputMode::PassthroughByName = options.output_mode {
-            let input_binding =
-                compiler.passthrough_binding_for_output_field(field.name(), program.span)?;
-            if &input_binding.data_type != field.data_type() {
-                return Err(CompileError {
-                    code: "type_mismatch",
-                    message: format!(
-                        "passthrough field '{}' has source type {:?}, expected declared output \
-                         type {:?}",
-                        field.name(),
-                        input_binding.data_type,
-                        field.data_type()
-                    ),
-                    span: program.span,
-                });
-            }
-            if input_binding.nullable && !field.is_nullable() {
-                return Err(CompileError {
-                    code: "null_for_required_field",
-                    message: format!(
-                        "passthrough field '{}' may be null but the output field is required",
-                        field.name()
-                    ),
-                    span: program.span,
-                });
-            }
-            if input_binding.sensitive && !field_sensitive && !options.allow_sensitive_output {
-                return Err(CompileError {
-                    code: "sensitive_leak",
-                    message: format!(
-                        "passthrough field '{}' would store sensitive data in a non-sensitive \
-                         output field; use SET with leak_sensitive(...) to explicitly remove \
-                         sensitivity",
-                        field.name()
-                    ),
-                    span: program.span,
-                });
-            }
-            let input_reg = input_binding.reg.ok_or_else(|| CompileError {
-                code: "unsupported_passthrough",
-                message: format!(
-                    "input field '{}.{}' has unsupported type for FILTER-MAP execution",
-                    compiler.default_passthrough_namespace,
-                    field.name()
-                ),
-                span: program.span,
-            })?;
-            let reg = compiler.alloc_output(input_reg.ty);
-            output_fields.push(field.as_ref().clone());
-            output_plans.push(OutputPlan {
-                binding: OutputBinding {
-                    output_index,
-                    name: name.clone(),
-                    reg,
-                },
-                source: OutputSource::Input(input_reg),
-            });
-        } else {
+    let filter = if let Some(filter_expr) = &program.inner.filter {
+        let filter_type = compiler.infer_expr_type(filter_expr)?;
+        if filter_type != DataType::Boolean {
             return Err(CompileError {
-                code: "missing_set",
-                message: format!(
-                    "declared output field '{}' must be assigned with SET",
-                    field.name()
-                ),
-                span: program.span,
+                code: "invalid_filter",
+                message: "WHERE expression must evaluate to Boolean".to_string(),
+                span: filter_expr.span,
             });
+        }
+        let filter_reg = compiler.alloc_condition(RegisterType::Boolean);
+        let compiled = compiler.compile_expr(filter_expr)?;
+        compiler.emit_move(filter_reg, compiled, filter_expr.span);
+        Some(filter_reg)
+    } else {
+        None
+    };
+
+    compiler.enter_set_scope(&output_schema, &output_sensitivity);
+    if let OutputMode::PassthroughByName = options.output_mode {
+        for field in output_schema.fields() {
+            if let Ok(source) = compiler
+                .passthrough_binding_for_output_field(field.name(), program.span)
+                .cloned()
+            {
+                compiler.update_writable_field(field.name(), source);
+            }
         }
     }
 
-    let outputs = output_plans
+    for (field_ref, expr) in &program.inner.set {
+        let field = output_schema
+            .field_with_name(&field_ref.field)
+            .expect("SET target was validated against the output schema");
+        let field_sensitive = output_sensitivity.is_sensitive(field.name());
+        compiler.validate_assignment_expr(
+            field.name(),
+            expr,
+            field.data_type(),
+            field.is_nullable(),
+            field_sensitive,
+            options.allow_sensitive_output,
+        )?;
+        let nullable = compiler.expr_may_be_null(expr)?;
+        let compiled = compiler.compile_assignment_expr(expr, field.data_type())?;
+        let reg = compiler.alloc_output(compiled.ty);
+        compiler.emit_move(reg, compiled, expr.span);
+        compiler.update_writable_field(
+            field.name(),
+            ColumnBinding {
+                data_type: field.data_type().clone(),
+                nullable,
+                sensitive: field_sensitive,
+                value: ColumnValue::Initialized(reg),
+            },
+        );
+    }
+
+    let output_namespace = compiler
+        .writable_namespaces
         .iter()
-        .map(|plan| plan.binding.clone())
-        .collect::<Vec<_>>();
-    let output_schema = Arc::new(Schema::new(output_fields));
-    let output_columns = output_plans
-        .iter()
-        .flat_map(|plan| {
-            compiler
-                .writable_namespaces
-                .iter()
-                .cloned()
-                .map(|namespace| {
-                    (
-                        BoundFieldRef::User(FieldRef {
-                            relay: namespace,
-                            field: plan.binding.name.clone(),
-                        }),
-                        ColumnBinding {
-                            data_type: output_schema
-                                .field(plan.binding.output_index)
-                                .data_type()
-                                .clone(),
-                            nullable: output_schema.field(plan.binding.output_index).is_nullable(),
-                            sensitive: output_sensitivity.is_sensitive(&plan.binding.name),
-                            reg: Some(plan.binding.reg),
-                        },
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<HashMap<_, _>>();
-    let input_columns = compiler.columns.clone();
-    compiler.columns = output_columns.clone();
+        .next()
+        .expect("compiler requires one writable namespace")
+        .clone();
+    let mut outputs = Vec::with_capacity(output_schema.fields().len());
+    for (output_index, field) in output_schema.fields().iter().enumerate() {
+        let binding = compiler
+            .columns
+            .get(&BoundFieldRef::User(FieldRef {
+                relay: output_namespace.clone(),
+                field: field.name().clone(),
+            }))
+            .expect("output fields were installed in SET scope")
+            .clone();
+        if binding.data_type != *field.data_type() {
+            return Err(CompileError {
+                code: "type_mismatch",
+                message: format!(
+                    "output field '{}' has expression type {:?}, expected declared output type \
+                     {:?}",
+                    field.name(),
+                    binding.data_type,
+                    field.data_type()
+                ),
+                span: program.span,
+            });
+        }
+        if binding.nullable && !field.is_nullable() {
+            let (code, message) = if let ColumnValue::Uninitialized = binding.value {
+                (
+                    "uninitialized_required_field",
+                    format!(
+                        "required output field '{}' remains uninitialized",
+                        field.name()
+                    ),
+                )
+            } else {
+                (
+                    "null_for_required_field",
+                    format!(
+                        "output field '{}' may be null but the output field is required",
+                        field.name()
+                    ),
+                )
+            };
+            return Err(CompileError {
+                code,
+                message,
+                span: program.span,
+            });
+        }
+        if binding.sensitive
+            && !output_sensitivity.is_sensitive(field.name())
+            && !options.allow_sensitive_output
+        {
+            return Err(CompileError {
+                code: "sensitive_leak",
+                message: format!(
+                    "output field '{}' would store sensitive data in a non-sensitive output \
+                     field; use SET with leak_sensitive(...) to explicitly remove sensitivity",
+                    field.name()
+                ),
+                span: program.span,
+            });
+        }
+        let reg = match binding.value {
+            ColumnValue::Initialized(reg) => reg,
+            ColumnValue::Uninitialized => {
+                let ty = Compiler::register_type_for_data_type(
+                    field.data_type(),
+                    program.span,
+                    "uninitialized output",
+                )?;
+                let reg = compiler.alloc_output(ty);
+                compiler.instructions.push(Instruction {
+                    kind: InstructionKind::Uninitialized {
+                        dst: reg,
+                        data_type: field.data_type().clone(),
+                    },
+                    span: program.span,
+                });
+                reg
+            }
+            ColumnValue::Unsupported => {
+                return Err(CompileError {
+                    code: "unsupported_passthrough",
+                    message: format!(
+                        "output field '{}' has unsupported type for FILTER-MAP execution",
+                        field.name()
+                    ),
+                    span: program.span,
+                });
+            }
+        };
+        outputs.push(OutputBinding {
+            output_index,
+            name: field.name().clone(),
+            reg,
+        });
+    }
+
     let mut branch_filters = Vec::with_capacity(program.inner.branch_filters.len());
     for filter_expr in &program.inner.branch_filters {
         let filter_type = compiler.infer_expr_type(filter_expr)?;
@@ -1805,33 +1909,11 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
                 span: filter_expr.span,
             });
         }
-        branch_filters.push(compiler.alloc_condition(RegisterType::Boolean));
-    }
-    compiler.columns = input_columns.clone();
-
-    if let (Some(filter_expr), Some(filter_reg)) = (&program.inner.filter, filter) {
+        let filter_reg = compiler.alloc_condition(RegisterType::Boolean);
         let compiled = compiler.compile_expr(filter_expr)?;
         compiler.emit_move(filter_reg, compiled, filter_expr.span);
+        branch_filters.push(filter_reg);
     }
-
-    for plan in &output_plans {
-        match &plan.source {
-            OutputSource::Input(input_reg) => {
-                compiler.emit_move(plan.binding.reg, *input_reg, program.span);
-            }
-            OutputSource::Expr { expr, target_type } => {
-                let compiled = compiler.compile_assignment_expr(expr, target_type)?;
-                compiler.emit_move(plan.binding.reg, compiled, expr.span);
-            }
-        }
-    }
-    compiler.columns = output_columns;
-    compiler.clear_expr_cache();
-    for (filter_expr, filter_reg) in program.inner.branch_filters.iter().zip(&branch_filters) {
-        let compiled = compiler.compile_expr(filter_expr)?;
-        compiler.emit_move(*filter_reg, compiled, filter_expr.span);
-    }
-    compiler.columns = input_columns;
 
     optimize_instructions(
         &mut compiler.instructions,
@@ -1839,7 +1921,6 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         filter,
         &branch_filters,
     );
-
     if options.optimize_temp_registers {
         remap_temp_registers(&mut compiler.instructions, &mut compiler.layouts.temps);
     }
@@ -1958,7 +2039,8 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
     match kind {
         InstructionKind::Move { .. }
         | InstructionKind::Literal { .. }
-        | InstructionKind::NullLiteral { .. } => true,
+        | InstructionKind::NullLiteral { .. }
+        | InstructionKind::Uninitialized { .. } => true,
         InstructionKind::Unary { op, .. } => unary_descriptor(*op)
             .semantics
             .supports_common_subexpression_elimination(),
@@ -2031,7 +2113,9 @@ fn instruction_inputs(kind: &InstructionKind) -> Vec<RegisterRef> {
         InstructionKind::Move { input, .. }
         | InstructionKind::Unary { input, .. }
         | InstructionKind::Cast { input, .. } => vec![*input],
-        InstructionKind::Literal { .. } | InstructionKind::NullLiteral { .. } => Vec::new(),
+        InstructionKind::Literal { .. }
+        | InstructionKind::NullLiteral { .. }
+        | InstructionKind::Uninitialized { .. } => Vec::new(),
         InstructionKind::Binary { left, right, .. } => vec![*left, *right],
         InstructionKind::Builtin { inputs, .. } => inputs.clone(),
     }
@@ -2042,6 +2126,7 @@ fn instruction_output(kind: &InstructionKind) -> RegisterRef {
         InstructionKind::Move { dst, .. }
         | InstructionKind::Literal { dst, .. }
         | InstructionKind::NullLiteral { dst, .. }
+        | InstructionKind::Uninitialized { dst, .. }
         | InstructionKind::Unary { dst, .. }
         | InstructionKind::Binary { dst, .. }
         | InstructionKind::Cast { dst, .. }
@@ -2054,6 +2139,7 @@ fn rewrite_instruction_output(kind: &mut InstructionKind, dst: RegisterRef) {
         InstructionKind::Move { dst: output, .. }
         | InstructionKind::Literal { dst: output, .. }
         | InstructionKind::NullLiteral { dst: output, .. }
+        | InstructionKind::Uninitialized { dst: output, .. }
         | InstructionKind::Unary { dst: output, .. }
         | InstructionKind::Binary { dst: output, .. }
         | InstructionKind::Cast { dst: output, .. }
@@ -2072,7 +2158,9 @@ fn rewrite_temp_input(kind: &mut InstructionKind, from: RegisterRef, to_index: u
         InstructionKind::Move { input, .. }
         | InstructionKind::Unary { input, .. }
         | InstructionKind::Cast { input, .. } => rewrite(input),
-        InstructionKind::Literal { .. } | InstructionKind::NullLiteral { .. } => {}
+        InstructionKind::Literal { .. }
+        | InstructionKind::NullLiteral { .. }
+        | InstructionKind::Uninitialized { .. } => {}
         InstructionKind::Binary { left, right, .. } => {
             rewrite(left);
             rewrite(right);
@@ -2090,6 +2178,7 @@ fn rewrite_temp_output(kind: &mut InstructionKind, to_index: usize) {
         InstructionKind::Move { dst, .. }
         | InstructionKind::Literal { dst, .. }
         | InstructionKind::NullLiteral { dst, .. }
+        | InstructionKind::Uninitialized { dst, .. }
         | InstructionKind::Unary { dst, .. }
         | InstructionKind::Binary { dst, .. }
         | InstructionKind::Cast { dst, .. }
@@ -2615,7 +2704,7 @@ mod tests {
     }
 
     #[test]
-    fn reuses_pure_expression_subtrees_across_outputs() {
+    fn invalidates_expression_cache_after_each_assignment() {
         let program = parse_program(
             "SET input.lowered = lower(input.name), input.normalized = lower(input.name);",
         )
@@ -2646,8 +2735,62 @@ mod tests {
                     )
                 })
                 .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn compiles_repeated_set_targets_in_source_order() {
+        let program = parse_program("SET output.amount = 1, output.amount = output.amount + 1;")
+            .expect("must parse");
+        let input_schema = schema(Vec::<Field>::new());
+        let output_schema = schema(vec![Field::new("amount", DataType::Int64, false)]);
+
+        let compiled = compile_program_for_bindings(
+            &program,
+            output_schema,
+            [
+                CompileBinding::writeonly(
+                    "output",
+                    schema(vec![Field::new("amount", DataType::Int64, false)]),
+                ),
+                CompileBinding::readonly("input", input_schema),
+            ],
+        )
+        .expect("sequential SET must compile");
+
+        assert_eq!(
+            compiled
+                .instructions
+                .iter()
+                .filter(|instruction| {
+                    if let InstructionKind::Binary {
+                        op: BinaryOp::Add, ..
+                    } = instruction.kind
+                    {
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .count(),
             1
         );
+    }
+
+    #[test]
+    fn rejects_required_output_that_stays_symbolically_uninitialized() {
+        let program = parse_program("WHERE true;").expect("must parse");
+        let output_schema = schema(vec![Field::new("amount", DataType::Int64, false)]);
+
+        let error = compile_program_for_bindings(
+            &program,
+            output_schema.clone(),
+            [CompileBinding::writeonly("output", output_schema)],
+        )
+        .expect_err("required uninitialized output must fail validation");
+
+        assert_eq!(error.code, "uninitialized_required_field");
     }
 
     #[test]

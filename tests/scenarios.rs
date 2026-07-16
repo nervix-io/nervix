@@ -48,6 +48,9 @@ use nervix::{
     runtime::RuntimeTestHooks,
 };
 use nervix_client_core::Client;
+use nervix_wasm::{
+    WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
+};
 use playwright_rs::{
     FilePayload, LaunchOptions, Playwright, Viewport, WaitForOptions, WaitForState,
 };
@@ -1475,6 +1478,25 @@ async fn given_node_has_malformed_output_wasm_processor_fixture_resource_directo
     .await;
 }
 
+#[given(
+    expr = "node {string} has a WASM fixture returning an uninitialized column to relay {string} \
+            in resource directory {string}"
+)]
+async fn given_node_has_uninitialized_output_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    output_relay: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        uninitialized_output_wasm_fixture(&output_relay),
+    )
+    .await;
+}
+
 #[given(expr = "node {string} has trapping WASM processor fixture resource directory {string}")]
 async fn given_node_has_trapping_wasm_processor_fixture_resource_directory(
     world: &mut ScenarioWorld,
@@ -1554,6 +1576,62 @@ fn malformed_output_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
     )"#
+}
+
+fn uninitialized_output_wasm_fixture(output_relay: &str) -> Vec<u8> {
+    let encoded = WasmEnvelope::output(
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![WasmOutputColumnRef::uninitialized()],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow::default()],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .expect("uninitialized WASM output fixture must encode");
+    let encoded_wat = encoded
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let encoded_len = encoded.len();
+
+    format!(
+        r#"(module
+          (memory (export "memory") 2)
+          (global $emitted (mut i32) (i32.const 0))
+          (data (i32.const 32768) "{encoded_wat}")
+          (func (export "nervix_buffer_ptr") (result i32) (i32.const 32768))
+          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const 131072))
+          (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
+          (func (export "nervix_process_batch") (param i32) (result i32)
+            i32.const 1
+            global.set $emitted
+            i32.const 0)
+          (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+          (func (export "nervix_read_emit") (result i32)
+            global.get $emitted
+            if (result i32)
+              i32.const 0
+              global.set $emitted
+              i32.const {encoded_len}
+            else
+              i32.const 0
+            end)
+          (func (export "nervix_dump_state") (result i32) (i32.const 0))
+          (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_reset_state") (result i32)
+            i32.const 0
+            global.set $emitted
+            i32.const 0)
+        )"#
+    )
+    .into_bytes()
 }
 
 fn trapping_wasm_fixture() -> &'static [u8] {

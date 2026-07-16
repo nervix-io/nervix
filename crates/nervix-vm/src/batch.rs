@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    UInt16Array, UInt32Array, UInt64Array, new_null_array,
 };
 use arrow_schema::{DataType, Schema, TimeUnit};
 
@@ -25,6 +25,7 @@ pub enum TypedArray {
     Utf8(StringArray),
     Datetime(TimestampNanosecondArray),
     Generic(ArrayRef),
+    Uninitialized { data_type: DataType, len: usize },
 }
 
 impl TypedArray {
@@ -44,6 +45,7 @@ impl TypedArray {
             Self::Utf8(array) => array.len(),
             Self::Datetime(array) => array.len(),
             Self::Generic(array) => array.len(),
+            Self::Uninitialized { len, .. } => *len,
         }
     }
 
@@ -67,6 +69,7 @@ impl TypedArray {
             Self::Utf8(_) => DataType::Utf8,
             Self::Datetime(_) => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
             Self::Generic(array) => array.data_type().clone(),
+            Self::Uninitialized { data_type, .. } => data_type.clone(),
         }
     }
 
@@ -177,6 +180,39 @@ impl TypedArray {
             Self::Utf8(array) => Arc::new(array.clone()),
             Self::Datetime(array) => Arc::new(array.clone()),
             Self::Generic(array) => array.clone(),
+            Self::Uninitialized { data_type, len } => new_null_array(data_type, *len),
+        }
+    }
+
+    pub fn uninitialized(data_type: DataType, len: usize) -> Self {
+        Self::Uninitialized { data_type, len }
+    }
+
+    pub const fn is_uninitialized(&self) -> bool {
+        if let Self::Uninitialized { .. } = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn null_count(&self) -> usize {
+        match self {
+            Self::UInt8(array) => array.null_count(),
+            Self::Int8(array) => array.null_count(),
+            Self::UInt16(array) => array.null_count(),
+            Self::Int16(array) => array.null_count(),
+            Self::UInt32(array) => array.null_count(),
+            Self::Int32(array) => array.null_count(),
+            Self::UInt64(array) => array.null_count(),
+            Self::Int64(array) => array.null_count(),
+            Self::Float32(array) => array.null_count(),
+            Self::Float64(array) => array.null_count(),
+            Self::Boolean(array) => array.null_count(),
+            Self::Utf8(array) => array.null_count(),
+            Self::Datetime(array) => array.null_count(),
+            Self::Generic(array) => array.null_count(),
+            Self::Uninitialized { len, .. } => *len,
         }
     }
 }
@@ -247,8 +283,21 @@ impl TypedBatch {
         let columns = self
             .columns
             .iter()
-            .map(TypedArray::to_array_ref)
-            .collect::<Vec<_>>();
+            .zip(self.schema.fields())
+            .map(|(column, field)| {
+                if column.is_uninitialized() && !field.is_nullable() {
+                    return Err(RuntimeError::UninitializedRequiredColumn {
+                        column: field.name().clone(),
+                    });
+                }
+                if !field.is_nullable() && column.null_count() > 0 {
+                    return Err(RuntimeError::NullForRequiredColumn {
+                        column: field.name().clone(),
+                    });
+                }
+                Ok(column.to_array_ref())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let result = if columns.is_empty() {
             RecordBatch::try_new_with_options(
                 self.schema.clone(),
@@ -389,6 +438,47 @@ mod tests {
                 assert!(message.contains("Int64"));
             }
             other => panic!("expected invalid batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optional_uninitialized_column_materializes_as_typed_nulls() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            true,
+        )]));
+        let batch =
+            TypedBatch::try_new(schema, vec![TypedArray::uninitialized(DataType::Int64, 2)])
+                .expect("uninitialized batch must build");
+
+        let materialized = batch
+            .to_record_batch()
+            .expect("optional uninitialized output must materialize");
+
+        assert_eq!(materialized.column(0).data_type(), &DataType::Int64);
+        assert_eq!(materialized.column(0).null_count(), 2);
+    }
+
+    #[test]
+    fn required_uninitialized_column_fails_materialization() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            TypedBatch::try_new(schema, vec![TypedArray::uninitialized(DataType::Int64, 1)])
+                .expect("uninitialized batch must build before its node boundary");
+
+        let error = batch
+            .to_record_batch()
+            .expect_err("required uninitialized output must fail");
+
+        if let RuntimeError::UninitializedRequiredColumn { column } = error {
+            assert_eq!(column, "value");
+        } else {
+            panic!("expected required uninitialized column error, got {error:?}");
         }
     }
 

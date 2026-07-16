@@ -30,6 +30,7 @@ RUN apt-get update \
         ca-certificates \
         cmake \
         curl \
+        flatbuffers-compiler \
         g++ \
         g++-aarch64-linux-gnu \
         gcc \

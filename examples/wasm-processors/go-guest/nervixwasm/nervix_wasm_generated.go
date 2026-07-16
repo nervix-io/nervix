@@ -73,18 +73,21 @@ func (v ProcessorTypeKind) String() string {
 type ColumnSource byte
 
 const (
-	ColumnSourceInput     ColumnSource = 0
-	ColumnSourceGenerated ColumnSource = 1
+	ColumnSourceInput         ColumnSource = 0
+	ColumnSourceGenerated     ColumnSource = 1
+	ColumnSourceUninitialized ColumnSource = 2
 )
 
 var EnumNamesColumnSource = map[ColumnSource]string{
-	ColumnSourceInput:     "Input",
-	ColumnSourceGenerated: "Generated",
+	ColumnSourceInput:         "Input",
+	ColumnSourceGenerated:     "Generated",
+	ColumnSourceUninitialized: "Uninitialized",
 }
 
 var EnumValuesColumnSource = map[string]ColumnSource{
-	"Input":     ColumnSourceInput,
-	"Generated": ColumnSourceGenerated,
+	"Input":         ColumnSourceInput,
+	"Generated":     ColumnSourceGenerated,
+	"Uninitialized": ColumnSourceUninitialized,
 }
 
 func (v ColumnSource) String() string {
