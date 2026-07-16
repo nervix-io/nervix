@@ -48,6 +48,8 @@ jobs:
           components: rustfmt
 
       - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
@@ -146,7 +148,8 @@ jobs:
           components: rustfmt,miri
 
       - uses: bufbuild/buf-setup-action@v1
-
+        with:
+          github_token: ${{ github.token }}
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
