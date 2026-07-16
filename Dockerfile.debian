@@ -3,6 +3,8 @@
 ARG RUST_VERSION=1.97
 ARG DEBIAN_VERSION=trixie
 ARG LLVM_VERSION=22
+ARG FLATBUFFERS_VERSION=25.12.19
+ARG FLATBUFFERS_SHA256=f81c3162b1046fe8b84b9a0dbdd383e24fdbcf88583b9cb6028f90d04d90696a
 
 ARG SONIC_PARALLELISM=2
 ARG SONIC_TARGET_CPUS=x86-64-v3
@@ -17,6 +19,8 @@ ARG TARGETARCH
 ARG RUST_VERSION
 ARG DEBIAN_VERSION
 ARG LLVM_VERSION
+ARG FLATBUFFERS_VERSION
+ARG FLATBUFFERS_SHA256
 ARG SONIC_PARALLELISM
 ARG SONIC_TARGET_CPUS
 
@@ -30,7 +34,6 @@ RUN apt-get update \
         ca-certificates \
         cmake \
         curl \
-        flatbuffers-compiler \
         g++ \
         g++-aarch64-linux-gnu \
         gcc \
@@ -46,6 +49,23 @@ RUN apt-get update \
         pkg-config \
         protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl -L --proto '=https' --tlsv1.2 -sSf \
+    "https://github.com/google/flatbuffers/archive/refs/tags/v${FLATBUFFERS_VERSION}.tar.gz" \
+    -o /tmp/flatbuffers.tar.gz \
+    && echo "${FLATBUFFERS_SHA256}  /tmp/flatbuffers.tar.gz" | sha256sum --check - \
+    && mkdir -p /tmp/flatbuffers-src /tmp/flatbuffers-build \
+    && tar -xzf /tmp/flatbuffers.tar.gz -C /tmp/flatbuffers-src --strip-components=1 \
+    && cmake -S /tmp/flatbuffers-src -B /tmp/flatbuffers-build \
+        -DFLATBUFFERS_BUILD_FLATLIB=OFF \
+        -DFLATBUFFERS_BUILD_GRPCTEST=OFF \
+        -DFLATBUFFERS_BUILD_SHAREDLIB=OFF \
+        -DFLATBUFFERS_BUILD_TESTS=OFF \
+        -DFLATBUFFERS_INSTALL=OFF \
+    && cmake --build /tmp/flatbuffers-build --target flatc --parallel \
+    && install -m 0755 /tmp/flatbuffers-build/flatc /usr/local/bin/flatc \
+    && test "$(flatc --version)" = "flatc version ${FLATBUFFERS_VERSION}" \
+    && rm -rf /tmp/flatbuffers.tar.gz /tmp/flatbuffers-src /tmp/flatbuffers-build
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" \
