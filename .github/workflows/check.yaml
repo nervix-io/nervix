@@ -95,7 +95,12 @@ jobs:
           go install github.com/antham/ghokin/v3@v3.9.0
 
       - name: Install apt deps
-        run: sudo apt update && sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            flatbuffers-compiler \
+            libcurl4-openssl-dev \
+            protobuf-compiler
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -184,7 +189,12 @@ jobs:
           npm install -g playwright
 
       - name: Install apt deps
-        run: sudo apt update && sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            flatbuffers-compiler \
+            libcurl4-openssl-dev \
+            protobuf-compiler
 
       - name: Checkout
         uses: actions/checkout@v4
