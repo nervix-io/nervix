@@ -4,7 +4,7 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{DataType, Field, Schema};
 use nervix_nspl::vm_program::{
     BinaryOp, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
-    Program, Span, SpannedExpr, SpannedNode, UnaryOp,
+    Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
 };
 
 use crate::{
@@ -291,6 +291,60 @@ impl Compiler {
             Ok(DataType::Utf8)
         } else {
             Ok(Self::header_values_type())
+        }
+    }
+
+    fn injected_window_aggregate_call_type(
+        &self,
+        function: WindowAggregateFunction,
+        args: &[SpannedExpr],
+        span: Span,
+    ) -> Result<DataType, CompileError> {
+        if args.len() != function.expected_arity() {
+            return Err(CompileError {
+                code: "invalid_function_arity",
+                message: format!(
+                    "function '{}' expects exactly {} argument(s), found {}",
+                    function.nspl_name(),
+                    function.expected_arity(),
+                    args.len()
+                ),
+                span,
+            });
+        }
+        let input_type = self.infer_expr_type(&args[0])?;
+        match function {
+            WindowAggregateFunction::Count => Ok(DataType::Int64),
+            WindowAggregateFunction::PercentileLinearHistogram => {
+                if !input_type.is_numeric() {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires a numeric input, found {input_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[0].span,
+                    });
+                }
+                Ok(DataType::Float64)
+            }
+            WindowAggregateFunction::Sum => {
+                if !input_type.is_numeric() {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires a numeric input, found {input_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[0].span,
+                    });
+                }
+                Ok(input_type)
+            }
+            WindowAggregateFunction::First
+            | WindowAggregateFunction::Last
+            | WindowAggregateFunction::Max
+            | WindowAggregateFunction::Min => Ok(input_type),
         }
     }
 
@@ -725,6 +779,13 @@ impl Compiler {
                     let arg = self.leak_sensitive_arg(args, expr.span)?;
                     return self.infer_expr_type(arg);
                 }
+                if let FunctionName::WindowAggregate(invocation) = function {
+                    return self.injected_window_aggregate_call_type(
+                        invocation.function,
+                        args,
+                        expr.span,
+                    );
+                }
                 if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
                     return self.injected_header_call_type(function, args, expr.span);
                 }
@@ -806,6 +867,9 @@ impl Compiler {
                 }
                 if let FunctionName::ReadHeader = function {
                     return Ok(true);
+                }
+                if let FunctionName::WindowAggregate(_) = function {
+                    return Ok(false);
                 }
                 if let FunctionName::NullIf = function {
                     return Ok(true);
@@ -1095,6 +1159,27 @@ impl Compiler {
                             dst,
                             function: function.clone(),
                             inputs,
+                            output_type,
+                        },
+                        span: expr.span,
+                    });
+                    return Ok(dst);
+                }
+                if let FunctionName::WindowAggregate(invocation) = function {
+                    let output_type = self.injected_window_aggregate_call_type(
+                        invocation.function,
+                        args,
+                        expr.span,
+                    )?;
+                    let dst = self.alloc_temp(
+                        RegisterType::from_data_type(&output_type)
+                            .expect("validated aggregate output type must be supported"),
+                    );
+                    self.instructions.push(Instruction {
+                        kind: InstructionKind::Inject {
+                            dst,
+                            function: function.clone(),
+                            inputs: Vec::new(),
                             output_type,
                         },
                         span: expr.span,
@@ -1620,6 +1705,7 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
             )))
         }
         FunctionName::Unknown(_)
+        | FunctionName::WindowAggregate(_)
         | FunctionName::LookupHashMap
         | FunctionName::ReadHeader
         | FunctionName::ReadHeaders

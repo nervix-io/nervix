@@ -15,6 +15,7 @@ Feature: Window processor runtime behavior
         CREATE SCHEMA metric_summary (
         tenant STRING,
         sample_count I64,
+        adjusted_sample_count I64,
         first_latency I64,
         last_latency I64,
         total_latency I64
@@ -32,6 +33,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
+        CREATE RELAY metric_summaries_copy SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
@@ -42,16 +44,18 @@ Feature: Window processor runtime behavior
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR tumbling_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries
+        TO metric_summaries_copy BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
+          metric_summaries.adjusted_sample_count = COUNT(metrics.latency) + 2,
           metric_summaries.first_latency = FIRST(metrics.latency),
           metric_summaries.last_latency = LAST(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
-        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries_copy WHERE metric_summaries_copy.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -70,6 +74,7 @@ Feature: Window processor runtime behavior
     And the last relay subscription payload contains
       """
       "sample_count":2
+      "adjusted_sample_count":4
       "first_latency":10
       "last_latency":20
       """
@@ -493,12 +498,28 @@ Feature: Window processor runtime behavior
       """
     And the last command output contains
       """
-      aggregate structures: 8
+      aggregate structures: 6
       """
     And the last command output contains
       """
-      structure 5:
-        function: PERCENTILE_LINEAR_HISTOGRAM
+      structure 1:
+        functions: FIRST, LAST
+        storage: sequence
+        references: 2
+        input: metrics.latency
+      """
+    And the last command output contains
+      """
+      structure 2:
+        functions: MAX, MIN
+        storage: sorted_map
+        references: 2
+        input: metrics.latency
+      """
+    And the last command output contains
+      """
+      structure 3:
+        functions: PERCENTILE_LINEAR_HISTOGRAM
         storage: linear_histogram
         references: 2
         input: metrics.latency
@@ -509,15 +530,15 @@ Feature: Window processor runtime behavior
       """
     And the last command output contains
       """
-      function: COUNT
+      functions: COUNT
       """
     And the last command output contains
       """
-      function: SUM
+      functions: SUM
       """
     And the last command output does not contain
       """
-      structure 8:
+      structure 6:
       """
 
     Examples:

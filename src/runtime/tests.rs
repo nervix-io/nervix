@@ -68,6 +68,35 @@ fn identifier(raw: &str) -> Identifier {
     Identifier::parse(raw).expect("valid identifier")
 }
 
+fn compile_window_aggregate_for_test(
+    aggregate: &nervix_nspl::window_processor::aggregate::WindowAggregateProgram,
+    input_type: ParseAsType,
+    output_schema: &super::CompiledSchema,
+) -> super::CompiledWindowAggregateProgram {
+    let input_relay = identifier("events");
+    let output_relay = identifier("summary");
+    let input_schema = compile_schema(&CreateSchema {
+        name: input_relay.clone(),
+        fields: vec![SchemaField {
+            name: identifier("latency"),
+            ty: input_type,
+            optional: false,
+            sensitive: false,
+        }],
+    });
+    let mut relay_schemas = HashMap::default();
+    relay_schemas.insert(input_relay.clone(), Arc::new(input_schema));
+    relay_schemas.insert(output_relay.clone(), Arc::new(output_schema.clone()));
+
+    super::CompiledWindowAggregateProgram::compile(
+        aggregate,
+        &[input_relay],
+        &output_relay,
+        &relay_schemas,
+    )
+    .expect("window aggregate should compile")
+}
+
 fn branch_key(fields: impl IntoIterator<Item = (Identifier, RuntimeValue)>) -> Option<BranchKey> {
     BranchKey::from_fields(fields)
         .expect("test branch key must be non-empty")
@@ -277,13 +306,19 @@ async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
     drop(shutdown_tx);
 }
 
-#[test]
-fn window_aggregate_evaluator_computes_count_percentile_and_array() {
+#[tokio::test]
+async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array() {
     let output_schema = compile_schema(&CreateSchema {
         name: identifier("summary"),
         fields: vec![
             nervix_models::SchemaField {
                 name: identifier("count"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            },
+            nervix_models::SchemaField {
+                name: identifier("adjusted_count"),
                 ty: ParseAsType::I64,
                 optional: false,
                 sensitive: false,
@@ -306,9 +341,9 @@ fn window_aggregate_evaluator_computes_count_percentile_and_array() {
         ],
     });
     let aggregate = parse_aggregate_program(
-        "summary.count = COUNT(events.latency), summary.p50 = \
-         PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 100, '2s'), summary.latencies = \
-         [PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 100, '2s'), \
+        "summary.count = COUNT(events.latency), summary.adjusted_count = COUNT(events.latency) + \
+         2, summary.p50 = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 100, '2s'), \
+         summary.latencies = [PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 100, '2s'), \
          PERCENTILE_LINEAR_HISTOGRAM(events.latency, 100, 10, 0, 100, '2s')]",
     )
     .expect("aggregate should parse");
@@ -330,14 +365,14 @@ fn window_aggregate_evaluator_computes_count_percentile_and_array() {
             .expect("aggregate state should accept message");
     }
 
-    let record = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate");
+    let compiled =
+        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::F64, &output_schema);
+    let record = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate");
 
     assert_eq!(record.value("count"), Some(&RuntimeValue::I64(3)));
+    assert_eq!(record.value("adjusted_count"), Some(&RuntimeValue::I64(5)));
     assert_eq!(
         record.value("p50"),
         Some(&RuntimeValue::F64(OrderedFloat(25.0)))
@@ -351,8 +386,8 @@ fn window_aggregate_evaluator_computes_count_percentile_and_array() {
     );
 }
 
-#[test]
-fn window_linear_histogram_percentiles_share_accumulator_by_config() {
+#[tokio::test]
+async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
     let output_schema = compile_schema(&CreateSchema {
         name: identifier("summary"),
         fields: vec![
@@ -408,12 +443,11 @@ fn window_linear_histogram_percentiles_share_accumulator_by_config() {
             .expect("aggregate state should accept message");
     }
 
-    let record = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate");
+    let compiled =
+        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let record = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate");
 
     assert_eq!(
         record.value("p50"),
@@ -470,8 +504,8 @@ fn window_advance_removes_step_messages() {
     );
 }
 
-#[test]
-fn linear_histogram_zero_delay_removes_step_values_immediately() {
+#[tokio::test]
+async fn linear_histogram_zero_delay_removes_step_values_immediately() {
     let output_schema = compile_schema(&CreateSchema {
         name: identifier("summary"),
         fields: vec![nervix_models::SchemaField {
@@ -514,12 +548,11 @@ fn linear_histogram_zero_delay_removes_step_values_immediately() {
         Timestamp::from_unix_nanos(1_000_000_000),
     )
     .expect("window should advance");
-    let record = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate");
+    let compiled =
+        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let record = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate");
 
     assert_eq!(
         record.value("p0"),
@@ -527,8 +560,8 @@ fn linear_histogram_zero_delay_removes_step_values_immediately() {
     );
 }
 
-#[test]
-fn linear_histogram_delay_retains_removed_step_values_until_expired() {
+#[tokio::test]
+async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
     let output_schema = compile_schema(&CreateSchema {
         name: identifier("summary"),
         fields: vec![nervix_models::SchemaField {
@@ -571,12 +604,11 @@ fn linear_histogram_delay_retains_removed_step_values_until_expired() {
         Timestamp::from_unix_nanos(1_000_000_000),
     )
     .expect("window should advance");
-    let retained = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate while delay retains value");
+    let compiled =
+        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let retained = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate while delay retains value");
     assert_eq!(
         retained.value("p0"),
         Some(&RuntimeValue::F64(OrderedFloat(15.0)))
@@ -596,12 +628,9 @@ fn linear_histogram_delay_retains_removed_step_values_until_expired() {
             },
         )
         .expect("aggregate state should accept message before delay expires");
-    let still_retained = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate before delay expires");
+    let still_retained = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate before delay expires");
     assert_eq!(
         still_retained.value("p0"),
         Some(&RuntimeValue::F64(OrderedFloat(15.0)))
@@ -621,20 +650,17 @@ fn linear_histogram_delay_retains_removed_step_values_until_expired() {
             },
         )
         .expect("aggregate state should accept message after delay expires");
-    let expired = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate after delay expires");
+    let expired = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate after delay expires");
     assert_eq!(
         expired.value("p0"),
         Some(&RuntimeValue::F64(OrderedFloat(95.0)))
     );
 }
 
-#[test]
-fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() {
+#[tokio::test]
+async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() {
     let output_schema = compile_schema(&CreateSchema {
         name: identifier("summary"),
         fields: vec![nervix_models::SchemaField {
@@ -694,20 +720,19 @@ fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() {
     );
     assert_eq!(state.next_timeout_deadline(), None);
 
-    let record = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate after timeout purge");
+    let compiled =
+        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let record = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate after timeout purge");
     assert_eq!(
         record.value("p0"),
         Some(&RuntimeValue::F64(OrderedFloat(95.0)))
     );
 }
 
-#[test]
-fn window_aggregate_state_updates_first_last_min_max_and_sum() {
+#[tokio::test]
+async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
     let output_schema = compile_schema(&CreateSchema {
         name: identifier("summary"),
         fields: vec![
@@ -767,12 +792,16 @@ fn window_aggregate_state_updates_first_last_min_max_and_sum() {
             .expect("aggregate state should accept message");
     }
 
-    let record = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate");
+    assert_eq!(
+        state.accumulators.len(),
+        3,
+        "FIRST/LAST and MIN/MAX should each share one physical structure"
+    );
+    let compiled =
+        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let record = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate");
 
     assert_eq!(record.value("first_latency"), Some(&RuntimeValue::I64(30)));
     assert_eq!(record.value("last_latency"), Some(&RuntimeValue::I64(20)));
@@ -788,12 +817,9 @@ fn window_aggregate_state_updates_first_last_min_max_and_sum() {
         Timestamp::now(),
     )
     .expect("window should advance");
-    let record = evaluate_window_aggregate(
-        &aggregate.inner,
-        &state,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("aggregate should evaluate after removal");
+    let record = evaluate_window_aggregate(&compiled, &state)
+        .await
+        .expect("aggregate should evaluate after removal");
 
     assert_eq!(record.value("first_latency"), Some(&RuntimeValue::I64(10)));
     assert_eq!(record.value("last_latency"), Some(&RuntimeValue::I64(20)));
@@ -859,8 +885,8 @@ fn window_output_metadata_uses_window_low_and_emit_high_watermark() {
     );
 }
 
-#[test]
-fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
+#[tokio::test]
+async fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
     let output_schema = compile_schema(&CreateSchema {
         name: identifier("summary"),
         fields: vec![
@@ -915,12 +941,11 @@ fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
 
     let restored = WindowProcessorState::from_snapshot(&aggregate.inner, state.to_snapshot())
         .expect("snapshot should restore");
-    let record = evaluate_window_aggregate(
-        &aggregate.inner,
-        &restored,
-        output_schema.arrow_schema().as_ref(),
-    )
-    .expect("restored aggregate should evaluate");
+    let compiled =
+        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let record = evaluate_window_aggregate(&compiled, &restored)
+        .await
+        .expect("restored aggregate should evaluate");
 
     assert_eq!(restored.entries.len(), 2);
     assert_eq!(

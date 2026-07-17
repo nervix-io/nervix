@@ -380,12 +380,13 @@ When `WIDTH` equals `STEP`, the processor behaves as a tumbling window. When `ST
 
 Duration windows use record watermark metadata as the event time. Ingested relay records always carry low and high watermarks. Window membership uses the low watermark. Duration `WIDTH` creates a scheduled timeout at `first_entry_low_watermark + WIDTH`; the timeout uses the shared domain clock, but the deadline is derived from each branch-local window state. When a window emits an aggregate record, its low watermark is the minimum low watermark in the window and its high watermark is the current domain time at emission.
 
-Aggregate expressions are not normal filter-map expressions. Aggregate functions are only valid as top-level aggregate values or as elements inside aggregate arrays:
+Aggregate expressions use the normal VM expression language, with aggregate calls supplied by the window runtime. An aggregate call may participate in unary, binary, cast, and standard function evaluation, but aggregate calls cannot be nested inside another aggregate call's arguments:
 
 ```nspl
 AGGREGATE
   summaries.tenant = FIRST(metrics.tenant),
   summaries.sample_count = COUNT(metrics.latency),
+  summaries.adjusted_sample_count = COUNT(metrics.latency) + 2,
   summaries.first_latency = FIRST(metrics.latency),
   summaries.last_latency = LAST(metrics.latency),
   summaries.min_latency = MIN(metrics.latency),
@@ -416,11 +417,13 @@ Supported aggregate functions:
 - `min` and `max` are numeric and `min < max`
 - `delay` is a duration string parsed with `humantime`, such as `'2s'`. When `STEP` removes values from the active window, histogram bucket counts remain eligible until `removal_time + delay`; use `'0ms'` for immediate removal.
 
-Aggregate calls declare runtime state by implication. Nervix first walks the `AGGREGATE` expression tree and extracts the set of demanded aggregation structures. It then deduplicates identical demands before creating branch-local accumulators.
+Aggregate calls declare runtime state by implication. Before a branch instance runs, Nervix walks the complete `AGGREGATE` expression tree, extracts every concrete function/input/configuration demand, minimizes the set of required physical structures, and compiles the surrounding expressions as VM programs. Repeated uses do not create repeated state, and compatible operations share one structure: `FIRST` and `LAST` over the same expression share a sequence, `MIN` and `MAX` share a sorted map, and histogram percentiles with identical input and configuration share a histogram. Multiple `TO` routes consume the same evaluated base record and do not duplicate aggregate state.
+
+At emission time, the VM calls the window runtime for each aggregate value. Once injected, that value follows the standard VM evaluation chain, so expressions such as `COUNT(metrics.latency) + 2` and `ABS(MIN(metrics.delta))` use ordinary typed VM operations.
 
 `DESCRIBE WINDOW PROCESSOR` exposes that deduplicated demand set. The output includes the scheduled owner and replicas, processor relays, window bounds, branch-local execution marker, aggregate structure count, and one entry per demanded structure with:
 
-- aggregate function
+- aggregate functions that require the structure
 - storage kind (`counter`, `sequence`, `sorted_map`, `sum`, or `linear_histogram`)
 - reference count from the aggregate expression tree
 - input expression when applicable

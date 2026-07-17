@@ -10235,7 +10235,15 @@ fn format_window_aggregate_demand(
 ) -> Vec<String> {
     let mut lines = vec![
         format!("structure {}:", demand.id),
-        format!("  function: {}", demand.function.nspl_name()),
+        format!(
+            "  functions: {}",
+            demand
+                .functions
+                .iter()
+                .map(|function| function.nspl_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         format!("  storage: {}", demand.storage.nspl_name()),
         format!(
             "  references: {}",
