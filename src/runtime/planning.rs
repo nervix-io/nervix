@@ -592,6 +592,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
 
     fn materialize_nodes(
         nodes: &[BranchedProcessorSpec],
+        relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
     ) -> Result<Vec<RelayProcessorTemplate>, String> {
         let mut out = Vec::new();
         for node in nodes {
@@ -625,21 +626,8 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         width,
                         step,
                         aggregate,
-                    } => RelayProcessorOperationTemplate::WindowProcessor {
-                        output_routes: materialize_outputs(output_routes)?,
-                        width_messages: width.messages.map(|messages| messages as usize),
-                        step_messages: step.messages.map(|messages| messages as usize),
-                        width_duration: parse_optional_window_duration(
-                            &node.processor,
-                            "width",
-                            width.duration.as_deref(),
-                        )?,
-                        step_duration: parse_optional_window_duration(
-                            &node.processor,
-                            "step",
-                            step.duration.as_deref(),
-                        )?,
-                        aggregate: parse_aggregate_program(aggregate)
+                    } => {
+                        let aggregate = parse_aggregate_program(aggregate)
                             .map_err(|error| {
                                 format!(
                                     "window processor '{}' aggregate parse failed: {}",
@@ -647,8 +635,41 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                                     Runtime::vm_program_error(error)
                                 )
                             })?
-                            .inner,
-                    },
+                            .inner;
+                        let output_relay = output_routes
+                            .outputs()
+                            .next()
+                            .map(|output| &output.relay)
+                            .ok_or_else(|| {
+                                format!(
+                                    "window processor '{}' requires an output relay",
+                                    node.processor.as_str()
+                                )
+                            })?;
+                        let compiled_aggregate = CompiledWindowAggregateProgram::compile(
+                            &aggregate,
+                            &node.input_relays,
+                            output_relay,
+                            relay_schemas,
+                        )?;
+                        RelayProcessorOperationTemplate::WindowProcessor {
+                            output_routes: materialize_outputs(output_routes)?,
+                            width_messages: width.messages.map(|messages| messages as usize),
+                            step_messages: step.messages.map(|messages| messages as usize),
+                            width_duration: parse_optional_window_duration(
+                                &node.processor,
+                                "width",
+                                width.duration.as_deref(),
+                            )?,
+                            step_duration: parse_optional_window_duration(
+                                &node.processor,
+                                "step",
+                                step.duration.as_deref(),
+                            )?,
+                            aggregate,
+                            compiled_aggregate,
+                        }
+                    }
                     BranchedProcessorOperationSpec::Reorderer {
                         output_routes,
                         order_by,
@@ -880,7 +901,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                 entrypoint_schema_relay.as_str()
             )
         })?;
-    let processors = materialize_nodes(&spec.processors)?
+    let processors = materialize_nodes(&spec.processors, relay_schemas)?
         .into_iter()
         .map(|processor| (processor.processor.clone(), processor))
         .collect::<HashMap<_, _>>();

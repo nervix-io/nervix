@@ -4,10 +4,13 @@ use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
 };
+use sorted_vec::SortedSet;
 
+pub use crate::vm_program::WindowAggregateFunction;
 use crate::vm_program::{
     Diagnostic, Expr, FieldRef, FunctionName, Literal, ParseError, ParseFromSourceError, Span,
-    SpannedExpr, SpannedNode, SpannedToken, Token, expr_parser, field_ref_parser, lex,
+    SpannedExpr, SpannedNode, SpannedToken, Token, WindowAggregateInvocation, expr_parser,
+    field_ref_parser, lex,
 };
 
 fn spanned<T>(inner: T, span: Span) -> SpannedNode<T> {
@@ -30,30 +33,9 @@ pub struct WindowAggregateAssignment {
 pub enum WindowAggregateExpr {
     Scalar(SpannedExpr),
     Array(Vec<SpannedNode<WindowAggregateExpr>>),
-    AggregateCall(WindowAggregateCall),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct WindowAggregateCall {
-    pub function: WindowAggregateFunction,
-    pub args: Vec<SpannedExpr>,
-    pub demand_id: WindowAggregateDemandId,
-    pub percentile: Option<f64>,
-    pub linear_histogram: Option<WindowLinearHistogramConfig>,
 }
 
 pub type WindowAggregateDemandId = usize;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WindowAggregateFunction {
-    Count,
-    First,
-    Last,
-    Max,
-    Min,
-    PercentileLinearHistogram,
-    Sum,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowLinearHistogramConfig {
@@ -75,36 +57,15 @@ pub enum WindowAggregateStorageKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowAggregateDemand {
     pub id: WindowAggregateDemandId,
-    pub function: WindowAggregateFunction,
+    pub functions: SortedSet<WindowAggregateFunction>,
     pub storage: WindowAggregateStorageKind,
     pub input: Option<Expr>,
     pub linear_histogram: Option<WindowLinearHistogramConfig>,
 }
 
 impl WindowAggregateFunction {
-    pub fn nspl_name(self) -> &'static str {
-        match self {
-            Self::Count => "COUNT",
-            Self::First => "FIRST",
-            Self::Last => "LAST",
-            Self::Max => "MAX",
-            Self::Min => "MIN",
-            Self::PercentileLinearHistogram => "PERCENTILE_LINEAR_HISTOGRAM",
-            Self::Sum => "SUM",
-        }
-    }
-
     fn parse_name(function: &FunctionName) -> Option<Self> {
-        match function.as_str().to_ascii_lowercase().as_str() {
-            "count" => Some(Self::Count),
-            "first" => Some(Self::First),
-            "last" => Some(Self::Last),
-            "max" => Some(Self::Max),
-            "min" => Some(Self::Min),
-            "percentile_linear_histogram" => Some(Self::PercentileLinearHistogram),
-            "sum" => Some(Self::Sum),
-            _ => None,
-        }
+        function.as_str().parse().ok()
     }
 
     pub fn storage(self) -> WindowAggregateStorageKind {
@@ -114,13 +75,6 @@ impl WindowAggregateFunction {
             Self::Max | Self::Min => WindowAggregateStorageKind::SortedMap,
             Self::PercentileLinearHistogram => WindowAggregateStorageKind::Histogram,
             Self::Sum => WindowAggregateStorageKind::Sum,
-        }
-    }
-
-    fn expected_arity(self) -> usize {
-        match self {
-            Self::PercentileLinearHistogram => 6,
-            Self::Count | Self::First | Self::Last | Self::Max | Self::Min | Self::Sum => 1,
         }
     }
 }
@@ -157,18 +111,37 @@ impl WindowAggregateProgram {
 impl WindowAggregateExpr {
     fn collect_demand_references(&self, counts: &mut [usize]) {
         match self {
-            Self::Scalar(_) => {}
+            Self::Scalar(expr) => collect_expr_demand_references(&expr.inner, counts),
             Self::Array(items) => {
                 for item in items {
                     item.inner.collect_demand_references(counts);
                 }
             }
-            Self::AggregateCall(call) => {
-                if let Some(count) = counts.get_mut(call.demand_id) {
+        }
+    }
+}
+
+fn collect_expr_demand_references(expr: &Expr, counts: &mut [usize]) {
+    match expr {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            collect_expr_demand_references(&expr.inner, counts);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_demand_references(&left.inner, counts);
+            collect_expr_demand_references(&right.inner, counts);
+        }
+        Expr::Call { function, args } => {
+            if let FunctionName::WindowAggregate(invocation) = function {
+                if let Some(count) = counts.get_mut(invocation.demand_id) {
                     *count += 1;
                 }
+                return;
+            }
+            for arg in args {
+                collect_expr_demand_references(&arg.inner, counts);
             }
         }
+        Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
     }
 }
 
@@ -287,47 +260,34 @@ fn aggregate_expr_from_vm_expr<'src>(
     expr: SpannedExpr,
     span: Span,
 ) -> Result<SpannedNode<WindowAggregateExpr>, Rich<'src, Token>> {
-    if let Expr::Call { function, args: _ } = &expr.inner
-        && legacy_percentile_name(function)
-    {
-        return Err(Rich::custom(
-            span,
-            "PERCENTILE is not supported; use PERCENTILE_LINEAR_HISTOGRAM",
-        ));
-    }
-    if let Expr::Call { function, args } = &expr.inner
-        && let Some(function) = WindowAggregateFunction::parse_name(function)
-    {
-        validate_aggregate_call(function, args, span)?;
-        let percentile = if function == WindowAggregateFunction::PercentileLinearHistogram {
-            Some(percentile_arg(&args[1], span)?)
-        } else {
-            None
-        };
-        let linear_histogram = if function == WindowAggregateFunction::PercentileLinearHistogram {
-            Some(linear_histogram_config(args, span)?)
-        } else {
-            None
-        };
-        return Ok(spanned(
-            WindowAggregateExpr::AggregateCall(WindowAggregateCall {
-                function,
-                args: args.clone(),
-                demand_id: 0,
-                percentile,
-                linear_histogram,
-            }),
-            expr.span,
-        ));
-    }
-
-    if contains_aggregate_call(&expr.inner) {
-        return Err(Rich::custom(
-            span,
-            "aggregate functions must be top-level aggregate values or array elements",
-        ));
-    }
+    validate_aggregate_expr(&expr)?;
     Ok(spanned(WindowAggregateExpr::Scalar(expr), span))
+}
+
+fn validate_aggregate_expr<'src>(expr: &SpannedExpr) -> Result<(), Rich<'src, Token>> {
+    match &expr.inner {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => validate_aggregate_expr(expr),
+        Expr::Binary { left, right, .. } => {
+            validate_aggregate_expr(left)?;
+            validate_aggregate_expr(right)
+        }
+        Expr::Call { function, args } => {
+            if legacy_percentile_name(function) {
+                return Err(Rich::custom(
+                    expr.span,
+                    "PERCENTILE is not supported; use PERCENTILE_LINEAR_HISTOGRAM",
+                ));
+            }
+            if let Some(function) = WindowAggregateFunction::parse_name(function) {
+                return validate_aggregate_call(function, args, expr.span);
+            }
+            for arg in args {
+                validate_aggregate_expr(arg)?;
+            }
+            Ok(())
+        }
+        Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => Ok(()),
+    }
 }
 
 fn validate_aggregate_call<'src>(
@@ -471,54 +431,99 @@ fn assign_aggregate_demands(program: &mut WindowAggregateProgram) {
 
 fn assign_expr_demands(expr: &mut WindowAggregateExpr, demands: &mut Vec<WindowAggregateDemand>) {
     match expr {
-        WindowAggregateExpr::Scalar(_) => {}
+        WindowAggregateExpr::Scalar(expr) => assign_vm_expr_demands(expr, demands),
         WindowAggregateExpr::Array(items) => {
             for item in items {
                 assign_expr_demands(&mut item.inner, demands);
             }
         }
-        WindowAggregateExpr::AggregateCall(call) => {
-            let demand = aggregate_demand_for_call(call, demands.len());
-            let demand_id = demands
-                .iter()
-                .position(|candidate| demand_matches(candidate, &demand))
-                .unwrap_or_else(|| {
-                    let id = demands.len();
-                    demands.push(WindowAggregateDemand { id, ..demand });
-                    id
-                });
-            call.demand_id = demand_id;
+    }
+}
+
+fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggregateDemand>) {
+    match &mut expr.inner {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            assign_vm_expr_demands(expr, demands);
         }
+        Expr::Binary { left, right, .. } => {
+            assign_vm_expr_demands(left, demands);
+            assign_vm_expr_demands(right, demands);
+        }
+        Expr::Call { function, args } => {
+            let Some(aggregate_function) = WindowAggregateFunction::parse_name(function) else {
+                for arg in args {
+                    assign_vm_expr_demands(arg, demands);
+                }
+                return;
+            };
+            let percentile =
+                if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
+                    Some(
+                        percentile_arg(&args[1], expr.span)
+                            .expect("validated percentile argument must remain valid"),
+                    )
+                } else {
+                    None
+                };
+            let linear_histogram =
+                if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
+                    Some(
+                        linear_histogram_config(args, expr.span)
+                            .expect("validated histogram configuration must remain valid"),
+                    )
+                } else {
+                    None
+                };
+            let demand = aggregate_demand_for_call(
+                aggregate_function,
+                args,
+                linear_histogram,
+                demands.len(),
+            );
+            let demand_id = if let Some(existing) = demands
+                .iter_mut()
+                .find(|candidate| demand_matches(candidate, &demand))
+            {
+                existing.functions.find_or_insert(aggregate_function);
+                existing.id
+            } else {
+                let id = demands.len();
+                demands.push(WindowAggregateDemand { id, ..demand });
+                id
+            };
+            *function = FunctionName::WindowAggregate(WindowAggregateInvocation {
+                demand_id,
+                function: aggregate_function,
+                percentile,
+            });
+        }
+        Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
     }
 }
 
 fn aggregate_demand_for_call(
-    call: &WindowAggregateCall,
+    function: WindowAggregateFunction,
+    args: &[SpannedExpr],
+    linear_histogram: Option<WindowLinearHistogramConfig>,
     id: WindowAggregateDemandId,
 ) -> WindowAggregateDemand {
-    let input = if call.function == WindowAggregateFunction::Count {
-        None
-    } else {
-        Some(
-            call.args
-                .first()
-                .expect("aggregate call must carry its validated input argument")
-                .inner
-                .clone(),
-        )
-    };
+    let input = Some(
+        args.first()
+            .expect("aggregate call must carry its validated input argument")
+            .inner
+            .clone(),
+    );
     WindowAggregateDemand {
         id,
-        function: call.function,
-        storage: call.function.storage(),
+        functions: SortedSet::from_unsorted(vec![function]),
+        storage: function.storage(),
         input,
-        linear_histogram: call.linear_histogram.clone(),
+        linear_histogram,
     }
 }
 
 fn demand_matches(left: &WindowAggregateDemand, right: &WindowAggregateDemand) -> bool {
-    left.function == right.function
-        && left.storage == right.storage
+    left.storage == right.storage
         && left.input == right.input
         && left.linear_histogram == right.linear_histogram
 }
@@ -535,11 +540,6 @@ fn collect_referenced_field_refs<'a>(expr: &'a WindowAggregateExpr, refs: &mut V
         WindowAggregateExpr::Array(items) => {
             for item in items {
                 collect_referenced_field_refs(&item.inner, refs);
-            }
-        }
-        WindowAggregateExpr::AggregateCall(call) => {
-            for arg in &call.args {
-                collect_expr_field_refs(&arg.inner, refs);
             }
         }
     }
@@ -601,12 +601,8 @@ mod tests {
         .expect("aggregate program should parse");
 
         assert_eq!(parsed.demands().len(), 1);
-        let WindowAggregateExpr::AggregateCall(first) = &parsed.assignments[0].value.inner else {
-            panic!("expected first aggregate call");
-        };
-        let WindowAggregateExpr::AggregateCall(second) = &parsed.assignments[1].value.inner else {
-            panic!("expected second aggregate call");
-        };
+        let first = aggregate_invocation(&parsed.assignments[0].value.inner);
+        let second = aggregate_invocation(&parsed.assignments[1].value.inner);
         assert_eq!(first.demand_id, 0);
         assert_eq!(second.demand_id, 0);
         assert_eq!(parsed.demand_reference_counts(), vec![2]);
@@ -623,6 +619,29 @@ mod tests {
 
         assert_eq!(parsed.demands().len(), 2);
         assert_eq!(parsed.demand_reference_counts(), vec![2, 1]);
+    }
+
+    #[test]
+    fn minimizes_structures_across_compatible_aggregate_functions() {
+        let parsed = parse_aggregate_program(
+            "s2.first = FIRST(s1.value), s2.last = LAST(s1.value), s2.min = MIN(s1.value), s2.max \
+             = MAX(s1.value)",
+        )
+        .expect("compatible aggregate functions should share online structures");
+
+        assert_eq!(parsed.demands().len(), 2);
+        assert_eq!(
+            parsed.demands()[0].functions.as_slice(),
+            &[
+                WindowAggregateFunction::First,
+                WindowAggregateFunction::Last,
+            ]
+        );
+        assert_eq!(
+            parsed.demands()[1].functions.as_slice(),
+            &[WindowAggregateFunction::Max, WindowAggregateFunction::Min,]
+        );
+        assert_eq!(parsed.demand_reference_counts(), vec![2, 2]);
     }
 
     #[test]
@@ -646,16 +665,14 @@ mod tests {
         )
         .expect("aggregate program should parse");
 
-        let WindowAggregateExpr::AggregateCall(call) = &parsed.assignments[0].value.inner else {
-            panic!("expected aggregate call");
-        };
+        let call = aggregate_invocation(&parsed.assignments[0].value.inner);
         assert_eq!(
             call.function,
             WindowAggregateFunction::PercentileLinearHistogram
         );
         assert_eq!(call.percentile, Some(99.0));
         assert_eq!(
-            call.linear_histogram,
+            parsed.demands()[0].linear_histogram,
             Some(WindowLinearHistogramConfig {
                 buckets: 2048,
                 min: 0.0,
@@ -683,10 +700,20 @@ mod tests {
 
     #[test]
     fn rejects_nested_aggregate_calls() {
-        parse_aggregate_program(
-            "s2.p = lower(PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 2048, 0, 10000, '2s'))",
+        parse_aggregate_program("s2.p = SUM(COUNT(s1.latency))")
+            .expect_err("aggregate calls must not be nested");
+    }
+
+    #[test]
+    fn parses_aggregate_calls_inside_vm_expressions() {
+        let parsed = parse_aggregate_program(
+            "s2.adjusted_count = COUNT(s1.latency) + 2, s2.adjusted_p99 = \
+             ABS(PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 2048, 0, 10000, '2s'))",
         )
-        .expect_err("aggregate calls must not be nested");
+        .expect("aggregate calls should be valid inside VM expressions");
+
+        assert_eq!(parsed.demands().len(), 2);
+        assert_eq!(parsed.demand_reference_counts(), vec![1, 1]);
     }
 
     #[test]
@@ -699,5 +726,19 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].relay, "s1");
         assert_eq!(refs[0].field, "latency");
+    }
+
+    fn aggregate_invocation(expr: &WindowAggregateExpr) -> &WindowAggregateInvocation {
+        let WindowAggregateExpr::Scalar(expr) = expr else {
+            panic!("expected scalar aggregate expression");
+        };
+        let Expr::Call {
+            function: FunctionName::WindowAggregate(invocation),
+            ..
+        } = &expr.inner
+        else {
+            panic!("expected aggregate invocation");
+        };
+        invocation
     }
 }

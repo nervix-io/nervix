@@ -5,6 +5,7 @@ mod parser;
 pub use ast::{
     BinaryOp, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef, Invocation,
     Literal, Program, SpannedExpr, SpannedInvocation, SpannedNode, UnaryOp,
+    WindowAggregateFunction, WindowAggregateInvocation,
 };
 pub use lexer::{LexError, Span, SpannedToken, Token, lex};
 pub use parser::{

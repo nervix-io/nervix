@@ -1,5 +1,8 @@
+use std::hash::{Hash, Hasher};
+
 use arrow_schema::DataType;
 use chumsky::span::{SimpleSpan, Spanned};
+use strum::{AsRefStr, EnumString};
 
 pub type Span = SimpleSpan<usize>;
 pub type SpannedNode<T> = Spanned<T, Span>;
@@ -143,7 +146,58 @@ pub enum FunctionName {
     ReadHeader,
     ReadHeaders,
     WriteHeader,
+    WindowAggregate(WindowAggregateInvocation),
     Unknown(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsRefStr, EnumString)]
+#[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum WindowAggregateFunction {
+    Count,
+    First,
+    Last,
+    Max,
+    Min,
+    PercentileLinearHistogram,
+    Sum,
+}
+
+#[derive(Debug, Clone)]
+pub struct WindowAggregateInvocation {
+    pub demand_id: usize,
+    pub function: WindowAggregateFunction,
+    pub percentile: Option<f64>,
+}
+
+impl PartialEq for WindowAggregateInvocation {
+    fn eq(&self, other: &Self) -> bool {
+        self.demand_id == other.demand_id
+            && self.function == other.function
+            && self.percentile.map(f64::to_bits) == other.percentile.map(f64::to_bits)
+    }
+}
+
+impl Eq for WindowAggregateInvocation {}
+
+impl Hash for WindowAggregateInvocation {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.demand_id.hash(state);
+        self.function.hash(state);
+        self.percentile.map(f64::to_bits).hash(state);
+    }
+}
+
+impl WindowAggregateFunction {
+    pub fn nspl_name(&self) -> &str {
+        self.as_ref()
+    }
+
+    pub const fn expected_arity(self) -> usize {
+        match self {
+            Self::PercentileLinearHistogram => 6,
+            Self::Count | Self::First | Self::Last | Self::Max | Self::Min | Self::Sum => 1,
+        }
+    }
 }
 
 impl FunctionName {
@@ -277,6 +331,7 @@ impl FunctionName {
             Self::ReadHeader => "read_header",
             Self::ReadHeaders => "read_headers",
             Self::WriteHeader => "write_header",
+            Self::WindowAggregate(invocation) => invocation.function.as_ref(),
             Self::Unknown(name) => name.as_str(),
         }
     }

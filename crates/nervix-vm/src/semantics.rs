@@ -430,6 +430,7 @@ pub const fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescri
         | FunctionName::ReadHeader
         | FunctionName::ReadHeaders
         | FunctionName::WriteHeader
+        | FunctionName::WindowAggregate(_)
         | FunctionName::Unknown(_) => return None,
     };
     Some(BuiltinDescriptor {
@@ -1062,7 +1063,15 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
             [expr_semantics(inner.as_ref())?],
         )),
         Expr::Call { function, args } => {
-            let operation = if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
+            let operation = if let FunctionName::WindowAggregate(_) = function {
+                OperationSemantics {
+                    volatility: Volatility::Stable,
+                    dependency_scope: DependencyScope::ExecutionLocal,
+                    has_side_effects: false,
+                    can_error: true,
+                    null_propagation: NullPropagation::NeverNull,
+                }
+            } else if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
                 OperationSemantics {
                     volatility: Volatility::Stable,
                     dependency_scope: DependencyScope::RowLocal,

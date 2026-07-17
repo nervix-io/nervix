@@ -57,8 +57,8 @@ use nervix_nspl::{
         SpannedExpr, UnaryOp, parse_program,
     },
     window_processor::aggregate::{
-        WindowAggregateDemand, WindowAggregateExpr, WindowAggregateFunction,
-        WindowAggregateProgram, parse_aggregate_program,
+        WindowAggregateDemand, WindowAggregateFunction, WindowAggregateProgram,
+        WindowAggregateStorageKind, parse_aggregate_program,
     },
 };
 #[cfg(test)]
@@ -163,13 +163,14 @@ use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec,
     BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
     BranchedProcessorSpec, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
-    CompiledReordererProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
-    InferencerFlushContext, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
-    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
-    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
-    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
-    ReorderKeyPart, ReordererPendingMessage, SharedCorrelatorBranchState, WasmAckContext,
-    WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds, WindowFlushContext,
+    CompiledReordererProgram, CompiledWindowAggregateExpr, CompiledWindowAggregateProgram,
+    CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
+    JunctionFlushContext, PlannedGeneralError, PlannedMessageError, RelayProcessorNode,
+    RelayProcessorOperationNode, RelayProcessorOperationTemplate, RelayProcessorOutputNode,
+    RelayProcessorOutputTemplate, RelayProcessorOutputsNode, RelayProcessorOutputsTemplate,
+    RelayProcessorRelayTemplate, RelayProcessorTemplate, ReorderKeyPart, ReordererPendingMessage,
+    SharedCorrelatorBranchState, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor,
+    WasmFlushContext, WindowBounds, WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -1717,7 +1718,7 @@ struct WindowEntry {
     message: RelayMessage,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LinearHistogramDelayedRemoval {
     expires_at: Timestamp,
     bucket: usize,
@@ -1738,7 +1739,7 @@ impl Ord for RuntimeValueSortKey {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum WindowAggregateAccumulator {
     Counter {
         count: usize,
@@ -2934,6 +2935,7 @@ impl RelayProcessorNode {
                     width_duration,
                     step_duration,
                     aggregate,
+                    compiled_aggregate,
                     state,
                     replicated_state,
                 } => {
@@ -3004,6 +3006,7 @@ impl RelayProcessorNode {
                             },
                             state,
                             aggregate,
+                            compiled_aggregate,
                             WindowBounds {
                                 width_messages: *width_messages,
                                 step_messages: *step_messages,
@@ -3796,6 +3799,7 @@ impl RelayProcessorNode {
                     width_duration,
                     step_duration,
                     aggregate,
+                    compiled_aggregate,
                     state,
                     replicated_state,
                 } => {
@@ -3811,6 +3815,7 @@ impl RelayProcessorNode {
                         },
                         state,
                         aggregate,
+                        compiled_aggregate,
                         WindowBounds {
                             width_messages: *width_messages,
                             step_messages: *step_messages,
@@ -4259,6 +4264,7 @@ impl RelayProcessorTemplate {
                     width_duration,
                     step_duration,
                     aggregate,
+                    compiled_aggregate,
                 } => {
                     let replicated_state = runtime
                         .replicated_window_processor_state(
@@ -4282,6 +4288,7 @@ impl RelayProcessorTemplate {
                         width_duration: *width_duration,
                         step_duration: *step_duration,
                         aggregate: aggregate.clone(),
+                        compiled_aggregate: compiled_aggregate.clone(),
                         state,
                         replicated_state,
                     }
@@ -9318,6 +9325,7 @@ async fn flush_ready_window_processor(
     context: WindowFlushContext<'_>,
     state: &mut WindowProcessorState,
     aggregate: &WindowAggregateProgram,
+    compiled_aggregate: &CompiledWindowAggregateProgram,
     bounds: WindowBounds,
     now: Timestamp,
 ) -> bool {
@@ -9376,11 +9384,7 @@ async fn flush_ready_window_processor(
         }
     }
     while window_width_met(state, bounds.width_messages, bounds.width_duration, now) {
-        let output_record = match evaluate_window_aggregate(
-            aggregate,
-            state,
-            output_schema.arrow_schema().as_ref(),
-        ) {
+        let output_record = match evaluate_window_aggregate(compiled_aggregate, state).await {
             Ok(record) => record,
             Err(error) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -9546,15 +9550,15 @@ async fn persist_window_processor_live_state(
 
 impl WindowAggregateAccumulator {
     fn new(demand: &WindowAggregateDemand) -> Self {
-        match demand.function {
-            WindowAggregateFunction::Count => Self::Counter { count: 0 },
-            WindowAggregateFunction::First | WindowAggregateFunction::Last => Self::Sequence {
+        match demand.storage {
+            WindowAggregateStorageKind::Counter => Self::Counter { count: 0 },
+            WindowAggregateStorageKind::Sequence => Self::Sequence {
                 values: VecDeque::new(),
             },
-            WindowAggregateFunction::Max | WindowAggregateFunction::Min => Self::SortedMap {
+            WindowAggregateStorageKind::SortedMap => Self::SortedMap {
                 counts: BTreeMap::new(),
             },
-            WindowAggregateFunction::PercentileLinearHistogram => {
+            WindowAggregateStorageKind::Histogram => {
                 let config = demand
                     .linear_histogram
                     .as_ref()
@@ -9569,7 +9573,7 @@ impl WindowAggregateAccumulator {
                     delayed_removals: VecDeque::new(),
                 }
             }
-            WindowAggregateFunction::Sum => Self::Sum { total: None },
+            WindowAggregateStorageKind::Sum => Self::Sum { total: None },
         }
     }
 
@@ -9724,25 +9728,26 @@ impl WindowAggregateAccumulator {
 
     fn add(
         &mut self,
-        demand: &WindowAggregateDemand,
+        _demand: &WindowAggregateDemand,
         timestamp: Timestamp,
         sequence: u64,
         value: Option<RuntimeValue>,
     ) -> Result<(), String> {
         self.purge_expired(timestamp)?;
-        let function = demand.function;
         match self {
             Self::Counter { count } => {
                 *count = count.saturating_add(1);
                 Ok(())
             }
             Self::Sequence { values } => {
-                let value = value.ok_or_else(|| format!("{function:?} requires a value"))?;
+                let value = value
+                    .ok_or_else(|| "sequence aggregate structure requires a value".to_string())?;
                 values.push_back((timestamp, sequence, value));
                 Ok(())
             }
             Self::SortedMap { counts } => {
-                let value = value.ok_or_else(|| format!("{function:?} requires a value"))?;
+                let value = value
+                    .ok_or_else(|| "ordered aggregate structure requires a value".to_string())?;
                 *counts.entry(RuntimeValueSortKey(value)).or_insert(0) += 1;
                 Ok(())
             }
@@ -9776,14 +9781,13 @@ impl WindowAggregateAccumulator {
 
     fn remove(
         &mut self,
-        demand: &WindowAggregateDemand,
+        _demand: &WindowAggregateDemand,
         removal_time: Timestamp,
         timestamp: Timestamp,
         sequence: u64,
         value: Option<RuntimeValue>,
     ) -> Result<(), String> {
         self.purge_expired(removal_time)?;
-        let function = demand.function;
         match self {
             Self::Counter { count } => {
                 *count = count.saturating_sub(1);
@@ -9796,15 +9800,14 @@ impl WindowAggregateAccumulator {
                         *entry_timestamp == timestamp && *entry_sequence == sequence
                     })
                 else {
-                    return Err(format!(
-                        "{function:?} sequence accumulator is missing removed window entry"
-                    ));
+                    return Err("sequence accumulator is missing removed window entry".to_string());
                 };
                 values.remove(index);
                 Ok(())
             }
             Self::SortedMap { counts } => {
-                let value = value.ok_or_else(|| format!("{function:?} requires a value"))?;
+                let value = value
+                    .ok_or_else(|| "ordered aggregate structure requires a value".to_string())?;
                 decrement_runtime_value_count(counts, value)
             }
             Self::LinearHistogram {
@@ -10243,56 +10246,135 @@ fn advance_window(
     Ok(())
 }
 
-fn evaluate_window_aggregate(
-    program: &WindowAggregateProgram,
+#[derive(Debug)]
+struct WindowAggregateFunctionInjector {
+    accumulators: Vec<WindowAggregateAccumulator>,
+    demand_types: Vec<ArrowDataType>,
+}
+
+impl VmFunctionInjector for WindowAggregateFunctionInjector {
+    fn inject(
+        &self,
+        function: &FunctionName,
+        _arguments: &[VmTypedArray],
+        row_count: usize,
+        _span: nervix_nspl::vm_program::Span,
+    ) -> Result<VmTypedArray, nervix_vm::RuntimeError> {
+        let FunctionName::WindowAggregate(invocation) = function else {
+            return Err(nervix_vm::RuntimeError::InvalidBatch {
+                message: format!("function '{}' is not a window aggregate", function.as_str()),
+            });
+        };
+        let accumulator = self.accumulators.get(invocation.demand_id).ok_or_else(|| {
+            nervix_vm::RuntimeError::InvalidBatch {
+                message: format!(
+                    "window aggregate is missing accumulator for demand {}",
+                    invocation.demand_id
+                ),
+            }
+        })?;
+        let value = accumulator
+            .evaluate(invocation.function, invocation.percentile)
+            .map_err(|message| nervix_vm::RuntimeError::InvalidBatch { message })?;
+        let data_type = self.demand_types.get(invocation.demand_id).ok_or_else(|| {
+            nervix_vm::RuntimeError::InvalidBatch {
+                message: format!(
+                    "window aggregate is missing output type for demand {}",
+                    invocation.demand_id
+                ),
+            }
+        })?;
+        let watermark = Timestamp::now();
+        let records = (0..row_count)
+            .map(|_| {
+                RuntimeRecord::from_fields_with_metadata(
+                    [("value".to_string(), value.clone())],
+                    RuntimeRecordMetadata::from_ingested_at_watermarks(watermark, watermark),
+                )
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "value",
+            data_type.clone(),
+            false,
+        )]));
+        vm_typed_batch_from_runtime_records(&records, &schema)
+            .map(|batch| batch.column(0).clone())
+            .map_err(|message| nervix_vm::RuntimeError::InvalidBatch { message })
+    }
+}
+
+async fn evaluate_window_aggregate(
+    program: &CompiledWindowAggregateProgram,
     state: &WindowProcessorState,
-    output_schema: &arrow_schema::Schema,
 ) -> Result<DecodedRecord, String> {
     let mut fields = Vec::with_capacity(program.assignments.len());
+    let injector: Arc<dyn VmFunctionInjector> = Arc::new(WindowAggregateFunctionInjector {
+        accumulators: state.accumulators.clone(),
+        demand_types: program.demand_types.clone(),
+    });
     for assignment in &program.assignments {
-        let target_type = output_schema
-            .field_with_name(&assignment.target.field)
-            .map(|field| field.data_type())
-            .map_err(|_| {
-                format!(
-                    "output schema is missing aggregate target '{}'",
-                    assignment.target.field
-                )
-            })?;
-        let value = evaluate_window_aggregate_expr(&assignment.value.inner, state, target_type)?;
+        let value = evaluate_window_aggregate_expr(
+            &assignment.value,
+            &assignment.target.field,
+            injector.clone(),
+        )
+        .await?;
         fields.push((assignment.target.field.clone(), value));
     }
     Ok(DecodedRecord::from_fields(fields))
 }
 
-fn evaluate_window_aggregate_expr(
-    expr: &WindowAggregateExpr,
-    state: &WindowProcessorState,
-    target_type: &ArrowDataType,
-) -> Result<RuntimeValue, String> {
-    match expr {
-        WindowAggregateExpr::Scalar(expr) => evaluate_runtime_expr(&expr.inner, None),
-        WindowAggregateExpr::Array(items) => {
-            let values = items
-                .iter()
-                .map(|item| evaluate_window_aggregate_expr(&item.inner, state, target_type))
-                .collect::<Result<Vec<_>, _>>()?;
-            if let ArrowDataType::FixedSizeList(_, _) = target_type {
-                Ok(RuntimeValue::Array(values))
-            } else {
-                Ok(RuntimeValue::Vec(values))
+fn evaluate_window_aggregate_expr<'a>(
+    expr: &'a CompiledWindowAggregateExpr,
+    target_field: &'a str,
+    injector: Arc<dyn VmFunctionInjector>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RuntimeValue, String>> + Send + 'a>>
+{
+    Box::pin(async move {
+        match expr {
+            CompiledWindowAggregateExpr::Scalar(program) => {
+                let input = VmTypedBatch::try_new(
+                    program.input_schema.clone(),
+                    program
+                        .input_schema
+                        .fields()
+                        .iter()
+                        .map(|field| VmTypedArray::uninitialized(field.data_type().clone(), 1))
+                        .collect(),
+                )
+                .map_err(|error| error.to_string())?;
+                let result = execute_program_with_selection_in_context(
+                    program,
+                    &input,
+                    &VmExecutionContext {
+                        now: Timestamp::now(),
+                        injector: Some(injector),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                let output = vm_output_row_to_decoded_record(&result.batch, 0)?;
+                output.value(target_field).cloned().ok_or_else(|| {
+                    format!("window aggregate VM produced no '{target_field}' output field")
+                })
+            }
+            CompiledWindowAggregateExpr::Array { items, fixed_size } => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(
+                        evaluate_window_aggregate_expr(item, target_field, injector.clone())
+                            .await?,
+                    );
+                }
+                if *fixed_size {
+                    Ok(RuntimeValue::Array(values))
+                } else {
+                    Ok(RuntimeValue::Vec(values))
+                }
             }
         }
-        WindowAggregateExpr::AggregateCall(call) => {
-            let Some(accumulator) = state.accumulators.get(call.demand_id) else {
-                return Err(format!(
-                    "window aggregate is missing accumulator for {:?}",
-                    call.function
-                ));
-            };
-            accumulator.evaluate(call.function, call.percentile)
-        }
-    }
+    })
 }
 
 fn evaluate_runtime_expr(
