@@ -17,13 +17,13 @@ pub use compiler::{
 };
 pub use error::{CompileError, ErrorCode, RuntimeError, SideError};
 pub use ir::{
-    CompiledProgram, InputBinding, Instruction, InstructionKind, OutputBinding, RegisterLayout,
-    RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
+    CompiledProgram, InputBinding, Instruction, InstructionKind, InvocationBinding, OutputBinding,
+    RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
 };
 pub use runtime::{
-    ExecutionContext, ExecutionResult, SPAWN_BLOCKING_ROW_THRESHOLD, execute_program,
-    execute_program_in_context, execute_program_with_selection,
-    execute_program_with_selection_in_context,
+    ExecutionContext, ExecutionResult, FunctionInjector, FunctionInvocation,
+    SPAWN_BLOCKING_ROW_THRESHOLD, execute_program, execute_program_in_context,
+    execute_program_with_selection, execute_program_with_selection_in_context,
 };
 pub use semantics::{
     BinaryDescriptor, BuiltinDescriptor, BuiltinLowering, CastDescriptor, DependencyScope,

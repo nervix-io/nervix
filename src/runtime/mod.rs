@@ -66,9 +66,9 @@ use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileNamespace as VmCompileNamespace,
     CompileOptions as VmCompileOptions, CompiledProgram as VmCompiledProgram,
-    ExecutionContext as VmExecutionContext, OutputMode as VmOutputMode,
-    SchemaSensitivity as VmSchemaSensitivity, TypedArray as VmTypedArray,
-    TypedBatch as VmTypedBatch,
+    ExecutionContext as VmExecutionContext, FunctionInjector as VmFunctionInjector,
+    OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity,
+    TypedArray as VmTypedArray, TypedBatch as VmTypedBatch,
     compile_program_for_bindings_with_sensitivity as compile_vm_program_for_bindings_with_sensitivity,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program_with_options_for_bindings_with_sensitivity,
     execute_program_with_selection_in_context,
@@ -205,7 +205,6 @@ const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_millis(25);
 const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
 const INGEST_METADATA_NAMESPACE: &str = "metadata";
-const INGEST_HEADERS_NAMESPACE: &str = "headers";
 const BRANCH_NAMESPACE: &str = "branch";
 const INNER_INPUT_NAMESPACE: &str = "inner_input";
 const INNER_OUTPUT_NAMESPACE: &str = "inner_output";
@@ -916,7 +915,7 @@ struct MessageErrorContext<'a> {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct IngestFilterMapMetadata {
     values: HashMap<String, RuntimeValue>,
-    headers: HashMap<String, RuntimeValue>,
+    headers: HashMap<String, Vec<String>>,
 }
 
 impl IngestFilterMapMetadata {
@@ -949,20 +948,89 @@ impl IngestFilterMapMetadata {
     }
 
     fn insert_header(&mut self, name: String, value: String) {
-        if let Some(RuntimeValue::String(existing)) = self.headers.get_mut(&name) {
-            existing.push_str(", ");
-            existing.push_str(&value);
-        } else {
-            self.headers.insert(name, RuntimeValue::String(value));
-        }
+        self.headers.entry(name).or_default().push(value);
     }
 
     fn metadata_value(&self, name: &str) -> Option<&RuntimeValue> {
         self.values.get(name)
     }
+}
 
-    fn header_value(&self, name: &str) -> Option<&RuntimeValue> {
-        self.headers.get(name)
+#[derive(Debug)]
+struct IngestHeaderFunctionInjector {
+    rows: Vec<HashMap<String, Vec<String>>>,
+}
+
+impl IngestHeaderFunctionInjector {
+    fn from_metadata(
+        metadata: Option<&[IngestFilterMapMetadata]>,
+        row_count: usize,
+    ) -> Arc<dyn VmFunctionInjector> {
+        let rows = metadata
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .map(|row| row.headers.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![HashMap::new(); row_count]);
+        Arc::new(Self { rows })
+    }
+}
+
+impl VmFunctionInjector for IngestHeaderFunctionInjector {
+    fn inject(
+        &self,
+        function: &FunctionName,
+        arguments: &[VmTypedArray],
+        row_count: usize,
+        _span: nervix_nspl::vm_program::Span,
+    ) -> Result<VmTypedArray, nervix_vm::RuntimeError> {
+        let [VmTypedArray::Utf8(names)] = arguments else {
+            return Err(nervix_vm::RuntimeError::InvalidBatch {
+                message: format!(
+                    "function '{}' requires one STRING argument",
+                    function.as_str()
+                ),
+            });
+        };
+        if self.rows.len() != row_count || names.len() != row_count {
+            return Err(nervix_vm::RuntimeError::InvalidBatch {
+                message: format!(
+                    "function '{}' header context has {} rows for a {row_count}-row batch",
+                    function.as_str(),
+                    self.rows.len()
+                ),
+            });
+        }
+        if let FunctionName::ReadHeader = function {
+            let values = names
+                .iter()
+                .zip(&self.rows)
+                .map(|(name, headers)| {
+                    name.and_then(|name| headers.get(name))
+                        .and_then(|values| values.first())
+                        .map(String::as_str)
+                })
+                .collect::<Vec<_>>();
+            return Ok(VmTypedArray::Utf8(arrow_array::StringArray::from(values)));
+        }
+        if let FunctionName::ReadHeaders = function {
+            let field = Arc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
+            let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field);
+            for (name, headers) in names.iter().zip(&self.rows) {
+                if let Some(values) = name.and_then(|name| headers.get(name)) {
+                    for value in values {
+                        builder.values().append_value(value);
+                    }
+                }
+                builder.append(true);
+            }
+            return Ok(VmTypedArray::Generic(Arc::new(builder.finish())));
+        }
+        Err(nervix_vm::RuntimeError::InvalidBatch {
+            message: format!("function '{}' is not injectable", function.as_str()),
+        })
     }
 }
 
@@ -1740,7 +1808,6 @@ pub(crate) type EmitterHeaders = Vec<(String, String)>;
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledEmitterFilterMapProgram {
     pub(crate) body: CompiledProgramWithMaterializedInterest,
-    pub(crate) headers: Option<CompiledProgramWithMaterializedInterest>,
     pub(crate) materialized_interest: MaterializedProgramInterest,
 }
 
@@ -2451,6 +2518,7 @@ impl RelayProcessorNode {
                 input_schema.vm_sensitivity(),
                 input_schema.arrow_schema(),
                 input_schema.vm_sensitivity(),
+                false,
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &available_lookups,
@@ -2674,7 +2742,10 @@ impl RelayProcessorNode {
                     let key_result = execute_program_with_selection_in_context(
                         &key_program.program,
                         &vm_batch,
-                        &VmExecutionContext { now: execution_now },
+                        &VmExecutionContext {
+                            now: execution_now,
+                            injector: None,
+                        },
                     )
                     .await;
                     let key_result = match key_result {
@@ -3049,7 +3120,10 @@ impl RelayProcessorNode {
                     let key_result = execute_program_with_selection_in_context(
                         &program.program,
                         &vm_batch,
-                        &VmExecutionContext { now: execution_now },
+                        &VmExecutionContext {
+                            now: execution_now,
+                            injector: None,
+                        },
                     )
                     .await;
                     let key_result = match key_result {
@@ -5520,6 +5594,11 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
     for (_field_ref, expr) in &program.set {
         collect_expr_field_refs(expr, &mut refs);
     }
+    for invocation in &program.invoke {
+        for arg in &invocation.inner.args {
+            collect_expr_field_refs(arg, &mut refs);
+        }
+    }
     refs
 }
 
@@ -5785,6 +5864,31 @@ fn rewrite_lookup_hash_map_program(
             })
             .collect::<Result<Vec<_>, _>>()?,
         unset: parsed.inner.unset.clone(),
+        invoke: parsed
+            .inner
+            .invoke
+            .iter()
+            .map(|invocation| {
+                Ok(nervix_nspl::vm_program::SpannedNode {
+                    inner: nervix_nspl::vm_program::Invocation {
+                        function: invocation.inner.function.clone(),
+                        args: invocation
+                            .inner
+                            .args
+                            .iter()
+                            .map(|arg| {
+                                rewrite_lookup_hash_map_expr(
+                                    arg,
+                                    available_lookups,
+                                    &mut pending_calls,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, String>>()?,
+                    },
+                    span: invocation.span,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
     };
     Ok((
         nervix_nspl::vm_program::SpannedNode {
@@ -5828,6 +5932,7 @@ fn compile_lookup_hash_map_calls(
                     call.key_expr,
                 )],
                 unset: Vec::new(),
+                invoke: Vec::new(),
             },
             span: (0..0).into(),
         };
@@ -5889,7 +5994,6 @@ fn referenced_materialized_stream_bindings(
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
         if writable_namespaces.contains(&relay)
             || relay == INGEST_METADATA_NAMESPACE
-            || relay == INGEST_HEADERS_NAMESPACE
             || relay == BRANCH_NAMESPACE
         {
             continue;
@@ -5969,34 +6073,6 @@ fn ingest_source_supports_headers(source: &IngestSource) -> bool {
     }
 }
 
-fn ingestor_filter_map_headers_arrow_schema(
-    source: &IngestSource,
-    parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-) -> Option<Arc<arrow_schema::Schema>> {
-    if !ingest_source_supports_headers(source) {
-        return None;
-    }
-    let fields = collect_program_field_refs(&parsed.inner)
-        .into_iter()
-        .filter_map(|(relay, field)| {
-            if relay == INGEST_HEADERS_NAMESPACE {
-                Some(field)
-            } else {
-                None
-            }
-        })
-        .collect::<BTreeSet<_>>();
-    if fields.is_empty() {
-        return None;
-    }
-    Some(Arc::new(arrow_schema::Schema::new(
-        fields
-            .into_iter()
-            .map(|field| arrow_schema::Field::new(field, ArrowDataType::Utf8, true))
-            .collect::<Vec<_>>(),
-    )))
-}
-
 fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
     if let EmitSink::Kafka { .. }
     | EmitSink::Pulsar { .. }
@@ -6010,36 +6086,9 @@ fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
     }
 }
 
-fn emitter_filter_map_headers_arrow_schema(
-    parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-) -> Option<Arc<arrow_schema::Schema>> {
-    let fields = parsed
-        .inner
-        .set
-        .iter()
-        .filter_map(|(field, _)| {
-            if field.relay == INGEST_HEADERS_NAMESPACE {
-                Some(field.field.clone())
-            } else {
-                None
-            }
-        })
-        .collect::<BTreeSet<_>>();
-    if fields.is_empty() {
-        return None;
-    }
-    Some(Arc::new(arrow_schema::Schema::new(
-        fields
-            .into_iter()
-            .map(|field| arrow_schema::Field::new(field, ArrowDataType::Utf8, true))
-            .collect::<Vec<_>>(),
-    )))
-}
-
 fn emitter_filter_map_local_namespaces(from_relay: &Identifier) -> HashSet<String> {
     HashSet::from_iter([
         INGEST_MESSAGE_NAMESPACE.to_string(),
-        INGEST_HEADERS_NAMESPACE.to_string(),
         BRANCH_NAMESPACE.to_string(),
         from_relay.as_str().to_string(),
     ])
@@ -6063,31 +6112,6 @@ fn emitter_filter_map_message_bindings(
     bindings
 }
 
-fn merge_materialized_program_interests(
-    interests: impl IntoIterator<Item = MaterializedProgramInterest>,
-) -> MaterializedProgramInterest {
-    let mut relays = BTreeMap::<String, MaterializedRelayInterest>::new();
-    for interest in interests {
-        for relay in interest.relays {
-            let key = relay.relay.as_str().to_string();
-            relays
-                .entry(key)
-                .and_modify(|existing| {
-                    for field in &relay.fields {
-                        if !existing.fields.contains(field) {
-                            existing.fields.push(field.clone());
-                        }
-                    }
-                    existing.fields.sort();
-                })
-                .or_insert(relay);
-        }
-    }
-    MaterializedProgramInterest {
-        relays: relays.into_values().collect(),
-    }
-}
-
 pub(crate) fn compile_filter_map_program(
     domain: &Domain,
     identifier: &Identifier,
@@ -6097,6 +6121,7 @@ pub(crate) fn compile_filter_map_program(
     input_sensitivity: VmSchemaSensitivity,
     output_schema: Arc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
+    allow_header_reads: bool,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     let Some(filter_map) = filter_map else {
@@ -6111,11 +6136,15 @@ pub(crate) fn compile_filter_map_program(
         input_sensitivity,
         context,
     )?;
-    let compiled = compile_vm_program_for_bindings_with_sensitivity(
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &prepared.parsed,
         output_schema,
         output_sensitivity.clone(),
         prepared.bindings,
+        VmCompileOptions {
+            allow_header_reads,
+            ..VmCompileOptions::default()
+        },
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -6312,11 +6341,11 @@ fn compile_wasm_output_filter_map_program(
             ),
         });
     }
-    if !parsed.inner.unset.is_empty() {
+    if !parsed.inner.unset.is_empty() || !parsed.inner.invoke.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
             reason: format!(
-                "WASM processor '{}' TO clauses may use SET and WHERE, but not UNSET",
+                "WASM processor '{}' TO clauses may use SET and WHERE, but not UNSET or INVOKE",
                 identifier.as_str()
             ),
         });
@@ -6444,19 +6473,9 @@ pub(crate) fn compile_emitter_filter_map_program(
     }
     if parsed
         .inner
-        .unset
+        .invoke
         .iter()
-        .any(|field| field.relay == INGEST_HEADERS_NAMESPACE)
-    {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' cannot UNSET emitter headers; omit a header by not setting it",
-                emitter.name.as_str()
-            ),
-        });
-    }
-    if emitter_filter_map_headers_arrow_schema(&parsed).is_some()
+        .any(|invocation| invocation.inner.function == FunctionName::WriteHeader)
         && !emit_sink_supports_headers(&emitter.sink)
     {
         return Err(RuntimeError::BuildDomainExecution {
@@ -6468,82 +6487,20 @@ pub(crate) fn compile_emitter_filter_map_program(
         });
     }
 
-    let original_parsed = parsed.clone();
-    let body_program = nervix_nspl::vm_program::Program {
-        filter: parsed.inner.filter.clone(),
-        branch_filters: Vec::new(),
-        set: parsed
-            .inner
-            .set
-            .iter()
-            .filter(|(field, _)| field.relay != INGEST_HEADERS_NAMESPACE)
-            .cloned()
-            .collect(),
-        unset: parsed.inner.unset.clone(),
-    };
-    let body_parsed = nervix_nspl::vm_program::SpannedNode {
-        inner: body_program,
-        span: parsed.span,
-    };
     let body = compile_emitter_filter_map_part(
         domain,
         &emitter.name,
         &emitter.from_relay,
-        &original_parsed,
-        body_parsed,
-        input_schema.clone(),
-        input_sensitivity.clone(),
+        parsed,
+        input_schema,
+        input_sensitivity,
         output_schema,
         output_sensitivity,
-        None,
-        VmOutputMode::PassthroughByName,
         context,
     )?;
-
-    let headers = if let Some(header_schema) = emitter_filter_map_headers_arrow_schema(&parsed) {
-        let header_program = nervix_nspl::vm_program::Program {
-            filter: parsed.inner.filter,
-            branch_filters: Vec::new(),
-            set: parsed
-                .inner
-                .set
-                .into_iter()
-                .filter(|(field, _)| field.relay == INGEST_HEADERS_NAMESPACE)
-                .collect(),
-            unset: Vec::new(),
-        };
-        let header_parsed = nervix_nspl::vm_program::SpannedNode {
-            inner: header_program,
-            span: parsed.span,
-        };
-        Some(compile_emitter_filter_map_part(
-            domain,
-            &emitter.name,
-            &emitter.from_relay,
-            &original_parsed,
-            header_parsed,
-            input_schema,
-            input_sensitivity,
-            header_schema,
-            VmSchemaSensitivity::default(),
-            Some(INGEST_HEADERS_NAMESPACE),
-            VmOutputMode::ExplicitOnly,
-            context,
-        )?)
-    } else {
-        None
-    };
-
-    let materialized_interest = merge_materialized_program_interests(
-        std::iter::once(body.materialized_interest.clone()).chain(
-            headers
-                .as_ref()
-                .map(|headers| headers.materialized_interest.clone()),
-        ),
-    );
+    let materialized_interest = body.materialized_interest.clone();
     Ok(Some(CompiledEmitterFilterMapProgram {
         body,
-        headers,
         materialized_interest,
     }))
 }
@@ -6552,23 +6509,14 @@ fn compile_emitter_filter_map_part(
     domain: &Domain,
     identifier: &Identifier,
     from_relay: &Identifier,
-    original_parsed: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     parsed: nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     input_schema: Arc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     output_schema: Arc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
-    writeonly_namespace: Option<&str>,
-    output_mode: VmOutputMode,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
     let mut bindings = Vec::new();
-    if let Some(namespace) = writeonly_namespace {
-        bindings.push(
-            VmCompileBinding::writeonly(namespace, output_schema.clone())
-                .with_sensitivity(output_sensitivity.clone()),
-        );
-    }
     bindings.extend(emitter_filter_map_message_bindings(
         from_relay,
         input_schema,
@@ -6579,7 +6527,7 @@ fn compile_emitter_filter_map_part(
     }
     let local_namespaces = emitter_filter_map_local_namespaces(from_relay);
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
-        original_parsed,
+        &parsed,
         &local_namespaces,
         context.available_materialized_streams,
         context.current_branching,
@@ -6619,8 +6567,9 @@ fn compile_emitter_filter_map_part(
         output_sensitivity.clone(),
         bindings,
         VmCompileOptions {
-            output_mode,
+            output_mode: VmOutputMode::PassthroughByName,
             allow_sensitive_output: true,
+            allow_header_writes: true,
             ..VmCompileOptions::default()
         },
     )
@@ -7018,6 +6967,7 @@ fn compile_correlator_where_program(
         || !parsed.inner.branch_filters.is_empty()
         || !parsed.inner.set.is_empty()
         || !parsed.inner.unset.is_empty()
+        || !parsed.inner.invoke.is_empty()
     {
         return Err(format!(
             "correlator '{}' CORRELATE WHERE must contain exactly one WHERE clause",
@@ -7084,6 +7034,7 @@ impl CorrelatorOutputCompileContext<'_> {
         if parsed.inner.filter.is_some()
             || !parsed.inner.branch_filters.is_empty()
             || !parsed.inner.unset.is_empty()
+            || !parsed.inner.invoke.is_empty()
             || parsed.inner.set.is_empty()
         {
             return Err(format!(
@@ -7492,7 +7443,10 @@ async fn evaluate_correlator_where_match(
     let result = execute_program_with_selection_in_context(
         &program.program,
         &input,
-        &VmExecutionContext { now: execution_now },
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
     )
     .await
     .map_err(|error| {
@@ -7577,7 +7531,10 @@ async fn evaluate_correlator_output_message(
     let result = execute_program_with_selection_in_context(
         &program.program,
         &input,
-        &VmExecutionContext { now: execution_now },
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
     )
     .await
     .map_err(|error| {
@@ -7853,12 +7810,6 @@ fn compile_ingestor_filter_map_program(
             metadata_schema,
         ));
     }
-    if let Some(headers_schema) = ingestor_filter_map_headers_arrow_schema(source, &parsed) {
-        bindings.push(VmCompileBinding::readonly(
-            INGEST_HEADERS_NAMESPACE,
-            headers_schema,
-        ));
-    }
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
         &parsed,
         &writable_namespaces,
@@ -7895,11 +7846,15 @@ fn compile_ingestor_filter_map_program(
         bindings.push(lookup_binding);
     }
 
-    let compiled = compile_vm_program_for_bindings_with_sensitivity(
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         schemas.output,
         schemas.output_sensitivity.clone(),
         bindings,
+        VmCompileOptions {
+            allow_header_reads: ingest_source_supports_headers(source),
+            ..VmCompileOptions::default()
+        },
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -7931,6 +7886,7 @@ fn parse_generator_program(
     if parsed.inner.filter.is_some()
         || !parsed.inner.branch_filters.is_empty()
         || !parsed.inner.unset.is_empty()
+        || !parsed.inner.invoke.is_empty()
         || parsed.inner.set.is_empty()
     {
         return Err(format!(
@@ -8057,7 +8013,13 @@ pub(crate) async fn execute_filter_map_on_record(
     let result = execute_program_with_selection_in_context(
         filter_map.compiled.as_ref(),
         &batch,
-        &VmExecutionContext { now: execution_now },
+        &VmExecutionContext {
+            now: execution_now,
+            injector: Some(IngestHeaderFunctionInjector::from_metadata(
+                filter_map_metadata.map(std::slice::from_ref),
+                batch.row_count(),
+            )),
+        },
     )
     .await
     .map_err(|error| format!("FILTER-MAP execution failed: {error}"))?;
@@ -8874,7 +8836,10 @@ async fn plan_filter_map_messages(
     let result = match execute_program_with_selection_in_context(
         program.compiled.as_ref(),
         &vm_batch,
-        &VmExecutionContext { now: execution_now },
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
     )
     .await
     {
@@ -9044,30 +9009,13 @@ async fn plan_emitter_filter_map_messages(
         "emitter",
         emitter,
         &program.body,
-        input_records.clone(),
+        input_records,
         execution_now,
         side_inputs,
         &batch.keys,
         &batch.acks,
     )
     .await?;
-    let header_input_records = if let Some(headers) = &program.headers {
-        Some(
-            prepare_filter_map_input_records(
-                "emitter",
-                emitter,
-                headers,
-                input_records,
-                execution_now,
-                side_inputs,
-                &batch.keys,
-                &batch.acks,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
     let RelayRecordBatch {
         keys,
         metadata: _,
@@ -9084,33 +9032,6 @@ async fn plan_emitter_filter_map_messages(
     )
     .await?;
     let mut acks = body_result.acks;
-    let header_result =
-        if let (Some(headers), Some(records)) = (&program.headers, header_input_records.as_ref()) {
-            Some(
-                execute_filter_map_program(
-                    "emitter",
-                    emitter,
-                    headers,
-                    records,
-                    execution_now,
-                    acks.clone(),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-    let header_rows_by_input = header_result
-        .as_ref()
-        .map(|result| {
-            result
-                .selected_rows
-                .iter()
-                .enumerate()
-                .map(|(output_row, input_row)| (*input_row, output_row))
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
 
     let mut selected_rows = vec![false; acks.len()];
     for &row in &body_result.selected_rows {
@@ -9145,40 +9066,8 @@ async fn plan_emitter_filter_map_messages(
             });
             continue;
         }
-        let message_headers = if let Some(header_result) = header_result.as_ref() {
-            let Some(&header_output_row) = header_rows_by_input.get(&input_row) else {
-                message_errors.push(PlannedMessageError {
-                    message: RelayMessage {
-                        key: keys[input_row].clone(),
-                        record: source_records[input_row].clone(),
-                        acks: std::mem::take(&mut acks[input_row]),
-                    },
-                    reason: format!(
-                        "emitter '{}' FILTER-MAP header selection did not include input row {}",
-                        emitter.as_str(),
-                        input_row
-                    ),
-                });
-                continue;
-            };
-            if let Some(side_error) = header_result.batch.errors()[header_output_row].first() {
-                message_errors.push(PlannedMessageError {
-                    message: RelayMessage {
-                        key: keys[input_row].clone(),
-                        record: source_records[input_row].clone(),
-                        acks: std::mem::take(&mut acks[input_row]),
-                    },
-                    reason: format!(
-                        "emitter '{}' FILTER-MAP header side error {}: {} at {}",
-                        emitter.as_str(),
-                        side_error.code.as_str(),
-                        side_error.message,
-                        side_error.span
-                    ),
-                });
-                continue;
-            }
-            match emitter_headers_from_output_row(&header_result.batch, header_output_row) {
+        let message_headers =
+            match emitter_headers_from_invocations(&body_result.invocations, output_row) {
                 Ok(headers) => headers,
                 Err(error) => {
                     message_errors.push(PlannedMessageError {
@@ -9195,10 +9084,7 @@ async fn plan_emitter_filter_map_messages(
                     });
                     continue;
                 }
-            }
-        } else {
-            Vec::new()
-        };
+            };
         let record = match vm_output_row_to_decoded_record(&body_result.batch, output_row) {
             Ok(record) => record.into_runtime_record(source_records[input_row].metadata().clone()),
             Err(error) => {
@@ -9235,6 +9121,7 @@ async fn plan_emitter_filter_map_messages(
 struct ExecutedFilterMap {
     batch: VmTypedBatch,
     selected_rows: Vec<usize>,
+    invocations: Vec<nervix_vm::FunctionInvocation>,
     acks: Vec<AckSet>,
 }
 
@@ -9340,7 +9227,10 @@ async fn execute_filter_map_program_with_uninitialized(
     let result = match execute_program_with_selection_in_context(
         program.compiled.as_ref(),
         &vm_batch,
-        &VmExecutionContext { now: execution_now },
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
     )
     .await
     {
@@ -9360,30 +9250,37 @@ async fn execute_filter_map_program_with_uninitialized(
     Ok(ExecutedFilterMap {
         batch: result.batch,
         selected_rows: result.selected_rows,
+        invocations: result.invocations,
         acks,
     })
 }
 
-fn emitter_headers_from_output_row(
-    batch: &VmTypedBatch,
+fn emitter_headers_from_invocations(
+    invocations: &[nervix_vm::FunctionInvocation],
     row: usize,
 ) -> Result<EmitterHeaders, String> {
-    let record = vm_output_row_to_decoded_record(batch, row)?;
     let mut headers = Vec::new();
-    for field in batch.schema().fields() {
-        let Some(value) = record.value(field.name()) else {
-            continue;
-        };
-        match value {
-            RuntimeValue::String(value) => headers.push((field.name().clone(), value.clone())),
-            other => {
-                return Err(format!(
-                    "header '{}' evaluated to {}, expected STRING",
-                    field.name(),
-                    runtime_value_type_name(other)
-                ));
-            }
+    for invocation in invocations {
+        if invocation.function != FunctionName::WriteHeader {
+            return Err(format!(
+                "unsupported invocation '{}'",
+                invocation.function.as_str()
+            ));
         }
+        let [VmTypedArray::Utf8(names), VmTypedArray::Utf8(values)] =
+            invocation.arguments.as_slice()
+        else {
+            return Err("write_header arguments must both be STRING".to_string());
+        };
+        if row >= names.len() || row >= values.len() {
+            return Err(format!(
+                "write_header result does not contain output row {row}"
+            ));
+        }
+        if names.is_null(row) || values.is_null(row) {
+            return Err("write_header arguments cannot be NULL".to_string());
+        }
+        headers.push((names.value(row).to_string(), values.value(row).to_string()));
     }
     Ok(headers)
 }
@@ -10803,12 +10700,6 @@ fn resolve_filter_map_input_value<'a>(
             .and_then(|row| row.metadata_value(field_name)));
     }
 
-    if namespace == INGEST_HEADERS_NAMESPACE {
-        return Ok(filter_map_metadata
-            .and_then(|rows| rows.get(index))
-            .and_then(|row| row.header_value(field_name)));
-    }
-
     if namespace == BRANCH_NAMESPACE {
         return Ok(record.value(field.name()));
     }
@@ -10928,7 +10819,10 @@ async fn runtime_record_lookup_key(
     let result = execute_program_with_selection_in_context(
         call.key_program.as_ref(),
         &vm_batch,
-        &VmExecutionContext { now: execution_now },
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
     )
     .await
     .map_err(|error| {
@@ -14189,7 +14083,10 @@ async fn execute_generator_program_on_context(
     let result = execute_program_with_selection_in_context(
         program,
         input,
-        &VmExecutionContext { now: execution_now },
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
     )
     .await
     .map_err(|error| format!("GENERATOR execution failed: {error}"))?;

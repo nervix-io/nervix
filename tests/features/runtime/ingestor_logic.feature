@@ -31,7 +31,7 @@ Feature: Ingestor filter-map logic
       """
     When the ingestor logic fixture "<transport_fixture>" starts with output schema "header_routed" and program
       """
-      SET logic_notifications.amount = message.amount + 1, logic_notifications.normalized = headers.route UNSET logic_notifications.raw WHERE headers.tenant = message.tenant
+      SET logic_notifications.amount = message.amount + 1, logic_notifications.normalized = first(read_headers(lower("ROUTE"))) UNSET logic_notifications.raw WHERE read_header(lower("TENANT")) = message.tenant AND count(read_headers("missing")) = 0
       """
     And the ingestor logic transport "<transport_fixture>" delivers payload fixture "header_message" with headers
     Then the ingestor logic expectation "header_routed_once" is observed
@@ -80,6 +80,8 @@ Feature: Ingestor filter-map logic
       | 3            | http_endpoint      | input                 | SET logic_notifications.total = metadata.offset                                       |
       | 1            | http_endpoint      | input                 | SET message.amount = message.amount + 1                                               |
       | 3            | http_endpoint      | input                 | SET message.amount = message.amount + 1                                               |
+      | 1            | zeromq             | input                 | WHERE read_header("tenant") = message.tenant                                          |
+      | 3            | zeromq             | input                 | WHERE read_header("tenant") = message.tenant                                          |
 
   Scenario Outline: Ingestor filter-map runtime failures emit errors and drop messages
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

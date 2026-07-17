@@ -174,8 +174,8 @@ General filter-map rules:
 - builtin calls may be nested or chained, for example `lower(trim(raw))`
 - arithmetic and predicate expressions may also be nested with parentheses
 - there is no implicit cast insertion; type mismatches must be resolved with explicit `AS ...`
-- ingestor filter-map programs read decoded payload fields as `message.<field>` and, for supported sources, transport headers as optional string fields under `headers.<field>`; see [Ingestors](ingestors.md#header-context)
-- emitter filter-map programs write encoded payload fields through `message.<field>` and may write string headers through `headers.<field>` for Kafka, Pulsar, RabbitMQ, NATS, and SQS sinks; see [Emitters](emitters.md#filter-map-programs)
+- ingestor filter-map programs read decoded payload fields as `message.<field>` and, for supported sources, read transport headers with `read_header(name)` or `read_headers(name)`; see [Ingestors](ingestors.md#header-context)
+- emitter filter-map programs write encoded payload fields through `message.<field>` and may append string headers with top-level `write_header(name, value)` calls in a final `INVOKE` block for Kafka, Pulsar, RabbitMQ, NATS, and SQS sinks; see [Emitters](emitters.md#filter-map-programs)
 - branch-local processors, reingestors, and emitters can read the current branch key as `branch.<key>` when the current relay is branched; `branch` is a reserved namespace and cannot be used as a relay name
 
 Example:

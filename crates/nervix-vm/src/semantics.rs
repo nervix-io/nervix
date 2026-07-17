@@ -425,9 +425,12 @@ pub const fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescri
         FunctionName::Tan => BuiltinLowering::Tan,
         FunctionName::ToHex => BuiltinLowering::ToHex,
         FunctionName::Translate => BuiltinLowering::Translate,
-        FunctionName::LeakSensitive | FunctionName::LookupHashMap | FunctionName::Unknown(_) => {
-            return None;
-        }
+        FunctionName::LeakSensitive
+        | FunctionName::LookupHashMap
+        | FunctionName::ReadHeader
+        | FunctionName::ReadHeaders
+        | FunctionName::WriteHeader
+        | FunctionName::Unknown(_) => return None,
     };
     Some(BuiltinDescriptor {
         lowering,
@@ -1058,12 +1061,29 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
             cast_semantics(),
             [expr_semantics(inner.as_ref())?],
         )),
-        Expr::Call { function, args } => Some(ExpressionSemantics::from_operation(
-            builtin_function_semantics(function)?,
-            args.iter()
-                .map(expr_semantics)
-                .collect::<Option<Vec<_>>>()?,
-        )),
+        Expr::Call { function, args } => {
+            let operation = if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
+                OperationSemantics {
+                    volatility: Volatility::Stable,
+                    dependency_scope: DependencyScope::RowLocal,
+                    has_side_effects: false,
+                    can_error: false,
+                    null_propagation: if let FunctionName::ReadHeader = function {
+                        NullPropagation::Custom
+                    } else {
+                        NullPropagation::NeverNull
+                    },
+                }
+            } else {
+                builtin_function_semantics(function)?
+            };
+            Some(ExpressionSemantics::from_operation(
+                operation,
+                args.iter()
+                    .map(expr_semantics)
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
     }
 }
 

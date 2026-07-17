@@ -66,7 +66,7 @@ impl NatsEmitter {
         } else {
             let mut header_map = async_nats::HeaderMap::new();
             for (name, value) in headers {
-                header_map.insert(name.as_str(), value.as_str());
+                header_map.append(name.as_str(), value.as_str());
             }
             client
                 .publish_with_headers(

@@ -43,10 +43,11 @@ CREATE [IF NOT EXISTS] EMITTER kafka_notifications
   FROM notifications
   ENCODE USING notification_codec
   TO KAFKA kafka_main TOPIC notifications_out
-  SET message.normalized = lower(message.raw),
-      headers.tenant = message.tenant
+  SET message.normalized = lower(message.raw)
   UNSET message.raw
   WHERE message.active
+  INVOKE write_header("tenant", message.tenant),
+         write_header("route", message.normalized)
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
@@ -57,13 +58,15 @@ The filter-map runs before codec encoding and sink publication.
 Supported blocks:
 
 - `SET message.<field> = <expr>, ...`
-- `SET headers.<name> = <string-expr>, ...`
 - `UNSET message.<field>, ...`
 - `WHERE <expr>`
+- `INVOKE write_header(<name-expr>, <value-expr>), ...`
 
-If more than one block is present, use `SET`, then `UNSET`, then `WHERE`.
+If more than one block is present, use `SET`, then `UNSET`, then `WHERE`, then `INVOKE`. `INVOKE` may also be the entire filter-map program, so an emitter that only adds headers does not need a `SET` block.
 
-`message.<field>` addresses the encoded outbound payload and is checked against the emitter codec schema when `ENCODE USING` is present. `headers.<name>` addresses broker headers or header-equivalent string metadata. Header output is supported for Kafka, Pulsar, RabbitMQ, NATS, and SQS emitters; Kafka, Pulsar, RabbitMQ, and NATS publish transport headers/properties, while SQS publishes string message attributes. Kinesis, MQTT, Redis, ZeroMQ, database, and Iceberg emitters do not expose a generic header channel.
+`message.<field>` addresses the encoded outbound payload and is checked against the emitter codec schema when `ENCODE USING` is present. `write_header` accepts two `STRING` expressions. Invocations execute after all `SET` assignments, so their arguments observe the final message values; they execute only for rows selected by `WHERE`. Repeated calls append values in source order. The connector translates that ordered list into native headers or properties when it publishes, using either repeated native values or the connector's overwrite behavior.
+
+`write_header` is a side-effect function. It returns no value, cannot appear in an expression or call chain, and is valid only as a top-level call in an emitter's final `INVOKE` block. Header output is supported for Kafka, Pulsar, RabbitMQ, NATS, and SQS emitters; Kafka, Pulsar, RabbitMQ, and NATS publish transport headers/properties, while SQS publishes string message attributes. Kinesis, MQTT, Redis, ZeroMQ, database, and Iceberg emitters reject `write_header` during leader-side validation.
 
 As with other runtime nodes, the leader validates the program immediately and checks that the resulting message output schema is compatible with the emitted schema after `SET` and `UNSET`.
 

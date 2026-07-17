@@ -597,11 +597,13 @@ pub fn error_policies<'src>()
 }
 
 fn vm_program_head<'src>()
--> impl Parser<'src, &'src [Token], Token, extra::Err<ParseError<'src>>> + Clone {
-    select! {
-        token @ Token::Word(Word::KnownWord { iden, .. })
-            if matches!(iden, Identifier::Where | Identifier::Set | Identifier::Unset) => token
-    }
+-> impl Parser<'src, &'src [Token], Identifier, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw(Identifier::Where).to(Identifier::Where),
+        kw(Identifier::Set).to(Identifier::Set),
+        kw(Identifier::Unset).to(Identifier::Unset),
+        kw(Identifier::Invoke).to(Identifier::Invoke),
+    ))
 }
 
 fn processor_output_boundary_token(token: &Token) -> bool {
@@ -652,10 +654,13 @@ fn validated_vm_program_until<'src>(
                 .collect::<Vec<_>>(),
         )
         .try_map(|(head, tail), span| {
-            let mut tokens = Vec::with_capacity(tail.len() + 1);
-            tokens.push(head);
-            tokens.extend(tail);
-            let source = render_vm_program_tokens(&tokens);
+            let head: &'static str = head.into();
+            let tail = render_vm_program_tokens(&tail);
+            let source = if tail.is_empty() {
+                head.to_string()
+            } else {
+                format!("{head} {tail}")
+            };
             crate::vm_program::parse_program(&source)
                 .map(|_| source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
@@ -827,6 +832,7 @@ pub fn set_only_program<'src>()
                 if parsed.inner.filter.is_none()
                     && parsed.inner.branch_filters.is_empty()
                     && parsed.inner.unset.is_empty()
+                    && parsed.inner.invoke.is_empty()
                     && !parsed.inner.set.is_empty() =>
             {
                 Ok(source)

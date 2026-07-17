@@ -6548,6 +6548,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         }))
         .arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &lookups,
@@ -6634,6 +6635,7 @@ async fn filter_map_can_read_branch_namespace() {
         super::VmSchemaSensitivity::default(),
         input_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -6721,6 +6723,7 @@ async fn filter_map_with_unset_can_read_branch_namespace() {
         super::VmSchemaSensitivity::default(),
         output_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -6795,6 +6798,7 @@ fn filter_map_rejects_branch_namespace_without_branch_schema() {
         super::VmSchemaSensitivity::default(),
         schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -6825,6 +6829,7 @@ fn filter_map_rejects_missing_branch_key() {
         super::VmSchemaSensitivity::default(),
         schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -6839,6 +6844,123 @@ fn filter_map_rejects_missing_branch_key() {
     assert!(
         error.contains("branch.tenant") || error.contains("tenant"),
         "expected missing branch key error, got {error}"
+    );
+}
+
+#[tokio::test]
+async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers() {
+    let input_schema = test_schema(&[
+        ("tenant", ParseAsType::String),
+        ("raw", ParseAsType::String),
+        ("active", ParseAsType::Bool),
+    ]);
+    let output_schema = test_schema(&[
+        ("tenant", ParseAsType::String),
+        ("normalized", ParseAsType::String),
+    ]);
+    let emitter = CreateEmitter {
+        name: identifier("kafka_notifications"),
+        from_relay: identifier("notifications"),
+        encode_using_codec: Some(identifier("notification_codec")),
+        sink: EmitSink::Kafka {
+            client: identifier("kafka_main"),
+            topic: identifier("notifications_out"),
+        },
+        flush_each: "100ms".to_string(),
+        max_batch_size: Some("1MiB".to_string()),
+        mode: AckMode::Attached,
+        error_policies: ErrorPolicies::handled_by_log(),
+        filter_map: Some(
+            "SET message.normalized = lower(message.raw) UNSET message.raw, message.active WHERE \
+             message.active INVOKE write_header(lower(\"TENANT\"), message.tenant), \
+             write_header(\"route\", message.normalized), write_header(\"route\", \"second\")"
+                .to_string(),
+        ),
+    };
+    let program = super::compile_emitter_filter_map_program(
+        &domain("default"),
+        &emitter,
+        input_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        output_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+        },
+    )
+    .expect("emitter filter-map must compile")
+    .expect("program must exist");
+    let mut unsupported_emitter = emitter.clone();
+    unsupported_emitter.sink = EmitSink::ZeroMq {
+        client: identifier("zeromq_main"),
+    };
+    let error = super::compile_emitter_filter_map_program(
+        &domain("default"),
+        &unsupported_emitter,
+        input_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        output_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+        },
+    )
+    .expect_err("ZeroMQ emitters must reject write_header");
+    assert!(error.to_string().contains("ZEROMQ emitters do not support"));
+    let messages = [true, false]
+        .into_iter()
+        .map(|active| {
+            let (acks, _completion) = AckSet::root();
+            RelayMessage {
+                key: None,
+                record: RuntimeRecord::from_fields([
+                    (
+                        "tenant".to_string(),
+                        RuntimeValue::String("acme".to_string()),
+                    ),
+                    (
+                        "raw".to_string(),
+                        RuntimeValue::String("FAST-LANE".to_string()),
+                    ),
+                    ("active".to_string(), RuntimeValue::Bool(active)),
+                ]),
+                acks,
+            }
+        })
+        .collect::<Vec<_>>();
+    let batch =
+        super::RelayRecordBatch::from_messages(input_schema, messages).expect("batch must build");
+
+    let plan = super::plan_emitter_filter_map_messages(
+        &emitter.name,
+        &program,
+        batch,
+        Timestamp::from_unix_nanos(1),
+        &HashMap::default(),
+    )
+    .await
+    .expect("emitter filter-map must execute");
+
+    assert_eq!(plan.messages.len(), 1);
+    assert_eq!(
+        plan.messages[0].record.value("normalized"),
+        Some(&RuntimeValue::String("fast-lane".to_string()))
+    );
+    assert_eq!(
+        plan.headers,
+        vec![vec![
+            ("tenant".to_string(), "acme".to_string()),
+            ("route".to_string(), "fast-lane".to_string()),
+            ("route".to_string(), "second".to_string()),
+        ]]
     );
 }
 
@@ -7112,6 +7234,7 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
         &input,
         &super::VmExecutionContext {
             now: Timestamp::from_unix_nanos(1),
+            injector: None,
         },
     )
     .await
@@ -7169,6 +7292,7 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
         &input,
         &super::VmExecutionContext {
             now: Timestamp::from_unix_nanos(1),
+            injector: None,
         },
     )
     .await
@@ -7417,6 +7541,148 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     assert!(output.value("active").is_none());
     assert!(output.value("amount").is_none());
     assert!(output.value("raw").is_none());
+}
+
+#[tokio::test]
+async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() {
+    let input_schema = test_schema(&[
+        ("tenant", ParseAsType::String),
+        ("header_name", ParseAsType::String),
+        ("raw", ParseAsType::String),
+    ]);
+    let output_schema = Arc::new(compile_schema(&CreateSchema {
+        name: identifier("header_output"),
+        fields: vec![
+            SchemaField {
+                name: identifier("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            },
+            SchemaField {
+                name: identifier("first"),
+                ty: ParseAsType::String,
+                optional: true,
+                sensitive: false,
+            },
+            SchemaField {
+                name: identifier("total"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            },
+        ],
+    }));
+    let source = IngestSource::Kafka {
+        client: identifier("logic_kafka"),
+        topic: identifier("logic_notifications"),
+        offset_mode: nervix_models::KafkaOffsetMode::Domain,
+        instances: 1,
+        mode: nervix_models::KafkaIngestMode::AckSequential {
+            timeout: "5s".to_string(),
+            retry_policy: RetryPolicy {
+                backoff: "100ms".to_string(),
+                max_backoff: "200ms".to_string(),
+            },
+        },
+    };
+    let program = super::compile_ingestor_filter_map_program(
+        &domain("default"),
+        &identifier("header_ingestor"),
+        &identifier("header_output"),
+        &source,
+        Some(
+            "SET header_output.first = read_header(lower(message.header_name)), \
+             header_output.total = count(read_headers(lower(message.header_name))) UNSET \
+             header_output.header_name, header_output.raw WHERE read_header(\"tenant\") = \
+             message.tenant AND count(read_headers(\"missing\")) = 0",
+        ),
+        super::RuntimeVmSchemaPair {
+            input: input_schema.arrow_schema(),
+            input_sensitivity: super::VmSchemaSensitivity::default(),
+            output: output_schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+        },
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+        },
+    )
+    .expect("header filter-map must compile")
+    .expect("program must exist");
+    let record = RuntimeRecord::from_fields([
+        (
+            "tenant".to_string(),
+            RuntimeValue::String("acme".to_string()),
+        ),
+        (
+            "header_name".to_string(),
+            RuntimeValue::String("ROUTE".to_string()),
+        ),
+        ("raw".to_string(), RuntimeValue::String("body".to_string())),
+    ]);
+    let metadata = super::IngestFilterMapMetadata::from_headers(vec![
+        ("tenant".to_string(), "acme".to_string()),
+        ("route".to_string(), "primary".to_string()),
+        ("route".to_string(), "secondary".to_string()),
+    ]);
+
+    let output = super::execute_filter_map_on_record(
+        &program,
+        record.clone(),
+        None,
+        Some(&metadata),
+        Timestamp::from_unix_nanos(1),
+    )
+    .await
+    .expect("header filter-map must execute")
+    .expect("record must be selected");
+
+    assert_eq!(
+        output.value("first"),
+        Some(&RuntimeValue::String("primary".to_string()))
+    );
+    assert_eq!(output.value("total"), Some(&RuntimeValue::I64(2)));
+
+    let message_namespace = identifier("message");
+    let top_filter = super::compile_filter_map_program(
+        &domain("default"),
+        &identifier("header_ingestor"),
+        &[message_namespace],
+        Some(
+            "WHERE read_header(lower(message.header_name)) = \"primary\" AND \
+             count(read_headers(\"missing\")) = 0",
+        ),
+        input_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        input_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        true,
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+        },
+    )
+    .expect("top FILTER WHERE must compile")
+    .expect("program must exist");
+    assert!(
+        super::execute_filter_map_on_record(
+            &top_filter,
+            record,
+            None,
+            Some(&metadata),
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .expect("top FILTER WHERE must execute")
+        .is_some()
+    );
 }
 
 #[tokio::test]

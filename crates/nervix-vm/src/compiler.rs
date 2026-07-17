@@ -10,8 +10,8 @@ use nervix_nspl::vm_program::{
 use crate::{
     error::CompileError,
     ir::{
-        CompiledProgram, InputBinding, Instruction, InstructionKind, OutputBinding,
-        RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
+        CompiledProgram, InputBinding, Instruction, InstructionKind, InvocationBinding,
+        OutputBinding, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
     },
     semantics::{
         BuiltinLowering, binary_descriptor, binary_output_type, builtin_descriptor,
@@ -168,6 +168,8 @@ struct Compiler {
     layouts: RegisterLayouts,
     expr_cache: HashMap<CachedExpr, RegisterRef>,
     expr_cache_generation: usize,
+    allow_header_reads: bool,
+    allow_header_writes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -226,6 +228,8 @@ pub struct CompileOptions {
     pub optimize_temp_registers: bool,
     pub output_mode: OutputMode,
     pub allow_sensitive_output: bool,
+    pub allow_header_reads: bool,
+    pub allow_header_writes: bool,
 }
 
 impl Default for CompileOptions {
@@ -234,11 +238,62 @@ impl Default for CompileOptions {
             optimize_temp_registers: true,
             output_mode: OutputMode::PassthroughByName,
             allow_sensitive_output: false,
+            allow_header_reads: false,
+            allow_header_writes: false,
         }
     }
 }
 
 impl Compiler {
+    fn header_values_type() -> DataType {
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)))
+    }
+
+    fn injected_header_call_type(
+        &self,
+        function: &FunctionName,
+        args: &[SpannedExpr],
+        span: Span,
+    ) -> Result<DataType, CompileError> {
+        if !self.allow_header_reads {
+            return Err(CompileError {
+                code: "unsupported_function_context",
+                message: format!(
+                    "function '{}' is only available to ingestors whose connector supports headers",
+                    function.as_str()
+                ),
+                span,
+            });
+        }
+        let [name] = args else {
+            return Err(CompileError {
+                code: "invalid_function_arity",
+                message: format!(
+                    "function '{}' expects exactly 1 argument, found {}",
+                    function.as_str(),
+                    args.len()
+                ),
+                span,
+            });
+        };
+        let name_type = self.infer_expr_type(name)?;
+        if name_type != DataType::Utf8 {
+            return Err(CompileError {
+                code: "type_mismatch",
+                message: format!(
+                    "function '{}' requires a STRING header name, found {name_type:?}",
+                    function.as_str()
+                ),
+                span: name.span,
+            });
+        }
+        if let FunctionName::ReadHeader = function {
+            Ok(DataType::Utf8)
+        } else {
+            Ok(Self::header_values_type())
+        }
+    }
+
     fn new(bindings: &[CompileBinding]) -> Result<(Self, Arc<Schema>), CompileError> {
         let mut layouts = RegisterLayouts::default();
         let mut inputs = Vec::new();
@@ -352,6 +407,8 @@ impl Compiler {
                 layouts,
                 expr_cache: HashMap::new(),
                 expr_cache_generation: 0,
+                allow_header_reads: false,
+                allow_header_writes: false,
             },
             Arc::new(Schema::new(input_fields)),
         ))
@@ -367,6 +424,11 @@ impl Compiler {
 
     fn alloc_output(&mut self, ty: RegisterType) -> RegisterRef {
         self.layouts.alloc(RegisterSpace::Output, ty)
+    }
+
+    fn apply_options(&mut self, options: CompileOptions) {
+        self.allow_header_reads = options.allow_header_reads;
+        self.allow_header_writes = options.allow_header_writes;
     }
 
     fn clear_expr_cache(&mut self) {
@@ -663,6 +725,17 @@ impl Compiler {
                     let arg = self.leak_sensitive_arg(args, expr.span)?;
                     return self.infer_expr_type(arg);
                 }
+                if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
+                    return self.injected_header_call_type(function, args, expr.span);
+                }
+                if let FunctionName::WriteHeader = function {
+                    return Err(CompileError {
+                        code: "invalid_side_effect_call",
+                        message: "write_header must be a top-level call in an INVOKE clause"
+                            .to_string(),
+                        span: expr.span,
+                    });
+                }
                 let arg_types = args
                     .iter()
                     .map(|arg| self.infer_expr_type(arg))
@@ -726,9 +799,13 @@ impl Compiler {
                 if let FunctionName::IsNull
                 | FunctionName::Now
                 | FunctionName::UuidV4
-                | FunctionName::UuidV7 = function
+                | FunctionName::UuidV7
+                | FunctionName::ReadHeaders = function
                 {
                     return Ok(false);
+                }
+                if let FunctionName::ReadHeader = function {
+                    return Ok(true);
                 }
                 if let FunctionName::NullIf = function {
                     return Ok(true);
@@ -1003,6 +1080,27 @@ impl Compiler {
                     let arg = self.leak_sensitive_arg(args, expr.span)?;
                     return self.compile_expr(arg);
                 }
+                if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
+                    let output_type = self.injected_header_call_type(function, args, expr.span)?;
+                    let inputs = args
+                        .iter()
+                        .map(|arg| self.compile_expr(arg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let dst = self.alloc_temp(
+                        RegisterType::from_data_type(&output_type)
+                            .expect("validated injected output type must be supported"),
+                    );
+                    self.instructions.push(Instruction {
+                        kind: InstructionKind::Inject {
+                            dst,
+                            function: function.clone(),
+                            inputs,
+                            output_type,
+                        },
+                        span: expr.span,
+                    });
+                    return Ok(dst);
+                }
                 let builtin = self.compile_builtin_call(function, args, expr.span)?;
                 let dst = self.alloc_temp(builtin.output_type());
                 self.instructions.push(Instruction {
@@ -1066,6 +1164,66 @@ impl Compiler {
             .collect::<Result<Vec<_>, _>>()?;
 
         BuiltinPlan::from_descriptor(descriptor.lowering, compiled_args, output_type, span)
+    }
+
+    fn compile_invocation(
+        &mut self,
+        invocation: &nervix_nspl::vm_program::SpannedInvocation,
+    ) -> Result<InvocationBinding, CompileError> {
+        if !self.allow_header_writes {
+            return Err(CompileError {
+                code: "unsupported_invoke_context",
+                message: "INVOKE is only available to emitters".to_string(),
+                span: invocation.span,
+            });
+        }
+        if invocation.inner.function != FunctionName::WriteHeader {
+            return Err(CompileError {
+                code: "unsupported_invocation",
+                message: format!(
+                    "function '{}' cannot be used in INVOKE; expected write_header",
+                    invocation.inner.function.as_str()
+                ),
+                span: invocation.span,
+            });
+        }
+        let [name, value] = invocation.inner.args.as_slice() else {
+            return Err(CompileError {
+                code: "invalid_function_arity",
+                message: format!(
+                    "function 'write_header' expects exactly 2 arguments, found {}",
+                    invocation.inner.args.len()
+                ),
+                span: invocation.span,
+            });
+        };
+        let mut inputs = Vec::with_capacity(2);
+        for (label, arg) in [("name", name), ("value", value)] {
+            let data_type = self.infer_expr_type(arg)?;
+            if data_type != DataType::Utf8 {
+                return Err(CompileError {
+                    code: "type_mismatch",
+                    message: format!("write_header {label} must be STRING, found {data_type:?}"),
+                    span: arg.span,
+                });
+            }
+            if self.expr_may_be_null(arg)? {
+                return Err(CompileError {
+                    code: "nullable_header_argument",
+                    message: format!("write_header {label} must not be nullable"),
+                    span: arg.span,
+                });
+            }
+            let compiled = self.compile_expr(arg)?;
+            let input = self.alloc_condition(RegisterType::Utf8);
+            self.emit_move(input, compiled, arg.span);
+            inputs.push(input);
+        }
+        Ok(InvocationBinding {
+            function: invocation.inner.function.clone(),
+            inputs,
+            span: invocation.span,
+        })
     }
 
     fn emit_move(&mut self, dst: RegisterRef, input: RegisterRef, span: Span) {
@@ -1463,6 +1621,9 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         }
         FunctionName::Unknown(_)
         | FunctionName::LookupHashMap
+        | FunctionName::ReadHeader
+        | FunctionName::ReadHeaders
+        | FunctionName::WriteHeader
         | FunctionName::Now
         | FunctionName::UuidV4
         | FunctionName::UuidV7
@@ -1665,6 +1826,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
 ) -> Result<CompiledProgram, CompileError> {
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let (mut compiler, input_schema) = Compiler::new(&bindings)?;
+    compiler.apply_options(options);
     output_sensitivity.validate_against_schema(&output_schema, "output")?;
     let output_field_names = output_schema
         .fields()
@@ -1795,6 +1957,13 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
             },
         );
     }
+
+    let invocations = program
+        .inner
+        .invoke
+        .iter()
+        .map(|invocation| compiler.compile_invocation(invocation))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let output_namespace = compiler
         .writable_namespaces
@@ -1933,6 +2102,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         filter,
         branch_filters,
         outputs,
+        invocations,
         layouts: compiler.layouts,
     })
 }
@@ -2053,6 +2223,7 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
         InstructionKind::Builtin { lowering, .. } => {
             builtin_semantics_for_lowering(*lowering).supports_common_subexpression_elimination()
         }
+        InstructionKind::Inject { .. } => true,
     }
 }
 
@@ -2117,7 +2288,9 @@ fn instruction_inputs(kind: &InstructionKind) -> Vec<RegisterRef> {
         | InstructionKind::NullLiteral { .. }
         | InstructionKind::Uninitialized { .. } => Vec::new(),
         InstructionKind::Binary { left, right, .. } => vec![*left, *right],
-        InstructionKind::Builtin { inputs, .. } => inputs.clone(),
+        InstructionKind::Builtin { inputs, .. } | InstructionKind::Inject { inputs, .. } => {
+            inputs.clone()
+        }
     }
 }
 
@@ -2130,7 +2303,8 @@ fn instruction_output(kind: &InstructionKind) -> RegisterRef {
         | InstructionKind::Unary { dst, .. }
         | InstructionKind::Binary { dst, .. }
         | InstructionKind::Cast { dst, .. }
-        | InstructionKind::Builtin { dst, .. } => *dst,
+        | InstructionKind::Builtin { dst, .. }
+        | InstructionKind::Inject { dst, .. } => *dst,
     }
 }
 
@@ -2143,7 +2317,8 @@ fn rewrite_instruction_output(kind: &mut InstructionKind, dst: RegisterRef) {
         | InstructionKind::Unary { dst: output, .. }
         | InstructionKind::Binary { dst: output, .. }
         | InstructionKind::Cast { dst: output, .. }
-        | InstructionKind::Builtin { dst: output, .. } => *output = dst,
+        | InstructionKind::Builtin { dst: output, .. }
+        | InstructionKind::Inject { dst: output, .. } => *output = dst,
     }
 }
 
@@ -2165,7 +2340,7 @@ fn rewrite_temp_input(kind: &mut InstructionKind, from: RegisterRef, to_index: u
             rewrite(left);
             rewrite(right);
         }
-        InstructionKind::Builtin { inputs, .. } => {
+        InstructionKind::Builtin { inputs, .. } | InstructionKind::Inject { inputs, .. } => {
             for input in inputs {
                 rewrite(input);
             }
@@ -2182,7 +2357,8 @@ fn rewrite_temp_output(kind: &mut InstructionKind, to_index: usize) {
         | InstructionKind::Unary { dst, .. }
         | InstructionKind::Binary { dst, .. }
         | InstructionKind::Cast { dst, .. }
-        | InstructionKind::Builtin { dst, .. } => dst,
+        | InstructionKind::Builtin { dst, .. }
+        | InstructionKind::Inject { dst, .. } => dst,
     };
     output.index = to_index;
 }
@@ -2339,6 +2515,7 @@ mod tests {
                     },
                 )],
                 unset: Vec::new(),
+                invoke: Vec::new(),
             },
             span: (0..0).into(),
         };
@@ -2372,6 +2549,80 @@ mod tests {
                 .field_with_name("internal LOOKUP_HASH_MAP.value_0")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn header_functions_are_contextual_and_plural_reads_are_typed_vectors() {
+        let parsed = parse_program("SET input.headers = read_headers(lower(input.name))")
+            .expect("program must parse");
+        let input_schema = schema(vec![Field::new("name", DataType::Utf8, false)]);
+        let headers_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)));
+        let output_schema = with_output_fields(
+            &input_schema,
+            vec![Field::new("headers", headers_type.clone(), false)],
+        );
+
+        let error = compile_program_for_bindings(
+            &parsed,
+            output_schema.clone(),
+            [CompileBinding::writable("input", input_schema.clone())],
+        )
+        .expect_err("header reads must be rejected outside an ingestor context");
+        assert_eq!(error.code, "unsupported_function_context");
+
+        let compiled = compile_program_with_options_for_bindings(
+            &parsed,
+            output_schema,
+            [CompileBinding::writable("input", input_schema)],
+            CompileOptions {
+                allow_header_reads: true,
+                ..CompileOptions::default()
+            },
+        )
+        .expect("header reads must compile for a supported ingestor");
+        assert_eq!(
+            compiled
+                .output_schema
+                .field_with_name("headers")
+                .unwrap()
+                .data_type(),
+            &headers_type
+        );
+    }
+
+    #[test]
+    fn write_header_is_only_valid_as_an_emitter_invocation() {
+        let schema = schema(vec![Field::new("value", DataType::Utf8, false)]);
+        let expression = parse_program("SET input.value = write_header(\"name\", input.value)")
+            .expect("program must parse");
+        let error = compile_program_with_options_for_bindings(
+            &expression,
+            schema.clone(),
+            [CompileBinding::writable("input", schema.clone())],
+            CompileOptions {
+                allow_header_writes: true,
+                ..CompileOptions::default()
+            },
+        )
+        .expect_err("write_header must not be an expression");
+        assert_eq!(error.code, "invalid_side_effect_call");
+
+        let invocation = parse_program("INVOKE write_header(\"name\", input.value)")
+            .expect("program must parse");
+        let error = compile_program_for_bindings(
+            &invocation,
+            schema,
+            [CompileBinding::writable(
+                "input",
+                Arc::new(Schema::new(vec![Field::new(
+                    "value",
+                    DataType::Utf8,
+                    false,
+                )])),
+            )],
+        )
+        .expect_err("INVOKE must be rejected outside an emitter context");
+        assert_eq!(error.code, "unsupported_invoke_context");
     }
 
     #[test]
@@ -2474,6 +2725,7 @@ mod tests {
                 branch_filters: Vec::new(),
                 set: Vec::new(),
                 unset: Vec::new(),
+                invoke: Vec::new(),
             },
             span: (0..0).into(),
         };

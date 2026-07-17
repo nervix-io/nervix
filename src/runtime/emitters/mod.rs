@@ -492,7 +492,10 @@ async fn sql_mapped_batch_values(
     let result = execute_program_with_selection_in_context(
         program.program.as_ref(),
         &input,
-        &VmExecutionContext { now: execution_now },
+        &VmExecutionContext {
+            now: execution_now,
+            injector: None,
+        },
     )
     .await
     .map_err(|error| {

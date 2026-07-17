@@ -219,6 +219,7 @@ pub enum Identifier {
     Every,
     Each,
     Set,
+    Invoke,
     Output,
     Unset,
     Attached,
