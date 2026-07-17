@@ -7,7 +7,10 @@ use chumsky::{
 };
 
 use crate::vm_program::{
-    ast::{BinaryOp, Expr, FieldRef, FunctionName, Literal, Program, Span, merge_spans, spanned},
+    ast::{
+        BinaryOp, Expr, FieldRef, FunctionName, Invocation, Literal, Program, Span, merge_spans,
+        spanned,
+    },
     lexer::{SpannedToken, Token, lex},
 };
 
@@ -324,6 +327,30 @@ where
             .allow_trailing()
             .collect::<Vec<_>>(),
     );
+    let invocation = identifier_name()
+        .then(
+            expr.clone()
+                .separated_by(keyword(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
+        )
+        .map_with(|(name, args), e| {
+            spanned(
+                Invocation {
+                    function: FunctionName::parse(&name),
+                    args,
+                },
+                e.span(),
+            )
+        });
+    let invoke_block = keyword(Token::Invoke).ignore_then(
+        invocation
+            .separated_by(keyword(Token::Comma))
+            .at_least(1)
+            .allow_trailing()
+            .collect::<Vec<_>>(),
+    );
 
     set_block
         .or_not()
@@ -332,9 +359,14 @@ where
         .then_ignore(keyword(Token::Semicolon).repeated())
         .then(keyword(Token::Where).ignore_then(expr).or_not())
         .then_ignore(keyword(Token::Semicolon).repeated())
-        .try_map(|((set, unset), filter), span| {
-            if set.is_none() && unset.is_none() && filter.is_none() {
-                return Err(Rich::custom(span, "expected SET, UNSET, or WHERE clause"));
+        .then(invoke_block.or_not())
+        .then_ignore(keyword(Token::Semicolon).repeated())
+        .try_map(|(((set, unset), filter), invoke), span| {
+            if set.is_none() && unset.is_none() && filter.is_none() && invoke.is_none() {
+                return Err(Rich::custom(
+                    span,
+                    "expected SET, UNSET, WHERE, or INVOKE clause",
+                ));
             }
 
             Ok(Program {
@@ -342,6 +374,7 @@ where
                 branch_filters: Vec::new(),
                 set: set.unwrap_or_default(),
                 unset: unset.unwrap_or_default(),
+                invoke: invoke.unwrap_or_default(),
             })
         })
         .map_with(|program, e| spanned(program, e.span()))
@@ -437,7 +470,9 @@ mod tests {
     #[test]
     fn parses_clauses_in_canonical_order() {
         let parsed = parse_program(
-            "SET input.total = input.amount UNSET input.legacy WHERE input.active = true;",
+            "SET input.total = input.amount UNSET input.legacy WHERE input.active = true INVOKE \
+             write_header(lower(\"X-Tenant\"), input.tenant), write_header(\"x-route\", \
+             input.route);",
         )
         .expect("program must parse");
 
@@ -445,6 +480,23 @@ mod tests {
         assert!(parsed.inner.branch_filters.is_empty());
         assert_eq!(parsed.inner.set.len(), 1);
         assert_eq!(parsed.inner.unset[0].field, "legacy");
+        assert_eq!(parsed.inner.invoke.len(), 2);
+        assert_eq!(
+            parsed.inner.invoke[0].inner.function,
+            FunctionName::WriteHeader
+        );
+        assert_eq!(parsed.inner.invoke[0].inner.args.len(), 2);
+    }
+
+    #[test]
+    fn parses_invoke_only_program() {
+        let parsed = parse_program("INVOKE write_header(\"route\", input.route)")
+            .expect("invoke-only program must parse");
+
+        assert!(parsed.inner.set.is_empty());
+        assert!(parsed.inner.unset.is_empty());
+        assert!(parsed.inner.filter.is_none());
+        assert_eq!(parsed.inner.invoke.len(), 1);
     }
 
     #[test]
@@ -452,6 +504,12 @@ mod tests {
         let error = parse_program("WHERE input.active SET input.total = input.amount;")
             .expect_err("program must fail");
 
+        assert!(matches!(error, ParseFromSourceError::Parse { .. }));
+
+        let error = parse_program(
+            "INVOKE write_header(\"route\", input.route) SET input.total = input.amount;",
+        )
+        .expect_err("INVOKE must be the final block");
         assert!(matches!(error, ParseFromSourceError::Parse { .. }));
     }
 

@@ -73,11 +73,12 @@ Feature: Kafka emission
         ENCODE USING emitted_notification_codec
         TO KAFKA kafka_main TOPIC notifications_headers_out_{{test_id}}
         SET message.amount = message.amount + 1,
-            message.normalized = lower(message.raw),
-            headers.tenant = message.tenant,
-            headers.route = lower(message.raw)
+            message.normalized = lower(message.raw)
         UNSET message.raw, message.active
         WHERE message.active
+        INVOKE write_header(lower("TENANT"), message.tenant),
+               write_header(lower("ROUTE"), "primary"),
+               write_header(lower("ROUTE"), message.normalized)
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
       START;
       """
@@ -92,6 +93,7 @@ Feature: Kafka emission
     And the last observed broker message has headers
       """
       tenant=acme
+      route=primary
       route=fast-lane
       """
 

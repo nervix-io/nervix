@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use arrow_schema::{DataType, Schema, TimeUnit};
-use nervix_nspl::vm_program::{BinaryOp, Span, UnaryOp};
+use nervix_nspl::vm_program::{BinaryOp, FunctionName, Span, UnaryOp};
 
 use crate::semantics::BuiltinLowering;
 
@@ -289,6 +289,12 @@ pub enum InstructionKind {
         lowering: BuiltinLowering,
         inputs: Vec<RegisterRef>,
     },
+    Inject {
+        dst: RegisterRef,
+        function: FunctionName,
+        inputs: Vec<RegisterRef>,
+        output_type: DataType,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -310,6 +316,13 @@ pub struct OutputBinding {
     pub reg: RegisterRef,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvocationBinding {
+    pub function: FunctionName,
+    pub inputs: Vec<RegisterRef>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
     pub input_schema: Arc<Schema>,
@@ -319,6 +332,7 @@ pub struct CompiledProgram {
     pub filter: Option<RegisterRef>,
     pub branch_filters: Vec<RegisterRef>,
     pub outputs: Vec<OutputBinding>,
+    pub invocations: Vec<InvocationBinding>,
     pub layouts: RegisterLayouts,
 }
 

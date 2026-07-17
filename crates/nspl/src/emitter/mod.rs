@@ -2171,7 +2171,7 @@ mod tests {
                 FROM p99
                 ENCODE USING my_codec
                 TO KAFKA broker1 TOPIC topic
-                SET message.normalized = lower(message.name), message.score = message.score AS FLOAT64, headers.tenant = message.tenant UNSET message.raw WHERE message.active ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                SET message.normalized = lower(message.name), message.score = message.score AS FLOAT64 UNSET message.raw WHERE message.active INVOKE write_header(lower("TENANT"), message.tenant), write_header("route", message.normalized) ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
@@ -2180,9 +2180,27 @@ mod tests {
             parsed.filter_map.as_deref(),
             Some(
                 "SET message.normalized = lower ( message.name ) , message.score = message.score \
-                 AS FLOAT64 , headers.tenant = message.tenant UNSET message.raw WHERE \
-                 message.active"
+                 AS FLOAT64 UNSET message.raw WHERE message.active INVOKE write_header ( lower ( \
+                 \"TENANT\" ) , message.tenant ) , write_header ( \"route\" , message.normalized )"
             )
+        );
+    }
+
+    #[test]
+    fn parses_emitter_with_invoke_only_filter_map_program() {
+        let input = r#"
+            CREATE EMITTER emit
+                FROM p99
+                ENCODE USING my_codec
+                TO KAFKA broker1 TOPIC topic
+                INVOKE write_header("route", p99.route)
+                ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        "#;
+
+        let parsed = parse_create_emitter(input).expect("parse should succeed");
+        assert_eq!(
+            parsed.filter_map.as_deref(),
+            Some("INVOKE write_header ( \"route\" , p99.route )")
         );
     }
 
@@ -2212,6 +2230,17 @@ mod tests {
         let suggestions = suggest_create_emitter(input, input.len());
         assert!(!suggestions.contains(&"MQTT".to_string()));
         assert!(!suggestions.contains(&"NATS".to_string()));
+    }
+
+    #[test]
+    fn emitter_filter_map_context_suggests_invoke_without_sink_leakage() {
+        let input = "CREATE ATTACHED EMITTER emit FROM p99 ENCODE USING my_codec TO KAFKA broker1 \
+                     TOPIC topic ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert!(suggestions.contains(&"INVOKE".to_string()));
+        assert!(!suggestions.contains(&"SUBJECT".to_string()));
+        assert!(!suggestions.contains(&"QUEUE".to_string()));
     }
 
     #[test]

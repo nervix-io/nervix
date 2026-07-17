@@ -39,7 +39,7 @@ use nervix_nspl::{
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity,
-    compile_program_for_bindings_with_sensitivity, compile_program_with_options_for_bindings,
+    compile_program_for_bindings_with_sensitivity,
     compile_program_with_options_for_bindings_with_sensitivity, infer_set_expr_types_for_bindings,
 };
 use petgraph::{
@@ -1181,13 +1181,14 @@ impl DomainState {
                     )?;
                     let message_namespace = Identifier::parse(INGEST_MESSAGE_NAMESPACE)
                         .expect("static namespace must be a valid identifier");
-                    validate_filter_where_for_internal_schemas(
+                    validate_ingestor_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
                         &[(&message_namespace, producer_schema)],
                         None,
                         ingestor.filter_where.as_deref(),
+                        &ingestor.source,
                     )?;
                     for output in ingestor.output_routes.outputs() {
                         let consumer_schema =
@@ -2979,11 +2980,12 @@ fn effective_wasm_output_filter_map_schema(
             reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
         }));
     }
-    if !parsed.inner.unset.is_empty() {
+    if !parsed.inner.unset.is_empty() || !parsed.inner.invoke.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "WASM processor TO clauses may use SET and WHERE, but not UNSET".to_string(),
+            reason: "WASM processor TO clauses may use SET and WHERE, but not UNSET or INVOKE"
+                .to_string(),
         }));
     }
 
@@ -3891,6 +3893,54 @@ fn validate_filter_where_for_internal_schemas(
         branch_schema,
         filter_where,
         "FILTER WHERE",
+        CompileOptions::default(),
+    )
+}
+
+fn validate_ingestor_filter_where_for_internal_schemas(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    input_schemas: &[(&Identifier, &CreateSchema)],
+    branch_schema: Option<&CreateSchema>,
+    filter_where: Option<&str>,
+    source: &IngestSource,
+) -> Result<(), Report<RegistryError>> {
+    let Some(filter_where) = filter_where else {
+        return Ok(());
+    };
+    let parsed = parse_program(filter_where).map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "FILTER WHERE parse failed: {}",
+                first_vm_program_error(error)
+            ),
+        })
+    })?;
+    if program_uses_header_reads(&parsed.inner) && !ingest_source_supports_headers(source) {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "{} ingestors do not support read_header or read_headers",
+                source.transport_label()
+            ),
+        }));
+    }
+    validate_where_program_for_internal_schemas(
+        domain,
+        identifier,
+        models,
+        input_schemas,
+        branch_schema,
+        filter_where,
+        "FILTER WHERE",
+        CompileOptions {
+            allow_header_reads: true,
+            ..CompileOptions::default()
+        },
     )
 }
 
@@ -3936,6 +3986,7 @@ fn validate_from_where_for_internal_schemas(
             branch_schema,
             &source_filter.where_clause,
             "FROM WHERE",
+            CompileOptions::default(),
         )?;
     }
     Ok(())
@@ -3949,6 +4000,7 @@ fn validate_where_program_for_internal_schemas(
     branch_schema: Option<&CreateSchema>,
     where_program: &str,
     clause_name: &str,
+    compile_options: CompileOptions,
 ) -> Result<(), Report<RegistryError>> {
     let parsed = parse_program(where_program).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -3964,6 +4016,7 @@ fn validate_where_program_for_internal_schemas(
         || !parsed.inner.set.is_empty()
         || !parsed.inner.unset.is_empty()
         || !parsed.inner.branch_filters.is_empty()
+        || !parsed.inner.invoke.is_empty()
     {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -4014,11 +4067,12 @@ fn validate_where_program_for_internal_schemas(
             reason: format!("{clause_name} requires at least one input relay"),
         }));
     };
-    compile_program_for_bindings_with_sensitivity(
+    compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         arrow_schema_for_internal_schema(first_schema),
         schema_sensitivity_for_internal_schema(first_schema),
         bindings,
+        compile_options,
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -4178,51 +4232,25 @@ fn effective_emitter_filter_map_schema(
             reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
         }));
     }
-    if parsed
+    let invokes_write_header = parsed
         .inner
-        .unset
+        .invoke
         .iter()
-        .any(|field| field.relay == "headers")
-    {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "FILTER-MAP cannot UNSET emitter headers; omit a header by not setting it"
-                .to_string(),
-        }));
-    }
-    if emitter_filter_map_headers_arrow_schema(&parsed).is_some()
-        && !emit_sink_supports_headers(&emitter.sink)
-    {
+        .any(|invocation| invocation.inner.function == FunctionName::WriteHeader);
+    if invokes_write_header && !emit_sink_supports_headers(&emitter.sink) {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "{} emitters do not support FILTER-MAP headers",
+                "{} emitters do not support write_header",
                 emitter.sink.transport_label()
             ),
         }));
     }
 
     let original_parsed = parsed.clone();
-    let body_program = Program {
-        filter: parsed.inner.filter.clone(),
-        branch_filters: Vec::new(),
-        set: parsed
-            .inner
-            .set
-            .iter()
-            .filter(|(field, _)| field.relay != "headers")
-            .cloned()
-            .collect(),
-        unset: parsed.inner.unset.clone(),
-    };
-    let body_parsed = nervix_nspl::vm_program::SpannedNode {
-        inner: body_program,
-        span: parsed.span,
-    };
-    let (body_parsed, lookup_fields) =
-        rewrite_lookup_hash_map_program(domain, identifier, models, &body_parsed)?;
+    let (parsed, lookup_fields) =
+        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut body_bindings = emitter_filter_map_message_bindings(&emitter.from_relay, input_schema);
     if let Some(branch_schema) = branch_schema {
         body_bindings.push(readonly_binding_for_internal_schema(
@@ -4240,12 +4268,13 @@ fn effective_emitter_filter_map_schema(
     )?);
     body_bindings.extend(lookup_hash_map_bindings(lookup_fields));
     compile_program_with_options_for_bindings_with_sensitivity(
-        &body_parsed,
+        &parsed,
         arrow_schema_for_internal_schema(output_schema),
         schema_sensitivity_for_internal_schema(output_schema),
         body_bindings,
         CompileOptions {
             allow_sensitive_output: true,
+            allow_header_writes: true,
             ..CompileOptions::default()
         },
     )
@@ -4256,63 +4285,6 @@ fn effective_emitter_filter_map_schema(
             reason: format!("FILTER-MAP compile failed: {}", error.message),
         })
     })?;
-
-    if let Some(header_schema) = emitter_filter_map_headers_arrow_schema(&parsed) {
-        let header_program = Program {
-            filter: parsed.inner.filter,
-            branch_filters: Vec::new(),
-            set: parsed
-                .inner
-                .set
-                .into_iter()
-                .filter(|(field, _)| field.relay == "headers")
-                .collect(),
-            unset: Vec::new(),
-        };
-        let header_parsed = nervix_nspl::vm_program::SpannedNode {
-            inner: header_program,
-            span: parsed.span,
-        };
-        let (header_parsed, lookup_fields) =
-            rewrite_lookup_hash_map_program(domain, identifier, models, &header_parsed)?;
-        let mut header_bindings = vec![CompileBinding::writeonly("headers", header_schema.clone())];
-        if let Some(branch_schema) = branch_schema {
-            header_bindings.push(readonly_binding_for_internal_schema(
-                BRANCH_NAMESPACE,
-                branch_schema,
-            ));
-        }
-        header_bindings.extend(emitter_filter_map_message_bindings(
-            &emitter.from_relay,
-            input_schema,
-        ));
-        header_bindings.extend(referenced_materialized_stream_bindings(
-            domain,
-            identifier,
-            models,
-            &original_parsed,
-            &emitter_filter_map_local_namespaces(&emitter.from_relay),
-            "FILTER-MAP",
-        )?);
-        header_bindings.extend(lookup_hash_map_bindings(lookup_fields));
-        compile_program_with_options_for_bindings(
-            &header_parsed,
-            header_schema,
-            header_bindings,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                allow_sensitive_output: true,
-                ..CompileOptions::default()
-            },
-        )
-        .map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!("FILTER-MAP header compile failed: {}", error.message),
-            })
-        })?;
-    }
 
     Ok(output_schema.clone())
 }
@@ -4389,6 +4361,25 @@ fn rewrite_lookup_hash_map_program(
                 .map(|(field, expr)| rewrite(expr).map(|expr| (field.clone(), expr)))
                 .collect::<Result<Vec<_>, _>>()?,
             unset: parsed.inner.unset.clone(),
+            invoke: parsed
+                .inner
+                .invoke
+                .iter()
+                .map(|invocation| {
+                    Ok(nervix_nspl::vm_program::SpannedNode {
+                        inner: nervix_nspl::vm_program::Invocation {
+                            function: invocation.inner.function.clone(),
+                            args: invocation
+                                .inner
+                                .args
+                                .iter()
+                                .map(&mut rewrite)
+                                .collect::<Result<Vec<_>, Report<RegistryError>>>()?,
+                        },
+                        span: invocation.span,
+                    })
+                })
+                .collect::<Result<Vec<_>, Report<RegistryError>>>()?,
         },
         span: parsed.span,
     };
@@ -4553,6 +4544,37 @@ fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>)
     }
 }
 
+fn expr_uses_header_read(expr: &SpannedExpr) -> bool {
+    match &expr.inner {
+        Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expr_uses_header_read(expr),
+        Expr::Binary { left, right, .. } => {
+            expr_uses_header_read(left) || expr_uses_header_read(right)
+        }
+        Expr::Call { function, args } => {
+            if let FunctionName::ReadHeader | FunctionName::ReadHeaders = function {
+                true
+            } else {
+                args.iter().any(expr_uses_header_read)
+            }
+        }
+    }
+}
+
+fn program_uses_header_reads(program: &Program) -> bool {
+    program.filter.as_ref().is_some_and(expr_uses_header_read)
+        || program.branch_filters.iter().any(expr_uses_header_read)
+        || program
+            .set
+            .iter()
+            .any(|(_field, expr)| expr_uses_header_read(expr))
+        || program
+            .invoke
+            .iter()
+            .flat_map(|invocation| &invocation.inner.args)
+            .any(expr_uses_header_read)
+}
+
 fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec<(String, String)> {
     let mut refs = Vec::new();
     if let Some(filter) = &program.filter {
@@ -4563,6 +4585,11 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
     }
     for (_field_ref, expr) in &program.set {
         collect_expr_field_refs(expr, &mut refs);
+    }
+    for invocation in &program.invoke {
+        for arg in &invocation.inner.args {
+            collect_expr_field_refs(arg, &mut refs);
+        }
     }
     refs
 }
@@ -4624,7 +4651,13 @@ fn infer_expr_optionality(
             lookup_hash_map_schema,
             right,
         )?),
-        Expr::Call { args, .. } => {
+        Expr::Call { function, args } => {
+            if let FunctionName::ReadHeader = function {
+                return Ok(true);
+            }
+            if let FunctionName::ReadHeaders = function {
+                return Ok(false);
+            }
             for arg in args {
                 if infer_expr_optionality(
                     domain,
@@ -4652,10 +4685,7 @@ fn referenced_materialized_stream_bindings(
 ) -> Result<Vec<CompileBinding>, Report<RegistryError>> {
     let mut fields_by_stream = HashMap::<Identifier, HashSet<String>>::default();
     for (relay, field) in collect_program_field_refs(&parsed.inner) {
-        if excluded_namespaces.contains(&relay)
-            || relay == "metadata"
-            || relay == "headers"
-            || relay == BRANCH_NAMESPACE
+        if excluded_namespaces.contains(&relay) || relay == "metadata" || relay == BRANCH_NAMESPACE
         {
             continue;
         }
@@ -4709,7 +4739,6 @@ fn referenced_materialized_stream_bindings(
 fn emitter_filter_map_local_namespaces(from_relay: &Identifier) -> HashSet<String> {
     HashSet::from_iter([
         "message".to_string(),
-        "headers".to_string(),
         BRANCH_NAMESPACE.to_string(),
         from_relay.as_str().to_string(),
     ])
@@ -4745,34 +4774,6 @@ fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
     }
 }
 
-fn emitter_filter_map_headers_arrow_schema(
-    parsed: &nervix_nspl::vm_program::SpannedNode<Program>,
-) -> Option<Arc<ArrowSchema>> {
-    let mut fields = parsed
-        .inner
-        .set
-        .iter()
-        .filter_map(|(field, _)| {
-            if field.relay == "headers" {
-                Some(field.field.clone())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    fields.sort();
-    fields.dedup();
-    if fields.is_empty() {
-        return None;
-    }
-    Some(Arc::new(ArrowSchema::new(
-        fields
-            .into_iter()
-            .map(|field| ArrowField::new(field, ArrowDataType::Utf8, true))
-            .collect::<Vec<_>>(),
-    )))
-}
-
 fn parse_generator_program(
     domain: &Domain,
     identifier: &Identifier,
@@ -4794,6 +4795,7 @@ fn parse_generator_program(
     if parsed.inner.filter.is_some()
         || !parsed.inner.branch_filters.is_empty()
         || !parsed.inner.unset.is_empty()
+        || !parsed.inner.invoke.is_empty()
         || parsed.inner.set.is_empty()
     {
         return Err(Report::new(RegistryError::InvalidModel {
@@ -4984,6 +4986,17 @@ fn effective_ingestor_output_filter_map_schema(
             reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
         }));
     }
+    if program_uses_header_reads(&parsed.inner) && !ingest_source_supports_headers(&ingestor.source)
+    {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "{} ingestors do not support read_header or read_headers",
+                ingestor.source.transport_label()
+            ),
+        }));
+    }
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
@@ -4998,16 +5011,9 @@ fn effective_ingestor_output_filter_map_schema(
             arrow_schema_for_internal_schema(&metadata_schema),
         ));
     }
-    if let Some(headers_schema) = ingestor_filter_map_headers_schema(&ingestor.source, &parsed) {
-        bindings.push(CompileBinding::readonly(
-            "headers",
-            arrow_schema_for_internal_schema(&headers_schema),
-        ));
-    }
     let local_namespaces = HashSet::from_iter([
         INGEST_MESSAGE_NAMESPACE.to_string(),
         "metadata".to_string(),
-        "headers".to_string(),
         output.relay.as_str().to_string(),
     ]);
     bindings.extend(referenced_materialized_stream_bindings(
@@ -5020,11 +5026,15 @@ fn effective_ingestor_output_filter_map_schema(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    compile_program_for_bindings_with_sensitivity(
+    compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         arrow_schema_for_internal_schema(output_schema),
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
+        CompileOptions {
+            allow_header_reads: true,
+            ..CompileOptions::default()
+        },
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -5050,44 +5060,6 @@ fn ingest_source_supports_headers(source: &IngestSource) -> bool {
     } else {
         false
     }
-}
-
-fn ingestor_filter_map_headers_schema(
-    source: &IngestSource,
-    parsed: &nervix_nspl::vm_program::SpannedNode<Program>,
-) -> Option<CreateSchema> {
-    if !ingest_source_supports_headers(source) {
-        return None;
-    }
-
-    let mut fields = collect_program_field_refs(&parsed.inner)
-        .into_iter()
-        .filter_map(|(relay, field)| {
-            if relay == "headers" {
-                Some(field)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    fields.sort();
-    fields.dedup();
-    if fields.is_empty() {
-        return None;
-    }
-
-    Some(CreateSchema {
-        name: Identifier::parse("ingestor_headers").expect("valid headers schema name"),
-        fields: fields
-            .into_iter()
-            .map(|field| SchemaField {
-                name: Identifier::parse(&field).expect("valid header field"),
-                ty: ParseAsType::String,
-                optional: true,
-                sensitive: false,
-            })
-            .collect(),
-    })
 }
 
 fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSchema> {
@@ -5631,6 +5603,7 @@ fn validate_correlate_where_for_internal_schemas(
         || !parsed.inner.set.is_empty()
         || !parsed.inner.unset.is_empty()
         || !parsed.inner.branch_filters.is_empty()
+        || !parsed.inner.invoke.is_empty()
     {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5701,6 +5674,7 @@ fn validate_correlator_output(
     if parsed.inner.filter.is_some()
         || !parsed.inner.branch_filters.is_empty()
         || !parsed.inner.unset.is_empty()
+        || !parsed.inner.invoke.is_empty()
         || parsed.inner.set.is_empty()
     {
         return Err(Report::new(RegistryError::InvalidModel {
@@ -5845,6 +5819,7 @@ fn validate_inferencer_output_filter_map(
                 branch_filters: Vec::new(),
                 set: Vec::new(),
                 unset: Vec::new(),
+                invoke: Vec::new(),
             },
             span: (0..0).into(),
         }
@@ -7666,6 +7641,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use ahash::HashMap;
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
@@ -8261,6 +8237,60 @@ mod tests {
 
             filter_map: None,
         })
+    }
+
+    #[test]
+    fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
+        let domain = Domain::parse("default").expect("valid domain");
+        let schema = CreateSchema {
+            name: identifier("event_schema"),
+            fields: vec![SchemaField {
+                name: identifier("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let mut emitter = CreateEmitter {
+            name: identifier("emit"),
+            from_relay: identifier("events"),
+            encode_using_codec: None,
+            sink: EmitSink::ZeroMq {
+                client: identifier("zeromq_main"),
+            },
+            flush_each: "100ms".to_string(),
+            max_batch_size: Some("1MiB".to_string()),
+            mode: AckMode::Attached,
+            error_policies: ErrorPolicies::handled_by_log(),
+            filter_map: Some("INVOKE write_header(\"tenant\", message.tenant)".to_string()),
+        };
+
+        let error = super::effective_emitter_filter_map_schema(
+            &domain,
+            &emitter.name,
+            &HashMap::default(),
+            &emitter,
+            &schema,
+            &schema,
+            None,
+        )
+        .expect_err("ZeroMQ emitters must reject write_header");
+        assert!(format!("{error:#}").contains("ZEROMQ emitters do not support write_header"));
+
+        emitter.sink = EmitSink::Kafka {
+            client: identifier("kafka_main"),
+            topic: identifier("events_out"),
+        };
+        super::effective_emitter_filter_map_schema(
+            &domain,
+            &emitter.name,
+            &HashMap::default(),
+            &emitter,
+            &schema,
+            &schema,
+            None,
+        )
+        .expect("Kafka emitters must accept write_header");
     }
 
     fn scheduled_node<'a>(

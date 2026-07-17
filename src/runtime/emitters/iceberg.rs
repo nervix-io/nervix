@@ -738,6 +738,7 @@ impl IcebergEmitter {
             &input,
             &VmExecutionContext {
                 now: current_timestamp(),
+                injector: None,
             },
         )
         .await

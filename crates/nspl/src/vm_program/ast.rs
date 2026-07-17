@@ -28,6 +28,7 @@ pub struct Program {
     pub branch_filters: Vec<SpannedExpr>,
     pub set: Vec<(FieldRef, SpannedExpr)>,
     pub unset: Vec<FieldRef>,
+    pub invoke: Vec<SpannedInvocation>,
 }
 
 impl Program {
@@ -46,6 +47,14 @@ impl Program {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Invocation {
+    pub function: FunctionName,
+    pub args: Vec<SpannedExpr>,
+}
+
+pub type SpannedInvocation = SpannedNode<Invocation>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -131,6 +140,9 @@ pub enum FunctionName {
     RegexpSubstr,
     LeakSensitive,
     LookupHashMap,
+    ReadHeader,
+    ReadHeaders,
+    WriteHeader,
     Unknown(String),
 }
 
@@ -195,6 +207,9 @@ impl FunctionName {
             "regexp_substr" => Self::RegexpSubstr,
             "leak_sensitive" => Self::LeakSensitive,
             "lookup_hash_map" => Self::LookupHashMap,
+            "read_header" => Self::ReadHeader,
+            "read_headers" => Self::ReadHeaders,
+            "write_header" => Self::WriteHeader,
             _ => Self::Unknown(name.to_string()),
         }
     }
@@ -259,6 +274,9 @@ impl FunctionName {
             Self::RegexpSubstr => "regexp_substr",
             Self::LeakSensitive => "leak_sensitive",
             Self::LookupHashMap => "lookup_hash_map",
+            Self::ReadHeader => "read_header",
+            Self::ReadHeaders => "read_headers",
+            Self::WriteHeader => "write_header",
             Self::Unknown(name) => name.as_str(),
         }
     }

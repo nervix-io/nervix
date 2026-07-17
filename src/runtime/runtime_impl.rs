@@ -2926,7 +2926,13 @@ impl Runtime {
             let result = execute_program_with_selection_in_context(
                 filter_where.compiled.as_ref(),
                 &vm_batch,
-                &VmExecutionContext { now: execution_now },
+                &VmExecutionContext {
+                    now: execution_now,
+                    injector: Some(IngestHeaderFunctionInjector::from_metadata(
+                        filter_map_metadata.as_deref(),
+                        vm_batch.row_count(),
+                    )),
+                },
             )
             .await
             .map_err(|error| format!("FILTER WHERE execution failed: {error}"))?;
@@ -6994,6 +7000,7 @@ impl Runtime {
                 input_schema.vm_sensitivity(),
                 input_schema.arrow_schema(),
                 input_schema.vm_sensitivity(),
+                false,
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &available_lookups,
@@ -7980,6 +7987,7 @@ impl Runtime {
             codec.schema().vm_sensitivity(),
             codec.schema().arrow_schema(),
             codec.schema().vm_sensitivity(),
+            ingest_source_supports_headers(&ingestor.source),
             RuntimeVmCompileContext {
                 available_materialized_streams: &execution.materialized_stream_specs,
                 available_lookups: &execution.lookups,

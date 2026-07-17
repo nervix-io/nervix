@@ -1,3 +1,5 @@
+use std::{fmt, sync::Arc};
+
 use ahash::{HashMap, HashMapExt};
 use arrow_arith::{
     aggregate::sum as arrow_sum,
@@ -24,7 +26,7 @@ use arrow_string::like::{
 };
 use chrono::DateTime;
 use nervix_models::Timestamp;
-use nervix_nspl::vm_program::{BinaryOp, Span, UnaryOp};
+use nervix_nspl::vm_program::{BinaryOp, FunctionName, Span, UnaryOp};
 use regex::Regex;
 use tokio::task;
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
@@ -581,17 +583,37 @@ pub struct ExecutionResult {
     pub batch: TypedBatch,
     pub selected_rows: Vec<usize>,
     pub branch_selected_rows: Vec<Vec<usize>>,
+    pub invocations: Vec<FunctionInvocation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionInvocation {
+    pub function: FunctionName,
+    pub arguments: Vec<TypedArray>,
+    pub span: Span,
+}
+
+pub trait FunctionInjector: Send + Sync + fmt::Debug {
+    fn inject(
+        &self,
+        function: &FunctionName,
+        arguments: &[TypedArray],
+        row_count: usize,
+        span: Span,
+    ) -> Result<TypedArray, RuntimeError>;
+}
+
+#[derive(Debug, Clone)]
 pub struct ExecutionContext {
     pub now: Timestamp,
+    pub injector: Option<Arc<dyn FunctionInjector>>,
 }
 
 impl Default for ExecutionContext {
     fn default() -> Self {
         Self {
             now: Timestamp::now(),
+            injector: None,
         }
     }
 }
@@ -680,6 +702,21 @@ fn execute_program_with_selection_in_context_sync(
     for output in &program.outputs {
         columns.push(registers.output_array(output.reg)?);
     }
+    let mut invocations = program
+        .invocations
+        .iter()
+        .map(|invocation| {
+            Ok(FunctionInvocation {
+                function: invocation.function.clone(),
+                arguments: invocation
+                    .inputs
+                    .iter()
+                    .map(|input| registers.output_array(*input))
+                    .collect::<Result<Vec<_>, RuntimeError>>()?,
+                span: invocation.span,
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
 
     let global_predicate = if let Some(filter_reg) = program.filter {
         Some(registers.boolean(filter_reg)?.clone())
@@ -702,6 +739,9 @@ fn execute_program_with_selection_in_context_sync(
         .collect::<Result<Vec<_>, RuntimeError>>()?;
 
     let (columns, row_errors, selected_rows) = if let Some(predicate) = global_predicate.as_ref() {
+        for invocation in &mut invocations {
+            invocation.arguments = filter_columns(&invocation.arguments, predicate)?;
+        }
         (
             filter_columns(&columns, predicate)?,
             filter_errors(&row_errors, predicate),
@@ -715,6 +755,7 @@ fn execute_program_with_selection_in_context_sync(
         batch: TypedBatch::with_errors(program.output_schema.clone(), columns, row_errors)?,
         selected_rows,
         branch_selected_rows,
+        invocations,
     })
 }
 
@@ -766,6 +807,33 @@ impl Instruction {
                 let output = execute_builtin(
                     *lowering, registers, inputs, row_count, row_errors, self.span, context,
                 )?;
+                registers.set_array(*dst, output)
+            }
+            InstructionKind::Inject {
+                dst,
+                function,
+                inputs,
+                output_type,
+            } => {
+                let injector = context.injector.as_ref().ok_or_else(|| {
+                    RuntimeError::MissingFunctionInjector {
+                        function: function.as_str().to_string(),
+                    }
+                })?;
+                let arguments = inputs
+                    .iter()
+                    .map(|input| registers.read_array(*input))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let output = injector.inject(function, &arguments, row_count, self.span)?;
+                if output.data_type() != *output_type || output.len() != row_count {
+                    return Err(RuntimeError::InvalidInjectedResult {
+                        function: function.as_str().to_string(),
+                        expected_type: output_type.clone(),
+                        actual_type: output.data_type(),
+                        expected_rows: row_count,
+                        actual_rows: output.len(),
+                    });
+                }
                 registers.set_array(*dst, output)
             }
         }
@@ -3693,7 +3761,35 @@ mod tests {
     use uuid::{Uuid, Version};
 
     use super::*;
-    use crate::{CompileBinding, OutputBinding, compile_program_for_bindings};
+    use crate::{
+        CompileBinding, CompileOptions, OutputBinding, compile_program_for_bindings,
+        compile_program_with_options_for_bindings,
+    };
+
+    #[derive(Debug)]
+    struct TestHeaderInjector;
+
+    impl FunctionInjector for TestHeaderInjector {
+        fn inject(
+            &self,
+            function: &FunctionName,
+            arguments: &[TypedArray],
+            row_count: usize,
+            _span: Span,
+        ) -> Result<TypedArray, RuntimeError> {
+            assert_eq!(*function, FunctionName::ReadHeader);
+            let [TypedArray::Utf8(names)] = arguments else {
+                panic!("read_header must receive one Utf8 array");
+            };
+            assert_eq!(names.len(), row_count);
+            Ok(TypedArray::Utf8(StringArray::from_iter(names.iter().map(
+                |name| match name {
+                    Some("route") => Some("primary"),
+                    Some(_) | None => None,
+                },
+            ))))
+        }
+    }
 
     fn instruction_span(
         compiled: &CompiledProgram,
@@ -4858,7 +4954,10 @@ mod tests {
         let output = execute_program_in_context_sync(
             &compiled,
             &batch,
-            &ExecutionContext { now: context_now },
+            &ExecutionContext {
+                now: context_now,
+                injector: None,
+            },
         )
         .expect("execution must succeed")
         .batch;
@@ -5129,6 +5228,69 @@ mod tests {
     }
 
     #[test]
+    fn executes_injected_header_reads_and_returns_selected_invocations_in_order() {
+        let parsed = parse_program(
+            "SET input.header_name = lower(input.header_name), input.route = \
+             read_header(input.header_name) WHERE input.keep INVOKE write_header(\"route\", \
+             input.header_name), write_header(\"route\", \"second\")",
+        )
+        .expect("program must parse");
+        let input_schema = schema(vec![
+            Field::new("header_name", DataType::Utf8, false),
+            Field::new("route", DataType::Utf8, true),
+            Field::new("keep", DataType::Boolean, false),
+        ]);
+        let compiled = compile_program_with_options_for_bindings(
+            &parsed,
+            input_schema.clone(),
+            [CompileBinding::writable("input", input_schema.clone())],
+            CompileOptions {
+                allow_header_reads: true,
+                allow_header_writes: true,
+                ..CompileOptions::default()
+            },
+        )
+        .expect("header program must compile");
+        let batch = TypedBatch::try_new(
+            input_schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec!["ROUTE", "DROP"])),
+                TypedArray::Utf8(StringArray::from(vec![None::<&str>, None])),
+                TypedArray::Boolean(BooleanArray::from(vec![true, false])),
+            ],
+        )
+        .expect("batch must build");
+
+        let result = execute_program_in_context_sync(
+            &compiled,
+            &batch,
+            &ExecutionContext {
+                now: Timestamp::from_unix_nanos(1),
+                injector: Some(Arc::new(TestHeaderInjector)),
+            },
+        )
+        .expect("program must execute");
+
+        assert_eq!(result.selected_rows, vec![0]);
+        let TypedArray::Utf8(route) = output_column(&result.batch, "route") else {
+            panic!("route must be Utf8");
+        };
+        assert_eq!(route.value(0), "primary");
+        assert_eq!(result.invocations.len(), 2);
+        let [TypedArray::Utf8(first_name), TypedArray::Utf8(first_value)] =
+            result.invocations[0].arguments.as_slice()
+        else {
+            panic!("write_header arguments must be Utf8");
+        };
+        assert_eq!(first_name.value(0), "route");
+        assert_eq!(first_value.value(0), "route");
+        let [_, TypedArray::Utf8(second_value)] = result.invocations[1].arguments.as_slice() else {
+            panic!("write_header arguments must be Utf8");
+        };
+        assert_eq!(second_value.value(0), "second");
+    }
+
+    #[test]
     fn rejects_mismatched_runtime_register_type() {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "value",
@@ -5158,6 +5320,7 @@ mod tests {
             }],
             filter: None,
             branch_filters: Vec::new(),
+            invocations: Vec::new(),
             outputs: vec![OutputBinding {
                 output_index: 0,
                 name: "lowered".to_string(),
@@ -5226,6 +5389,7 @@ mod tests {
             }],
             filter: None,
             branch_filters: Vec::new(),
+            invocations: Vec::new(),
             outputs: vec![OutputBinding {
                 output_index: 0,
                 name: "bad".to_string(),

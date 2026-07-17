@@ -6,9 +6,10 @@ These functions are available inside filter-map programs on ingestors, runtime n
 [SET <relay>.<field> = <expr>, ...]
 [UNSET <relay>.<field>, ...]
 [WHERE <expr>]
+[INVOKE write_header(<name-expr>, <value-expr>), ...]
 ```
 
-The block order is significant: `SET`, then `UNSET`, then `WHERE`. The order is syntactic; expression identifiers are still validated against the node's input scope.
+The block order is significant: `SET`, then `UNSET`, then `WHERE`, then `INVOKE`. `INVOKE` and `write_header` are emitter-only; other functions are expressions and cannot be placed in `INVOKE`.
 
 General rules:
 
@@ -19,6 +20,18 @@ General rules:
 - emitter payload and header output is an external destination and may receive sensitive values without `leak_sensitive(...)`
 - `NOW()` returns the execution-local domain time as `DATETIME`
 - `UUID_V7()` uses that same execution-local domain time when building the UUID
+
+## Header Functions
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `read_header(name)` | optional `STRING` | Ingestor-only. Returns the first value, or `NULL` when absent |
+| `read_headers(name)` | `VEC<STRING>` | Ingestor-only. Returns all values in order, or an empty vector when absent |
+| `write_header(name, value)` | nothing | Emitter-only side effect. Valid only as a top-level call in the final `INVOKE` block |
+
+Header names may be dynamic `STRING` expressions. Header reads are available only on Endpoint (HTTP and WebSocket), HTTP client, Kafka, NATS, Pulsar, RabbitMQ, and SQS ingestors. Header writes are available only on Kafka, NATS, Pulsar, RabbitMQ, and SQS emitters. Unsupported connectors are rejected when the statement is validated.
+
+`write_header` arguments are evaluated after `SET`, and only selected rows are invoked. Multiple calls append in source order; the emitter connector maps the stored values to its native header or property behavior when the message is published.
 
 ## Context And Identity
 

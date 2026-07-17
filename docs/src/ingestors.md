@@ -111,7 +111,7 @@ General notes:
 - the program source is stored as NSPL, not serialized bytecode
 - ingestor payload fields are referenced through `message.<field>`
 - source-specific transport metadata may be exposed through `metadata.<field>` when the ingestor supports it; Kafka currently provides `metadata.topic`, `metadata.partition`, and `metadata.offset`
-- transport header-like fields may be exposed through `headers.<field>` when the ingestor supports them; header values are optional `STRING` fields and must be explicitly assigned into the destination row if they should be preserved
+- supported sources expose transport headers through `read_header(name)` and `read_headers(name)`; header names may be any `STRING` expression, and these functions may be used in both top-level `FILTER WHERE` and per-route filter-map expressions
 
 Useful built-ins include string, null-handling, numeric, regex, and contextual functions such as `lower`, `coalesce`, `abs`, `regexp_like`, `now`, and `uuid_v7`.
 
@@ -134,7 +134,12 @@ The filter-map type surface matches the full Nervix internal schema type set:
 
 ### Header Context
 
-Some ingestors receive additional source data alongside the decoded payload body. In filter-map programs, supported header-like fields are available as `headers.<field>`:
+Some ingestors receive additional source data alongside the decoded payload body. They expose it through two functions:
+
+- `read_header(name)` returns the first value as an optional `STRING`, or `NULL` when the header is absent
+- `read_headers(name)` returns every value in transport order as a non-null `VEC<STRING>`, or an empty vector when the header is absent
+
+The `name` argument can be any expression that returns `STRING`. Both functions are available in top-level `FILTER WHERE` and in per-route `SET` / `WHERE` expressions for these sources:
 
 - HTTP endpoints and HTTP client polling expose HTTP headers with UTF-8 values
 - WebSocket endpoints expose UTF-8 headers from the opening HTTP upgrade request
@@ -144,14 +149,14 @@ Some ingestors receive additional source data alongside the decoded payload body
 - RabbitMQ exposes AMQP message headers, converting typed AMQP values to strings
 - SQS exposes message attributes, converting string, number, and binary values to strings
 
-Header fields are not part of `message`. They are always modeled as optional `STRING` values because individual messages may omit a header and some source systems treat header/property values as untyped transport data. To route a header downstream, assign it explicitly, for example:
+Header values are not part of `message`, and all values are exposed as strings. To route a header downstream, assign it explicitly, for example:
 
 ```nspl
-SET notifications.route = headers.route
-WHERE headers.tenant = message.tenant
+SET notifications.route = read_header(lower(message.route_header))
+WHERE read_header("tenant") = message.tenant
 ```
 
-MQTT, Redis, Kinesis, Prometheus, and ZeroMQ ingestors do not currently expose a header namespace.
+MQTT, Redis, Kinesis, Prometheus, and ZeroMQ ingestors do not support these functions. Leader-side validation rejects `read_header` or `read_headers` for a source without header support.
 
 ## TLS Client Configuration
 

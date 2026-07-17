@@ -1,3 +1,4 @@
+use arrow_schema::DataType;
 use nervix_nspl::vm_program::Span;
 use thiserror::Error;
 
@@ -56,6 +57,19 @@ pub enum RuntimeError {
     },
     #[error("blocking execution task failed: {message}")]
     BlockingExecutionFailed { message: String },
+    #[error("function '{function}' requires caller-supplied values")]
+    MissingFunctionInjector { function: String },
+    #[error(
+        "caller supplied invalid result for function '{function}': expected {expected_type:?} \
+         with {expected_rows} rows, got {actual_type:?} with {actual_rows} rows"
+    )]
+    InvalidInjectedResult {
+        function: String,
+        expected_type: DataType,
+        actual_type: DataType,
+        expected_rows: usize,
+        actual_rows: usize,
+    },
 }
 
 #[cfg(test)]
