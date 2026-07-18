@@ -10796,7 +10796,7 @@ impl SessionServiceImpl {
             Ok(graph_bytes) => Some(SessionResponse {
                 event: Some(proto::session_response::Event::Snapshot(DomainSnapshot {
                     domain: domain.as_str().to_string(),
-                    dataflow_graph: graph_bytes,
+                    dataflow_graph: graph_bytes.into(),
                     entities: self
                         .registry
                         .active_domain_entities(&domain)

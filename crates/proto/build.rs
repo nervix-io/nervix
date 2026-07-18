@@ -3,6 +3,7 @@ fn main() {
     let build_client = std::env::var_os("CARGO_FEATURE_CLIENT").is_some();
     let build_server = std::env::var_os("CARGO_FEATURE_SERVER").is_some();
     tonic_build::configure()
+        .bytes(["."])
         .build_server(build_server)
         .build_client(build_client)
         .compile_protos(
