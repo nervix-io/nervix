@@ -575,7 +575,7 @@ impl Client {
                     if tx
                         .send(proto::UploadResourceRequest {
                             event: Some(proto::upload_resource_request::Event::Chunk(
-                                buffer[..read].to_vec(),
+                                buffer[..read].to_vec().into(),
                             )),
                         })
                         .await

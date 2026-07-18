@@ -766,7 +766,9 @@ fn use_websocket_session(
                                     };
                                     match message {
                                         Ok(WebSocketMessage::Bytes(payload)) => {
-                                            match nervix_proto::SessionResponse::decode(payload.as_slice()) {
+                                            match nervix_proto::SessionResponse::decode(
+                                                prost::bytes::Bytes::from(payload),
+                                            ) {
                                                 Ok(response) => {
                                                     match handle_session_response(
                                                         terminal_lines,
