@@ -15,7 +15,7 @@ CREATE RELAY output SCHEMA output_schema BRANCHED BY tenant;
 
 CREATE INFERENCER batch_score_messages
   FROM input
-  TO output SET output.scores = inner_output.scores UNSET input.features, input.mask
+  TO output FLUSH EACH 10ms MAX BATCH SIZE 16mb SET output.scores = inner_output.scores UNSET input.features, input.mask ON MESSAGE ERROR DROP
   BRANCHED BY tenant
   USING RESOURCE inference
   FILE 'batch-score.onnx'
@@ -25,6 +25,4 @@ CREATE INFERENCER batch_score_messages
   }
   OUTPUT SCHEMA {
     "scores" DENSE TENSOR<F32>[BATCH, 10]
-  }
-  FLUSH EACH 10ms MAX BATCH SIZE 16mb
-  ON MESSAGE ERROR DROP;
+  };

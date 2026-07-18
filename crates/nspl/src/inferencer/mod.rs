@@ -9,9 +9,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause, inferencer_name,
-        into_parse_error, kw, kw_phrase2, lex_input, message_error_policy, processor_outputs,
-        relay_ref, resource_ref, string_lit, suggestions_from_errors, tok, word_raw,
+        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
+        inferencer_name, into_parse_error, kw, kw_phrase2, lex_input, relay_ref, resource_ref,
+        string_lit, suggestions_from_errors, tok, word_raw,
     },
 };
 
@@ -133,7 +133,7 @@ pub fn create_inferencer_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
-        .then(processor_outputs())
+        .then(flushed_processor_outputs())
         .then(branch_selection())
         .then_ignore(kw(Identifier::Using))
         .then_ignore(kw(Identifier::Resource))
@@ -143,22 +143,13 @@ pub fn create_inferencer_parser<'src>()
         .then(string_lit())
         .then(input_mappings())
         .then(output_schema())
-        .then(flush_each())
-        .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(|value| {
-            let (
-                (
-                    (((((base, resource), resource_version), file), inputs), output_schema),
-                    flush_each,
-                ),
-                message_error_policy,
-            ) = value;
+            let (((((base, resource), resource_version), file), inputs), output_schema) = value;
             let (
                 (((((if_not_exists, mode), name), from_input), filter_where), processor_outputs),
                 branched_by,
             ) = base;
-            let (flush_each, max_batch_size) = flush_each;
             CreateStatement::new(
                 CreateInferencer {
                     name,
@@ -170,9 +161,6 @@ pub fn create_inferencer_parser<'src>()
                     file,
                     inputs,
                     output_schema,
-                    flush_each,
-                    max_batch_size,
-                    message_error_policy,
                     mode: mode.unwrap_or(AckMode::Attached),
                     filter_where,
                 },
@@ -240,14 +228,13 @@ mod tests {
         let input = r#"
             CREATE DETACHED INFERENCER score_model
             FROM features FILTER WHERE features.present
-            TO scored SET scored.ready = true, scored.score = inner_output.score
-            TO audited SET audited.model_input = inner_input.features
+            TO scored FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET scored.ready = true, scored.score = inner_output.score ON MESSAGE ERROR LOG
+            TO audited FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET audited.model_input = inner_input.features ON MESSAGE ERROR LOG
             BRANCHED BY tenant
             USING RESOURCE fraud_model VERSION 3
             FILE 'models/fraud.onnx'
             INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = features.vector }
-            OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] }
-            FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] };
         "#;
 
         let parsed = parse_create_inferencer_tokens(&to_tokens(input)).expect("parse should work");
@@ -268,7 +255,14 @@ mod tests {
         assert_eq!(parsed.resource_version, Some(3));
         assert_eq!(parsed.file, "models/fraud.onnx");
         assert_eq!(parsed.mode, AckMode::Detached);
-        assert_eq!(parsed.flush_each, "100ms");
+        assert_eq!(
+            parsed.output_routes.routes[0]
+                .flush_policy
+                .as_ref()
+                .expect("output flush policy should parse")
+                .flush_each,
+            "100ms"
+        );
         assert_eq!(parsed.inputs[0].tensor, "features");
         assert_eq!(parsed.inputs[0].relay.as_str(), "features");
         assert_eq!(parsed.inputs[0].field.as_str(), "vector");
@@ -287,11 +281,10 @@ mod tests {
     #[test]
     fn rejects_legacy_outputs_mapping() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b SET b.y = inner_output.y UNBRANCHED
+            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE SET b.y = inner_output.y ON MESSAGE ERROR LOG UNBRANCHED
             USING RESOURCE r FILE 'm.onnx'
             INPUTS { "x" DENSE TENSOR<F32>[1] = a.x }
-            OUTPUTS { "y" DENSE TENSOR<F32>[1] = b.y }
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            OUTPUTS { "y" DENSE TENSOR<F32>[1] = b.y };
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
     }
@@ -299,15 +292,14 @@ mod tests {
     #[test]
     fn parses_scalar_fixed_dynamic_and_non_leading_batch_tensor_dimensions() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b FLUSH EACH 10ms MAX BATCH SIZE 16mb ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS {
                 "scalar" DENSE TENSOR<F32>[] = a.scalar,
                 "image" DENSE TENSOR<F32>[3, 224, 224] = a.image,
                 "sequence" DENSE TENSOR<F32>[DYNAMIC, 64] = a.sequence,
                 "tokens" DENSE TENSOR<F32>[128, BATCH] = a.tokens
             }
-            OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[10, BATCH] }
-            FLUSH EACH 10ms MAX BATCH SIZE 16mb ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[10, BATCH] };
         "#;
 
         let parsed = parse_create_inferencer_tokens(&to_tokens(input)).expect("parse should work");
@@ -335,10 +327,9 @@ mod tests {
     #[test]
     fn rejects_zero_sized_tensor_dimension() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS { "x" DENSE TENSOR<F32>[0] = a.x }
-            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] }
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] };
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
     }
@@ -346,16 +337,14 @@ mod tests {
     #[test]
     fn rejects_unsupported_tensor_representation_and_element_type() {
         let sparse = r#"
-            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS { "x" SPARSE TENSOR<F32>[1] = a.x }
-            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] }
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] };
         "#;
         let f64 = r#"
-            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS { "x" DENSE TENSOR<F64>[1] = a.x }
-            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] }
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] };
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(sparse)).is_err());
         assert!(parse_create_inferencer_tokens(&to_tokens(f64)).is_err());
@@ -364,10 +353,9 @@ mod tests {
     #[test]
     fn rejects_binding_without_complete_tensor_schema() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS { "x" = a.x }
-            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] }
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] };
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
     }
@@ -375,9 +363,9 @@ mod tests {
     #[test]
     fn rejects_inferencer_without_flush_policy() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS { "x" DENSE TENSOR<F32>[1] = a.x }
-            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] } ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] };
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
     }
@@ -385,18 +373,17 @@ mod tests {
     #[test]
     fn rejects_legacy_parenthesized_tensor_mappings() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r FILE 'm.onnx'
             INPUTS ("x" DENSE TENSOR<F32>[1] = a.x)
-            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] }
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] };
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
     }
 
     #[test]
     fn suggests_inputs_after_filter_map_without_schema_leakage() {
-        let input =
-            "CREATE INFERENCER p FROM a TO b BRANCHED BY tenant USING RESOURCE r FILE 'm.onnx' ";
+        let input = "CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                     BRANCHED BY tenant USING RESOURCE r FILE 'm.onnx' ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"INPUTS".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -405,8 +392,8 @@ mod tests {
 
     #[test]
     fn suggests_braced_tensor_mapping_without_branch_value_leakage() {
-        let input =
-            "CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx' INPUTS ";
+        let input = "CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                     UNBRANCHED USING RESOURCE r FILE 'm.onnx' INPUTS ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"{".to_string()));
         assert!(!suggestions.contains(&"VALUES".to_string()));
@@ -415,8 +402,8 @@ mod tests {
 
     #[test]
     fn suggests_dense_tensor_schema_without_output_keyword_leakage() {
-        let input = "CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx' \
-                     INPUTS { \"x\" ";
+        let input = "CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                     UNBRANCHED USING RESOURCE r FILE 'm.onnx' INPUTS { \"x\" ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"DENSE".to_string()));
         assert!(!suggestions.contains(&"OUTPUT SCHEMA".to_string()));
@@ -425,8 +412,9 @@ mod tests {
 
     #[test]
     fn suggests_composed_output_schema_without_flush_leakage() {
-        let input = "CREATE INFERENCER p FROM a TO b UNBRANCHED USING RESOURCE r FILE 'm.onnx' \
-                     INPUTS { \"x\" DENSE TENSOR<F32>[1] = a.x } ";
+        let input = "CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                     UNBRANCHED USING RESOURCE r FILE 'm.onnx' INPUTS { \"x\" DENSE \
+                     TENSOR<F32>[1] = a.x } ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"OUTPUT SCHEMA".to_string()));
         assert!(!suggestions.contains(&"OUTPUT_SCHEMA".to_string()));
@@ -436,11 +424,10 @@ mod tests {
     #[test]
     fn rejects_output_schema_mapping() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b SET b.y = inner_output.y UNBRANCHED
+            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE SET b.y = inner_output.y ON MESSAGE ERROR LOG UNBRANCHED
             USING RESOURCE r FILE 'm.onnx'
             INPUTS { "x" DENSE TENSOR<F32>[1] = a.x }
-            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] = b.y }
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+            OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] = b.y };
         "#;
         assert!(parse_create_inferencer_tokens(&to_tokens(input)).is_err());
     }

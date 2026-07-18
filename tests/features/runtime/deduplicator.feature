@@ -31,16 +31,15 @@ Feature: Relay deduplication
         PATH '/dedup'
         TYPE HTTP;
         CREATE INGESTOR source_txns
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 BRANCHED BY by_source_txns
+        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
@@ -93,16 +92,15 @@ Feature: Relay deduplication
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/dedup-expire' TYPE HTTP;
         CREATE INGESTOR source_txns
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 BRANCHED BY by_source_txns
+        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 300ms
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 300ms;
         CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
@@ -170,16 +168,15 @@ Feature: Relay deduplication
         PATH '/dedup-functions'
         TYPE HTTP;
         CREATE INGESTOR source_txns
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_source_txns VALUES { tenant = ss1.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 BRANCHED BY by_source_txns
+        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
         DEDUPLICATE ON lower(trim(ss1.transaction_id)), abs(ss1.amount)
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION ss2_subscription TO ss2 WHERE ss2.tenant = 'acme';
         START;
       """
@@ -243,16 +240,15 @@ Feature: Relay deduplication
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/dedup-describe' TYPE HTTP;
         CREATE INGESTOR source_txns
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_source_txns VALUES { tenant = ss1.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 BRANCHED BY by_source_txns
+        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         DESCRIBE DEDUPLICATOR dedup_txns;
       """
     Then the last command output contains
@@ -330,22 +326,21 @@ Feature: Relay deduplication
         PATH '/dedup'
         TYPE HTTP;
         CREATE INGESTOR state_txns_ingestor
-        TO state_txns
+        TO state_txns FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         UNBRANCHED
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR source_txns
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 SET ss2.source = state_txns.source BRANCHED BY by_source_txns
+        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET ss2.source = state_txns.source ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
@@ -391,10 +386,9 @@ Feature: Relay deduplication
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_dedup_txns;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_dedup_txns;
         CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 BRANCHED BY by_dedup_txns
+        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_dedup_txns
         DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
 
     Examples:

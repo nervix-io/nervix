@@ -32,16 +32,15 @@ Feature: Deduplicator state replication
         PATH '/dedup'
         TYPE HTTP;
         CREATE INGESTOR source_txns
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 BRANCHED BY by_source_txns
+        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {

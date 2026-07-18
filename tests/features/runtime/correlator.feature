@@ -74,29 +74,29 @@ Feature: Relay correlation
         PATH '/right-alias'
         TYPE HTTP;
         CREATE INGESTOR left_profile_ingestor
-        TO left_profiles
+        TO left_profiles FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING left_profile_codec
         BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profiles.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR left_profile_alias_ingestor
-        TO left_profile_aliases
+        TO left_profile_aliases FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING left_profile_codec
         BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profile_aliases.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR right_profile_ingestor
-        TO right_profiles
+        TO right_profiles FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING right_profile_codec
         BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profiles.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR right_profile_alias_ingestor
-        TO right_profile_aliases
+        TO right_profile_aliases FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING right_profile_codec
         BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profile_aliases.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE CORRELATOR correlate_profiles
         LEFT FROM left_profiles WHERE left_profiles.marker > 0
         LEFT FROM left_profile_aliases WHERE left_profile_aliases.marker > 0
@@ -104,8 +104,8 @@ Feature: Relay correlation
         RIGHT FROM right_profile_aliases WHERE right_profile_aliases.tenant = 'acme'
         CORRELATE WHERE lower(left_profile_aliases.first_name) = lower(right_profile_aliases.first_name)
         MATCH <match_policy>
-        TO correlated_profiles BRANCHED BY by_left_profile_ingestor
-        FLUSH IMMEDIATE
+        TO correlated_profiles FLUSH IMMEDIATE ON MESSAGE ERROR LOG BRANCHED BY by_left_profile_ingestor
+
         OUTPUT
           correlated_profiles.tenant = left_profile_aliases.tenant,
           correlated_profiles.normalized_name = lower(left_profile_aliases.first_name),
@@ -113,8 +113,7 @@ Feature: Relay correlation
           correlated_profiles.surname = upper(right_profile_aliases.surname),
           correlated_profiles.memo = NULL
         MAX TIME 5s
-        ON CORRELATION TIMEOUT DROP, DROP
-        ON MESSAGE ERROR LOG;
+        ON CORRELATION TIMEOUT DROP, DROP;
         CREATE SUBSCRIPTION correlated_profiles_subscription TO correlated_profiles WHERE correlated_profiles.tenant = 'acme';
         START;
       """

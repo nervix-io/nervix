@@ -82,25 +82,24 @@ Feature: LOOKUP_HASH_MAP filter-map function
         TYPE HTTP;
 
       CREATE INGESTOR source_logs
-        TO incoming_logs
+        TO incoming_logs FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         UNBRANCHED
-        FLUSH IMMEDIATE
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR enrich_titles
         FROM incoming_logs
         FILTER WHERE incoming_logs.active
-        TO enriched_logs
+        TO enriched_logs FLUSH IMMEDIATE
           SET enriched_logs.title_key = lower(incoming_logs.title),
               enriched_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name"),
               enriched_logs.region = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "region_name")
           UNSET incoming_logs.title, incoming_logs.legacy
-          WHERE NOT is_null(LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name"))
+          WHERE NOT is_null(LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name")) ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON incoming_logs.id
-        MAX TIME 10m
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
 
       CREATE SUBSCRIPTION enriched_logs_subscription TO enriched_logs;
 
@@ -217,14 +216,13 @@ Feature: LOOKUP_HASH_MAP filter-map function
       """
       CREATE DEDUPLICATOR enrich_titles
         FROM incoming_logs
-        TO enriched_logs
+        TO enriched_logs FLUSH IMMEDIATE
           SET enriched_logs.title_key = lower(incoming_logs.title),
               enriched_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "missing_city")
-          UNSET incoming_logs.title
+          UNSET incoming_logs.title ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON incoming_logs.id
-        MAX TIME 10m
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
 
     Examples:

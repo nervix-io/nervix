@@ -34,11 +34,11 @@ Feature: Sensitive data
         TYPE HTTP;
 
       CREATE INGESTOR sensitive_notifications
-        TO notifications
+        TO notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         UNBRANCHED
-        FLUSH IMMEDIATE
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
@@ -106,20 +106,19 @@ Feature: Sensitive data
         TYPE HTTP;
 
       CREATE INGESTOR sensitive_notifications
-        TO notifications
+        TO notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         UNBRANCHED
-        FLUSH IMMEDIATE
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR reveal_notifications
         FROM notifications
-        TO public_notifications
-          SET public_notifications.secret = leak_sensitive(notifications.secret)
+        TO public_notifications FLUSH IMMEDIATE
+          SET public_notifications.secret = leak_sensitive(notifications.secret) ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
 
       CREATE SUBSCRIPTION public_notifications_subscription TO public_notifications;
       START;
@@ -164,11 +163,10 @@ Feature: Sensitive data
 
       CREATE DEDUPLICATOR leak_notifications
         FROM notifications
-        TO public_notifications
+        TO public_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
 
     Examples:
@@ -222,11 +220,11 @@ Feature: Sensitive data
         TYPE HTTP;
 
       CREATE INGESTOR sensitive_notifications
-        TO notifications
+        TO notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         UNBRANCHED
-        FLUSH IMMEDIATE
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE CLIENT zeromq_main
         TYPE ZEROMQ

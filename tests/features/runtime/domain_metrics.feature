@@ -30,16 +30,15 @@ Feature: Domain metrics
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics' TYPE HTTP;
         CREATE INGESTOR domain_metrics_source
-        TO domain_metrics_raw
+        TO domain_metrics_raw FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_domain_metrics_source VALUES { tenant = domain_metrics_raw.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT domain_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT domain_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR domain_metrics_dedup
-        FROM domain_metrics_raw TO domain_metrics_deduped BRANCHED BY by_domain_metrics_source
+        FROM domain_metrics_raw TO domain_metrics_deduped FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_domain_metrics_source
         DEDUPLICATE ON domain_metrics_raw.transaction_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {

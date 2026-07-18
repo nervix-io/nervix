@@ -13,7 +13,7 @@ Relay-consuming runtime nodes support `ATTACHED` or `DETACHED` branch semantics.
 - `ATTACHED` keeps the upstream ACK chain open
 - `DETACHED` drops ACK state for that branch immediately
 
-Pure runtime processors end with `ON MESSAGE ERROR <policy>` only. `ON GENERAL ERROR` is reserved for `INGESTOR` and `EMITTER`, because those are the runtime nodes that own external-system failures.
+Every processor `TO` route owns an `ON MESSAGE ERROR <policy>`. `ON GENERAL ERROR` is reserved for `INGESTOR` and `EMITTER`, because those are the runtime nodes that own external-system failures. A WASM processor keeps its node-level `ON GLOBAL ERROR` contract for guest failures that are not associated with a message or output route.
 
 ## Branch Ownership
 
@@ -28,7 +28,7 @@ Branch behavior by node type:
 
 Processors between ingestor and reingestor/emitter are scoped to one concrete branch. The isolation covers both the relay batches they handle and the state they keep.
 
-Every flush-based runtime node must declare either `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` in its NSPL definition. `FLUSH EACH` uses the duration as the local batch boundary: the node buffers input under one concrete branch group and forwards it downstream on that cadence. `FLUSH IMMEDIATE` forwards each received batch without waiting for a flush deadline. Emitters also declare `FLUSH` and use it to collect a terminal output batch before publishing externally. Window processors use `WIDTH` and `STEP` instead. WASM processors do not declare a flush policy: output emission is controlled by the guest through `process` output and guest-requested timeouts.
+Every destination of a flush-based multi-output node must declare either `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` directly after its `TO <relay>`. Each destination has an independent buffer and deadline, so one output can publish immediately while another batches the same produced rows. Generators and emitters have one terminal output and retain their node-level `FLUSH` clause. Window processors use `WIDTH` and `STEP` instead. WASM processors do not declare a flush policy: output emission is controlled by the guest through `process` output and guest-requested timeouts.
 
 ## Processor Outputs
 
@@ -37,7 +37,9 @@ Relay-consuming processors declare one or more destination outputs after their i
 ```nspl
 FROM <input> [WHERE <expr>], ...
 [FILTER WHERE <expr>]
-TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]
+TO <relay> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE)
+  [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]
+  ON MESSAGE ERROR <policy>
 [TO <relay> ...]
 ```
 
@@ -45,7 +47,7 @@ TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHE
 
 `FILTER WHERE` is a node-level arrival filter. It runs after source filtering and before the processor accepts a row into its buffer or state. It replaces the old global processor-level `WHERE` form.
 
-Each `TO` route may carry its own destination filter-map. `SET` and `UNSET` are destination-owned and therefore appear after the destination relay is known. `WHERE` is optional; a route without `WHERE` receives every row produced by the processor.
+Each `TO` route owns its flush policy, destination filter-map, and message error policy. `SET` and `UNSET` are destination-owned and therefore appear after the destination relay and flush policy are known. `WHERE` is optional; a route without `WHERE` receives every row produced by the processor. A construction or filter-map failure on one route is handled only by that route's policy.
 
 Assignments inside one `SET` clause execute from left to right. The same destination field may be assigned more than once, and each right-hand expression observes the latest preceding assignment, for example `SET out.amount = 1, out.amount = out.amount + 1` produces `2`. This does not change existing `WHERE` visibility or evaluation order.
 
@@ -88,16 +90,14 @@ CREATE BRANCH by_user
 
 CREATE DEDUPLICATOR project_notifications
   FROM notifications WHERE notifications.active
-  TO projected_notifications
+  TO projected_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
     SET projected_notifications.normalized = lower(trim(notifications.raw)),
         projected_notifications.amount = notifications.amount + 1
     UNSET notifications.raw, notifications.active
-    WHERE trim(notifications.raw) != ''
+    WHERE trim(notifications.raw) != '' ON MESSAGE ERROR LOG
   BRANCHED BY by_user
   DEDUPLICATE ON notifications.tenant, notifications.user_id
-  MAX TIME 10m
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-  ON MESSAGE ERROR LOG;
+  MAX TIME 10m;
 ```
 
 That example keeps the existing branch grouping, filters inactive rows at the source boundary, rewrites `normalized` and `amount`, removes `raw` and `active`, and forwards the surviving rows into `projected_notifications`.
@@ -132,14 +132,12 @@ Generator rules:
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] JUNCTION <name>
   FROM <input> [WHERE <expr>], ...
-  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]]
+  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>] ON MESSAGE ERROR <policy>]
   [TO <output> ...]
-  BRANCHED BY <branch>
-  FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  ON MESSAGE ERROR <policy>;
+  BRANCHED BY <branch>;
 ```
 
-A junction is a branch-local pass-through processor. It consumes one or more same-schema upstream relays, applies source `WHERE` and node `FILTER WHERE` filters, buffers accepted Arrow batches until its flush policy fires, concatenates buffered batches when needed, and forwards records through one or more output routes.
+A junction is a branch-local pass-through processor. It consumes one or more same-schema upstream relays, applies source `WHERE` and node `FILTER WHERE` filters, and forwards accepted rows into each output route's independent flush buffer.
 
 Each output route may use the normal processor `SET`, `UNSET`, and `WHERE` filter-map clauses. Routes without a `WHERE` receive every accepted record.
 
@@ -150,7 +148,7 @@ Use it when records should be filtered, projected, fanned out, or joined into do
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
   FROM <input> [WHERE <expr>], ...
-  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
+  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) [SET <output>.<field> = <expr>, ...] [WHERE <expr>] ON MESSAGE ERROR <policy>]
   [TO <output> ...]
   BRANCHED BY <branch>
   USING RESOURCE <resource> [VERSION <n>]
@@ -162,9 +160,7 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] INFERENCER <name>
   OUTPUT SCHEMA {
     "<onnx_output_name>" DENSE TENSOR<F32>[<dimensions>],
     ...
-  }
-  FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  ON MESSAGE ERROR <policy>;
+  };
 ```
 
 An inferencer declares a branch-local ONNX model execution node. The model file is loaded from a versioned `RESOURCE`; if `VERSION` is omitted, Nervix resolves the latest uploaded resource version.
@@ -222,13 +218,11 @@ OUTPUT SCHEMA {
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] DEDUPLICATOR <name>
   FROM <input> [WHERE <expr>], ...
-  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
-  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
+  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr> ON MESSAGE ERROR <policy>]
+  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] ON MESSAGE ERROR <policy>]
   BRANCHED BY <branch>
   DEDUPLICATE ON <expr>[, <expr> ...]
-  MAX TIME <duration>
-  FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  ON MESSAGE ERROR <policy>;
+  MAX TIME <duration>;
 ```
 
 ```nspl
@@ -248,22 +242,20 @@ State-holding `DESCRIBE` commands expose the scheduled `owner` and `replicas` un
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REORDERER <name>
   FROM <input> [WHERE <expr>], ...
-  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
-  [TO <output> [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
+  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr> ON MESSAGE ERROR <policy>]
+  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) [SET <output>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] ON MESSAGE ERROR <policy>]
   BRANCHED BY <branch>
   BY <expr>, <expr>, ...
-  MAX TIME <duration>
-  FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  ON MESSAGE ERROR <policy>;
+  MAX TIME <duration>;
 ```
 
 A reorderer buffers records for one concrete branch and emits them sorted by the `BY` expression list. Each `BY` expression is evaluated with the same VM expression surface as filter-map programs, so field references and built-ins such as `lower(...)` are valid ordering keys.
 
 Ordering is ascending. When two records have identical `BY` keys, arrival order is the tie-breaker.
 
-`MAX TIME` bounds how long the oldest buffered record may wait. `FLUSH EACH` also creates a periodic flush boundary; `FLUSH IMMEDIATE` sorts and emits each received batch immediately. Reorderers preserve the upstream branch and do not support `ON GENERAL ERROR`.
+`MAX TIME` bounds the ordering horizon: once the oldest record reaches it, the reorderer sorts the pending records. The sorted result then enters each destination's independent `FLUSH` buffer. Reorderers preserve the upstream branch and do not support `ON GENERAL ERROR`.
 
-`DESCRIBE REORDERER <name>` reports the scheduled owner and replicas, input/output relays, ordering expression list, max time, flush policy, filter-map presence, branch-local execution marker, state persistence markers, and runtime metrics when available.
+`DESCRIBE REORDERER <name>` reports the scheduled owner and replicas, input/output relays, ordering expression list, max time, per-output flush policies, filter-map presence, branch-local execution marker, state persistence markers, and runtime metrics when available.
 
 ## Correlator
 
@@ -275,16 +267,14 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] CORRELATOR <name>
   [RIGHT FROM <right_input> [WHERE <expr>] ...]
   CORRELATE WHERE <left_right_predicate>
   MATCH EARLIEST | LATEST
-  [TO <output> WHERE <expr>]
-  [TO <output>]
+  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) WHERE <expr> ON MESSAGE ERROR <policy>]
+  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) ON MESSAGE ERROR <policy>]
   BRANCHED BY <branch>
-  FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
   OUTPUT
     <output>.<field> = <expr>,
     ...
   MAX TIME <duration>
-  ON CORRELATION TIMEOUT <left_action>, <right_action>
-  ON MESSAGE ERROR <policy>;
+  ON CORRELATION TIMEOUT <left_action>, <right_action>;
 ```
 
 A correlator stores unmatched records in branch-local pending state and matches a left/right pair when the `CORRELATE WHERE` predicate evaluates to true against both input records. Relays declared on the same side must share that side's schema; the left and right sides may use different schemas. Source-level `WHERE` clauses apply only to the relay they follow. The predicate must compile to `BOOLEAN`. `MATCH EARLIEST` keeps the first pending record on a side for a matching predicate and acknowledges later same-side duplicates. `MATCH LATEST` replaces the pending same-side record and acknowledges the replaced one.
@@ -303,10 +293,9 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WASM PROCESSOR <name>
   FILE '<path>'
   FROM <input> [WHERE <expr>], ...
   [FILTER WHERE <expr>]
-  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
+  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>] ON MESSAGE ERROR <policy>]
   [TO <output> ...]
   BRANCHED BY <branch>
-  ON MESSAGE ERROR <policy>
   ON GLOBAL ERROR <policy>;
 ```
 
@@ -341,15 +330,14 @@ Flush is guest-controlled for WASM processors. Nervix calls the guest `process` 
 ```nspl
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] WINDOW PROCESSOR <name>
   FROM <input> [WHERE <expr>], ...
-  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>]]
+  [TO <output> [SET <output>.<field> = <expr>, ...] [WHERE <expr>] ON MESSAGE ERROR <policy>]
   [TO <output> ...]
   BRANCHED BY <branch>
   WIDTH [<n> MESSAGES] [<duration> DURATION]
   STEP [<n> MESSAGES] [<duration> DURATION]
   AGGREGATE
     <output>.<field> = <aggregate_expr>,
-    ...
-  ON MESSAGE ERROR <policy>;
+    ...;
 ```
 
 ```nspl
@@ -453,14 +441,12 @@ CREATE BRANCH by_reingested_tenant
 
 CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] REINGESTOR <name>
   FROM <relay> [WHERE <expr>], ...
-  [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr>]
-  [TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...]]
-  BRANCHED BY by_reingested_tenant
-  FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
-  ON MESSAGE ERROR <policy>;
+  [TO <relay> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] WHERE <expr> ON MESSAGE ERROR <policy>]
+  [TO <relay> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] ON MESSAGE ERROR <policy>]
+  BRANCHED BY by_reingested_tenant;
 ```
 
-For reingestors, `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` declares when the processor flushes buffered output downstream. `FLUSH IMMEDIATE` republishes each received batch without waiting.
+For reingestors, each `TO` destination declares when its own buffered output is published downstream and how message-specific failures are handled. Different destinations may use different cadences and error policies.
 
 A reingestor republishes records from one or more same-schema relays into another and starts downstream branches with a new branch mapping.
 

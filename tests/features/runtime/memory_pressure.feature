@@ -28,11 +28,11 @@ Feature: Memory pressure
         PATH '/memory-pressure'
         TYPE HTTP;
         CREATE INGESTOR memory_pressure_source
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_memory_pressure_source VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT memory_pressure_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT memory_pressure_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         START;
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "memory_pressure_source" as "status: stopped"

@@ -67,29 +67,27 @@ CREATE ENDPOINT wasm_metrics_ingress
   TYPE HTTP;
 
 CREATE INGESTOR metric_source
-  TO raw_metrics
+  TO raw_metrics FLUSH EACH 100ms MAX BATCH SIZE 100kb ON MESSAGE ERROR LOG
   DECODE USING metric_codec
   UNBRANCHED
-  FLUSH EACH 100ms MAX BATCH SIZE 100kb
-  FROM ENDPOINT wasm_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+  FROM ENDPOINT wasm_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
 CREATE WASM PROCESSOR rust_filter_even_rows
   USING RESOURCE rust_wasm_filter VERSION 1
   FILE 'nervix_wasm_processor_rust_guest.wasm'
   FROM raw_metrics
-  TO rust_filtered_metrics
-  TO rust_positive_metrics WHERE rust_positive_metrics.value > 0 AS I32
-  UNBRANCHED
-  ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+  TO rust_filtered_metrics ON MESSAGE ERROR LOG
+  TO rust_positive_metrics WHERE rust_positive_metrics.value > 0 AS I32 ON MESSAGE ERROR LOG
+  UNBRANCHED ON GLOBAL ERROR LOG;
 
 CREATE WASM PROCESSOR go_filter_even_rows
   USING RESOURCE go_wasm_filter VERSION 1
   FILE 'nervix_wasm_processor_go_guest.wasm'
   FROM rust_filtered_metrics
-  TO go_filtered_metrics
-  TO go_positive_metrics WHERE go_positive_metrics.value > 0 AS I32
-  UNBRANCHED
-  ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+  TO go_filtered_metrics ON MESSAGE ERROR LOG
+  TO go_positive_metrics WHERE go_positive_metrics.value > 0 AS I32 ON MESSAGE ERROR LOG
+  UNBRANCHED ON GLOBAL ERROR LOG;
 
 CREATE SUBSCRIPTION rust_filtered_metrics_subscription TO rust_filtered_metrics;
 CREATE SUBSCRIPTION rust_positive_metrics_subscription TO rust_positive_metrics;

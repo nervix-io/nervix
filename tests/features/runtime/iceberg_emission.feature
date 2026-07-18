@@ -150,13 +150,13 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_ingress
         TOPIC iceberg_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -242,13 +242,13 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-missing-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_ingress
         TOPIC iceberg_missing_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -347,13 +347,13 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-namespace-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_ingress
         TOPIC iceberg_namespace_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -485,13 +485,13 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-temp-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_ingress
         TOPIC iceberg_temp_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -579,13 +579,13 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-shutdown-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_ingress
         TOPIC iceberg_shutdown_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -666,13 +666,13 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-init-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_ingress
         TOPIC iceberg_init_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -771,15 +771,14 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_ingress
         TOPIC iceberg_ack_notifications_in_{{test_id}}
         SESSION PERSISTENT QOS 1
-        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE EMITTER iceberg_notifications
         FROM notifications
         TO ICEBERG ON S3 s3_main TABLE ack_notifications_{{test_id}}

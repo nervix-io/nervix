@@ -2511,6 +2511,27 @@ impl Runtime {
         }
     }
 
+    pub(in crate::runtime) async fn handle_planned_message_errors_with_policy(
+        &self,
+        domain: &Domain,
+        node_kind: &str,
+        node: &Identifier,
+        policy: &MessageErrorPolicy,
+        errors: Vec<PlannedMessageError>,
+    ) {
+        for error in errors {
+            self.handle_message_error_with_policy(
+                domain,
+                node_kind,
+                node,
+                policy,
+                error.message,
+                error.reason,
+            )
+            .await;
+        }
+    }
+
     pub(in crate::runtime) async fn dispatch_message_error_to_dlq(
         &self,
         context: MessageErrorContext<'_>,
@@ -6686,7 +6707,7 @@ impl Runtime {
             };
             pending_messages.extend(messages);
             pending_batches.extend(batches);
-            pending_errors.extend(errors);
+            pending_errors.extend(errors.into_iter().map(|error| (output_index, error)));
         }
 
         let mut delivery_counts = vec![0usize; batch.acks.len()];
@@ -6698,7 +6719,7 @@ impl Runtime {
                 delivery_counts[*row] += 1;
             }
         }
-        for error in &pending_errors {
+        for (_, error) in &pending_errors {
             delivery_counts[error.row] += 1;
         }
 
@@ -6769,28 +6790,24 @@ impl Runtime {
             }
         }
 
-        let mut planned_errors = Vec::new();
-        for error in pending_errors {
+        for (output_index, error) in pending_errors {
             let Some(acks) = ack_queues[error.row].pop_front() else {
                 continue;
             };
-            planned_errors.push(PlannedMessageError {
-                message: RelayMessage {
+            self.handle_message_error_with_policy(
+                domain,
+                "reingestor",
+                reingestor,
+                &output_routes.routes[output_index].message_error_policy,
+                RelayMessage {
                     key: error.key,
                     record: error.record,
                     acks,
                 },
-                reason: error.reason,
-            });
+                error.reason,
+            )
+            .await;
         }
-        self.handle_planned_message_errors(
-            domain,
-            "reingestor",
-            reingestor,
-            error_policies,
-            planned_errors,
-        )
-        .await;
 
         for ((relay, messages), mut batches) in output_relays
             .into_iter()
@@ -7112,12 +7129,31 @@ impl Runtime {
                 .output_routes
                 .routes
                 .iter()
-                .map(|output| RelayProcessorOutputNode {
-                    relay: output.relay.clone(),
-                    filter_map: output.filter_map.clone(),
-                    compiled_program: None,
+                .map(|output| {
+                    let flush_policy = output
+                        .flush_policy
+                        .as_ref()
+                        .map(|policy| {
+                            Self::parse_runtime_node_flush_policy(
+                                &domain,
+                                "reingestor output",
+                                &output.relay,
+                                &policy.flush_each,
+                                policy.max_batch_size.as_deref(),
+                            )
+                        })
+                        .transpose()?;
+                    Ok(RelayProcessorOutputNode {
+                        relay: output.relay.clone(),
+                        filter_map: output.filter_map.clone(),
+                        flush_policy,
+                        message_error_policy: output.message_error_policy.clone(),
+                        pending: Vec::new(),
+                        next_flush: None,
+                        compiled_program: None,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, RuntimeError>>()?,
         };
         let mut task_branched_senders = HashMap::default();
         for output in reingestor.output_routes.outputs() {
@@ -7142,7 +7178,7 @@ impl Runtime {
             .find(|source_filter| source_filter.relay == task_from_relay)
             .map(|source_filter| source_filter.where_clause.clone());
         let task_mode = reingestor.mode;
-        let task_error_policies = message_only_error_policies(&reingestor.message_error_policy);
+        let task_error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
 
@@ -8038,9 +8074,26 @@ impl Runtime {
                     current_branch_sensitivity: None,
                 },
             )?;
+            let flush_policy = output
+                .flush_policy
+                .as_ref()
+                .map(|policy| {
+                    Self::parse_runtime_node_flush_policy(
+                        domain,
+                        "ingestor output",
+                        &output.relay,
+                        &policy.flush_each,
+                        policy.max_batch_size.as_deref(),
+                    )
+                })
+                .transpose()?;
             output_routes.routes.push(RelayProcessorOutputNode {
                 relay: output.relay.clone(),
                 filter_map: output.filter_map.clone(),
+                flush_policy,
+                message_error_policy: output.message_error_policy.clone(),
+                pending: Vec::new(),
+                next_flush: None,
                 compiled_program,
             });
         }

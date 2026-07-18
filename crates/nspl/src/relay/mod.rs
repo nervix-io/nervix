@@ -315,8 +315,8 @@ mod tests {
     #[test]
     fn rejects_branch_as_relay_reference() {
         let error = crate::statement::parse_statement(
-            "CREATE REINGESTOR fw FROM branch TO projected BRANCHED BY tenant_branch VALUES { \
-             tenant = projected.tenant } FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE REINGESTOR fw FROM branch TO projected FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+             BRANCHED BY tenant_branch VALUES { tenant = projected.tenant };",
         )
         .expect_err("reserved branch namespace must not be accepted as relay reference");
 

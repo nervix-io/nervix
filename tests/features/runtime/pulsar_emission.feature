@@ -27,15 +27,15 @@ Feature: Pulsar emission
           'addr' = 'pulsar://127.0.0.1:6650'
         };
         CREATE INGESTOR pulsar_ingress
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_pulsar_ingress VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM PULSAR pulsar_main
         TOPIC notifications_in_{{test_id}}
         SUBSCRIPTION nervix_pulsar_emission_{{test_id}}
         INSTANCES 1
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
         CREATE EMITTER pulsar_notifications
         FROM notifications
         ENCODE USING notification_codec

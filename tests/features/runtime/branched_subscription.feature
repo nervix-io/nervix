@@ -29,13 +29,13 @@ Feature: Branched session subscriptions
           'client_id' = 'nervix-cucumber-branched-subscription-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id, tenant = notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -95,13 +95,13 @@ Feature: Branched session subscriptions
           'client_id' = 'nervix-cucumber-branched-subscription-filter-map-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id, tenant = notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications
         SET notifications.normalized = lower(trim(notifications.raw))
         UNSET notifications.raw, notifications.active, notifications.user_id

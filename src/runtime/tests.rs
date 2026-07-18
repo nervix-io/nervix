@@ -1070,6 +1070,10 @@ fn validate_wasm_test_output_groups(
             .map(|(relay, _)| super::RelayProcessorOutputNode {
                 relay: relay.clone(),
                 filter_map: None,
+                flush_policy: None,
+                message_error_policy: MessageErrorPolicy::Log,
+                pending: Vec::new(),
+                next_flush: None,
                 compiled_program: None,
             })
             .collect(),
@@ -2299,11 +2303,13 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                             ingestor.clone(),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
-                                output_routes: ProcessorOutputs::single(relay.clone()),
+                                output_routes: (ProcessorOutputs::single(relay.clone()))
+                                    .with_flush_policy(
+                                        "100ms".to_string(),
+                                        Some("1MiB".to_string()),
+                                    ),
                                 decode_using_codec: codec.clone(),
                                 branched_by: BranchInitiatorSelection::unbranched(),
-                                flush_each: "100ms".to_string(),
-                                max_batch_size: Some("1MiB".to_string()),
                                 timestamp_source: None,
                                 source: IngestSource::Mqtt {
                                     client,
@@ -2314,10 +2320,7 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                                         qos: MqttQos::AtMostOnce,
                                     },
                                 },
-                                error_policies: ErrorPolicies {
-                                    message: MessageErrorPolicy::Log,
-                                    general: GeneralErrorPolicy::Log,
-                                },
+                                general_error_policy: GeneralErrorPolicy::Log,
                                 filter_where: None,
                             }),
                         ),
@@ -2441,11 +2444,13 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                             ingestor.clone(),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
-                                output_routes: ProcessorOutputs::single(relay.clone()),
+                                output_routes: (ProcessorOutputs::single(relay.clone()))
+                                    .with_flush_policy(
+                                        "100ms".to_string(),
+                                        Some("1MiB".to_string()),
+                                    ),
                                 decode_using_codec: codec.clone(),
                                 branched_by: BranchInitiatorSelection::unbranched(),
-                                flush_each: "100ms".to_string(),
-                                max_batch_size: Some("1MiB".to_string()),
                                 timestamp_source: None,
                                 source: IngestSource::Mqtt {
                                     client,
@@ -2459,10 +2464,7 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                                         },
                                     },
                                 },
-                                error_policies: ErrorPolicies {
-                                    message: MessageErrorPolicy::Log,
-                                    general: GeneralErrorPolicy::Log,
-                                },
+                                general_error_policy: GeneralErrorPolicy::Log,
                                 filter_where: None,
                             }),
                         ),
@@ -2505,14 +2507,12 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             nervix_models::Model::Deduplicator(CreateDeduplicator {
                 name: identifier("dedup_orders"),
                 from: ProcessorInputs::single(identifier("orders")),
-                output_routes: ProcessorOutputs::single(identifier("projected_orders")),
+                output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                 deduplicate_on: "orders.order_id".to_string(),
                 max_time: "10m".to_string(),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             }),
             "deduplicator 'dedup_orders' is not attached to a branch root",
@@ -2526,12 +2526,10 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                     vec![identifier("left_orders"), identifier("right_orders")],
                     Vec::new(),
                 ),
-                output_routes: ProcessorOutputs::single(identifier("joined_orders")),
+                output_routes: (ProcessorOutputs::single(identifier("joined_orders")))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: processor_branched_by("tenant", "left_orders", &["tenant"]),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             }),
             "junction 'join_orders' is not attached to a branch root",
@@ -2554,7 +2552,6 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 },
                 mode: AckMode::Attached,
                 aggregate: "order_summaries.count = COUNT(orders.amount)".to_string(),
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             }),
             "window processor 'orders_window' is not attached to a branch root",
@@ -2565,7 +2562,8 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             nervix_models::Model::Inferencer(CreateInferencer {
                 name: identifier("score_orders"),
                 from: ProcessorInputs::single(identifier("orders")),
-                output_routes: ProcessorOutputs::single(identifier("scores")),
+                output_routes: (ProcessorOutputs::single(identifier("scores")))
+                    .with_flush_policy("IMMEDIATE".to_string(), None),
                 branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                 resource: identifier("score_model"),
                 resource_version: None,
@@ -2580,10 +2578,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                     tensor: "score".to_string(),
                     schema: inferencer_tensor_schema(1),
                 }],
-                flush_each: "IMMEDIATE".to_string(),
-                max_batch_size: None,
                 mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             }),
             "inferencer 'score_orders' is not attached to a branch root",
@@ -4959,17 +4954,16 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                 identifier("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
-                    output_routes: ProcessorOutputs::single(identifier("orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: identifier("orders_codec"),
                     branched_by: branched_by("tenant", "orders", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -4980,14 +4974,12 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "projected_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -4998,14 +4990,12 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_projected_orders"),
                     from: ProcessorInputs::single(identifier("projected_orders")),
-                    output_routes: ProcessorOutputs::single(identifier("aggregated_orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("aggregated_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "projected_orders", &["tenant"]),
                     deduplicate_on: "tenant_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5065,17 +5055,16 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                 identifier("metrics_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("metrics_ingestor"),
-                    output_routes: ProcessorOutputs::single(identifier("metrics")),
+                    output_routes: (ProcessorOutputs::single(identifier("metrics")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: identifier("metrics_codec"),
                     branched_by: branched_by("host", "metrics", &["host"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("host")]),
@@ -5098,7 +5087,6 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                     },
                     mode: AckMode::Attached,
                     aggregate: "metric_summary.count = COUNT(metrics.latency)".to_string(),
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("host")]),
@@ -5109,14 +5097,12 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_summary"),
                     from: ProcessorInputs::single(identifier("metric_summary")),
-                    output_routes: ProcessorOutputs::single(identifier("projected_summary")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_summary")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("host", "metric_summary", &["host"]),
                     deduplicate_on: "metric_summary.count".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("host")]),
@@ -5162,17 +5148,16 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                 identifier("features_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("features_ingestor"),
-                    output_routes: ProcessorOutputs::single(identifier("features")),
+                    output_routes: (ProcessorOutputs::single(identifier("features")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: identifier("features_codec"),
                     branched_by: branched_by("tenant", "features", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5183,7 +5168,8 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                 nervix_models::Model::Inferencer(CreateInferencer {
                     name: identifier("score_model"),
                     from: ProcessorInputs::single(identifier("features")),
-                    output_routes: ProcessorOutputs::single(identifier("scores")),
+                    output_routes: (ProcessorOutputs::single(identifier("scores")))
+                        .with_flush_policy("IMMEDIATE".to_string(), None),
                     branched_by: processor_branched_by("tenant", "features", &["tenant"]),
                     resource: identifier("fraud_model"),
                     resource_version: Some(3),
@@ -5198,10 +5184,7 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                         tensor: "score".to_string(),
                         schema: inferencer_tensor_schema(1),
                     }],
-                    flush_each: "IMMEDIATE".to_string(),
-                    max_batch_size: None,
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: Some("WHERE active".to_string()),
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5212,14 +5195,12 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_scores"),
                     from: ProcessorInputs::single(identifier("scores")),
-                    output_routes: ProcessorOutputs::single(identifier("projected_scores")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_scores")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "scores", &["tenant"]),
                     deduplicate_on: "scores.score".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5240,7 +5221,6 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
         file,
         inputs,
         output_schema,
-        flush_each,
         ..
     } = &spec.roots[0].operation
     else {
@@ -5258,7 +5238,7 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
     assert_eq!(file, "models/fraud.onnx");
     assert_eq!(inputs.len(), 1);
     assert_eq!(output_schema.len(), 1);
-    assert_eq!(flush_each, "IMMEDIATE");
+    assert_eq!(output.flush_each.as_deref(), Some("IMMEDIATE"));
     assert_eq!(spec.roots[0].filter_where.as_deref(), Some("WHERE active"));
 }
 
@@ -5273,12 +5253,10 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
                 nervix_models::Model::Reingestor(CreateReingestor {
                     name: identifier("tenant_partition"),
                     from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("tenant_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: branched_by("tenant", "tenant_orders", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5289,14 +5267,12 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("tenant_orders")),
-                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "tenant_orders", &["tenant"]),
                     deduplicate_on: "urgent_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5326,17 +5302,16 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                 identifier("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
-                    output_routes: ProcessorOutputs::single(identifier("orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: identifier("orders_codec"),
                     branched_by: branched_by("tenant", "orders", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5347,23 +5322,25 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("orders_splitter"),
                     from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: ProcessorOutputs::new(vec![
+                    output_routes: (ProcessorOutputs::new(vec![
                         ProcessorOutput {
                             relay: identifier("urgent_orders"),
                             filter_map: Some("WHERE urgent".to_string()),
+                            flush_policy: None,
+                            message_error_policy: MessageErrorPolicy::Log,
                         },
                         ProcessorOutput {
                             relay: identifier("default_orders"),
                             filter_map: None,
+                            flush_policy: None,
+                            message_error_policy: MessageErrorPolicy::Log,
                         },
-                    ]),
+                    ]))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: Some("WHERE active".to_string()),
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5374,14 +5351,12 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_urgent"),
                     from: ProcessorInputs::single(identifier("urgent_orders")),
-                    output_routes: ProcessorOutputs::single(identifier("urgent_projected")),
+                    output_routes: (ProcessorOutputs::single(identifier("urgent_projected")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "urgent_orders", &["tenant"]),
                     deduplicate_on: "default_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5392,14 +5367,12 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_default"),
                     from: ProcessorInputs::single(identifier("default_orders")),
-                    output_routes: ProcessorOutputs::single(identifier("default_projected")),
+                    output_routes: (ProcessorOutputs::single(identifier("default_projected")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "default_orders", &["tenant"]),
                     deduplicate_on: "projected_orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5449,17 +5422,16 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                 identifier("left_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("left_ingestor"),
-                    output_routes: ProcessorOutputs::single(identifier("left_stream")),
+                    output_routes: (ProcessorOutputs::single(identifier("left_stream")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: identifier("notification_codec"),
                     branched_by: branched_by("tenant", "left_stream", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
                 }),
@@ -5470,17 +5442,16 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                 identifier("right_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("right_ingestor"),
-                    output_routes: ProcessorOutputs::single(identifier("right_stream")),
+                    output_routes: (ProcessorOutputs::single(identifier("right_stream")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: identifier("notification_codec"),
                     branched_by: branched_by("tenant", "right_stream", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
                 }),
@@ -5495,12 +5466,10 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                         vec![identifier("left_stream"), identifier("right_stream")],
                         Vec::new(),
                     ),
-                    output_routes: ProcessorOutputs::single(identifier("joined_stream")),
+                    output_routes: (ProcessorOutputs::single(identifier("joined_stream")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "left_stream", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5511,14 +5480,12 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_joined"),
                     from: ProcessorInputs::single(identifier("joined_stream")),
-                    output_routes: ProcessorOutputs::single(identifier("projected_joined")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_joined")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "joined_stream", &["tenant"]),
                     deduplicate_on: "joined_stream.tenant".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5573,17 +5540,16 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
                 identifier("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
-                    output_routes: ProcessorOutputs::single(identifier("orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: identifier("orders_codec"),
                     branched_by: branched_by("tenant", "orders", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
                 }),
@@ -5601,14 +5567,12 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
                             where_clause: "WHERE orders.active".to_string(),
                         }],
                     ),
-                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: Some("WHERE active".to_string()),
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5619,14 +5583,12 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_projected"),
                     from: ProcessorInputs::single(identifier("projected_orders")),
-                    output_routes: ProcessorOutputs::single(identifier("aggregated_orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("aggregated_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("tenant", "projected_orders", &["tenant"]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(vec![identifier("tenant")]),
@@ -5670,17 +5632,16 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
                 identifier("orders_ingestor"),
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
-                    output_routes: ProcessorOutputs::single(identifier("orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: identifier("orders_codec"),
                     branched_by: branched_by("root", "orders", &[]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
                         mode: ZeroMqIngestMode::NoAckSequential,
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
                 }),
@@ -5692,14 +5653,12 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("root", "orders", &[]),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(Vec::new()),
@@ -5737,14 +5696,12 @@ fn branched_ingestor_specs_use_explicit_unbranched_relay_as_root() {
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
                     from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: ProcessorOutputs::single(identifier("projected_orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: BranchSelection::unbranched(),
                     deduplicate_on: "orders.order_id".to_string(),
                     max_time: "10m".to_string(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 Some(Vec::new()),
@@ -5788,7 +5745,6 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                     resource: identifier("filter_resource"),
                     resource_version: None,
                     file: "filter.wasm".to_string(),
-                    message_error_policy: MessageErrorPolicy::Log,
                     global_error_policy: GeneralErrorPolicy::Ignore,
                     mode: AckMode::Attached,
                     filter_where: None,
@@ -5822,12 +5778,10 @@ fn branched_ingestor_specs_include_reingestor_with_declared_branching() {
                 nervix_models::Model::Reingestor(CreateReingestor {
                     name: identifier("tenant_partition"),
                     from: ProcessorInputs::single(identifier("notifications")),
-                    output_routes: ProcessorOutputs::single(identifier("tenant_notifications")),
+                    output_routes: (ProcessorOutputs::single(identifier("tenant_notifications")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: branched_by("tenant", "tenant_notifications", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
-                    message_error_policy: MessageErrorPolicy::Log,
                     filter_where: None,
                 }),
                 None,
@@ -6162,12 +6116,10 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             CreateReingestor {
                 name: identifier("tenant_partition"),
                 from: ProcessorInputs::single(identifier("orders")),
-                output_routes: ProcessorOutputs::single(identifier("tenant_orders")),
+                output_routes: (ProcessorOutputs::single(identifier("tenant_orders")))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: branched_by("tenant", "orders", &["tenant"]),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             },
             identifier("orders"),

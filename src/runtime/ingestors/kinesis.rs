@@ -106,7 +106,8 @@ impl KinesisIngestor {
             let task_runtime = runtime.clone();
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
-            let task_error_policies = ingestor.error_policies.clone();
+            let task_error_policies =
+                internal_processor_error_policies(ingestor.general_error_policy.clone());
             let task_timestamp_source = ingestor.timestamp_source.clone();
             let task_relay = relay.clone();
             let task_events = runtime.events.clone();

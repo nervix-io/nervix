@@ -265,7 +265,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       CREATE UNPACED DOMAIN {{domain}}_empty;
       """
     And the web console is opened on the leader node
@@ -298,7 +298,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -317,7 +317,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -378,22 +378,23 @@ Feature: Web console NSPL REPL
       CREATE RELAY correlator_errors SCHEMA correlator_error BRANCHED BY by_left_profile_ingestor;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT left_ingress ON edge PATH '/left' TYPE HTTP;
-      CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP; CREATE INGESTOR left_profile_ingestor TO left_profiles DECODE USING left_profile_codec BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profiles.tenant } FLUSH IMMEDIATE FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR right_profile_ingestor TO right_profiles DECODE USING right_profile_codec BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profiles.tenant } FLUSH IMMEDIATE FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ENDPOINT right_ingress ON edge PATH '/right' TYPE HTTP; CREATE INGESTOR left_profile_ingestor TO left_profiles FLUSH IMMEDIATE ON MESSAGE ERROR LOG DECODE USING left_profile_codec BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profiles.tenant }  FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG; CREATE INGESTOR right_profile_ingestor TO right_profiles FLUSH IMMEDIATE ON MESSAGE ERROR LOG DECODE USING right_profile_codec BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profiles.tenant }  FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       CREATE CORRELATOR correlate_profiles
         LEFT FROM left_profiles
         RIGHT FROM right_profiles
         CORRELATE WHERE lower(left_profiles.first_name) = lower(right_profiles.first_name)
         MATCH EARLIEST
-        TO correlated_profiles BRANCHED BY by_left_profile_ingestor
-        FLUSH IMMEDIATE
+        TO correlated_profiles FLUSH IMMEDIATE
+        ON MESSAGE ERROR DLQ correlator_errors SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
+        BRANCHED BY by_left_profile_ingestor
+
         OUTPUT
           correlated_profiles.tenant = left_profiles.tenant,
           correlated_profiles.normalized_name = lower(left_profiles.first_name),
           correlated_profiles.left_marker = left_profiles.marker,
           correlated_profiles.surname = upper(right_profiles.surname)
         MAX TIME 5s
-        ON CORRELATION TIMEOUT SEND TO uncorrelated_left_profiles, SEND TO uncorrelated_right_profiles
-        ON MESSAGE ERROR DLQ correlator_errors SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record;
+        ON CORRELATION TIMEOUT SEND TO uncorrelated_left_profiles, SEND TO uncorrelated_right_profiles;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -431,7 +432,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -469,7 +470,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -514,7 +515,7 @@ Feature: Web console NSPL REPL
       CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant }  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -576,7 +577,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source TO raw_metrics DECODE USING metric_codec UNBRANCHED FLUSH IMMEDIATE FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR raw_metrics_source TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG DECODE USING metric_codec UNBRANCHED  FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -633,9 +634,9 @@ Feature: Web console NSPL REPL
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source TO raw_metrics DECODE USING metric_codec UNBRANCHED FLUSH IMMEDIATE FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE DEDUPLICATOR rust_filter FROM raw_metrics FILTER WHERE raw_metrics.rust_keep TO rust_filtered_metrics UNBRANCHED DEDUPLICATE ON raw_metrics.value MAX TIME 10m FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE DEDUPLICATOR go_filter FROM rust_filtered_metrics FILTER WHERE rust_filtered_metrics.go_keep TO go_filtered_metrics UNBRANCHED DEDUPLICATE ON rust_filtered_metrics.value MAX TIME 10m FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE INGESTOR raw_metrics_source TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG DECODE USING metric_codec UNBRANCHED  FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR rust_filter FROM raw_metrics FILTER WHERE raw_metrics.rust_keep TO rust_filtered_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED DEDUPLICATE ON raw_metrics.value MAX TIME 10m;
+      CREATE DEDUPLICATOR go_filter FROM rust_filtered_metrics FILTER WHERE rust_filtered_metrics.go_keep TO go_filtered_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED DEDUPLICATE ON rust_filtered_metrics.value MAX TIME 10m;
       START;
       """
     And the web console is opened on the leader node
@@ -712,8 +713,8 @@ Feature: Web console NSPL REPL
       CREATE RELAY priority_notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY default_notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY ordered_notifications SCHEMA notification UNBRANCHED;
-      CREATE DEDUPLICATOR route_notifications FROM notifications TO priority_notifications WHERE notifications.user_id = 1 TO default_notifications UNBRANCHED DEDUPLICATE ON notifications.user_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      CREATE REORDERER order_notifications FROM default_notifications TO ordered_notifications UNBRANCHED BY default_notifications.user_id MAX TIME 10s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR route_notifications FROM notifications TO priority_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB WHERE notifications.user_id = 1 ON MESSAGE ERROR LOG TO default_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG UNBRANCHED DEDUPLICATE ON notifications.user_id MAX TIME 10m;
+      CREATE REORDERER order_notifications FROM default_notifications TO ordered_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG UNBRANCHED BY default_notifications.user_id MAX TIME 10s;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -744,7 +745,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };
       CREATE EMITTER zeromq_notifications FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
       START;
@@ -778,7 +779,7 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -809,7 +810,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications TO notifications DECODE USING notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "http_notifications"
     And selector ".graph-hit-layer" contains "notifications"
@@ -859,86 +860,73 @@ Feature: Web console NSPL REPL
         'uri' = 'http://127.0.0.1:8181',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       }; CREATE INGESTOR iot_device_activity
-        TO device_activity_landing
+        TO device_activity_landing FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
         DECODE USING activity_codec
         BRANCHED BY by_iot_device_activity VALUES {
           tenant_id = device_activity_landing.tenant_id,
           device_id = device_activity_landing.device_id
         }
-        FLUSH EACH 250ms MAX BATCH SIZE 512kb
+
         FROM MQTT mqtt_devices
         TOPIC 'datalake/device_activity'
         INSTANCES 2
-        MODE NO_ACK SEQUENTIAL
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR edge_server_activity
-        TO edge_activity_landing
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG; CREATE INGESTOR edge_server_activity
+        TO edge_activity_landing FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
         DECODE USING activity_codec
         BRANCHED BY by_iot_device_activity VALUES {
           tenant_id = edge_activity_landing.tenant_id,
           device_id = edge_activity_landing.device_id
         }
-        FLUSH EACH 250ms MAX BATCH SIZE 512kb
+
         FROM NATS nats_edge
         SUBJECT datalake_edge_activity
         QUEUE GROUP datalake_edge_servers
         INSTANCES 2
-        MODE NO_ACK SEQUENTIAL
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR auth_server_activity
-        TO auth_activity_landing
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG; CREATE INGESTOR auth_server_activity
+        TO auth_activity_landing FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
         DECODE USING activity_codec
         BRANCHED BY by_iot_device_activity VALUES {
           tenant_id = auth_activity_landing.tenant_id,
           device_id = auth_activity_landing.device_id
         }
-        FLUSH EACH 250ms MAX BATCH SIZE 512kb
+
         FROM KAFKA kafka_auth
         TOPIC datalake_auth_activity
         OFFSET BY CONSUMER GROUP datalake_demo_auth
         INSTANCES 4
-        MODE NO_ACK PARALLEL MAX 1024
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK PARALLEL MAX 1024 ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR connect_without_authorization
         FROM auth_activity_landing
-        TO security_events
+        TO security_events FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
         BRANCHED BY by_iot_device_activity
         DEDUPLICATE ON auth_activity_landing.tenant_id, auth_activity_landing.device_id, auth_activity_landing.event_type, auth_activity_landing.value
-        MAX TIME 30m
-        FLUSH EACH 250ms MAX BATCH SIZE 512kb
-        ON MESSAGE ERROR LOG;
+        MAX TIME 30m;
       CREATE DEDUPLICATOR connection_distance_alert_mapper
         FROM device_activity_landing
-        TO connected_sessions
+        TO connected_sessions FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
         BRANCHED BY by_iot_device_activity
         DEDUPLICATE ON device_activity_landing.tenant_id, device_activity_landing.device_id, device_activity_landing.event_type, device_activity_landing.value
-        MAX TIME 30m
-        FLUSH EACH 250ms MAX BATCH SIZE 512kb
-        ON MESSAGE ERROR LOG;
+        MAX TIME 30m;
       CREATE DEDUPLICATOR location_distance_alert_mapper
         FROM device_activity_landing
-        TO location_distance_alerts
+        TO location_distance_alerts FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
         BRANCHED BY by_iot_device_activity
         DEDUPLICATE ON device_activity_landing.tenant_id, device_activity_landing.device_id, device_activity_landing.event_type, device_activity_landing.value
-        MAX TIME 30m
-        FLUSH EACH 250ms MAX BATCH SIZE 512kb
-        ON MESSAGE ERROR LOG;
+        MAX TIME 30m;
       CREATE DEDUPLICATOR edge_location_lookup
         FROM edge_activity_landing
-        TO edge_activity_enriched_landing
+        TO edge_activity_enriched_landing FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
         BRANCHED BY by_iot_device_activity
         DEDUPLICATE ON edge_activity_landing.tenant_id, edge_activity_landing.device_id, edge_activity_landing.event_type, edge_activity_landing.value
-        MAX TIME 30m
-        FLUSH EACH 250ms MAX BATCH SIZE 512kb
-        ON MESSAGE ERROR LOG;
+        MAX TIME 30m;
       CREATE DEDUPLICATOR edge_activity_splitter
         FROM edge_activity_enriched_landing
-        TO edge_connect_events WHERE edge_activity_enriched_landing.event_type = "connect"
-        TO edge_disconnect_events WHERE edge_activity_enriched_landing.event_type = "disconnect"
-        TO edge_connect_events
+        TO edge_connect_events FLUSH EACH 250ms MAX BATCH SIZE 512kb WHERE edge_activity_enriched_landing.event_type = "connect" ON MESSAGE ERROR LOG
+        TO edge_disconnect_events FLUSH EACH 250ms MAX BATCH SIZE 512kb WHERE edge_activity_enriched_landing.event_type = "disconnect" ON MESSAGE ERROR LOG
+        TO edge_connect_events FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
         BRANCHED BY by_iot_device_activity
         DEDUPLICATE ON edge_activity_enriched_landing.tenant_id, edge_activity_enriched_landing.device_id, edge_activity_enriched_landing.event_type, edge_activity_enriched_landing.value
-        MAX TIME 30m
-        FLUSH EACH 250ms MAX BATCH SIZE 512kb
-        ON MESSAGE ERROR LOG;
+        MAX TIME 30m;
       CREATE EMITTER kafka_security_events
         FROM security_events
         ENCODE USING activity_codec
@@ -1022,7 +1010,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_primary_telemetry;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT primary_telemetry_endpoint ON edge PATH '/primary' TYPE HTTP;
-      CREATE INGESTOR primary_telemetry TO telemetry_by_site DECODE USING telemetry_codec BRANCHED BY by_primary_telemetry VALUES { site = telemetry_by_site.site } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT primary_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR primary_telemetry TO telemetry_by_site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING telemetry_codec BRANCHED BY by_primary_telemetry VALUES { site = telemetry_by_site.site }  FROM ENDPOINT primary_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -1033,7 +1021,7 @@ Feature: Web console NSPL REPL
     When these NSPL commands are executed on the leader node
       """
       CREATE ENDPOINT backup_telemetry_endpoint ON edge PATH '/backup' TYPE HTTP;
-      CREATE INGESTOR backup_telemetry TO telemetry_by_site DECODE USING telemetry_codec BRANCHED BY by_primary_telemetry VALUES { site = telemetry_by_site.site } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT backup_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INGESTOR backup_telemetry TO telemetry_by_site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING telemetry_codec BRANCHED BY by_primary_telemetry VALUES { site = telemetry_by_site.site }  FROM ENDPOINT backup_telemetry_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       START;
       """
     Then selector ".graph-hit-layer" contains "backup_telemetry"
@@ -1068,8 +1056,8 @@ Feature: Web console NSPL REPL
       CREATE RELAY deduped_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT raw_events_endpoint ON edge PATH '/raw' TYPE HTTP;
-      CREATE INGESTOR ingest_events TO raw_events DECODE USING event_codec BRANCHED BY by_ingest_events VALUES { value = raw_events.value } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE DEDUPLICATOR dedup_events FROM raw_events TO deduped_events BRANCHED BY by_ingest_events DEDUPLICATE ON raw_events.value MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE INGESTOR ingest_events TO raw_events FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING event_codec BRANCHED BY by_ingest_events VALUES { value = raw_events.value }  FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR dedup_events FROM raw_events TO deduped_events FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_ingest_events DEDUPLICATE ON raw_events.value MAX TIME 10m;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -1097,8 +1085,8 @@ Feature: Web console NSPL REPL
       CREATE RELAY filtered_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT raw_events_endpoint ON edge PATH '/raw' TYPE HTTP;
-      CREATE INGESTOR ingest_events TO raw_events DECODE USING event_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' FROM raw_events TO filtered_events UNBRANCHED ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+      CREATE INGESTOR ingest_events TO raw_events FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING event_codec UNBRANCHED  FROM ENDPOINT raw_events_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' FROM raw_events TO filtered_events ON MESSAGE ERROR LOG UNBRANCHED ON GLOBAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -1139,23 +1127,21 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
       CREATE INGESTOR reingestor_metrics_source
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_reingestor_metrics_source VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR notification_forwarder
         FROM notifications
-        TO validated_notifications
+        TO validated_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         BRANCHED BY by_reingestor_metrics_source
         DEDUPLICATE ON notifications.tenant, notifications.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       CREATE REINGESTOR reingestor_metrics_node
         FROM validated_notifications
-        TO tenant_notifications
-        BRANCHED BY by_reingestor_metrics_node VALUES { tenant = tenant_notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO tenant_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        BRANCHED BY by_reingestor_metrics_node VALUES { tenant = tenant_notifications.tenant };
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -1207,31 +1193,28 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT telemetry_ingress ON edge PATH '/telemetry' TYPE HTTP;
       CREATE CLIENT redis_alerts TYPE REDIS CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE INGESTOR http_telemetry
-        TO telemetry_by_site
+        TO telemetry_by_site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING telemetry_codec
         BRANCHED BY by_http_telemetry VALUES { site = telemetry_by_site.site }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT telemetry_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT telemetry_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR quality_gate
         FROM telemetry_by_site
-        TO battery_alerts WHERE telemetry_by_site.battery_pct < 15.0
-        TO telemetry_clean
+        TO battery_alerts FLUSH EACH 100ms MAX BATCH SIZE 1MiB WHERE telemetry_by_site.battery_pct < 15.0 ON MESSAGE ERROR LOG
+        TO telemetry_clean FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         BRANCHED BY by_http_telemetry
         DEDUPLICATE ON telemetry_by_site.site, telemetry_by_site.device_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG; CREATE REINGESTOR device_repartition
+        MAX TIME 10m; CREATE REINGESTOR device_repartition
         FROM telemetry_clean
-        TO telemetry_by_device
-        BRANCHED BY by_device_repartition VALUES { device_id = telemetry_by_device.device_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO telemetry_by_device FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        BRANCHED BY by_device_repartition VALUES { device_id = telemetry_by_device.device_id };
       CREATE DEDUPLICATOR anomaly_splitter
         FROM telemetry_by_device
-        TO maintenance_alerts WHERE telemetry_by_device.value >= telemetry_by_device.warn_high
-        TO normal_telemetry
+        TO maintenance_alerts FLUSH EACH 100ms MAX BATCH SIZE 1MiB WHERE telemetry_by_device.value >= telemetry_by_device.warn_high ON MESSAGE ERROR LOG
+        TO normal_telemetry FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         BRANCHED BY by_device_repartition
         DEDUPLICATE ON telemetry_by_device.device_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       CREATE EMITTER redis_battery_alerts
         FROM battery_alerts
         ENCODE USING telemetry_codec
@@ -1282,18 +1265,17 @@ Feature: Web console NSPL REPL
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_relay_buffer_source;
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
       CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE INGESTOR relay_buffer_source
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_relay_buffer_source VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR relay_buffer_forwarder
         FROM notifications
-        TO forwarded_notifications
+        TO forwarded_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         BRANCHED BY by_relay_buffer_source
         DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE notifications.user_id = 42;
       START;
       """
@@ -1353,8 +1335,8 @@ Feature: Web console NSPL REPL
       CREATE RELAY ss2 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT source_txns_endpoint ON edge PATH '/source' TYPE HTTP;
-      CREATE INGESTOR source_txns TO ss1 DECODE USING txn_codec BRANCHED BY by_source_txns VALUES { value = ss1.value } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT source_txns_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY by_source_txns DEDUPLICATE ON ss1.value MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE INGESTOR source_txns TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING txn_codec BRANCHED BY by_source_txns VALUES { value = ss1.value }  FROM ENDPOINT source_txns_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns DEDUPLICATE ON ss1.value MAX TIME 10m;
       """
     Then selector ".graph-hit-layer" contains "source_txns"
     And selector ".graph-hit-layer" contains "dedup_txns"
@@ -1365,8 +1347,8 @@ Feature: Web console NSPL REPL
       CREATE RELAY state_txns SCHEMA txn BRANCHED BY by_state_txns_ingestor WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY rr1 SCHEMA txn BRANCHED BY by_state_txns_ingestor;
       CREATE ENDPOINT state_txns_endpoint ON edge PATH '/state' TYPE HTTP;
-      CREATE INGESTOR state_txns_ingestor TO state_txns DECODE USING txn_codec BRANCHED BY by_state_txns_ingestor VALUES { value = state_txns.value } FLUSH EACH 100ms MAX BATCH SIZE 1MiB FROM ENDPOINT state_txns_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE REINGESTOR fwd FROM ss2 TO rr1 BRANCHED BY by_state_txns_ingestor VALUES { value = rr1.value } FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE INGESTOR state_txns_ingestor TO state_txns FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING txn_codec BRANCHED BY by_state_txns_ingestor VALUES { value = state_txns.value }  FROM ENDPOINT state_txns_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+      CREATE REINGESTOR fwd FROM ss2 TO rr1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_state_txns_ingestor VALUES { value = rr1.value };
       """
     Then selector ".graph-hit-layer" contains "state_txns_ingestor"
     And selector ".graph-hit-layer" contains "state_txns"
