@@ -9,17 +9,16 @@ CREATE BRANCH by_user
   SCHEMA user_branch TTL 5m;
 
 CREATE [IF NOT EXISTS] INGESTOR kafka_notifications
-  TO notifications
+  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
   DECODE USING notification_codec
   BRANCHED BY by_user
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   TIMESTAMP NOW
   FROM KAFKA kafka_main
   TOPIC notifications
   OFFSET BY CONSUMER GROUP nervix_consumer
   INSTANCES 1
   MODE ACK SEQUENTIAL
-  ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
@@ -28,21 +27,22 @@ Every ingestor defines:
 - the destination relay or relays
 - the codec used for decoding
 - the explicit branch to use, or `UNBRANCHED`
-- the batch flush interval
+- a flush policy for every destination relay
+- a message error policy for every destination relay
 - the timestamp source
 - the transport-specific source
 - the delivery mode
 - optional node-level `FILTER WHERE` and per-route `SET` / `UNSET` / `WHERE` programs
 
-`FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required on ingestors and configures the ingestor-local batcher.
+`FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required after every `TO <relay>`. Every route also requires its own `ON MESSAGE ERROR <policy>`. Each route buffers and handles message-specific construction failures independently. `ON GENERAL ERROR` remains node-level because it handles source or transport failures that are not tied to one message or output route.
 
 At runtime, the ingestor:
 
 - decodes inbound payloads into runtime records
 - optionally executes `FILTER WHERE` against the decoded input batch
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
-- accumulates decoded rows for that group until the flush interval fires
-- writes buffered rows into each matching destination relay inside that group's branch
+- accumulates decoded rows independently for every matching destination and branch group
+- writes each route's buffered rows when that route's flush interval or size boundary fires
 
 ## Branch Semantics
 
@@ -76,15 +76,14 @@ CREATE BRANCH by_tenant
 
 CREATE [IF NOT EXISTS] INGESTOR notifications_in
   FILTER WHERE message.active
-  TO notifications
+  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
     SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
     UNSET notifications.raw
     WHERE message.tenant = 'acme'
+    ON MESSAGE ERROR LOG
   DECODE USING notification_codec
   BRANCHED BY by_tenant
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-  ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 

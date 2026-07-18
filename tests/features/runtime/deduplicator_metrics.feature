@@ -29,16 +29,15 @@ Feature: Deduplicator metrics
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT dedup_metrics_ingress ON edge PATH '/dedup-metrics' TYPE HTTP;
         CREATE INGESTOR dedup_metrics_source
-        TO raw_txns
+        TO raw_txns FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_dedup_metrics_source VALUES { tenant = raw_txns.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT dedup_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT dedup_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_metrics_node
-        FROM raw_txns TO deduped_txns BRANCHED BY by_dedup_metrics_source
+        FROM raw_txns TO deduped_txns FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_dedup_metrics_source
         DEDUPLICATE ON raw_txns.transaction_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION deduped_txns_subscription TO deduped_txns;
         START;
       """

@@ -19,11 +19,11 @@ use nervix_models::{
     InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
     KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
     MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, NameError, NatsIngestMode, ParseAsType, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
-    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField,
-    SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode, WindowBound,
-    WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    MySqlConflictAction, NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
+    SchemaField, SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode,
+    WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -435,11 +435,9 @@ pub struct StoredCreateIngestor {
     pub output_routes: StoredProcessorOutputs,
     pub decode_using_codec: String,
     pub branched_by: StoredBranchInitiatorSelection,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
     pub timestamp_source: Option<StoredIngestTimestampSource>,
     pub source: StoredIngestSource,
-    pub error_policies: StoredErrorPolicies,
+    pub general_error_policy: StoredGeneralErrorPolicy,
     pub filter_where: Option<String>,
 }
 
@@ -508,10 +506,7 @@ pub struct StoredCreateReingestor {
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
     pub branched_by: StoredBranchInitiatorSelection,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
     pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
     pub filter_where: Option<String>,
 }
 
@@ -526,10 +521,7 @@ pub struct StoredCreateInferencer {
     pub file: String,
     pub inputs: Vec<StoredInferencerTensorMapping>,
     pub output_schema: Vec<StoredInferencerTensorDeclaration>,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
     pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
     pub filter_where: Option<String>,
 }
 
@@ -543,7 +535,6 @@ pub struct StoredCreateWasmProcessor {
     pub resource_version: Option<u64>,
     pub file: String,
     pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
     pub global_error_policy: StoredGeneralErrorPolicy,
     pub filter_where: Option<String>,
 }
@@ -816,6 +807,14 @@ pub enum StoredBranchInitiatorSelection {
 pub struct StoredProcessorOutput {
     pub relay: String,
     pub filter_map: Option<String>,
+    pub flush_policy: Option<StoredOutputFlushPolicy>,
+    pub message_error_policy: StoredMessageErrorPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredOutputFlushPolicy {
+    pub flush_each: String,
+    pub max_batch_size: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -855,10 +854,7 @@ pub struct StoredCreateJunction {
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
     pub branched_by: StoredBranchSelection,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
     pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
     pub filter_where: Option<String>,
 }
 
@@ -870,10 +866,7 @@ pub struct StoredCreateDeduplicator {
     pub branched_by: StoredBranchSelection,
     pub deduplicate_on: String,
     pub max_time: String,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
     pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
     pub filter_where: Option<String>,
 }
 
@@ -888,11 +881,8 @@ pub struct StoredCreateCorrelator {
     pub match_policy: StoredCorrelatorMatchPolicy,
     pub output: String,
     pub max_time: String,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
     pub timeout_policy: StoredCorrelationTimeoutPolicy,
     pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
     pub filter_where: Option<String>,
 }
 
@@ -922,10 +912,7 @@ pub struct StoredCreateReorderer {
     pub branched_by: StoredBranchSelection,
     pub order_by: String,
     pub max_time: String,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
     pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
     pub filter_where: Option<String>,
 }
 
@@ -939,7 +926,6 @@ pub struct StoredCreateWindowProcessor {
     pub step: StoredWindowBound,
     pub aggregate: String,
     pub mode: AckMode,
-    pub message_error_policy: StoredMessageErrorPolicy,
     pub filter_where: Option<String>,
 }
 
@@ -2469,11 +2455,9 @@ impl From<CreateIngestor> for StoredCreateIngestor {
             output_routes: value.output_routes.into(),
             decode_using_codec: value.decode_using_codec.to_string(),
             branched_by: value.branched_by.into(),
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             timestamp_source: value.timestamp_source.map(Into::into),
             source: value.source.into(),
-            error_policies: value.error_policies.into(),
+            general_error_policy: value.general_error_policy.into(),
             filter_where: value.filter_where,
         }
     }
@@ -2599,6 +2583,8 @@ impl From<ProcessorOutput> for StoredProcessorOutput {
         Self {
             relay: value.relay.to_string(),
             filter_map: value.filter_map,
+            flush_policy: value.flush_policy.map(Into::into),
+            message_error_policy: value.message_error_policy.into(),
         }
     }
 }
@@ -2610,7 +2596,27 @@ impl TryFrom<StoredProcessorOutput> for ProcessorOutput {
         Ok(Self {
             relay: Identifier::parse(&value.relay)?,
             filter_map: value.filter_map,
+            flush_policy: value.flush_policy.map(Into::into),
+            message_error_policy: value.message_error_policy.try_into()?,
         })
+    }
+}
+
+impl From<OutputFlushPolicy> for StoredOutputFlushPolicy {
+    fn from(value: OutputFlushPolicy) -> Self {
+        Self {
+            flush_each: value.flush_each,
+            max_batch_size: value.max_batch_size,
+        }
+    }
+}
+
+impl From<StoredOutputFlushPolicy> for OutputFlushPolicy {
+    fn from(value: StoredOutputFlushPolicy) -> Self {
+        Self {
+            flush_each: value.flush_each,
+            max_batch_size: value.max_batch_size,
+        }
     }
 }
 
@@ -2697,11 +2703,9 @@ impl TryFrom<StoredCreateIngestor> for CreateIngestor {
             output_routes: value.output_routes.try_into()?,
             decode_using_codec: Identifier::parse(&value.decode_using_codec)?,
             branched_by: value.branched_by.try_into()?,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             timestamp_source: value.timestamp_source.map(TryInto::try_into).transpose()?,
             source: value.source.try_into()?,
-            error_policies: value.error_policies.try_into()?,
+            general_error_policy: value.general_error_policy.into(),
             filter_where: value.filter_where,
         })
     }
@@ -2734,10 +2738,7 @@ impl From<CreateReingestor> for StoredCreateReingestor {
             from: value.from.into(),
             output_routes: value.output_routes.into(),
             branched_by: value.branched_by.into(),
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
             filter_where: value.filter_where,
         }
     }
@@ -2752,10 +2753,7 @@ impl TryFrom<StoredCreateReingestor> for CreateReingestor {
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             branched_by: value.branched_by.try_into()?,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
             filter_where: value.filter_where,
         })
     }
@@ -2773,10 +2771,7 @@ impl From<CreateInferencer> for StoredCreateInferencer {
             file: value.file,
             inputs: value.inputs.into_iter().map(Into::into).collect(),
             output_schema: value.output_schema.into_iter().map(Into::into).collect(),
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
             filter_where: value.filter_where,
         }
     }
@@ -2804,10 +2799,7 @@ impl TryFrom<StoredCreateInferencer> for CreateInferencer {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<_>, _>>()?,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
             filter_where: value.filter_where,
         })
     }
@@ -2824,7 +2816,6 @@ impl From<CreateWasmProcessor> for StoredCreateWasmProcessor {
             resource_version: value.resource_version,
             file: value.file,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
             global_error_policy: value.global_error_policy.into(),
             filter_where: value.filter_where,
         }
@@ -2844,7 +2835,6 @@ impl TryFrom<StoredCreateWasmProcessor> for CreateWasmProcessor {
             resource_version: value.resource_version,
             file: value.file,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
             global_error_policy: value.global_error_policy.into(),
             filter_where: value.filter_where,
         })
@@ -3681,10 +3671,7 @@ impl From<CreateDeduplicator> for StoredCreateDeduplicator {
             branched_by: value.branched_by.into(),
             deduplicate_on: value.deduplicate_on,
             max_time: value.max_time,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
             filter_where: value.filter_where,
         }
     }
@@ -3701,10 +3688,7 @@ impl TryFrom<StoredCreateDeduplicator> for CreateDeduplicator {
             branched_by: value.branched_by.try_into()?,
             deduplicate_on: value.deduplicate_on,
             max_time: value.max_time,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
             filter_where: value.filter_where,
         })
     }
@@ -3722,11 +3706,8 @@ impl From<CreateCorrelator> for StoredCreateCorrelator {
             match_policy: value.match_policy.into(),
             output: value.output,
             max_time: value.max_time,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             timeout_policy: value.timeout_policy.into(),
             mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
             filter_where: value.filter_where,
         }
     }
@@ -3746,11 +3727,8 @@ impl TryFrom<StoredCreateCorrelator> for CreateCorrelator {
             match_policy: value.match_policy.into(),
             output: value.output,
             max_time: value.max_time,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             timeout_policy: value.timeout_policy.try_into()?,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
             filter_where: value.filter_where,
         })
     }
@@ -3827,10 +3805,7 @@ impl From<CreateReorderer> for StoredCreateReorderer {
             branched_by: value.branched_by.into(),
             order_by: value.order_by,
             max_time: value.max_time,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
             filter_where: value.filter_where,
         }
     }
@@ -3847,10 +3822,7 @@ impl TryFrom<StoredCreateReorderer> for CreateReorderer {
             branched_by: value.branched_by.try_into()?,
             order_by: value.order_by,
             max_time: value.max_time,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
             filter_where: value.filter_where,
         })
     }
@@ -3867,7 +3839,6 @@ impl From<CreateWindowProcessor> for StoredCreateWindowProcessor {
             step: value.step.into(),
             aggregate: value.aggregate,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
             filter_where: value.filter_where,
         }
     }
@@ -3886,7 +3857,6 @@ impl TryFrom<StoredCreateWindowProcessor> for CreateWindowProcessor {
             step: value.step.into(),
             aggregate: value.aggregate,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
             filter_where: value.filter_where,
         })
     }
@@ -3917,10 +3887,7 @@ impl From<CreateJunction> for StoredCreateJunction {
             from: value.from.into(),
             output_routes: value.output_routes.into(),
             branched_by: value.branched_by.into(),
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.into(),
             filter_where: value.filter_where,
         }
     }
@@ -3935,10 +3902,7 @@ impl TryFrom<StoredCreateJunction> for CreateJunction {
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
             branched_by: value.branched_by.try_into()?,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
             mode: value.mode,
-            message_error_policy: value.message_error_policy.try_into()?,
             filter_where: value.filter_where,
         })
     }
@@ -4419,17 +4383,16 @@ mod tests {
             }),
             Model::Ingestor(CreateIngestor {
                 name: identifier("events_ingestor"),
-                output_routes: ProcessorOutputs::single(identifier("events_stream")),
+                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 decode_using_codec: identifier("events_codec"),
                 branched_by: branched_by("events", "events_stream", &["tenant"]),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
                 source: IngestSource::Http {
                     client: identifier("http_client"),
                     every: "5s".to_string(),
                 },
-                error_policies: ErrorPolicies::handled_by_log(),
+                general_error_policy: GeneralErrorPolicy::Log,
 
                 filter_where: None,
             }),
@@ -4439,47 +4402,45 @@ mod tests {
                     vec![identifier("events_a"), identifier("events_b")],
                     Vec::new(),
                 ),
-                output_routes: ProcessorOutputs::single(identifier("events_stream")),
+                output_routes: (ProcessorOutputs::single(identifier("events_stream")))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: processor_branched_by("events"),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             }),
             Model::Reingestor(CreateReingestor {
                 name: identifier("events_splitter"),
                 from: ProcessorInputs::single(identifier("events_stream")),
-                output_routes: ProcessorOutputs::new(vec![
+                output_routes: (ProcessorOutputs::new(vec![
                     ProcessorOutput {
                         relay: identifier("events_errors"),
                         filter_map: Some(
                             r#"SET severity = lower(level) WHERE level = "error""#.to_string(),
                         ),
+                        flush_policy: None,
+                        message_error_policy: MessageErrorPolicy::Log,
                     },
                     ProcessorOutput::new(identifier("events_other")),
-                ]),
+                ]))
+                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: branched_by("events", "events_stream", &["tenant"]),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             }),
             Model::Reingestor(CreateReingestor {
                 name: identifier("events_forwarder"),
                 from: ProcessorInputs::single(identifier("events_stream")),
-                output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: identifier("events_projected"),
                     filter_map: Some(
                         "SET normalized = lower(raw) UNSET raw WHERE active".to_string(),
                     ),
-                }]),
+                    flush_policy: None,
+                    message_error_policy: MessageErrorPolicy::Log,
+                }]))
+                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: branched_by("events", "events_stream", &["tenant"]),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Detached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: Some("WHERE tenant = \"acme\"".to_string()),
             }),
             Model::WindowProcessor(CreateWindowProcessor {
@@ -4497,7 +4458,6 @@ mod tests {
                 },
                 aggregate: "events_summary.count = COUNT(events_stream.id)".to_string(),
                 mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             }),
             Model::Emitter(CreateEmitter {

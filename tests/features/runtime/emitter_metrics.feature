@@ -25,11 +25,11 @@ Feature: Emitter metrics
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics' TYPE HTTP;
         CREATE INGESTOR emitter_metrics_source
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_emitter_metrics_source VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT emitter_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT emitter_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {

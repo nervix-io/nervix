@@ -47,27 +47,27 @@ Feature: Ingestor branch consistency
         CONFIG {
           'addr' = 'redis://127.0.0.1:6379/'
         }; CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
         }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_branch TTL 5m; CREATE INGESTOR redis_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_redis_notifications VALUES {
           user_id = notifications.user_id
         }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM REDIS PUBSUB redis_main
         CHANNEL notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       """
 
     Examples:
@@ -123,26 +123,26 @@ Feature: Ingestor branch consistency
         };
 
       CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m; CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
         }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_a_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE INGESTOR mqtt_notifications_secondary
-        TO notifications
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG; CREATE INGESTOR mqtt_notifications_secondary
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications_secondary VALUES {
           tenant = notifications.tenant,
           user_id = notifications.user_id
         }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_secondary
         TOPIC notifications_b_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       START;
       """

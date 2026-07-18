@@ -33,18 +33,16 @@ Feature: Reorderer
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO incoming_notifications
+        TO incoming_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { tenant = incoming_notifications.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications BRANCHED BY by_http_notifications
+        TO ordered_notifications FLUSH EACH 2s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_http_notifications
         BY incoming_notifications.sequence
-        MAX TIME 10s
-        FLUSH EACH 2s MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG;
+        MAX TIME 10s;
         CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
         START;
       """
@@ -118,18 +116,16 @@ Feature: Reorderer
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO incoming_notifications
+        TO incoming_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { tenant = incoming_notifications.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications BRANCHED BY by_http_notifications
+        TO ordered_notifications FLUSH EACH 2s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_http_notifications
         BY lower(trim(incoming_notifications.category)), abs(incoming_notifications.priority)
-        MAX TIME 10s
-        FLUSH EACH 2s MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG;
+        MAX TIME 10s;
         CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
         START;
       """
@@ -194,10 +190,9 @@ Feature: Reorderer
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_order_notifications;
         CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications BRANCHED BY by_order_notifications
+        TO ordered_notifications FLUSH EACH 2s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_order_notifications
         BY incoming_notifications.sequence
         MAX TIME 10s
-        FLUSH EACH 2s MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG
+
         ON GENERAL ERROR LOG;
       """

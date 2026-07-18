@@ -31,13 +31,13 @@ Feature: Prometheus ingestion
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples
-        TO samples
+        TO samples FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING sample_codec
         BRANCHED BY by_prom_samples VALUES { source = samples.source }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
-        EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        EVERY 1s ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION samples_subscription TO samples;
         START;
       """
@@ -86,13 +86,13 @@ Feature: Prometheus ingestion
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples
-        TO samples
+        TO samples FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING sample_codec
         BRANCHED BY by_prom_samples VALUES { source = samples.source }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(43.5), "source", "recover", "", "")'
-        EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        EVERY 1s ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION samples_subscription TO samples;
         START;
       """
@@ -147,14 +147,14 @@ Feature: Prometheus ingestion
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples
-        TO samples
+        TO samples FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING sample_codec
         BRANCHED BY by_prom_samples VALUES { source = samples.source }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
         FROM PROMETHEUS prom_main
         QUERY 'label_replace(vector(time()), "source", "local", "", "")'
-        EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        EVERY 1s ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION samples_subscription TO samples;
       """
     When these NSPL commands are executed on the leader node

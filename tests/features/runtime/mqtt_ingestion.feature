@@ -27,13 +27,13 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -86,13 +86,13 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-reconnect-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_reconnect_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -148,14 +148,13 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-noack-parallel-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_noack_parallel_{{test_id}}
-        QOS 1 MODE NO_ACK PARALLEL MAX 2
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        QOS 1 MODE NO_ACK PARALLEL MAX 2 ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -205,16 +204,15 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-fixed-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_client_conflict_{{test_id}}
         INSTANCES 2
         SESSION PERSISTENT QOS 1
-        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         START;
       """
     Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
@@ -255,16 +253,15 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-template-{{test_id}}-{{instance}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_client_template_{{test_id}}
         INSTANCES 2
         SESSION PERSISTENT QOS 1
-        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -316,16 +313,15 @@ Feature: MQTT ingestion
         };
 
       CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         UNBRANCHED
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_start_failure_{{test_id}}
         INSTANCES 1
         SESSION PERSISTENT QOS 1
-        MODE ACK SEQUENTIAL ACK TIMEOUT oops RETRY POLICY BACKOFF 100ms MAX 200ms
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT oops RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
 
       START;
       """
@@ -390,15 +386,14 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-ack-seq-out-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_ingress
         TOPIC notifications_ack_seq_{{test_id}}
         SESSION PERSISTENT QOS 1
-        MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE EMITTER mqtt_forward
         FROM notifications
         ENCODE USING notification_codec
@@ -463,16 +458,15 @@ Feature: MQTT ingestion
           'client_id' = 'nervix-cucumber-ingestor-ack-parallel-{{test_id}}-{{instance}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC notifications_ack_parallel_{{test_id}}
         INSTANCES 2
         SESSION PERSISTENT QOS 1
-        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
         DRAIN NODE node-1;

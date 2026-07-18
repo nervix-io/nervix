@@ -915,6 +915,11 @@ impl DomainState {
                     )?;
                 }
                 Model::Inferencer(processor) => {
+                    ensure_processor_output_flush_policies(
+                        domain,
+                        identifier,
+                        &processor.output_routes,
+                    )?;
                     processor.execution_mode().map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
@@ -990,14 +995,14 @@ impl DomainState {
                             processor,
                         )?;
                     }
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &processor.message_error_policy,
+                        &processor.output_routes,
                     )?;
                 }
                 Model::WasmProcessor(processor) => {
@@ -1057,14 +1062,14 @@ impl DomainState {
                         branch_schema,
                     )?;
 
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &processor.message_error_policy,
+                        &processor.output_routes,
                     )?;
                 }
                 Model::Codec(codec) => {
@@ -1109,6 +1114,11 @@ impl DomainState {
                 }
                 Model::Ingestor(ingestor) => {
                     validate_ingestor_source(domain, identifier, ingestor)?;
+                    ensure_processor_output_flush_policies(
+                        domain,
+                        identifier,
+                        &ingestor.output_routes,
+                    )?;
 
                     add_processor_output_edges(
                         domain,
@@ -1224,14 +1234,14 @@ impl DomainState {
                         ingestor,
                         producer_schema,
                     )?;
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &ingestor.error_policies.message,
+                        &ingestor.output_routes,
                     )?;
                 }
                 Model::Relay(stream) => {
@@ -1268,6 +1278,11 @@ impl DomainState {
                     }
                 }
                 Model::Reingestor(reingestor) => {
+                    ensure_processor_output_flush_policies(
+                        domain,
+                        identifier,
+                        &reingestor.output_routes,
+                    )?;
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -1345,14 +1360,14 @@ impl DomainState {
                             branch_schema,
                         )?;
                     }
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &reingestor.message_error_policy,
+                        &reingestor.output_routes,
                     )?;
                 }
                 Model::Endpoint(endpoint) => {
@@ -1408,6 +1423,11 @@ impl DomainState {
                     ensure_lookup_key_field_exists(domain, identifier, lookup, schema)?;
                 }
                 Model::Deduplicator(deduplicator) => {
+                    ensure_processor_output_flush_policies(
+                        domain,
+                        identifier,
+                        &deduplicator.output_routes,
+                    )?;
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -1482,14 +1502,14 @@ impl DomainState {
                         "deduplicator flow",
                         ProcessorOutputSchemaCompatibility::Compatible,
                     )?;
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &deduplicator.message_error_policy,
+                        &deduplicator.output_routes,
                     )?;
                 }
                 Model::Correlator(correlator) => {
@@ -1615,14 +1635,14 @@ impl DomainState {
                             "correlator flow",
                         )?;
                     }
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &correlator.message_error_policy,
+                        &correlator.output_routes,
                     )?;
                 }
                 Model::Reorderer(reorderer) => {
@@ -1646,24 +1666,11 @@ impl DomainState {
                             ),
                         })
                     })?;
-                    humantime::parse_duration(&reorderer.flush_each)
-                        .or_else(|error| {
-                            if reorderer.flush_each.eq_ignore_ascii_case("IMMEDIATE") {
-                                Ok(std::time::Duration::ZERO)
-                            } else {
-                                Err(error)
-                            }
-                        })
-                        .map_err(|error| {
-                            Report::new(RegistryError::InvalidModel {
-                                domain: domain.as_str().to_string(),
-                                identifier: identifier.as_str().to_string(),
-                                reason: format!(
-                                    "invalid reorderer FLUSH '{}': {error}",
-                                    reorderer.flush_each
-                                ),
-                            })
-                        })?;
+                    ensure_processor_output_flush_policies(
+                        domain,
+                        identifier,
+                        &reorderer.output_routes,
+                    )?;
 
                     let input_schemas = processor_input_schemas(
                         domain,
@@ -1713,17 +1720,22 @@ impl DomainState {
                         "reorderer flow",
                         ProcessorOutputSchemaCompatibility::Compatible,
                     )?;
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &reorderer.message_error_policy,
+                        &reorderer.output_routes,
                     )?;
                 }
                 Model::Junction(junction) => {
+                    ensure_processor_output_flush_policies(
+                        domain,
+                        identifier,
+                        &junction.output_routes,
+                    )?;
                     add_processor_output_edges(
                         domain,
                         identifier,
@@ -1782,14 +1794,14 @@ impl DomainState {
                         "junction flow",
                         ProcessorOutputSchemaCompatibility::Equal,
                     )?;
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &junction.message_error_policy,
+                        &junction.output_routes,
                     )?;
                 }
                 Model::WindowProcessor(window_processor) => {
@@ -1861,14 +1873,14 @@ impl DomainState {
                         &input_schemas,
                         branch_schema,
                     )?;
-                    add_message_error_policy_edges(
+                    add_output_message_error_policy_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &window_processor.message_error_policy,
+                        &window_processor.output_routes,
                     )?;
                 }
                 Model::Emitter(emitter) => {
@@ -3582,6 +3594,29 @@ fn add_message_error_policy_edges(
     Ok(())
 }
 
+fn add_output_message_error_policy_edges(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    indices: &HashMap<RegistryKey, NodeIndex>,
+    graph: &mut DiGraph<ActiveNode, EdgeKind>,
+    source: NodeIndex,
+    outputs: &ProcessorOutputs,
+) -> Result<(), Report<RegistryError>> {
+    for output in outputs.outputs() {
+        add_message_error_policy_edges(
+            domain,
+            identifier,
+            models,
+            indices,
+            graph,
+            source,
+            &output.message_error_policy,
+        )?;
+    }
+    Ok(())
+}
+
 fn add_correlation_timeout_action_edges(
     domain: &Domain,
     identifier: &Identifier,
@@ -3846,6 +3881,71 @@ fn ensure_processor_outputs_declared(
         })?;
     }
 
+    Ok(())
+}
+
+fn ensure_processor_output_flush_policies(
+    domain: &Domain,
+    identifier: &Identifier,
+    outputs: &ProcessorOutputs,
+) -> Result<(), Report<RegistryError>> {
+    for output in outputs.outputs() {
+        let Some(policy) = output.flush_policy.as_ref() else {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "TO output '{}' must declare FLUSH EACH or FLUSH IMMEDIATE",
+                    output.relay.as_str()
+                ),
+            }));
+        };
+        if policy.flush_each.eq_ignore_ascii_case("IMMEDIATE") {
+            if policy.max_batch_size.is_some() {
+                return Err(Report::new(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "TO output '{}' FLUSH IMMEDIATE cannot declare MAX BATCH SIZE",
+                        output.relay.as_str()
+                    ),
+                }));
+            }
+            continue;
+        }
+        humantime::parse_duration(&policy.flush_each).map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "invalid TO output '{}' FLUSH EACH duration '{}': {error}",
+                    output.relay.as_str(),
+                    policy.flush_each
+                ),
+            })
+        })?;
+        let Some(max_batch_size) = policy.max_batch_size.as_deref() else {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "TO output '{}' FLUSH EACH requires MAX BATCH SIZE",
+                    output.relay.as_str()
+                ),
+            }));
+        };
+        max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "invalid TO output '{}' MAX BATCH SIZE '{}': {error}",
+                    output.relay.as_str(),
+                    max_batch_size
+                ),
+            })
+        })?;
+    }
     Ok(())
 }
 
@@ -5514,24 +5614,7 @@ fn validate_correlator(
             ),
         })
     })?;
-    humantime::parse_duration(&correlator.flush_each)
-        .or_else(|error| {
-            if correlator.flush_each.eq_ignore_ascii_case("IMMEDIATE") {
-                Ok(std::time::Duration::ZERO)
-            } else {
-                Err(error)
-            }
-        })
-        .map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "invalid correlator FLUSH '{}': {error}",
-                    correlator.flush_each
-                ),
-            })
-        })?;
+    ensure_processor_output_flush_policies(domain, identifier, &correlator.output_routes)?;
 
     validate_correlate_where_for_internal_schemas(
         domain,
@@ -7994,11 +8077,10 @@ mod tests {
         };
         Model::Ingestor(CreateIngestor {
             name: identifier(name),
-            output_routes: ProcessorOutputs::single(identifier(into)),
+            output_routes: (ProcessorOutputs::single(identifier(into)))
+                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
             decode_using_codec: identifier(codec),
             branched_by,
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
             timestamp_source: None,
             source: IngestSource::Kafka {
                 client: Identifier::parse(client).expect("valid identifier"),
@@ -8015,7 +8097,7 @@ mod tests {
                     },
                 },
             },
-            error_policies: ErrorPolicies::handled_by_log(),
+            general_error_policy: GeneralErrorPolicy::Log,
 
             filter_where: None,
         })
@@ -8092,7 +8174,6 @@ mod tests {
             resource: identifier("wasm_filter"),
             resource_version: Some(1),
             file: "processors/filter_even.wasm".to_string(),
-            message_error_policy: MessageErrorPolicy::Log,
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
             filter_where: None,
@@ -8109,19 +8190,17 @@ mod tests {
             name: identifier(name),
             left: ProcessorInputs::single(identifier(left_relay)),
             right: ProcessorInputs::single(identifier(right_relay)),
-            output_routes: ProcessorOutputs::single(identifier(into_relay)),
+            output_routes: (ProcessorOutputs::single(identifier(into_relay)))
+                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
             branched_by: BranchSelection::unbranched(),
             correlate_where: format!("WHERE {left_relay}.value = {right_relay}.value"),
             match_policy: CorrelatorMatchPolicy::Earliest,
             output: format!("{into_relay}.value = {left_relay}.value"),
             max_time: "5s".to_string(),
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
             timeout_policy: CorrelationTimeoutPolicy {
                 left: CorrelationTimeoutAction::Drop,
                 right: CorrelationTimeoutAction::Drop,
             },
-            message_error_policy: MessageErrorPolicy::Log,
             mode: AckMode::Attached,
             filter_where: None,
         })
@@ -8145,7 +8224,6 @@ mod tests {
             },
             aggregate: aggregate.to_string(),
             mode: AckMode::Attached,
-            message_error_policy: MessageErrorPolicy::Log,
             filter_where: None,
         })
     }
@@ -8160,18 +8238,16 @@ mod tests {
                     .collect(),
                 Vec::new(),
             ),
-            output_routes: ProcessorOutputs::single(
+            output_routes: (ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
-            ),
+            ))
+            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(
                 from_relays
                     .first()
                     .expect("junction helper requires at least one input"),
             )),
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
-            message_error_policy: MessageErrorPolicy::Log,
             filter_where: None,
         })
     }
@@ -8186,16 +8262,14 @@ mod tests {
         Model::Deduplicator(CreateDeduplicator {
             name: Identifier::parse(name).expect("valid identifier"),
             from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
-            output_routes: ProcessorOutputs::single(
+            output_routes: (ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
-            ),
+            ))
+            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
             deduplicate_on: field.to_string(),
             max_time: max_time.to_string(),
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
-            message_error_policy: MessageErrorPolicy::Log,
             filter_where: None,
         })
     }
@@ -8209,14 +8283,12 @@ mod tests {
         Model::Reingestor(CreateReingestor {
             name: Identifier::parse(name).expect("valid identifier"),
             from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
-            output_routes: ProcessorOutputs::single(
+            output_routes: (ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
-            ),
+            ))
+            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
             branched_by,
-            flush_each: "100ms".to_string(),
-            max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
-            message_error_policy: MessageErrorPolicy::Log,
             filter_where: None,
         })
     }
@@ -8708,13 +8780,12 @@ mod tests {
 
             CREATE INFERENCER score_model
               FROM features
-              TO scored SET scored.score = inner_output.score UNSET features.vector
+              TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score UNSET features.vector ON MESSAGE ERROR LOG
               BRANCHED BY by_tenant_branch
               USING RESOURCE fraud_model VERSION 1
               FILE 'models/simple_score.onnx'
               INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector }
-              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
-              FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] };
             "#,
         );
         let path = temp_db_path();
@@ -8737,11 +8808,10 @@ mod tests {
             CREATE RELAY features SCHEMA features UNBRANCHED;
             CREATE RELAY scored SCHEMA scored UNBRANCHED;
             CREATE INFERENCER score_model
-              FROM features TO scored SET scored.score = inner_output.score UNBRANCHED
+              FROM features TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score ON MESSAGE ERROR LOG UNBRANCHED
               USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
               INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = features.vector }
-              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
-              FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] };
             "#,
         );
         let path = temp_db_path();
@@ -8765,11 +8835,10 @@ mod tests {
             CREATE RELAY features SCHEMA features UNBRANCHED;
             CREATE RELAY scored SCHEMA scored UNBRANCHED;
             CREATE INFERENCER score_model
-              FROM features TO scored SET scored.score = inner_output.score UNBRANCHED
+              FROM features TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score ON MESSAGE ERROR LOG UNBRANCHED
               USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
               INPUTS { "features" DENSE TENSOR<F32>[BATCH, BATCH, 2] = features.vector }
-              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] }
-              FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] };
             "#,
         );
         let path = temp_db_path();
@@ -8810,12 +8879,12 @@ mod tests {
 
             CREATE WINDOW PROCESSOR latency_window
               FROM metrics
-              TO metric_summaries BRANCHED BY by_tenant_branch
+              TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
               WIDTH 2 MESSAGES
               STEP 2 MESSAGES
               AGGREGATE
                 metric_summaries.tenant = FIRST(metrics.tenant),
-                metric_summaries.sample_count = COUNT(metrics.latency) ON MESSAGE ERROR LOG;
+                metric_summaries.sample_count = COUNT(metrics.latency);
             "#,
         );
         let path = temp_db_path();
@@ -8851,11 +8920,11 @@ mod tests {
 
             CREATE WINDOW PROCESSOR latency_window
               FROM metrics
-              TO metric_summaries BRANCHED BY by_tenant_branch
+              TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
               WIDTH 10s DURATION
               STEP 5s DURATION
               AGGREGATE
-                metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
+                metric_summaries.total_latency = SUM(metrics.latency);
             "#,
         );
         let path = temp_db_path();
@@ -8898,14 +8967,14 @@ mod tests {
 
             CREATE WINDOW PROCESSOR first_window
               FROM metrics
-              TO high_summaries WHERE high_summaries.total_latency >= 100
-              TO low_summaries BRANCHED BY by_tenant_branch
+              TO high_summaries WHERE high_summaries.total_latency >= 100 ON MESSAGE ERROR LOG
+              TO low_summaries ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
               WIDTH 2 MESSAGES
               STEP 2 MESSAGES
               AGGREGATE
                 high_summaries.tenant = FIRST(metrics.tenant),
                 high_summaries.sample_count = COUNT(metrics.latency),
-                high_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
+                high_summaries.total_latency = SUM(metrics.latency);
             "#,
         );
         let path = temp_db_path();
@@ -8942,12 +9011,11 @@ mod tests {
               USING RESOURCE wasm_filter VERSION 1
               FILE 'processors/filter_even.wasm'
               FROM raw_metrics FILTER WHERE raw_metrics.value >= 0
-              TO even_metrics WHERE even_metrics.value >= 10
+              TO even_metrics WHERE even_metrics.value >= 10 ON MESSAGE ERROR LOG
               TO projected_metrics
                 SET projected_metrics.source = input.source,
-                    projected_metrics.bucket = lower(projected_metrics.bucket)
-              UNBRANCHED
-              ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+                    projected_metrics.bucket = lower(projected_metrics.bucket) ON MESSAGE ERROR LOG
+              UNBRANCHED ON GLOBAL ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -8975,11 +9043,9 @@ mod tests {
 
             CREATE DEDUPLICATOR dedup_metrics
               FROM raw_metrics WHERE raw_metrics.value >= 0
-              TO deduped_metrics UNBRANCHED
+              TO deduped_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
               DEDUPLICATE ON raw_metrics.source
-              MAX TIME 10m
-              FLUSH IMMEDIATE
-              ON MESSAGE ERROR LOG;
+              MAX TIME 10m;
             "#,
         );
         let path = temp_db_path();
@@ -9007,11 +9073,9 @@ mod tests {
 
             CREATE DEDUPLICATOR dedup_metrics
               FROM raw_metrics WHERE raw_metrics.value
-              TO deduped_metrics UNBRANCHED
+              TO deduped_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
               DEDUPLICATE ON raw_metrics.source
-              MAX TIME 10m
-              FLUSH IMMEDIATE
-              ON MESSAGE ERROR LOG;
+              MAX TIME 10m;
             "#,
         );
         let path = temp_db_path();
@@ -9048,11 +9112,9 @@ mod tests {
 
             CREATE DEDUPLICATOR dedup_metrics
               FROM raw_metrics WHERE deduped_metrics.value >= 0
-              TO deduped_metrics UNBRANCHED
+              TO deduped_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
               DEDUPLICATE ON raw_metrics.source
-              MAX TIME 10m
-              FLUSH IMMEDIATE
-              ON MESSAGE ERROR LOG;
+              MAX TIME 10m;
             "#,
         );
         let path = temp_db_path();
@@ -9091,10 +9153,9 @@ mod tests {
               USING RESOURCE wasm_filter VERSION 1
               FILE 'processors/filter_even.wasm'
               FROM raw_metrics
-              TO projected_metrics
-              TO projected_metrics WHERE projected_metrics.value >= 0
-              UNBRANCHED
-              ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+              TO projected_metrics ON MESSAGE ERROR LOG
+              TO projected_metrics WHERE projected_metrics.value >= 0 ON MESSAGE ERROR LOG
+              UNBRANCHED ON GLOBAL ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -9130,14 +9191,12 @@ mod tests {
                     Model::Deduplicator(CreateDeduplicator {
                         name: identifier("dedup_events"),
                         from: ProcessorInputs::single(identifier("raw_events")),
-                        output_routes: ProcessorOutputs::single(identifier("projected_events")),
+                        output_routes: (ProcessorOutputs::single(identifier("projected_events")))
+                            .with_flush_policy("IMMEDIATE".to_string(), None),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: "raw_events.value".to_string(),
                         max_time: "10m".to_string(),
-                        flush_each: "IMMEDIATE".to_string(),
-                        max_batch_size: None,
                         mode: AckMode::Attached,
-                        message_error_policy: MessageErrorPolicy::Log,
                         filter_where: None,
                     }),
                 ],
@@ -9364,20 +9423,19 @@ mod tests {
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("http_ing").expect("valid identifier"),
-                        output_routes: ProcessorOutputs::single(
+                        output_routes: (ProcessorOutputs::single(
                             Identifier::parse("notifications").expect("valid identifier"),
-                        ),
+                        ))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
                         branched_by: BranchInitiatorSelection::unbranched(),
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
                         source: IngestSource::Endpoint {
                             endpoint: Identifier::parse("ingest_http").expect("valid identifier"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
                         },
-                        error_policies: ErrorPolicies::handled_by_log(),
+                        general_error_policy: GeneralErrorPolicy::Log,
 
                         filter_where: None,
                     }),
@@ -9426,13 +9484,12 @@ mod tests {
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("mqtt_ing").expect("valid identifier"),
-                    output_routes: ProcessorOutputs::single(
+                    output_routes: (ProcessorOutputs::single(
                         Identifier::parse("notifications").expect("valid identifier"),
-                    ),
+                    ))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
                     branched_by: BranchInitiatorSelection::unbranched(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::Mqtt {
                         client: Identifier::parse("mqtt_main").expect("valid identifier"),
@@ -9443,7 +9500,7 @@ mod tests {
                             qos: MqttQos::AtMostOnce,
                         },
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
             ],
@@ -9501,13 +9558,12 @@ mod tests {
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
-                    output_routes: ProcessorOutputs::single(
+                    output_routes: (ProcessorOutputs::single(
                         Identifier::parse("notifications").expect("valid identifier"),
-                    ),
+                    ))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
                     branched_by: BranchInitiatorSelection::unbranched(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: Some(IngestTimestampSource::At(
                         Identifier::parse("occurred_at").expect("valid identifier"),
                     )),
@@ -9520,7 +9576,7 @@ mod tests {
                         instances: 1,
                         mode: KafkaIngestMode::NoAckParallel { max: 1 },
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
                 }),
@@ -9614,19 +9670,20 @@ mod tests {
                     branch_for_relay("notifications", "tenant_branch", &["tenant"]),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("ing").expect("valid identifier"),
-                        output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                        output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                             relay: Identifier::parse("notifications").expect("valid identifier"),
                             filter_map: Some(
                                 "SET notifications.total = message.value, notifications.tenant = \
                                  message.tenant UNSET notifications.value, notifications.raw"
                                     .to_string(),
                             ),
-                        }]),
+                            flush_policy: None,
+                            message_error_policy: MessageErrorPolicy::Log,
+                        }]))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
                         branched_by: branched_by("tenant_branch", "notifications", &["tenant"]),
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
                         source: IngestSource::Kafka {
                             client: Identifier::parse("broker").expect("valid identifier"),
@@ -9637,7 +9694,7 @@ mod tests {
                             instances: 1,
                             mode: KafkaIngestMode::NoAckParallel { max: 1 },
                         },
-                        error_policies: ErrorPolicies::handled_by_log(),
+                        general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     }),
                 ],
@@ -9688,18 +9745,19 @@ mod tests {
                 relay("notifications", "transformed_schema"),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
-                    output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                    output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                         relay: Identifier::parse("notifications").expect("valid identifier"),
                         filter_map: Some(
                             "SET notifications.total = message.missing + 1 UNSET \
                              notifications.value"
                                 .to_string(),
                         ),
-                    }]),
+                        flush_policy: None,
+                        message_error_policy: MessageErrorPolicy::Log,
+                    }]))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
                     branched_by: BranchInitiatorSelection::unbranched(),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
                         client: Identifier::parse("broker").expect("valid identifier"),
@@ -9710,7 +9768,7 @@ mod tests {
                         instances: 1,
                         mode: KafkaIngestMode::NoAckParallel { max: 1 },
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
                 }),
@@ -9775,14 +9833,15 @@ mod tests {
                 branch_for_relay("notifications", "tenant_branch", &["tenant"]),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
-                    output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                    output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                         relay: Identifier::parse("notifications").expect("valid identifier"),
                         filter_map: Some("UNSET notifications.value".to_string()),
-                    }]),
+                        flush_policy: None,
+                        message_error_policy: MessageErrorPolicy::Log,
+                    }]))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
                     branched_by: branched_by("tenant_branch", "notifications", &["tenant"]),
-                    flush_each: "100ms".to_string(),
-                    max_batch_size: Some("1MiB".to_string()),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
                         client: Identifier::parse("broker").expect("valid identifier"),
@@ -9793,7 +9852,7 @@ mod tests {
                         instances: 1,
                         mode: KafkaIngestMode::NoAckParallel { max: 1 },
                     },
-                    error_policies: ErrorPolicies::handled_by_log(),
+                    general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
                 }),
@@ -9834,20 +9893,19 @@ mod tests {
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("ws_ing").expect("valid identifier"),
-                        output_routes: ProcessorOutputs::single(
+                        output_routes: (ProcessorOutputs::single(
                             Identifier::parse("notifications").expect("valid identifier"),
-                        ),
+                        ))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
                         branched_by: BranchInitiatorSelection::unbranched(),
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
                         source: IngestSource::Endpoint {
                             endpoint: Identifier::parse("ingest_ws").expect("valid identifier"),
                             mode: nervix_models::EndpointIngestMode::NoAckSequential,
                         },
-                        error_policies: ErrorPolicies::handled_by_log(),
+                        general_error_policy: GeneralErrorPolicy::Log,
 
                         filter_where: None,
                     }),
@@ -10545,14 +10603,12 @@ mod tests {
                             vec![identifier("notifications_a"), identifier("notifications_b")],
                             Vec::new(),
                         ),
-                        output_routes: ProcessorOutputs::single(identifier("deduped")),
+                        output_routes: (ProcessorOutputs::single(identifier("deduped")))
+                            .with_flush_policy("IMMEDIATE".to_string(), None),
                         branched_by: BranchSelection::unbranched(),
                         deduplicate_on: "notifications_a.value".to_string(),
                         max_time: "10m".to_string(),
-                        flush_each: "IMMEDIATE".to_string(),
-                        max_batch_size: None,
                         mode: AckMode::Attached,
-                        message_error_policy: MessageErrorPolicy::Log,
                         filter_where: None,
                     }),
                 ],
@@ -10617,12 +10673,10 @@ mod tests {
                     Model::Reingestor(CreateReingestor {
                         name: identifier("leak_events"),
                         from: ProcessorInputs::single(identifier("sensitive_events")),
-                        output_routes: ProcessorOutputs::single(identifier("public_events")),
+                        output_routes: (ProcessorOutputs::single(identifier("public_events")))
+                            .with_flush_policy("IMMEDIATE".to_string(), None),
                         branched_by: BranchInitiatorSelection::unbranched(),
-                        flush_each: "IMMEDIATE".to_string(),
-                        max_batch_size: None,
                         mode: AckMode::Attached,
-                        message_error_policy: MessageErrorPolicy::Log,
                         filter_where: None,
                     }),
                 ],
@@ -10801,12 +10855,11 @@ mod tests {
               RIGHT FROM right_events
               CORRELATE WHERE lower(left_events.value)
               MATCH EARLIEST
-              TO correlated_events UNBRANCHED
-              FLUSH IMMEDIATE
+              TO correlated_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
+
               OUTPUT correlated_events.value = left_events.value
               MAX TIME 5s
-              ON CORRELATION TIMEOUT DROP, DROP
-              ON MESSAGE ERROR LOG;
+              ON CORRELATION TIMEOUT DROP, DROP;
             "#,
         );
         let path = temp_db_path();
@@ -10857,12 +10910,11 @@ mod tests {
               RIGHT FROM right_events
               CORRELATE WHERE branch.tenant = left_events.tenant
               MATCH EARLIEST
-              TO correlated_events BRANCHED BY by_tenant_branch
-              FLUSH IMMEDIATE
+              TO correlated_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
+
               OUTPUT correlated_events.value = left_events.value
               MAX TIME 5s
-              ON CORRELATION TIMEOUT DROP, DROP
-              ON MESSAGE ERROR LOG;
+              ON CORRELATION TIMEOUT DROP, DROP;
             "#,
         );
         let path = temp_db_path();
@@ -10917,12 +10969,11 @@ mod tests {
               RIGHT FROM right_events
               CORRELATE WHERE left_events.value = right_events.value
               MATCH EARLIEST
-              TO correlated_events UNBRANCHED
-              FLUSH IMMEDIATE
+              TO correlated_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
+
               OUTPUT correlated_events.value = left_events.value
               MAX TIME 5s
-              ON CORRELATION TIMEOUT DROP, DROP
-              ON MESSAGE ERROR LOG;
+              ON CORRELATION TIMEOUT DROP, DROP;
             "#,
         );
         let path = temp_db_path();
@@ -11144,7 +11195,8 @@ mod tests {
                     ),
                     Model::Ingestor(CreateIngestor {
                         name: identifier("ing_b"),
-                        output_routes: ProcessorOutputs::single(identifier("notifications")),
+                        output_routes: (ProcessorOutputs::single(identifier("notifications")))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                         decode_using_codec: identifier("event_codec"),
                         branched_by: BranchInitiatorSelection::branched_by(
                             identifier("by_notifications_user_id"),
@@ -11154,8 +11206,6 @@ mod tests {
                                 relay_field: identifier("user_id"),
                             }],
                         ),
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
                         timestamp_source: None,
                         source: IngestSource::Kafka {
                             client: identifier("broker_in_2"),
@@ -11170,7 +11220,7 @@ mod tests {
                                 },
                             },
                         },
-                        error_policies: ErrorPolicies::handled_by_log(),
+                        general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     }),
                 ],
@@ -11558,21 +11608,26 @@ mod tests {
                     Model::Reingestor(CreateReingestor {
                         name: identifier("route_logs"),
                         from: ProcessorInputs::single(identifier("notifications")),
-                        output_routes: ProcessorOutputs::new(vec![
+                        output_routes: (ProcessorOutputs::new(vec![
                             ProcessorOutput {
                                 relay: identifier("errors"),
                                 filter_map: Some(
                                     r#"WHERE notifications.value = "error""#.to_string(),
                                 ),
+                                flush_policy: None,
+                                message_error_policy: MessageErrorPolicy::Log,
                             },
                             ProcessorOutput {
                                 relay: identifier("warnings"),
                                 filter_map: Some(
                                     r#"WHERE notifications.value = "warn""#.to_string(),
                                 ),
+                                flush_policy: None,
+                                message_error_policy: MessageErrorPolicy::Log,
                             },
                             ProcessorOutput::new(identifier("info")),
-                        ]),
+                        ]))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                         branched_by: BranchInitiatorSelection::branched_by(
                             identifier("by_route_logs"),
                             vec![
@@ -11588,10 +11643,7 @@ mod tests {
                                 },
                             ],
                         ),
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
                         mode: AckMode::Attached,
-                        message_error_policy: MessageErrorPolicy::Log,
                         filter_where: None,
                     }),
                 ],
@@ -11686,20 +11738,20 @@ mod tests {
                     Model::Reingestor(CreateReingestor {
                         name: identifier("route_logs"),
                         from: ProcessorInputs::single(identifier("notifications")),
-                        output_routes: ProcessorOutputs::new(vec![
+                        output_routes: (ProcessorOutputs::new(vec![
                             ProcessorOutput {
                                 relay: identifier("errors"),
                                 filter_map: Some(
                                     r#"WHERE notifications.missing = "error""#.to_string(),
                                 ),
+                                flush_policy: None,
+                                message_error_policy: MessageErrorPolicy::Log,
                             },
                             ProcessorOutput::new(identifier("info")),
-                        ]),
+                        ]))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                         branched_by: branched_by("tenant_branch", "errors", &["tenant"]),
-                        flush_each: "100ms".to_string(),
-                        max_batch_size: Some("1MiB".to_string()),
                         mode: AckMode::Attached,
-                        message_error_policy: MessageErrorPolicy::Log,
                         filter_where: None,
                     }),
                 ],
@@ -12630,10 +12682,11 @@ mod tests {
                                 relay: identifier("uncorrelated_right_events"),
                             },
                         };
-                        correlator.message_error_policy = MessageErrorPolicy::Dlq {
-                            relay: identifier("correlator_errors"),
-                            mappings: Vec::new(),
-                        };
+                        correlator.output_routes.routes[0].message_error_policy =
+                            MessageErrorPolicy::Dlq {
+                                relay: identifier("correlator_errors"),
+                                mappings: Vec::new(),
+                            };
                         Model::Correlator(correlator)
                     },
                 ],

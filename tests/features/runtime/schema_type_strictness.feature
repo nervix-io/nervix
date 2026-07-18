@@ -12,12 +12,11 @@ Feature: Schema type strictness
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { tenant = notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP strict_types MODE NO_ACK PARALLEL MAX 10
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP strict_types MODE NO_ACK PARALLEL MAX 10 ON GENERAL ERROR LOG;
       """
 
     Examples:
@@ -77,39 +76,33 @@ Feature: Schema type strictness
       """
       CREATE DEDUPLICATOR missing_unset_projection
         FROM inbound_events
-        TO missing_unset_events
-          SET missing_unset_events.id = inbound_events.id
+        TO missing_unset_events FLUSH IMMEDIATE
+          SET missing_unset_events.id = inbound_events.id ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON inbound_events.id
-        MAX TIME 10m
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
     When these NSPL commands fail with "SET field 'extra' is not declared in the output schema"
       """
       CREATE DEDUPLICATOR unknown_set_projection
         FROM inbound_events
-        TO unknown_set_events
+        TO unknown_set_events FLUSH IMMEDIATE
           SET unknown_set_events.extra = "x"
-          UNSET inbound_events.legacy
+          UNSET inbound_events.legacy ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON inbound_events.id
-        MAX TIME 10m
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
     When these NSPL commands are executed
       """
       CREATE DEDUPLICATOR valid_projection
         FROM inbound_events
-        TO valid_projected_events
+        TO valid_projected_events FLUSH IMMEDIATE
           SET valid_projected_events.id = inbound_events.id
-          UNSET inbound_events.legacy
+          UNSET inbound_events.legacy ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON inbound_events.id
-        MAX TIME 10m
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
 
     Examples:
@@ -142,27 +135,23 @@ Feature: Schema type strictness
       """
       CREATE DEDUPLICATOR null_required_projection
         FROM nullable_inbound_events
-        TO required_projected_events
+        TO required_projected_events FLUSH IMMEDIATE
           SET required_projected_events.memo = NULL
-          UNSET nullable_inbound_events.legacy
+          UNSET nullable_inbound_events.legacy ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON nullable_inbound_events.id
-        MAX TIME 10m
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
     When these NSPL commands are executed
       """
       CREATE DEDUPLICATOR null_optional_projection
         FROM nullable_inbound_events
-        TO nullable_projected_events
+        TO nullable_projected_events FLUSH IMMEDIATE
           SET nullable_projected_events.memo = NULL
-          UNSET nullable_inbound_events.legacy
+          UNSET nullable_inbound_events.legacy ON MESSAGE ERROR LOG
         UNBRANCHED
         DEDUPLICATE ON nullable_inbound_events.id
-        MAX TIME 10m
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
 
     Examples:

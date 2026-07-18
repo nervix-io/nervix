@@ -41,13 +41,13 @@ Feature: Prometheus TLS resource mounts
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE INGESTOR prom_samples
-        TO samples
+        TO samples FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING sample_codec
         BRANCHED BY by_prom_samples VALUES { source = samples.source }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM PROMETHEUS prom_tls
         QUERY 'label_replace(vector(42.5), "source", "prometheus", "", "")'
-        EVERY 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        EVERY 200ms ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION samples_subscription TO samples;
         START;
       """

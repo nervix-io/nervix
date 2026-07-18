@@ -4,7 +4,7 @@ use ahash::{HashMap, HashSet};
 use nervix_models::{
     AckMode, BranchValueMapping, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
     CorrelatorMatchPolicy, ErrorPolicies, Identifier, InferencerTensorDeclaration,
-    InferencerTensorMapping, ModelKind, Timestamp, WindowBound,
+    InferencerTensorMapping, MessageErrorPolicy, ModelKind, Timestamp, WindowBound,
 };
 use nervix_nspl::{
     vm_program::{FieldRef, Program as VmProgram, SpannedNode},
@@ -93,8 +93,6 @@ pub(super) enum BranchedProcessorOperationSpec {
         output_routes: BranchedProcessorOutputsSpec,
         order_by: String,
         max_time: String,
-        flush_each: String,
-        max_batch_size: Option<String>,
     },
     Correlator {
         output_routes: BranchedProcessorOutputsSpec,
@@ -104,14 +102,10 @@ pub(super) enum BranchedProcessorOperationSpec {
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,
         max_time: String,
-        flush_each: String,
-        max_batch_size: Option<String>,
         timeout_policy: CorrelationTimeoutPolicy,
     },
     Junction {
         output_routes: BranchedProcessorOutputsSpec,
-        flush_each: String,
-        max_batch_size: Option<String>,
     },
     Inferencer {
         output_routes: BranchedProcessorOutputsSpec,
@@ -120,8 +114,6 @@ pub(super) enum BranchedProcessorOperationSpec {
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
-        flush_each: String,
-        max_batch_size: Option<String>,
     },
     WasmProcessor {
         output_routes: BranchedProcessorOutputsSpec,
@@ -150,6 +142,9 @@ impl BranchedProcessorOutputsSpec {
 pub(super) struct BranchedProcessorOutputSpec {
     pub(super) relay: Identifier,
     pub(super) filter_map: Option<String>,
+    pub(super) flush_each: Option<String>,
+    pub(super) max_batch_size: Option<String>,
+    pub(super) message_error_policy: MessageErrorPolicy,
     pub(super) children: Vec<BranchedProcessorSpec>,
 }
 
@@ -278,7 +273,6 @@ pub(super) enum RelayProcessorOperationTemplate {
         output_routes: RelayProcessorOutputsTemplate,
         order_by: String,
         max_time: Duration,
-        flush_each: RuntimeFlushPolicy,
     },
     Correlator {
         output_routes: RelayProcessorOutputsTemplate,
@@ -288,12 +282,10 @@ pub(super) enum RelayProcessorOperationTemplate {
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,
         max_time: Duration,
-        flush_each: RuntimeFlushPolicy,
         timeout_policy: CorrelationTimeoutPolicy,
     },
     Junction {
         output_routes: RelayProcessorOutputsTemplate,
-        flush_each: RuntimeFlushPolicy,
     },
     Inferencer {
         output_routes: RelayProcessorOutputsTemplate,
@@ -302,7 +294,6 @@ pub(super) enum RelayProcessorOperationTemplate {
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
-        flush_each: RuntimeFlushPolicy,
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsTemplate,
@@ -322,6 +313,8 @@ pub(super) struct RelayProcessorOutputsTemplate {
 pub(super) struct RelayProcessorOutputTemplate {
     pub(super) output_relay: Identifier,
     pub(super) filter_map: Option<String>,
+    pub(super) flush_policy: Option<RuntimeFlushPolicy>,
+    pub(super) message_error_policy: MessageErrorPolicy,
 }
 
 #[derive(Debug)]
@@ -364,11 +357,9 @@ pub(super) enum RelayProcessorOperationNode {
         output_routes: RelayProcessorOutputsNode,
         order_by: String,
         max_time: Duration,
-        flush_each: RuntimeFlushPolicy,
         compiled_program: Option<Box<CompiledReordererProgram>>,
-        pending: Vec<ReordererPendingMessage>,
+        output_buffers: Vec<ReordererOutputBuffer>,
         arrival_sequence: u64,
-        next_flush: Option<Timestamp>,
     },
     Correlator {
         output_routes: RelayProcessorOutputsNode,
@@ -378,7 +369,6 @@ pub(super) enum RelayProcessorOperationNode {
         match_policy: CorrelatorMatchPolicy,
         output_assignments: String,
         max_time: Duration,
-        flush_each: RuntimeFlushPolicy,
         timeout_policy: CorrelationTimeoutPolicy,
         compiled_where_program: Option<Box<CompiledCorrelatorWhereProgram>>,
         compiled_output_program: Option<Box<CompiledCorrelatorOutputProgram>>,
@@ -386,9 +376,6 @@ pub(super) enum RelayProcessorOperationNode {
     },
     Junction {
         output_routes: RelayProcessorOutputsNode,
-        flush_each: RuntimeFlushPolicy,
-        pending: Vec<RelayRecordBatch>,
-        next_flush: Option<Timestamp>,
     },
     Inferencer {
         output_routes: RelayProcessorOutputsNode,
@@ -397,9 +384,7 @@ pub(super) enum RelayProcessorOperationNode {
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
-        flush_each: RuntimeFlushPolicy,
-        pending: Vec<RelayRecordBatch>,
-        next_flush: Option<Timestamp>,
+        output_buffers: Vec<InferencerOutputBuffer>,
         session: Option<OnnxInferencerSession>,
     },
     WasmProcessor {
@@ -414,6 +399,32 @@ pub(super) enum RelayProcessorOperationNode {
         next_ack_token: u64,
         pending: Vec<RelayRecordBatch>,
     },
+}
+
+impl RelayProcessorOperationNode {
+    pub(super) fn output_routes(&self) -> &RelayProcessorOutputsNode {
+        match self {
+            Self::Deduplicator { output_routes, .. }
+            | Self::WindowProcessor { output_routes, .. }
+            | Self::Reorderer { output_routes, .. }
+            | Self::Correlator { output_routes, .. }
+            | Self::Junction { output_routes, .. }
+            | Self::Inferencer { output_routes, .. }
+            | Self::WasmProcessor { output_routes, .. } => output_routes,
+        }
+    }
+
+    pub(super) fn output_routes_mut(&mut self) -> &mut RelayProcessorOutputsNode {
+        match self {
+            Self::Deduplicator { output_routes, .. }
+            | Self::WindowProcessor { output_routes, .. }
+            | Self::Reorderer { output_routes, .. }
+            | Self::Correlator { output_routes, .. }
+            | Self::Junction { output_routes, .. }
+            | Self::Inferencer { output_routes, .. }
+            | Self::WasmProcessor { output_routes, .. } => output_routes,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -645,13 +656,88 @@ impl RelayProcessorOutputsNode {
     pub(super) fn base_relay(&self) -> Option<Identifier> {
         self.routes.first().map(|output| output.relay.clone())
     }
+
+    pub(super) fn next_flush(&self) -> Option<Timestamp> {
+        self.routes
+            .iter()
+            .filter_map(|output| output.next_flush)
+            .min()
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct RelayProcessorOutputNode {
     pub(super) relay: Identifier,
     pub(super) filter_map: Option<String>,
+    pub(super) flush_policy: Option<RuntimeFlushPolicy>,
+    pub(super) message_error_policy: MessageErrorPolicy,
+    pub(super) pending: Vec<RelayRecordBatch>,
+    pub(super) next_flush: Option<Timestamp>,
     pub(super) compiled_program: Option<CompiledProgramWithMaterializedInterest>,
+}
+
+impl RelayProcessorOutputNode {
+    pub(super) fn schedule_input_flush(
+        &mut self,
+        now: Timestamp,
+        pending_bytes: u64,
+    ) -> Option<bool> {
+        match self.flush_policy? {
+            RuntimeFlushPolicy::Immediate => Some(true),
+            RuntimeFlushPolicy::Each {
+                interval,
+                max_batch_size,
+            } => {
+                let deadline = self
+                    .next_flush
+                    .get_or_insert_with(|| super::checked_add_duration_to_timestamp(now, interval));
+                Some(*deadline <= now || pending_bytes >= max_batch_size)
+            }
+        }
+    }
+
+    pub(super) fn flush_deadline_due(&self, now: Timestamp) -> bool {
+        self.next_flush.is_some_and(|deadline| deadline <= now)
+    }
+
+    pub(super) fn force_flush_at(&mut self, now: Timestamp) {
+        self.next_flush = Some(now);
+    }
+
+    pub(super) fn clear_flush_deadline(&mut self) {
+        self.next_flush = None;
+    }
+
+    pub(super) fn enqueue(&mut self, batch: RelayRecordBatch, now: Timestamp) -> bool {
+        self.pending.push(batch);
+        match self.flush_policy {
+            None | Some(RuntimeFlushPolicy::Immediate) => true,
+            Some(RuntimeFlushPolicy::Each {
+                interval,
+                max_batch_size,
+            }) => {
+                let deadline = self
+                    .next_flush
+                    .get_or_insert_with(|| super::checked_add_duration_to_timestamp(now, interval));
+                *deadline <= now
+                    || self
+                        .pending
+                        .iter()
+                        .map(RelayRecordBatch::estimated_bytes)
+                        .sum::<u64>()
+                        >= max_batch_size
+            }
+        }
+    }
+
+    pub(super) fn flush_due(&self, now: Timestamp) -> bool {
+        !self.pending.is_empty() && self.next_flush.is_some_and(|deadline| deadline <= now)
+    }
+
+    pub(super) fn take_pending(&mut self) -> Vec<RelayRecordBatch> {
+        self.next_flush = None;
+        std::mem::take(&mut self.pending)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -679,6 +765,51 @@ pub(super) struct ReordererPendingMessage {
     pub(super) message: RelayMessage,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct ReordererOutputBuffer {
+    pub(super) pending: Vec<ReordererPendingMessage>,
+    pub(super) estimated_bytes: u64,
+}
+
+impl ReordererOutputBuffer {
+    pub(super) fn clear(&mut self) {
+        self.pending.clear();
+        self.estimated_bytes = 0;
+    }
+
+    pub(super) fn take_pending(&mut self) -> Vec<ReordererPendingMessage> {
+        self.estimated_bytes = 0;
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct InferencerOutputBuffer {
+    pub(super) pending: Vec<RelayRecordBatch>,
+    estimated_bytes: u64,
+}
+
+impl InferencerOutputBuffer {
+    pub(super) fn push(&mut self, batch: RelayRecordBatch) {
+        self.estimated_bytes = self.estimated_bytes.saturating_add(batch.estimated_bytes());
+        self.pending.push(batch);
+    }
+
+    pub(super) fn estimated_bytes(&self) -> u64 {
+        self.estimated_bytes
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.pending.clear();
+        self.estimated_bytes = 0;
+    }
+
+    pub(super) fn take_pending(&mut self) -> Vec<RelayRecordBatch> {
+        self.estimated_bytes = 0;
+        std::mem::take(&mut self.pending)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum ReorderKeyPart {
     Null,
@@ -697,7 +828,6 @@ pub(super) struct CorrelatorBranchState {
     pub(super) pending_left: Vec<CorrelatorPendingMessage>,
     pub(super) pending_right: Vec<CorrelatorPendingMessage>,
     pub(super) output_pending: Vec<RelayMessage>,
-    pub(super) next_flush: Option<Timestamp>,
 }
 
 #[derive(Debug)]

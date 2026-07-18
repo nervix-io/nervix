@@ -40,11 +40,11 @@ Feature: Branched branch behavior
         ON edge
         PATH '/notifications'
         TYPE HTTP; CREATE INGESTOR source_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
@@ -97,16 +97,15 @@ Feature: Branched branch behavior
         PATH '/dedup'
         TYPE HTTP;
         CREATE INGESTOR source_txns
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING transaction_codec
         BRANCHED BY by_source_txns VALUES { tenant = ss1.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 BRANCHED BY by_source_txns
+        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
         DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
@@ -175,19 +174,19 @@ Feature: Branched branch behavior
         PATH '/metrics'
         TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR latency_window
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
-          metric_summaries.sample_count = COUNT(metrics.latency) ON MESSAGE ERROR LOG;
+          metric_summaries.sample_count = COUNT(metrics.latency);
         CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
@@ -254,21 +253,20 @@ Feature: Branched branch behavior
         PATH '/ingest-b'
         TYPE HTTP;
         CREATE INGESTOR source_one
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_one VALUES { tenant = ss1.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
-        TO ss2
+        TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_one VALUES { tenant = ss2.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 BRANCHED BY by_source_one
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO ss10 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_one;
         CREATE SUBSCRIPTION ss10_subscription TO ss10 WHERE ss10.tenant = 'acme';
         START;
       """
@@ -327,16 +325,15 @@ Feature: Branched branch behavior
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE REINGESTOR tenant_partition
         FROM notifications
-        TO tenant_notifications
-        BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO tenant_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant };
         CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications WHERE tenant_notifications.tenant = 'acme';
         START;
       """

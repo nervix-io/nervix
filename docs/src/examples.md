@@ -18,7 +18,7 @@ REST catalog namespace and tables explicitly before the graph appends data.
 For WASM processor guest testing, see `examples/wasm-processors/wasm-dual.nspl`,
 which uploads both the Rust and Go guest modules and wires them into one graph
 with multiple output routes on both WASM processors.
-`examples/binance-websocket/binance_websocket.nspl` connects to the real Binance
+`examples/binance-websocket/binance_websocket.nspl` connects to the FLUSH IMMEDIATE real Binance
 spot WebSocket API with an explicit `SIGNALING PROTOCOL` subscription handshake
 and normalizes the received stream events with a JAQ-native codec. Binance may
 restrict API access by jurisdiction or network location, so this example should
@@ -35,7 +35,7 @@ Per-message execution omits `BATCH` from every binding:
 ```nspl
 CREATE INFERENCER score_message
   FROM input
-  TO output SET output.scores = inner_output.scores UNSET input.features
+  TO output FLUSH IMMEDIATE SET output.scores = inner_output.scores UNSET input.features ON MESSAGE ERROR DROP
   BRANCHED BY tenant
   USING RESOURCE inference
   FILE 'score.onnx'
@@ -44,9 +44,7 @@ CREATE INFERENCER score_message
   }
   OUTPUT SCHEMA {
     "scores" DENSE TENSOR<F32>[10]
-  }
-  FLUSH IMMEDIATE
-  ON MESSAGE ERROR DROP;
+  };
 ```
 
 Batched execution gives every binding one `BATCH` axis. For a flush of `N`
@@ -56,7 +54,7 @@ messages, this example invokes the model once with `features` and `mask` shaped
 ```nspl
 CREATE INFERENCER batch_score_messages
   FROM input
-  TO output SET output.scores = inner_output.scores UNSET input.features, input.mask
+  TO output FLUSH EACH 10ms MAX BATCH SIZE 16mb SET output.scores = inner_output.scores UNSET input.features, input.mask ON MESSAGE ERROR DROP
   BRANCHED BY tenant
   USING RESOURCE inference
   FILE 'batch-score.onnx'
@@ -66,9 +64,7 @@ CREATE INFERENCER batch_score_messages
   }
   OUTPUT SCHEMA {
     "scores" DENSE TENSOR<F32>[BATCH, 10]
-  }
-  FLUSH EACH 10ms MAX BATCH SIZE 16mb
-  ON MESSAGE ERROR DROP;
+  };
 ```
 
 ## Basic Kafka Ingestion
@@ -103,14 +99,14 @@ CREATE CLIENT kafka_main
 CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
 
 CREATE INGESTOR kafka_notifications
-  TO notifications
+  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
   DECODE USING notification_codec
   BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
   FROM KAFKA kafka_main
   TOPIC notifications
   OFFSET BY CONSUMER GROUP nervix_consumer
-  MODE ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  MODE ACK SEQUENTIAL ON GENERAL ERROR LOG;
 ```
 
 ## Kafka TLS Ingestion With A Mounted Resource
@@ -131,14 +127,14 @@ CREATE CLIENT kafka_tls
 CREATE BRANCH by_kafka_notifications_tls SCHEMA user_id_branch TTL 5m;
 
 CREATE INGESTOR kafka_notifications_tls
-  TO notifications
+  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
   DECODE USING notification_codec
   BRANCHED BY by_kafka_notifications_tls VALUES { user_id = notifications.user_id }
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
   FROM KAFKA kafka_tls
   TOPIC notifications_tls
   OFFSET BY CONSUMER GROUP nervix_consumer_tls
-  MODE ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  MODE ACK SEQUENTIAL ON GENERAL ERROR LOG;
 ```
 
 ## Basic Pulsar Ingestion
@@ -153,15 +149,15 @@ CREATE CLIENT pulsar_main
 CREATE BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
 
 CREATE INGESTOR pulsar_notifications
-  TO notifications
+  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
   DECODE USING notification_codec
   BRANCHED BY by_pulsar_notifications VALUES { user_id = notifications.user_id }
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
   FROM PULSAR pulsar_main
   TOPIC notifications
   SUBSCRIPTION nervix_notifications
   INSTANCES 1
-  MODE ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  MODE ACK SEQUENTIAL ON GENERAL ERROR LOG;
 ```
 
 ## Basic Pulsar Emission
@@ -196,14 +192,14 @@ CREATE CLIENT pulsar_tls
 CREATE BRANCH by_pulsar_notifications_tls SCHEMA user_id_branch TTL 5m;
 
 CREATE INGESTOR pulsar_notifications_tls
-  TO notifications
+  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
   DECODE USING notification_codec
   BRANCHED BY by_pulsar_notifications_tls VALUES { user_id = notifications.user_id }
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
   FROM PULSAR pulsar_tls
   TOPIC notifications_tls
   SUBSCRIPTION nervix_pulsar_tls
-  MODE ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  MODE ACK SEQUENTIAL ON GENERAL ERROR LOG;
 ```
 
 ## JSON JAQ On Ingestion
@@ -301,13 +297,13 @@ CREATE CLIENT prom_main
   };
 
 CREATE INGESTOR prom_samples
-  TO samples
+  TO samples FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
   DECODE USING sample_codec
   BRANCHED BY by_prom_samples VALUES { source = samples.source }
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
   FROM PROMETHEUS prom_main
   QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
-  EVERY 1s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  EVERY 1s ON GENERAL ERROR LOG;
 
 CREATE SUBSCRIPTION live_samples TO samples;
 ```
@@ -345,15 +341,14 @@ CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_user
 
 CREATE DEDUPLICATOR project_notifications
   FROM notifications WHERE notifications.active
-  TO projected_notifications
+  TO projected_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
     SET projected_notifications.normalized = lower(trim(notifications.raw)),
         projected_notifications.amount = notifications.amount + 1
     UNSET notifications.raw, notifications.active
-    WHERE trim(notifications.raw) != ''
+    WHERE trim(notifications.raw) != '' ON MESSAGE ERROR LOG
   BRANCHED BY by_user
   DEDUPLICATE ON notifications.tenant, notifications.user_id
-  MAX TIME 10m
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+  MAX TIME 10m;
 ```
 
 This keeps the existing branch grouping, drops inactive rows at the source boundary, rewrites the record shape, drops rows with empty raw text, and forwards the surviving rows into a second relay without changing native grouping.

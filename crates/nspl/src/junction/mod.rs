@@ -5,9 +5,8 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        filter_where_clause, flush_each, from_relay_clauses, if_not_exists_clause,
-        into_parse_error, junction_name, kw, lex_input, message_error_policy, processor_outputs,
-        suggestions_from_errors, tok,
+        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
+        into_parse_error, junction_name, kw, lex_input, suggestions_from_errors, tok,
     },
 };
 
@@ -22,32 +21,20 @@ pub fn create_junction_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
-        .then(processor_outputs())
+        .then(flushed_processor_outputs())
         .then(branch_selection())
-        .then(flush_each())
-        .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |(
-                (
-                    (
-                        (((((if_not_exists, mode), name), from_inputs), filter_where), outputs),
-                        branched_by,
-                    ),
-                    flush_each,
-                ),
-                message_error_policy,
+                (((((if_not_exists, mode), name), from_inputs), filter_where), outputs),
+                branched_by,
             )| {
-                let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateJunction {
                         name,
                         from: from_inputs,
                         output_routes: outputs,
                         branched_by,
-                        flush_each,
-                        max_batch_size,
-                        message_error_policy,
                         mode: mode.unwrap_or(AckMode::Attached),
                         filter_where,
                     },
@@ -116,9 +103,8 @@ mod tests {
         let input = r#"
             CREATE JUNCTION join_streams
                 FROM ss1, ss2, ss3
-                TO ss10
-                BRANCHED BY tenant
-                FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+                TO ss10 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+                BRANCHED BY tenant;
         "#;
 
         let tokens = to_tokens(input);
@@ -147,10 +133,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_message_error_policy_on_each_output_route() {
+        let input = r#"
+            CREATE JUNCTION route_messages
+                FROM incoming
+                TO accepted FLUSH IMMEDIATE ON MESSAGE ERROR IGNORE
+                TO rejected FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                    ON MESSAGE ERROR DLQ errors
+                    SET reason = message_error.message
+                UNBRANCHED;
+        "#;
+
+        let parsed = parse_create_junction(input).expect("route policies should parse");
+        assert_eq!(
+            parsed.output_routes.routes[0].message_error_policy,
+            nervix_models::MessageErrorPolicy::Ignore
+        );
+        assert!(matches!(
+            parsed.output_routes.routes[1].message_error_policy,
+            nervix_models::MessageErrorPolicy::Dlq { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_output_route_without_message_error_policy() {
+        let input = r#"
+            CREATE JUNCTION route_messages
+                FROM incoming
+                TO accepted FLUSH IMMEDIATE ON MESSAGE ERROR IGNORE
+                TO rejected FLUSH IMMEDIATE
+                UNBRANCHED;
+        "#;
+
+        assert!(parse_create_junction(input).is_err());
+    }
+
+    #[test]
+    fn completion_does_not_leak_branch_clause_before_output_message_policy() {
+        let input = "CREATE JUNCTION route_messages FROM incoming TO accepted FLUSH IMMEDIATE ON ";
+        let suggestions = suggest_create_junction(input, input.len());
+
+        assert!(suggestions.iter().any(|suggestion| suggestion == "MESSAGE"));
+        assert!(!suggestions.iter().any(|suggestion| suggestion == "TO"));
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion == "UNBRANCHED")
+        );
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion == "BRANCHED BY")
+        );
+    }
+
+    #[test]
     fn parses_create_detached_junction() {
         let tokens = to_tokens(
-            "CREATE DETACHED JUNCTION join_streams FROM ss1, ss2 TO ss10 BRANCHED BY tenant FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE DETACHED JUNCTION join_streams FROM ss1, ss2 TO ss10 FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.mode, AckMode::Detached);
@@ -159,28 +200,89 @@ mod tests {
     #[test]
     fn parses_junction_flush_each() {
         let tokens = to_tokens(
-            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 BRANCHED BY tenant FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 FLUSH EACH 100ms MAX BATCH SIZE \
+             1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.flush_each, "100ms");
+        assert_eq!(
+            parsed.output_routes.routes[0]
+                .flush_policy
+                .as_ref()
+                .expect("output flush policy should parse")
+                .flush_each,
+            "100ms"
+        );
     }
 
     #[test]
     fn parses_junction_flush_immediate() {
         let tokens = to_tokens(
-            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 BRANCHED BY tenant FLUSH \
-             IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 FLUSH IMMEDIATE ON MESSAGE ERROR \
+             LOG BRANCHED BY tenant;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.flush_each, "IMMEDIATE");
+        assert_eq!(
+            parsed.output_routes.routes[0]
+                .flush_policy
+                .as_ref()
+                .expect("output flush policy should parse")
+                .flush_each,
+            "IMMEDIATE"
+        );
+    }
+
+    #[test]
+    fn parses_distinct_flush_policy_for_each_output() {
+        let tokens = to_tokens(
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO fast FLUSH IMMEDIATE ON MESSAGE ERROR \
+             LOG TO slow FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG UNBRANCHED;",
+        );
+        let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
+        assert_eq!(parsed.output_routes.routes.len(), 2);
+        assert_eq!(
+            parsed.output_routes.routes[0]
+                .flush_policy
+                .as_ref()
+                .expect("first output flush policy should parse")
+                .flush_each,
+            "IMMEDIATE"
+        );
+        assert_eq!(
+            parsed.output_routes.routes[1]
+                .flush_policy
+                .as_ref()
+                .expect("second output flush policy should parse")
+                .flush_each,
+            "1s"
+        );
+    }
+
+    #[test]
+    fn rejects_output_without_flush_policy() {
+        let tokens = to_tokens(
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO fast FLUSH IMMEDIATE ON MESSAGE ERROR \
+             LOG TO slow ON MESSAGE ERROR LOG UNBRANCHED;",
+        );
+        parse_create_junction_tokens(&tokens)
+            .expect_err("every output must declare its own flush policy");
+    }
+
+    #[test]
+    fn suggests_flush_for_each_output_without_branch_leakage() {
+        let input = "CREATE JUNCTION join_streams FROM ss1, ss2 TO fast FLUSH IMMEDIATE ON \
+                     MESSAGE ERROR LOG TO slow FL";
+        let suggestions = suggest_create_junction(input, input.len());
+        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(suggestions.contains(&"FLUSH IMMEDIATE".to_string()));
+        assert!(!suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(!suggestions.contains(&"UNBRANCHED".to_string()));
     }
 
     #[test]
     fn parses_single_source_junction() {
         let tokens = to_tokens(
-            "CREATE JUNCTION join_streams FROM ss1 TO ss10 UNBRANCHED FLUSH IMMEDIATE ON MESSAGE \
-             ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM ss1 TO ss10 FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+             UNBRANCHED;",
         );
         let parsed = parse_create_junction_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.from.from.len(), 1);
@@ -206,7 +308,7 @@ mod tests {
 
     #[test]
     fn suggests_flush_after_target_without_schema_leakage() {
-        let input = "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 BRANCHED BY tenant FL";
+        let input = "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 FL";
         let suggestions = suggest_create_junction(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));

@@ -46,11 +46,11 @@ Feature: Websocket client ingestion
     And these NSPL commands are executed
       """
       CREATE INGESTOR ws_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       START;
       """
     Then within "10s" the observed broker receives payloads
@@ -92,11 +92,11 @@ Feature: Websocket client ingestion
           'endpoint' = 'ws://127.0.0.1:18080/ws/{{test_id}}'
         };
         CREATE INGESTOR ws_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

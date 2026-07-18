@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        deduplicator_name, duration_lit, filter_where_clause, flush_each, from_relay_clauses,
-        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, message_error_policy,
-        processor_outputs, suggestions_from_errors, tok,
+        deduplicator_name, duration_lit, filter_where_clause, flushed_processor_outputs,
+        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
+        suggestions_from_errors, tok,
     },
 };
 
@@ -102,36 +102,24 @@ pub fn create_deduplicator_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
-        .then(processor_outputs())
+        .then(flushed_processor_outputs())
         .then(branch_selection())
         .then(deduplicate_on_exprs())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
         .then(duration_lit())
-        .then(flush_each())
-        .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |(
                 (
                     (
-                        (
-                            (
-                                (
-                                    ((((if_not_exists, mode), name), from_input), filter_where),
-                                    outputs,
-                                ),
-                                branched_by,
-                            ),
-                            deduplicate_on,
-                        ),
-                        max_time,
+                        (((((if_not_exists, mode), name), from_input), filter_where), outputs),
+                        branched_by,
                     ),
-                    flush_each,
+                    deduplicate_on,
                 ),
-                message_error_policy,
+                max_time,
             )| {
-                let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateDeduplicator {
                         name,
@@ -140,9 +128,6 @@ pub fn create_deduplicator_parser<'src>()
                         branched_by,
                         deduplicate_on,
                         max_time,
-                        flush_each,
-                        max_batch_size,
-                        message_error_policy,
                         mode: mode.unwrap_or(AckMode::Attached),
                         filter_where,
                     },
@@ -212,11 +197,10 @@ mod tests {
     fn parses_create_deduplicator() {
         let input = r#"
             CREATE DEDUPLICATOR dedup_txns
-                FROM ss1 TO ss2
+                FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
                 BRANCHED BY tenant
                 DEDUPLICATE ON ss1.transaction_id
-                MAX TIME 10m
-                FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+                MAX TIME 10m;
         "#;
 
         let tokens = to_tokens(input);
@@ -241,9 +225,9 @@ mod tests {
     #[test]
     fn parses_source_where_after_from_relay() {
         let tokens = to_tokens(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE ss1.value = 1 TO ss2 BRANCHED BY \
-             tenant DEDUPLICATE ON ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH \
-             SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE ss1.value = 1 TO ss2 FLUSH EACH 100ms \
+             MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant DEDUPLICATE ON \
+             ss1.transaction_id MAX TIME 10m;",
         );
         let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.from.from[0].as_str(), "ss1");
@@ -256,8 +240,8 @@ mod tests {
     fn parses_multiple_from_relays_with_source_where() {
         let tokens = to_tokens(
             "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE ss1.value = 1, ss2 WHERE ss2.value != \
-             2 TO ss3 BRANCHED BY tenant DEDUPLICATE ON ss1.transaction_id MAX TIME 10m FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             2 TO ss3 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY \
+             tenant DEDUPLICATE ON ss1.transaction_id MAX TIME 10m;",
         );
         let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(
@@ -279,9 +263,10 @@ mod tests {
     #[test]
     fn parses_deduplicator_expression_list() {
         let tokens = to_tokens(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant DEDUPLICATE ON \
-             concat(lower(ss1.transaction_id), '-', trim(ss1.source)), abs(ss1.amount) MAX TIME \
-             10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
+             ON MESSAGE ERROR LOG
+             BRANCHED BY tenant DEDUPLICATE ON concat(lower(ss1.transaction_id), '-', \
+             trim(ss1.source)), abs(ss1.amount) MAX TIME 10m;",
         );
         let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(
@@ -293,9 +278,9 @@ mod tests {
     #[test]
     fn parses_create_detached_deduplicator() {
         let tokens = to_tokens(
-            "CREATE DETACHED DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant \
-             DEDUPLICATE ON ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-             ON MESSAGE ERROR LOG;",
+            "CREATE DETACHED DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH \
+             SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant DEDUPLICATE ON ss1.transaction_id \
+             MAX TIME 10m;",
         );
         let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.mode, AckMode::Detached);
@@ -304,19 +289,26 @@ mod tests {
     #[test]
     fn parses_deduplicator_flush_each() {
         let tokens = to_tokens(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant DEDUPLICATE ON \
-             ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
-             ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
+             ON MESSAGE ERROR LOG BRANCHED BY tenant DEDUPLICATE ON ss1.transaction_id MAX TIME \
+             10m;",
         );
         let parsed = parse_create_deduplicator_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.flush_each, "100ms");
+        assert_eq!(
+            parsed.output_routes.routes[0]
+                .flush_policy
+                .as_ref()
+                .expect("output flush policy should parse")
+                .flush_each,
+            "100ms"
+        );
     }
 
     #[test]
     fn rejects_missing_time_keyword() {
         let tokens = to_tokens(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant DEDUPLICATE ON \
-             ss1.transaction_id MAX 100 ON MESSAGE ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+             BRANCHED BY tenant DEDUPLICATE ON ss1.transaction_id MAX 100;",
         );
         let errors = parse_create_deduplicator_tokens(&tokens).expect_err("parse must fail");
         let debug = format!("{errors:?}");
@@ -326,9 +318,9 @@ mod tests {
     #[test]
     fn rejects_empty_source_where() {
         let tokens = to_tokens(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE TO ss2 BRANCHED BY tenant DEDUPLICATE \
-             ON ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
-             ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 WHERE TO ss2 FLUSH EACH 100ms MAX BATCH SIZE \
+             1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant DEDUPLICATE ON ss1.transaction_id MAX \
+             TIME 10m  ON MESSAGE ERROR LOG;",
         );
         let errors = parse_create_deduplicator_tokens(&tokens).expect_err("parse must fail");
         let debug = format!("{errors:?}");
@@ -363,15 +355,16 @@ mod tests {
 
     #[test]
     fn suggests_deduplicate_on_as_compound_keyword() {
-        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant ";
+        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH IMMEDIATE ON MESSAGE \
+                     ERROR LOG BRANCHED BY tenant ";
         let suggestions = suggest_create_deduplicator(input, input.len());
         assert!(suggestions.contains(&"DEDUPLICATE ON".to_string()));
     }
 
     #[test]
     fn suggests_field_name_after_deduplicate_on() {
-        let input =
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant DEDUPLICATE ON ";
+        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH IMMEDIATE ON MESSAGE \
+                     ERROR LOG BRANCHED BY tenant DEDUPLICATE ON ";
         let suggestions = suggest_create_deduplicator(input, input.len());
         assert!(suggestions.contains(&"deduplicate_on".to_string()));
         assert!(!suggestions.contains(&"ref:relay".to_string()));
@@ -379,8 +372,8 @@ mod tests {
 
     #[test]
     fn suggests_time_after_max_without_schema_leakage() {
-        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant \
-                     DEDUPLICATE ON ss1.transaction_id MAX ";
+        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH IMMEDIATE ON MESSAGE \
+                     ERROR LOG BRANCHED BY tenant DEDUPLICATE ON ss1.transaction_id MAX ";
         let suggestions = suggest_create_deduplicator(input, input.len());
         assert!(suggestions.contains(&"TIME".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -388,9 +381,8 @@ mod tests {
     }
 
     #[test]
-    fn suggests_flush_after_max_time_without_cross_branch_leakage() {
-        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 BRANCHED BY tenant \
-                     DEDUPLICATE ON ss1.transaction_id MAX TIME 10m FL";
+    fn suggests_flush_on_output_without_cross_branch_leakage() {
+        let input = "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FL";
         let suggestions = suggest_create_deduplicator(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
