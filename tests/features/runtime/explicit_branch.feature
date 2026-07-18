@@ -42,11 +42,11 @@ Feature: Explicit branches
         TYPE HTTP;
 
       CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_tenant VALUES { tenant = notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       START;
       """

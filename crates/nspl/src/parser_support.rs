@@ -7,7 +7,8 @@ use chumsky::{
 use nervix_models::{
     AckMode, BranchInitiatorSelection, BranchSelection, BranchValueMapping, Domain,
     ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, Identifier as ModelIdentifier,
-    MessageErrorPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    MessageErrorPolicy, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs,
 };
 use sorted_vec::SortedSet;
 
@@ -795,15 +796,59 @@ fn processor_output_route<'src>()
     kw(Identifier::To)
         .ignore_then(relay_ref())
         .then(output_filter_map_program().or_not())
-        .map(|(relay, filter_map)| ProcessorOutput { relay, filter_map })
+        .then(message_error_policy())
+        .map(
+            |((relay, filter_map), message_error_policy)| ProcessorOutput {
+                relay,
+                filter_map,
+                flush_policy: None,
+                message_error_policy,
+            },
+        )
 }
 
-fn ingestor_output_route<'src>()
+fn flushed_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
         .ignore_then(relay_ref())
+        .then(flush_each())
+        .then(output_filter_map_program().or_not())
+        .then(message_error_policy())
+        .map(
+            |(((relay, (flush_each, max_batch_size)), filter_map), message_error_policy)| {
+                ProcessorOutput {
+                    relay,
+                    filter_map,
+                    flush_policy: Some(OutputFlushPolicy {
+                        flush_each,
+                        max_batch_size,
+                    }),
+                    message_error_policy,
+                }
+            },
+        )
+}
+
+fn flushed_ingestor_output_route<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(flush_each())
         .then(ingestor_output_filter_map_program().or_not())
-        .map(|(relay, filter_map)| ProcessorOutput { relay, filter_map })
+        .then(message_error_policy())
+        .map(
+            |(((relay, (flush_each, max_batch_size)), filter_map), message_error_policy)| {
+                ProcessorOutput {
+                    relay,
+                    filter_map,
+                    flush_policy: Some(OutputFlushPolicy {
+                        flush_each,
+                        max_batch_size,
+                    }),
+                    message_error_policy,
+                }
+            },
+        )
 }
 
 pub fn processor_outputs<'src>()
@@ -815,9 +860,18 @@ pub fn processor_outputs<'src>()
         .map(ProcessorOutputs::new)
 }
 
-pub fn ingestor_outputs<'src>()
+pub fn flushed_processor_outputs<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
-    ingestor_output_route()
+    flushed_processor_output_route()
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(ProcessorOutputs::new)
+}
+
+pub fn flushed_ingestor_outputs<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
+    flushed_ingestor_output_route()
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()

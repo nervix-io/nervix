@@ -14,7 +14,7 @@ CREATE RELAY output SCHEMA output_schema BRANCHED BY tenant;
 
 CREATE INFERENCER score_message
   FROM input
-  TO output SET output.scores = inner_output.scores UNSET input.features
+  TO output FLUSH IMMEDIATE SET output.scores = inner_output.scores UNSET input.features ON MESSAGE ERROR DROP
   BRANCHED BY tenant
   USING RESOURCE inference
   FILE 'score.onnx'
@@ -23,6 +23,4 @@ CREATE INFERENCER score_message
   }
   OUTPUT SCHEMA {
     "scores" DENSE TENSOR<F32>[10]
-  }
-  FLUSH IMMEDIATE
-  ON MESSAGE ERROR DROP;
+  };

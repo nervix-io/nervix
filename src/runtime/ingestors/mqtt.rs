@@ -176,7 +176,9 @@ impl MqttIngestor {
                 runtime: runtime.clone(),
                 domain: domain.clone(),
                 ingestor: ingestor.name.clone(),
-                error_policies: ingestor.error_policies.clone(),
+                error_policies: internal_processor_error_policies(
+                    ingestor.general_error_policy.clone(),
+                ),
                 timestamp_source: ingestor.timestamp_source.clone(),
                 output_routes: output_routes.clone(),
                 filter_where: filter_where.clone(),

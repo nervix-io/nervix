@@ -111,18 +111,18 @@ Feature: Generator node
         TYPE HTTP;
 
       CREATE INGESTOR left_ingestor
-        TO left_notifications
+        TO left_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY tenant_branch VALUES { tenant = left_notifications.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT left_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT left_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE INGESTOR right_ingestor
-        TO right_notifications
+        TO right_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY tenant_branch VALUES { tenant = right_notifications.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT right_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT right_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE GENERATOR synth_notifications
         TO generated_notifications
@@ -202,12 +202,12 @@ Feature: Generator node
         TYPE HTTP;
 
       CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         UNBRANCHED
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE GENERATOR synth_notifications
         TO generated_notifications
@@ -273,12 +273,12 @@ Feature: Generator node
         TYPE HTTP;
 
       CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         UNBRANCHED
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE GENERATOR synth_notifications
         TO generated_notifications
@@ -344,12 +344,12 @@ Feature: Generator node
         TYPE HTTP;
 
       CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         UNBRANCHED
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE GENERATOR synth_notifications
         TO generated_notifications

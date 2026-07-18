@@ -37,15 +37,15 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR tumbling_latency
         FROM metrics
-        TO metric_summaries
-        TO metric_summaries_copy BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG
+        TO metric_summaries_copy ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
@@ -54,7 +54,7 @@ Feature: Window processor runtime behavior
           metric_summaries.adjusted_sample_count = COUNT(metrics.latency) + 2,
           metric_summaries.first_latency = FIRST(metrics.latency),
           metric_summaries.last_latency = LAST(metrics.latency),
-          metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
+          metric_summaries.total_latency = SUM(metrics.latency);
         CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries_copy WHERE metric_summaries_copy.tenant = 'acme';
         START;
       """
@@ -144,14 +144,14 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR sliding_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
         STEP 1 MESSAGES
         AGGREGATE
@@ -162,7 +162,7 @@ Feature: Window processor runtime behavior
           metric_summaries.min_latency = MIN(metrics.latency),
           metric_summaries.max_latency = MAX(metrics.latency),
           metric_summaries.total_latency = SUM(metrics.latency),
-          metric_summaries.latency_p50 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 50, 10, 0, 100, '0ms') ON MESSAGE ERROR LOG;
+          metric_summaries.latency_p50 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 50, 10, 0, 100, '0ms');
         CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
@@ -249,20 +249,20 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR restart_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
-          metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
+          metric_summaries.total_latency = SUM(metrics.latency);
         START;
       """
     Then node "node-1" eventually accepts http traffic for host "http-{{test_id}}.example.com" path "/metrics"
@@ -334,20 +334,20 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR histogram_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.latency_p50 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 50, 10, 0, 100, '2s'),
-          metric_summaries.latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 90, 10, 0, 100, '2s') ON MESSAGE ERROR LOG;
+          metric_summaries.latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 90, 10, 0, 100, '2s');
         CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
@@ -408,12 +408,12 @@ Feature: Window processor runtime behavior
       """
       CREATE WINDOW PROCESSOR invalid_histogram_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_invalid_histogram_latency
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_invalid_histogram_latency
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
-          metric_summaries.latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 90, 10, 0, 100, 'not-a-duration') ON MESSAGE ERROR LOG;
+          metric_summaries.latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 90, 10, 0, 100, 'not-a-duration');
       """
 
     Examples:
@@ -461,14 +461,14 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR described_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
         AGGREGATE
@@ -480,7 +480,7 @@ Feature: Window processor runtime behavior
           metric_summaries.latency_p50 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 50, 10, 0, 100, '2s'),
           metric_summaries.latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 90, 10, 0, 100, '2s'),
           metric_summaries.sample_count = COUNT(metrics.latency),
-          metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
+          metric_summaries.total_latency = SUM(metrics.latency);
         DESCRIBE WINDOW PROCESSOR described_latency;
       """
     Then the last command output contains
@@ -580,19 +580,19 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR delayed_histogram_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 1 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
-          metric_summaries.latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 0, 10, 0, 100, '2s') ON MESSAGE ERROR LOG;
+          metric_summaries.latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 0, 10, 0, 100, '2s');
         CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
@@ -656,19 +656,19 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR delayed_histogram_timeout
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES 5s DURATION
         STEP 1 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
-          metric_summaries.latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 0, 10, 0, 100, '1s') ON MESSAGE ERROR LOG;
+          metric_summaries.latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(metrics.latency, 0, 10, 0, 100, '1s');
         CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
@@ -732,20 +732,20 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR duration_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 300ms DURATION
         STEP 300ms DURATION
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
-          metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
+          metric_summaries.total_latency = SUM(metrics.latency);
         CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
@@ -804,20 +804,20 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR combined_latency
         FROM metrics
-        TO metric_summaries BRANCHED BY by_metric_ingestor
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 3 MESSAGES 3s DURATION
         STEP 3 MESSAGES 3s DURATION
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
           metric_summaries.sample_count = COUNT(metrics.latency),
-          metric_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
+          metric_summaries.total_latency = SUM(metrics.latency);
         CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
         START;
       """
@@ -907,29 +907,29 @@ Feature: Window processor runtime behavior
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR first_window
         FROM metrics
-        TO high_summaries WHERE high_summaries.total_latency >= 100
-        TO low_summaries BRANCHED BY by_metric_ingestor
+        TO high_summaries WHERE high_summaries.total_latency >= 100 ON MESSAGE ERROR LOG
+        TO low_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
           high_summaries.tenant = FIRST(metrics.tenant),
           high_summaries.sample_count = COUNT(metrics.latency),
-          high_summaries.total_latency = SUM(metrics.latency) ON MESSAGE ERROR LOG;
+          high_summaries.total_latency = SUM(metrics.latency);
         CREATE WINDOW PROCESSOR second_window
         FROM high_summaries
-        TO chain_summaries BRANCHED BY by_metric_ingestor
+        TO chain_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
           chain_summaries.tenant = FIRST(high_summaries.tenant),
-          chain_summaries.high_window_count = COUNT(high_summaries.total_latency) ON MESSAGE ERROR LOG;
+          chain_summaries.high_window_count = COUNT(high_summaries.total_latency);
         START;
         CREATE SUBSCRIPTION chain_summaries_subscription TO chain_summaries WHERE chain_summaries.tenant = 'acme';
       """
@@ -1013,22 +1013,22 @@ Feature: Window processor runtime behavior
         'auto.offset.reset' = 'earliest'
       };
         CREATE INGESTOR kafka_metrics
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_kafka_metrics VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC metrics_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE WINDOW PROCESSOR attached_window
         FROM metrics
-        TO metric_summaries BRANCHED BY by_kafka_metrics
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_kafka_metrics
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
-          metric_summaries.sample_count = COUNT(metrics.latency) ON MESSAGE ERROR LOG;
+          metric_summaries.sample_count = COUNT(metrics.latency);
         CREATE EMITTER kafka_forward
         FROM metric_summaries
         ENCODE USING metric_summary_codec
@@ -1101,22 +1101,22 @@ Feature: Window processor runtime behavior
         'auto.offset.reset' = 'earliest'
       };
         CREATE INGESTOR kafka_metrics
-        TO metrics
+        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING metric_codec
         BRANCHED BY by_kafka_metrics VALUES { tenant = metrics.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC metrics_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE DETACHED WINDOW PROCESSOR detached_window
         FROM metrics
-        TO metric_summaries BRANCHED BY by_kafka_metrics
+        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_kafka_metrics
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
         AGGREGATE
           metric_summaries.tenant = FIRST(metrics.tenant),
-          metric_summaries.sample_count = COUNT(metrics.latency) ON MESSAGE ERROR LOG;
+          metric_summaries.sample_count = COUNT(metrics.latency);
         CREATE EMITTER kafka_forward
         FROM metric_summaries
         ENCODE USING metric_summary_codec

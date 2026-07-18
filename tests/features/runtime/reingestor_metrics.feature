@@ -31,21 +31,19 @@ Feature: Reingestor metrics
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics' TYPE HTTP;
         CREATE INGESTOR reingestor_metrics_source
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_reingestor_metrics_source VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT reingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE REINGESTOR reingestor_metrics_node
         FROM notifications
-        TO tenant_notifications
-        BRANCHED BY by_reingestor_metrics_node VALUES { tenant = tenant_notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO tenant_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        BRANCHED BY by_reingestor_metrics_node VALUES { tenant = tenant_notifications.tenant };
         CREATE REINGESTOR audit_reingestor_metrics_node
         FROM notifications
-        TO audit_notifications
-        BRANCHED BY by_audit_reingestor_metrics_node VALUES { tenant = audit_notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO audit_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        BRANCHED BY by_audit_reingestor_metrics_node VALUES { tenant = audit_notifications.tenant };
         CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications;
         CREATE SUBSCRIPTION audit_notifications_subscription TO audit_notifications;
         START;

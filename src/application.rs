@@ -9523,6 +9523,7 @@ fn format_ingestor_describe_output(
         ),
         format!("ready: {}", if summary.ready { "true" } else { "false" }),
     ];
+    lines.extend(format_processor_output_lines(&ingestor.output_routes));
     let memory_backpressure_state = if summary.memory_backpressure_paused {
         "active"
     } else {
@@ -9706,8 +9707,18 @@ fn format_processor_output_lines(outputs: &ProcessorOutputs) -> Vec<String> {
     lines.push(format!("outputs: {output_count}"));
 
     for (index, output) in outputs.routes.iter().enumerate() {
+        let flush = output
+            .flush_policy
+            .as_ref()
+            .map(|policy| match policy.max_batch_size.as_deref() {
+                Some(max_batch_size) => {
+                    format!("{} max-batch-size={max_batch_size}", policy.flush_each)
+                }
+                None => policy.flush_each.clone(),
+            })
+            .unwrap_or_else(|| "none".to_string());
         lines.push(format!(
-            "output {index}: into={} filter-map={}",
+            "output {index}: into={} filter-map={} flush={flush}",
             output.relay.as_str(),
             if output.filter_map.is_some() {
                 "present"
@@ -9768,7 +9779,6 @@ fn format_deduplicator_describe_output(
         format!("mode: {}", deduplicator.mode.as_ref()),
         format!("deduplicate on: {}", deduplicator.deduplicate_on),
         format!("max time: {}", deduplicator.max_time),
-        format!("flush each: {}", deduplicator.flush_each),
         format!(
             "filter-where: {}",
             if deduplicator.filter_where.is_some() {
@@ -9808,7 +9818,6 @@ fn format_reingestor_describe_output(
             format_branch_initiator_selection(&reingestor.branched_by)
         ),
         format!("mode: {}", reingestor.mode.as_ref()),
-        format!("flush each: {}", reingestor.flush_each),
         format!(
             "filter-where: {}",
             if reingestor.filter_where.is_some() {
@@ -9843,7 +9852,6 @@ fn format_correlator_describe_output(
         format!("match: {}", correlator.match_policy.as_ref()),
         format!("correlate where: {}", correlator.correlate_where),
         format!("max time: {}", correlator.max_time),
-        format!("flush each: {}", correlator.flush_each),
         format!("output: {}", correlator.output),
         format!(
             "filter-where: {}",
@@ -9893,7 +9901,6 @@ fn format_reorderer_describe_output(
         format!("mode: {}", reorderer.mode.as_ref()),
         format!("order by: {}", reorderer.order_by),
         format!("max time: {}", reorderer.max_time),
-        format!("flush each: {}", reorderer.flush_each),
         format!(
             "filter-where: {}",
             if reorderer.filter_where.is_some() {
@@ -14966,14 +14973,13 @@ mod tests {
             "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
-            "CREATE INGESTOR notifications_ingestor TO notifications DECODE USING \
-             notification_codec UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW \
-             FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP \
-             notifications_group MODE NO_ACK PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR \
-             LOG;",
+            "CREATE INGESTOR notifications_ingestor TO notifications FLUSH EACH 100ms MAX BATCH \
+             SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  TIMESTAMP \
+             NOW FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP \
+             notifications_group MODE NO_ACK PARALLEL MAX 1 ON GENERAL ERROR LOG;",
             "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications TO \
-             forwarded_notifications UNBRANCHED DEDUPLICATE ON notifications.user_id MAX TIME 10m \
-             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+             forwarded_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
+             UNBRANCHED DEDUPLICATE ON notifications.user_id MAX TIME 10m;",
             "CREATE DETACHED EMITTER kafka_forward FROM notifications ENCODE USING \
              notification_codec TO KAFKA kafka_main TOPIC notifications_out ON MESSAGE ERROR LOG \
              ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;",
@@ -15141,17 +15147,17 @@ mod tests {
             "CREATE RELAY notifications_all SCHEMA notification UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
-            "CREATE INGESTOR ingest_a TO notifications_a DECODE USING notification_codec \
-             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
-             TOPIC notifications_a OFFSET BY CONSUMER GROUP notifications_a_group MODE NO_ACK \
-             PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
-            "CREATE INGESTOR ingest_b TO notifications_b DECODE USING notification_codec \
-             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
-             TOPIC notifications_b OFFSET BY CONSUMER GROUP notifications_b_group MODE NO_ACK \
-             PARALLEL MAX 1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            "CREATE INGESTOR ingest_a TO notifications_a FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+             MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  TIMESTAMP NOW FROM \
+             KAFKA kafka_main TOPIC notifications_a OFFSET BY CONSUMER GROUP \
+             notifications_a_group MODE NO_ACK PARALLEL MAX 1 ON GENERAL ERROR LOG;",
+            "CREATE INGESTOR ingest_b TO notifications_b FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+             MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  TIMESTAMP NOW FROM \
+             KAFKA kafka_main TOPIC notifications_b OFFSET BY CONSUMER GROUP \
+             notifications_b_group MODE NO_ACK PARALLEL MAX 1 ON GENERAL ERROR LOG;",
             "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
-             notifications_all UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-             LOG;",
+             notifications_all FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
+             UNBRANCHED;",
         ] {
             let result = service
                 .process_command(
@@ -15310,13 +15316,13 @@ mod tests {
             "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
-            "CREATE INGESTOR inbound_ingestor TO inbound DECODE USING transaction_codec \
-             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB TIMESTAMP NOW FROM KAFKA kafka_main \
-             TOPIC inbound OFFSET BY CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL MAX 1 ON \
-             MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
-            "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped UNBRANCHED DEDUPLICATE ON \
-             inbound.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
-             ERROR LOG;",
+            "CREATE INGESTOR inbound_ingestor TO inbound FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+             MESSAGE ERROR LOG DECODE USING transaction_codec UNBRANCHED  TIMESTAMP NOW FROM \
+             KAFKA kafka_main TOPIC inbound OFFSET BY CONSUMER GROUP inbound_group MODE NO_ACK \
+             PARALLEL MAX 1 ON GENERAL ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped FLUSH EACH 100ms MAX BATCH \
+             SIZE 1MiB ON MESSAGE ERROR LOG UNBRANCHED DEDUPLICATE ON inbound.transaction_id MAX \
+             TIME 10m;",
         ] {
             let result = service
                 .process_command(
@@ -15613,8 +15619,8 @@ mod tests {
     #[test]
     fn parse_server_statement_accepts_junction_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 UNBRANCHED FLUSH EACH 100ms MAX \
-             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 FLUSH EACH 100ms MAX BATCH SIZE \
+             1MiB ON MESSAGE ERROR LOG UNBRANCHED;",
         )
         .expect("junction statement should parse");
         let Statement::Create(model) = parsed else {
@@ -15626,9 +15632,8 @@ mod tests {
     #[test]
     fn parse_server_statement_accepts_deduplicator_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 UNBRANCHED DEDUPLICATE ON \
-             ss1.transaction_id MAX TIME 10m FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
-             ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
+             ON MESSAGE ERROR LOG UNBRANCHED DEDUPLICATE ON ss1.transaction_id MAX TIME 10m;",
         )
         .expect("deduplicator statement should parse");
         let Statement::Create(model) = parsed else {

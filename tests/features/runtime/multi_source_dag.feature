@@ -47,45 +47,41 @@ Feature: Multi-source DAG routing
           'addr' = 'redis://127.0.0.1:6379/'
         };
         CREATE INGESTOR kafka_notifications
-        TO kafka_ingress
+        TO kafka_ingress FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = kafka_ingress.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC dag_kafka_{{test_id}}
         OFFSET BY CONSUMER GROUP dag_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
         CREATE INGESTOR rabbit_notifications
-        TO rabbit_ingress
+        TO rabbit_ingress FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_rabbit_notifications VALUES { user_id = rabbit_ingress.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM RABBITMQ rabbit_main
         QUEUE dag_rabbit_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR kafka_branch
         FROM kafka_ingress
-        TO kafka_projected BRANCHED BY by_kafka_notifications
+        TO kafka_projected FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON kafka_ingress.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE REINGESTOR rabbit_branch
         FROM rabbit_ingress
-        TO rabbit_projected BRANCHED BY by_kafka_notifications
-        VALUES { user_id = rabbit_projected.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO rabbit_projected FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
+        VALUES { user_id = rabbit_projected.user_id };
         CREATE DEDUPLICATOR kafka_shared
         FROM kafka_projected
-        TO shared_dispatch BRANCHED BY by_kafka_notifications
+        TO shared_dispatch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON kafka_projected.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE DEDUPLICATOR rabbit_shared
         FROM rabbit_projected
-        TO shared_dispatch BRANCHED BY by_kafka_notifications
+        TO shared_dispatch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON rabbit_projected.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE EMITTER kafka_out
         FROM kafka_projected
         ENCODE USING notification_codec

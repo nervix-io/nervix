@@ -24,11 +24,11 @@ Feature: Ingestor metrics
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
         CREATE INGESTOR ingestor_metrics_source
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_ingestor_metrics_source VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingestor_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -173,12 +173,11 @@ Feature: Ingestor metrics
           'addr' = 'redis://127.0.0.1:6379/'
         };
         CREATE INGESTOR ingestor_metrics_source
-        TO notifications
+        TO notifications FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_ingestor_metrics_source VALUES { user_id = notifications.user_id }
-        FLUSH EACH 1s MAX BATCH SIZE 1MiB
-        FROM <source_clause>
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM <source_clause> ON GENERAL ERROR LOG;
         START;
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "status: running"
@@ -237,11 +236,11 @@ Feature: Ingestor metrics
         CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
         CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
         CREATE INGESTOR ingestor_metrics_source
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_ingestor_metrics_source VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingestor_metrics_restart_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingestor_metrics_restart_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         START;
       """
     And http payload is posted to node "node-1" with host "http-{{test_id}}-ingestor-restart.example.com" path "/ingestor-metrics-restart"
@@ -304,12 +303,11 @@ Feature: Ingestor metrics
           'addr' = 'redis://127.0.0.1:6379/'
         };
         CREATE INGESTOR remote_owner_metrics_source
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_remote_owner_metrics_source VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM REDIS PUBSUB redis_main CHANNEL remote_owner_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM REDIS PUBSUB redis_main CHANNEL remote_owner_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         START;
         DRAIN NODE node-1;
         SHOW CLUSTER STATUS;

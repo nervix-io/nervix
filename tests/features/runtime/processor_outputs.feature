@@ -1,4 +1,135 @@
 Feature: Processor output routing
+  Scenario Outline: Each output route owns its message error policy
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA routed_event (
+        id STRING,
+        divisor I64,
+        result I64 OPTIONAL
+      );
+      CREATE SCHEMA error_record (
+        error_message STRING,
+        failed_record STRING
+      );
+      CREATE STRICT WIRE JSON SCHEMA routed_event_wire (
+        id string,
+        divisor integer,
+        result integer OPTIONAL
+      );
+      CREATE CODEC routed_event_codec
+        FROM WIRE JSON SCHEMA routed_event_wire
+        TO SCHEMA routed_event;
+      CREATE RELAY source_events SCHEMA routed_event UNBRANCHED;
+      CREATE RELAY successful_events SCHEMA routed_event UNBRANCHED;
+      CREATE RELAY failing_events SCHEMA routed_event UNBRANCHED;
+      CREATE RELAY route_errors SCHEMA error_record UNBRANCHED;
+      CREATE VHOST edge output-error-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR event_source
+        TO source_events FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        DECODE USING routed_event_codec
+        UNBRANCHED
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION project_events
+        FROM source_events
+        TO successful_events FLUSH IMMEDIATE
+          SET successful_events.result = 10
+          ON MESSAGE ERROR LOG
+        TO failing_events FLUSH IMMEDIATE
+          SET failing_events.result = 10 / source_events.divisor
+          ON MESSAGE ERROR DLQ route_errors
+            SET error_message = message_error.message,
+                failed_record = message_error.record
+        UNBRANCHED;
+      CREATE SUBSCRIPTION successful_events_subscription TO successful_events;
+      CREATE SUBSCRIPTION failing_events_subscription TO failing_events;
+      CREATE SUBSCRIPTION route_errors_subscription TO route_errors;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "output-error-{{test_id}}.example.com" path "/events"
+      """
+      {"id":"event-1","divisor":0,"result":0}
+      """
+    Then within "5s" the relay subscription receives payloads
+      """
+      "divisor":0,"id":"event-1","result":10
+      "failed_record":"{\"divisor\":0,\"id\":\"event-1\",\"result\":0}"
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
+  Scenario Outline: Each processor output owns its flush policy
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA routed_event (
+        id STRING,
+        route STRING OPTIONAL
+      );
+      CREATE STRICT WIRE JSON SCHEMA routed_event_wire (
+        id string,
+        route string OPTIONAL
+      );
+      CREATE CODEC routed_event_codec
+        FROM WIRE JSON SCHEMA routed_event_wire
+        TO SCHEMA routed_event;
+      CREATE RELAY incoming_events SCHEMA routed_event UNBRANCHED;
+      CREATE RELAY immediate_events SCHEMA routed_event UNBRANCHED;
+      CREATE RELAY delayed_events SCHEMA routed_event UNBRANCHED;
+      CREATE VHOST edge output-flush-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR event_source
+        TO incoming_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        DECODE USING routed_event_codec
+        UNBRANCHED
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+      CREATE JUNCTION route_events
+        FROM incoming_events
+        TO immediate_events FLUSH IMMEDIATE
+          SET immediate_events.route = "immediate" ON MESSAGE ERROR LOG
+        TO delayed_events FLUSH EACH 2s MAX BATCH SIZE 1MiB
+          SET delayed_events.route = "delayed" ON MESSAGE ERROR LOG
+        UNBRANCHED;
+      CREATE SUBSCRIPTION immediate_events_subscription TO immediate_events;
+      CREATE SUBSCRIPTION delayed_events_subscription TO delayed_events;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "output-flush-{{test_id}}.example.com" path "/events"
+      """
+      {"id":"event-1"}
+      """
+    Then within "1s" the relay subscription receives a payload
+      """
+      "id":"event-1","route":"immediate"
+      """
+    And the relay subscription does not receive a payload within "500ms"
+    And within "3s" the relay subscription receives a payload
+      """
+      "id":"event-1","route":"delayed"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: Ingestor output routes filter input before fan-out
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -44,19 +175,20 @@ Feature: Processor output routing
 
       CREATE INGESTOR event_source
         FILTER WHERE message.active
-        TO error_events
+        TO error_events FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           SET error_events.route = "error",
               error_events.normalized = lower(trim(message.raw))
           UNSET error_events.active, error_events.level, error_events.raw
           WHERE message.level = "ERROR"
-        TO audit_events
+          ON MESSAGE ERROR LOG
+        TO audit_events FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           SET audit_events.route = "audit",
               audit_events.normalized = lower(trim(message.raw))
-          UNSET audit_events.active, audit_events.level, audit_events.raw
+          UNSET audit_events.active, audit_events.level, audit_events.raw ON MESSAGE ERROR LOG
         DECODE USING event_codec
         UNBRANCHED
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION error_events_subscription TO error_events;
       CREATE SUBSCRIPTION audit_events_subscription TO audit_events;
@@ -114,13 +246,13 @@ Feature: Processor output routing
       CREATE VHOST edge sequential-set-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR source_events
-        TO projected_events
+        TO projected_events FLUSH IMMEDIATE
           SET projected_events.amount = 1,
-              projected_events.amount = projected_events.amount + 1
+              projected_events.amount = projected_events.amount + 1 ON MESSAGE ERROR LOG
         DECODE USING source_event_codec
         UNBRANCHED
-        FLUSH IMMEDIATE
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION projected_events_subscription TO projected_events;
       START;
       """
@@ -220,28 +352,27 @@ Feature: Processor output routing
         PATH '/route-b'
         TYPE HTTP;
         CREATE INGESTOR source_logs_a
-        TO incoming_logs_a
+        TO incoming_logs_a FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_logs_a VALUES { id = incoming_logs_a.id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR source_logs_b
-        TO incoming_logs_b
+        TO incoming_logs_b FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_logs_a VALUES { id = incoming_logs_b.id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR log_splitter
         FROM incoming_logs_a WHERE incoming_logs_a.level != "skip",
              incoming_logs_b WHERE incoming_logs_b.level != "hold"
         FILTER WHERE incoming_logs_a.active
-        TO errors_ss WHERE incoming_logs_a.level = "error"
-        TO warnings_ss WHERE incoming_logs_a.urgent
-        TO info_ss
+        TO errors_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB WHERE incoming_logs_a.level = "error" ON MESSAGE ERROR LOG
+        TO warnings_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB WHERE incoming_logs_a.urgent ON MESSAGE ERROR LOG
+        TO info_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         BRANCHED BY by_source_logs_a
         DEDUPLICATE ON incoming_logs_a.id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION errors_ss_subscription TO errors_ss;
         CREATE SUBSCRIPTION warnings_ss_subscription TO warnings_ss;
         CREATE SUBSCRIPTION info_ss_subscription TO info_ss;
@@ -331,21 +462,20 @@ Feature: Processor output routing
         PATH '/output-route'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR project_notifications
         FROM notifications
         FILTER WHERE notifications.active
-        TO projected_notifications
+        TO projected_notifications FLUSH IMMEDIATE
           SET projected_notifications.normalized = lower(trim(notifications.raw)), projected_notifications.amount = notifications.amount + 1
-          UNSET notifications.raw, notifications.active
+          UNSET notifications.raw, notifications.active ON MESSAGE ERROR LOG
         BRANCHED BY by_http_notifications
         DEDUPLICATE ON notifications.tenant, notifications.user_id
-        MAX TIME 10m
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications;
         START;
       """
@@ -423,29 +553,28 @@ Feature: Processor output routing
         PATH '/project-output'
         TYPE HTTP;
         CREATE INGESTOR source_logs
-        TO incoming_logs
+        TO incoming_logs FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_logs VALUES { id = incoming_logs.id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR project_by_destination
         FROM incoming_logs
         FILTER WHERE incoming_logs.active
-        TO errors_ss
+        TO errors_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           SET errors_ss.severity = lower(incoming_logs.level)
           UNSET incoming_logs.level, incoming_logs.legacy
-          WHERE incoming_logs.level = "ERROR"
-        TO warnings_ss
+          WHERE incoming_logs.level = "ERROR" ON MESSAGE ERROR LOG
+        TO warnings_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           SET warnings_ss.severity = lower(incoming_logs.level)
           UNSET incoming_logs.level, incoming_logs.legacy
-          WHERE incoming_logs.level = "WARN"
-        TO info_ss
+          WHERE incoming_logs.level = "WARN" ON MESSAGE ERROR LOG
+        TO info_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           SET info_ss.severity = lower(incoming_logs.level)
-          UNSET incoming_logs.level, incoming_logs.legacy
+          UNSET incoming_logs.level, incoming_logs.legacy ON MESSAGE ERROR LOG
         BRANCHED BY by_source_logs
         DEDUPLICATE ON incoming_logs.id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION errors_ss_subscription TO errors_ss;
         CREATE SUBSCRIPTION warnings_ss_subscription TO warnings_ss;
         CREATE SUBSCRIPTION info_ss_subscription TO info_ss;

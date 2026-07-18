@@ -37,13 +37,13 @@ Feature: Redis TLS resource mounts
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE INGESTOR redis_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_redis_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM REDIS PUBSUB redis_tls
         CHANNEL notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

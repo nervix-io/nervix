@@ -26,12 +26,12 @@ Feature: HTTP ingestor domain pacing
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -77,12 +77,12 @@ Feature: HTTP ingestor domain pacing
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest" and fails
@@ -135,12 +135,12 @@ Feature: HTTP ingestor domain pacing
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP AT occurred_at
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -189,12 +189,12 @@ Feature: HTTP ingestor domain pacing
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP AT occurred_at
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest" and fails

@@ -8,8 +8,8 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         duration_lit, filter_where_clause, from_relay_clauses, if_not_exists_clause,
-        into_parse_error, kw, lex_input, message_error_policy, processor_outputs,
-        suggestions_from_errors, tok, window_processor_name,
+        into_parse_error, kw, lex_input, processor_outputs, suggestions_from_errors, tok,
+        window_processor_name,
     },
 };
 
@@ -215,27 +215,20 @@ pub fn create_window_processor_parser<'src>()
         .then_ignore(kw(Identifier::Step))
         .then(window_bound())
         .then(aggregate_block())
-        .then(message_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .try_map(
             |(
                 (
                     (
                         (
-                            (
-                                (
-                                    ((((if_not_exists, mode), name), from_input), filter_where),
-                                    outputs,
-                                ),
-                                branched_by,
-                            ),
-                            width,
+                            (((((if_not_exists, mode), name), from_input), filter_where), outputs),
+                            branched_by,
                         ),
-                        step,
+                        width,
                     ),
-                    aggregate,
+                    step,
                 ),
-                message_error_policy,
+                aggregate,
             ),
              span| {
                 validate_step(&width, &step, span)?;
@@ -248,7 +241,6 @@ pub fn create_window_processor_parser<'src>()
                         width,
                         step,
                         aggregate,
-                        message_error_policy,
                         mode: mode.unwrap_or(AckMode::Attached),
                         filter_where,
                     },
@@ -319,7 +311,7 @@ mod tests {
         let input = r#"
             CREATE WINDOW PROCESSOR latency_window
                 FROM s1
-                TO s2
+                TO s2 ON MESSAGE ERROR LOG
                 BRANCHED BY tenant
                 WIDTH 100 MESSAGES 10s DURATION
                 STEP 10 MESSAGES 1s DURATION
@@ -327,7 +319,7 @@ mod tests {
                     s2.latency_p99 = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 2048, 0, 10000, '2s'),
                     s2.time = MAX(s1.timestamp),
                     s2.started_at = FIRST(s1.timestamp),
-                    s2.latencies = [PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 90, 2048, 0, 10000, '2s'), PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 95, 2048, 0, 10000, '2s')] ON MESSAGE ERROR LOG;
+                    s2.latencies = [PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 90, 2048, 0, 10000, '2s'), PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 95, 2048, 0, 10000, '2s')];
         "#;
 
         let parsed =
@@ -356,11 +348,11 @@ mod tests {
     fn parses_tumbling_message_window() {
         let input = r#"
             CREATE DETACHED WINDOW PROCESSOR counts
-                FROM s1 TO s2
+                FROM s1 TO s2 ON MESSAGE ERROR LOG
                 BRANCHED BY tenant
                 WIDTH 100 MESSAGES
                 STEP 100 MESSAGES
-                AGGREGATE s2.count = COUNT(s1.value) ON MESSAGE ERROR LOG;
+                AGGREGATE s2.count = COUNT(s1.value);
         "#;
 
         let parsed =
@@ -376,11 +368,11 @@ mod tests {
     fn rejects_step_larger_than_width() {
         let input = r#"
             CREATE WINDOW PROCESSOR bad
-                FROM s1 TO s2
+                FROM s1 TO s2 ON MESSAGE ERROR LOG
                 BRANCHED BY tenant
                 WIDTH 100 MESSAGES
                 STEP 101 MESSAGES
-                AGGREGATE s2.count = COUNT(s1.value) ON MESSAGE ERROR LOG;
+                AGGREGATE s2.count = COUNT(s1.value);
         "#;
         assert!(parse_create_window_processor_tokens(&to_tokens(input)).is_err());
     }
@@ -389,18 +381,19 @@ mod tests {
     fn rejects_step_dimension_missing_from_width() {
         let input = r#"
             CREATE WINDOW PROCESSOR bad
-                FROM s1 TO s2
+                FROM s1 TO s2 ON MESSAGE ERROR LOG
                 BRANCHED BY tenant
                 WIDTH 100 MESSAGES
                 STEP 1s DURATION
-                AGGREGATE s2.count = COUNT(s1.value) ON MESSAGE ERROR LOG;
+                AGGREGATE s2.count = COUNT(s1.value);
         "#;
         assert!(parse_create_window_processor_tokens(&to_tokens(input)).is_err());
     }
 
     #[test]
     fn suggests_window_processor_keywords() {
-        let input = "CREATE WINDOW PROCESSOR p FROM s1 TO s2 BRANCHED BY tenant ";
+        let input =
+            "CREATE WINDOW PROCESSOR p FROM s1 TO s2 ON MESSAGE ERROR LOG BRANCHED BY tenant ";
         let suggestions = suggest_create_window_processor(input, input.len());
         assert!(suggestions.contains(&"WIDTH".to_string()));
     }

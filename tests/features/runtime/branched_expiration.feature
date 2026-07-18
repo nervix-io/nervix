@@ -31,23 +31,21 @@ Feature: Branched branch expiration
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE REINGESTOR reproject_notifications
         FROM notifications
-        TO reingested_notifications
-        BRANCHED BY by_reproject_notifications VALUES { user_id = reingested_notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO reingested_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        BRANCHED BY by_reproject_notifications VALUES { user_id = reingested_notifications.user_id };
         CREATE DEDUPLICATOR passthrough
         FROM reingested_notifications
-        TO projected_notifications BRANCHED BY by_reproject_notifications
+        TO projected_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_reproject_notifications
         DEDUPLICATE ON reingested_notifications.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications;
         START;
       """
@@ -128,19 +126,18 @@ Feature: Branched branch expiration
         TYPE HTTP;
 
       CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR passthrough
         FROM notifications
-        TO projected_notifications BRANCHED BY by_http_notifications
+        TO projected_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_http_notifications
         DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """

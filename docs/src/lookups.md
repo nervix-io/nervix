@@ -69,15 +69,13 @@ CREATE BRANCH by_zip
 
 CREATE DEDUPLICATOR enrich_zip
   FROM inbound
-  TO enriched
+  TO enriched FLUSH IMMEDIATE
     SET enriched.city = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"),
         enriched.region = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "region")
-    WHERE NOT is_null(LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"))
+    WHERE NOT is_null(LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city")) ON MESSAGE ERROR LOG
   BRANCHED BY by_zip
   DEDUPLICATE ON inbound.zip
-  MAX TIME 10m
-  FLUSH IMMEDIATE
-  ON MESSAGE ERROR LOG;
+  MAX TIME 10m;
 ```
 
 Lookup models are domain-owned. A hash map name must be unique within the active domain, and `CREATE IF NOT EXISTS HASH MAP ...` follows the same idempotent-create behavior as other model create statements.

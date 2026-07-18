@@ -129,7 +129,7 @@ This surface is available on:
 
 The clause acts as a row-level filter-map program:
 
-Flush-based runtime nodes require an explicit `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` clause. Emitters also declare a flush policy: they collect an in-memory Arrow batch before publishing to the external system. Window processors use `WIDTH` and `STEP` instead.
+Every `TO` destination on a flush-based multi-output node requires an explicit `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` clause. Destination buffers and deadlines are independent. Generators and emitters retain their single node-level flush policy; window processors use `WIDTH` and `STEP` instead.
 
 - `SET` overwrites existing fields or appends new fields
 - `UNSET` removes fields from the downstream row shape when passthrough inheritance is active
@@ -186,14 +186,12 @@ CREATE BRANCH by_tenant
 
 CREATE INGESTOR notifications_in
   FILTER WHERE message.active
-  TO notifications
+  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
     SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
-    UNSET notifications.raw
+    UNSET notifications.raw ON MESSAGE ERROR LOG
   DECODE USING notification_codec
   BRANCHED BY by_tenant VALUES { tenant = notifications.tenant }
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-  FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 ```
 
 Another example showing nested conditions and chained calls:
@@ -233,20 +231,21 @@ Generator-specific rules:
 
 ## Runtime Node Error Policies
 
-Runtime node declarations that touch external systems, currently `INGESTOR` and `EMITTER`, must end with both error policy blocks:
+Every `TO` route on an ingestor or relay-consuming processor must declare its message error policy after that route's construction clauses:
 
 ```nspl
 ON MESSAGE ERROR IGNORE | LOG | DLQ error_stream SET error_message = message_error.message
+```
+
+An ingestor additionally declares its node-level general policy after the source configuration:
+
+```nspl
 ON GENERAL ERROR IGNORE | LOG
 ```
 
-Pure runtime processors declare only a message error policy:
+Emitters retain their message and general policies at node level because they have one external sink rather than relay `TO` routes. WASM processors keep `ON GLOBAL ERROR` at node level for guest failures that are not tied to a message.
 
-```nspl
-ON MESSAGE ERROR IGNORE | LOG | DLQ error_stream SET error_message = message_error.message
-```
-
-`MESSAGE` errors are tied to one concrete message, such as decode, transform, or publish failures for that message. `GENERAL` errors are not tied to a concrete message, such as transport-level HTTP or client errors. `DLQ` is therefore only valid for `ON MESSAGE ERROR`. Pure processors do not expose `ON GENERAL ERROR` because they do not own external transport/client failures.
+`MESSAGE` errors are tied to one concrete message and one output construction, such as decode, transform, or route publication failures for that message. `GENERAL` and `GLOBAL` errors are not tied to a concrete message or `TO` route. `DLQ` is therefore only valid for `ON MESSAGE ERROR`. Pure processors do not expose `ON GENERAL ERROR` because they do not own external transport/client failures.
 
 Client definitions are key-value based and may optionally mount a resource for file-backed settings such as TLS material:
 

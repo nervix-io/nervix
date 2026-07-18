@@ -45,25 +45,24 @@ Feature: Branch namespace
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-branch-namespace-{{test_id}}'
         }; CREATE INGESTOR mqtt_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_mqtt_notifications VALUES { tenant = notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM MQTT mqtt_main
         TOPIC branch_namespace_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR project_notifications
         FROM notifications
-        TO projected_notifications
+        TO projected_notifications FLUSH IMMEDIATE
           SET projected_notifications.branch_tenant = branch.tenant,
               projected_notifications.amount = notifications.amount + 1
           UNSET notifications.active
-          WHERE branch.tenant = notifications.tenant
+          WHERE branch.tenant = notifications.tenant ON MESSAGE ERROR LOG
         BRANCHED BY by_mqtt_notifications
         DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
 
       CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications WHERE projected_notifications.tenant = 'acme';
       START;
@@ -126,15 +125,14 @@ Feature: Branch namespace
         ON edge
         PATH '/ingest'
         TYPE HTTP; CREATE INGESTOR http_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE REINGESTOR copy_notifications
+
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG; CREATE REINGESTOR copy_notifications
         FROM notifications
-        TO copied_notifications
-        BRANCHED BY by_copy_notifications VALUES { tenant = branch.tenant }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO copied_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        BRANCHED BY by_copy_notifications VALUES { tenant = branch.tenant };
 
       CREATE SUBSCRIPTION copied_notifications_subscription TO copied_notifications;
       START;

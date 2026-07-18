@@ -27,14 +27,14 @@ Feature: RabbitMQ ingestion
           'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
         };
         CREATE INGESTOR rabbit_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_rabbit_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM RABBITMQ rabbit_main
         QUEUE notifications_{{test_id}}
         INSTANCES <instances>
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -87,13 +87,13 @@ Feature: RabbitMQ ingestion
           'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
         };
         CREATE INGESTOR rabbit_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_rabbit_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM RABBITMQ rabbit_main
         QUEUE notifications_reconnect_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

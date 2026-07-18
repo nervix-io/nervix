@@ -131,67 +131,58 @@ CREATE CLIENT nats_edge
   };
 
 CREATE INGESTOR nats_machine_signals
-  TO signals_by_site
+  TO signals_by_site FLUSH EACH 250ms MAX BATCH SIZE 32kb
     SET signals_by_site.status = lower(trim(message.status)),
         signals_by_site.sensor = lower(trim(message.sensor)),
-        signals_by_site.unit = lower(trim(message.unit))
+        signals_by_site.unit = lower(trim(message.unit)) ON MESSAGE ERROR LOG
   DECODE USING machine_signal_codec
   BRANCHED BY by_site VALUES { site = signals_by_site.site }
-  FLUSH EACH 250ms MAX BATCH SIZE 32kb
+
   TIMESTAMP AT ts
   FROM NATS nats_edge
   SUBJECT factory_signals
   QUEUE GROUP factory_signal_workers
   INSTANCES 4
-  MODE NO_ACK SEQUENTIAL
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+  MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
 
 CREATE DEDUPLICATOR intake_quality_gate
   FROM signals_by_site
-  TO rejected_signals WHERE signals_by_site.asset_id = "" OR signals_by_site.sensor = "" OR signals_by_site.status = "offline"
-  TO battery_alerts WHERE signals_by_site.battery_pct < 15.0
-  TO clean_signals
+  TO rejected_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb WHERE signals_by_site.asset_id = "" OR signals_by_site.sensor = "" OR signals_by_site.status = "offline" ON MESSAGE ERROR LOG
+  TO battery_alerts FLUSH EACH 250ms MAX BATCH SIZE 32kb WHERE signals_by_site.battery_pct < 15.0 ON MESSAGE ERROR LOG
+  TO clean_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
   BRANCHED BY by_site
   DEDUPLICATE ON signals_by_site.site, signals_by_site.line, signals_by_site.asset_id, signals_by_site.sensor, signals_by_site.ts, signals_by_site.seq
-  MAX TIME 5m
-  FLUSH EACH 250ms MAX BATCH SIZE 32kb
-  ON MESSAGE ERROR LOG;
+  MAX TIME 5m;
 
 CREATE REINGESTOR asset_signal_repartition
   FROM clean_signals
-  TO signals_by_asset
+  TO signals_by_asset FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
   BRANCHED BY by_asset_signal VALUES {
     site = signals_by_asset.site,
     line = signals_by_asset.line,
     asset_id = signals_by_asset.asset_id,
     sensor = signals_by_asset.sensor
-  }
-  FLUSH EACH 250ms MAX BATCH SIZE 32kb
-  ON MESSAGE ERROR LOG;
+  };
 
 CREATE REORDERER asset_signal_reorderer
   FROM signals_by_asset
-  TO signals_ordered
+  TO signals_ordered FLUSH EACH 500ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
   BRANCHED BY by_asset_signal
   BY signals_by_asset.ts, signals_by_asset.seq
-  MAX TIME 5s
-  FLUSH EACH 500ms MAX BATCH SIZE 32kb
-  ON MESSAGE ERROR LOG;
+  MAX TIME 5s;
 
 CREATE DEDUPLICATOR process_alert_splitter
   FROM signals_ordered
-  TO critical_signals WHERE signals_ordered.status = "fault" OR signals_ordered.value >= signals_ordered.critical_high
-  TO drift_signals WHERE signals_ordered.value < signals_ordered.target_min OR signals_ordered.value > signals_ordered.target_max
-  TO normal_signals
+  TO critical_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb WHERE signals_ordered.status = "fault" OR signals_ordered.value >= signals_ordered.critical_high ON MESSAGE ERROR LOG
+  TO drift_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb WHERE signals_ordered.value < signals_ordered.target_min OR signals_ordered.value > signals_ordered.target_max ON MESSAGE ERROR LOG
+  TO normal_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
   BRANCHED BY by_asset_signal
   DEDUPLICATE ON signals_ordered.site, signals_ordered.line, signals_ordered.asset_id, signals_ordered.sensor, signals_ordered.ts, signals_ordered.seq
-  MAX TIME 5m
-  FLUSH EACH 250ms MAX BATCH SIZE 32kb
-  ON MESSAGE ERROR LOG;
+  MAX TIME 5m;
 
 CREATE WINDOW PROCESSOR asset_signal_window
   FROM signals_ordered
-  TO signal_windows
+  TO signal_windows ON MESSAGE ERROR LOG
   BRANCHED BY by_asset_signal
   WIDTH 20 MESSAGES 30s DURATION
   STEP 10 MESSAGES 10s DURATION
@@ -215,14 +206,12 @@ CREATE WINDOW PROCESSOR asset_signal_window
       PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 50, 512, 0, 200, '2s'),
       PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 90, 512, 0, 200, '2s'),
       PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 99, 512, 0, 200, '2s')
-    ] ON MESSAGE ERROR LOG;
+    ];
 
 CREATE REINGESTOR site_critical_repartition
   FROM critical_signals
-  TO site_critical_signals
-  BRANCHED BY by_site_critical VALUES { site = site_critical_signals.site }
-  FLUSH EACH 250ms MAX BATCH SIZE 32kb
-  ON MESSAGE ERROR LOG;
+  TO site_critical_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
+  BRANCHED BY by_site_critical VALUES { site = site_critical_signals.site };
 
 CREATE EMITTER nats_signal_windows
   FROM signal_windows

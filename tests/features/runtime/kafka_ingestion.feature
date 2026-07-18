@@ -26,15 +26,15 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
         INSTANCES <instances>
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -86,14 +86,14 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_reconnect_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_reconnect_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -148,14 +148,14 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE EMITTER kafka_forward
         FROM notifications
         ENCODE USING notification_codec
@@ -206,14 +206,14 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE EMITTER kafka_forward
         FROM notifications
         ENCODE USING notification_codec
@@ -265,14 +265,14 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE EMITTER kafka_forward
         FROM notifications
         ENCODE USING notification_codec
@@ -326,14 +326,14 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 500ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 500ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -379,14 +379,14 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE DETACHED EMITTER kafka_forward
         FROM notifications
         ENCODE USING notification_codec
@@ -437,14 +437,14 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE EMITTER kafka_forward
         FROM notifications
         ENCODE USING notification_codec
@@ -500,20 +500,19 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE DETACHED DEDUPLICATOR passthrough
         FROM notifications
-        TO forwarded_notifications BRANCHED BY by_kafka_notifications
+        TO forwarded_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE EMITTER kafka_forward
         FROM forwarded_notifications
         ENCODE USING notification_codec
@@ -570,20 +569,19 @@ Feature: Kafka ingestion
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications
+        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         FROM KAFKA kafka_main
         TOPIC notifications_{{test_id}}
         OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
         CREATE DEDUPLICATOR passthrough
         FROM notifications
-        TO forwarded_notifications BRANCHED BY by_kafka_notifications
+        TO forwarded_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
         DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        MAX TIME 10m;
         CREATE EMITTER kafka_forward
         FROM forwarded_notifications
         ENCODE USING notification_codec

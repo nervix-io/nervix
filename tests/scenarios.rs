@@ -863,14 +863,13 @@ fn build_ingestor_logic_commands(
       CREATE RELAY logic_notifications SCHEMA {} BRANCHED BY by_logic_ingestor;
       {}
       CREATE INGESTOR logic_ingestor
-        TO logic_notifications
-        {}
+        TO logic_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        {} ON MESSAGE ERROR LOG
         DECODE USING {}
         BRANCHED BY by_logic_ingestor
         VALUES {{ tenant = logic_notifications.tenant }}
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        {}
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        {} ON GENERAL ERROR LOG;
       {}
 "#,
         output_schema.schema_name(),

@@ -47,25 +47,24 @@ Feature: Relay junction
         PATH '/ingest-b'
         TYPE HTTP;
         CREATE INGESTOR source_one
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_one VALUES { user_id = ss1.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
-        TO ss2
+        TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_one VALUES { user_id = ss2.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams
         FROM ss1 WHERE ss1.source != "drop-left",
              ss2 WHERE ss2.source != "drop-right"
         FILTER WHERE ss1.user_id > 0
-        TO ss10 SET ss10.lane = "left" UNSET ss10.raw WHERE ss1.source = "left"
-        TO ss20 SET ss20.lane = "right" UNSET ss20.raw WHERE ss1.source = "right"
-        BRANCHED BY by_source_one
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO ss10 FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET ss10.lane = "left" UNSET ss10.raw WHERE ss1.source = "left" ON MESSAGE ERROR LOG
+        TO ss20 FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET ss20.lane = "right" UNSET ss20.raw WHERE ss1.source = "right" ON MESSAGE ERROR LOG
+        BRANCHED BY by_source_one;
         CREATE SUBSCRIPTION ss10_subscription TO ss10;
         CREATE SUBSCRIPTION ss20_subscription TO ss20;
         START;
@@ -134,22 +133,22 @@ Feature: Relay junction
         PATH '/branch-b'
         TYPE HTTP;
         CREATE INGESTOR source_one
-        TO ss1
+        TO ss1 FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_one VALUES { tenant = ss1.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
-        TO ss2
+        TO ss2 FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_source_one VALUES { tenant = ss2.tenant }
-        FLUSH IMMEDIATE
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams
         FROM ss1, ss2
         TO ss10
-        BRANCHED BY by_source_one
-        <flush_policy> ON MESSAGE ERROR LOG;
+        <flush_policy> ON MESSAGE ERROR LOG
+        BRANCHED BY by_source_one;
         CREATE SUBSCRIPTION ss10_subscription TO ss10;
         START;
       """
@@ -232,27 +231,26 @@ Feature: Relay junction
         PATH '/ingest-b'
         TYPE HTTP;
         CREATE INGESTOR state_source
-        TO state_notifications
+        TO state_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_state_source VALUES { user_id = state_notifications.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR source_one
-        TO ss1
+        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_state_source VALUES { user_id = ss1.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
-        TO ss2
+        TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING notification_codec
         BRANCHED BY by_state_source VALUES { user_id = ss2.user_id }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+
+        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 SET ss10.source = state_notifications.source BRANCHED BY by_state_source
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO ss10 FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET ss10.source = state_notifications.source ON MESSAGE ERROR LOG BRANCHED BY by_state_source;
         CREATE SUBSCRIPTION ss10_subscription TO ss10;
         START;
       """
@@ -306,8 +304,7 @@ Feature: Relay junction
         CREATE RELAY ss10 SCHEMA notification BRANCHED BY by_join_streams;
         CREATE JUNCTION join_streams
         FROM ss1, ss2
-        TO ss10 BRANCHED BY by_join_streams
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        TO ss10 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_join_streams;
       """
 
     Examples:

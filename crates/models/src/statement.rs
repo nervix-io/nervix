@@ -1233,12 +1233,9 @@ pub struct CreateIngestor {
     pub output_routes: ProcessorOutputs,
     pub decode_using_codec: Identifier,
     pub branched_by: BranchInitiatorSelection,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
     pub timestamp_source: Option<IngestTimestampSource>,
     pub source: IngestSource,
-    pub error_policies: ErrorPolicies,
+    pub general_error_policy: GeneralErrorPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_where: Option<String>,
 }
@@ -1248,6 +1245,16 @@ pub struct ProcessorOutput {
     pub relay: Identifier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_map: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flush_policy: Option<OutputFlushPolicy>,
+    pub message_error_policy: MessageErrorPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputFlushPolicy {
+    pub flush_each: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch_size: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1298,6 +1305,24 @@ impl ProcessorOutput {
         Self {
             relay,
             filter_map: None,
+            flush_policy: None,
+            message_error_policy: MessageErrorPolicy::Log,
+        }
+    }
+
+    pub fn with_flush_policy(
+        relay: Identifier,
+        flush_each: String,
+        max_batch_size: Option<String>,
+    ) -> Self {
+        Self {
+            relay,
+            filter_map: None,
+            flush_policy: Some(OutputFlushPolicy {
+                flush_each,
+                max_batch_size,
+            }),
+            message_error_policy: MessageErrorPolicy::Log,
         }
     }
 }
@@ -1317,6 +1342,16 @@ impl ProcessorOutputs {
         Self {
             routes: vec![ProcessorOutput::new(relay)],
         }
+    }
+
+    pub fn with_flush_policy(mut self, flush_each: String, max_batch_size: Option<String>) -> Self {
+        for output in &mut self.routes {
+            output.flush_policy = Some(OutputFlushPolicy {
+                flush_each: flush_each.clone(),
+                max_batch_size: max_batch_size.clone(),
+            });
+        }
+        self
     }
 
     pub fn relays(&self) -> impl Iterator<Item = &Identifier> {
@@ -1344,11 +1379,7 @@ pub struct CreateReingestor {
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchInitiatorSelection,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
     pub mode: AckMode,
-    pub message_error_policy: MessageErrorPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_where: Option<String>,
 }
@@ -1365,10 +1396,6 @@ pub struct CreateInferencer {
     pub file: String,
     pub inputs: Vec<InferencerTensorMapping>,
     pub output_schema: Vec<InferencerTensorDeclaration>,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
-    pub message_error_policy: MessageErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1441,7 +1468,6 @@ pub struct CreateWasmProcessor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_version: Option<u64>,
     pub file: String,
-    pub message_error_policy: MessageErrorPolicy,
     pub global_error_policy: GeneralErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
@@ -2080,10 +2106,6 @@ pub struct CreateJunction {
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
-    pub message_error_policy: MessageErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2098,10 +2120,6 @@ pub struct CreateDeduplicator {
     pub branched_by: BranchSelection,
     pub deduplicate_on: String,
     pub max_time: String,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
-    pub message_error_policy: MessageErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2119,11 +2137,7 @@ pub struct CreateCorrelator {
     pub match_policy: CorrelatorMatchPolicy,
     pub output: String,
     pub max_time: String,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
     pub timeout_policy: CorrelationTimeoutPolicy,
-    pub message_error_policy: MessageErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2159,10 +2173,6 @@ pub struct CreateReorderer {
     pub branched_by: BranchSelection,
     pub order_by: String,
     pub max_time: String,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
-    pub message_error_policy: MessageErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2178,7 +2188,6 @@ pub struct CreateWindowProcessor {
     pub width: WindowBound,
     pub step: WindowBound,
     pub aggregate: String,
-    pub message_error_policy: MessageErrorPolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2238,13 +2247,13 @@ pub enum AckMode {
 mod tests {
     use super::{
         AckMode, BranchInitiatorSelection, BranchSelection, ClusterSchedule, CreateSchema,
-        DomainSchedule, ErrorPolicies, InferencerTensorDimension, InferencerTensorElementType,
-        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule,
-        MessageErrorPolicy, Model, ModelKind, ScheduledNode,
+        DomainSchedule, GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
+        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule, Model,
+        ModelKind, ScheduledNode,
     };
     use crate::{
         CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Identifier, IngestSource,
-        ParseAsType, ProcessorInputs, ProcessorOutputs, SchemaField,
+        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2452,12 +2461,13 @@ mod tests {
                     vec![identifier("orders_in_a"), identifier("orders_in_b")],
                     Vec::new(),
                 ),
-                output_routes: ProcessorOutputs::single(identifier("orders_out")),
+                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                    identifier("orders_out"),
+                    "100ms".to_string(),
+                    Some("1MiB".to_string()),
+                )]),
                 branched_by: BranchSelection::unbranched(),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 mode: AckMode::Attached,
-                message_error_policy: MessageErrorPolicy::Log,
                 filter_where: None,
             })),
             effective_branching: None,
@@ -2471,17 +2481,19 @@ mod tests {
             kind: ModelKind::Ingestor,
             config: Box::new(Model::Ingestor(CreateIngestor {
                 name: identifier("orders_http"),
-                output_routes: ProcessorOutputs::single(identifier("orders_out")),
+                output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                    identifier("orders_out"),
+                    "100ms".to_string(),
+                    Some("1MiB".to_string()),
+                )]),
                 decode_using_codec: identifier("codec"),
                 branched_by: BranchInitiatorSelection::unbranched(),
-                flush_each: "100ms".to_string(),
-                max_batch_size: Some("1MiB".to_string()),
                 timestamp_source: None,
                 source: IngestSource::Endpoint {
                     endpoint: identifier("public_http"),
                     mode: EndpointIngestMode::NoAckSequential,
                 },
-                error_policies: ErrorPolicies::handled_by_log(),
+                general_error_policy: GeneralErrorPolicy::Log,
 
                 filter_where: None,
             })),

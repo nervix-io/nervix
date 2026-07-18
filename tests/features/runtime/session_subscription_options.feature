@@ -30,12 +30,12 @@ Feature: Session subscription delivery options
         PATH '/telemetry'
         TYPE HTTP;
         CREATE INGESTOR telemetry_http
-        TO telemetry
+        TO telemetry FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING telemetry_codec
         BRANCHED BY by_telemetry_http VALUES { device = telemetry.device }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION telemetry_subscription TO telemetry DROPPING BATCH SAMPLE RATE 0.0 WHERE telemetry.active;
         START;
       """
@@ -81,12 +81,12 @@ Feature: Session subscription delivery options
         PATH '/telemetry'
         TYPE HTTP;
         CREATE INGESTOR telemetry_http
-        TO telemetry
+        TO telemetry FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         DECODE USING telemetry_codec
         BRANCHED BY by_telemetry_http VALUES { device = telemetry.device }
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+
         TIMESTAMP NOW
-        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION telemetry_subscription TO telemetry BLOCKING BATCH SAMPLE RATE 1.0 WHERE telemetry.active;
         START;
       """

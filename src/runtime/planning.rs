@@ -10,6 +10,15 @@ fn branched_output(output: &ModelProcessorOutput) -> BranchedProcessorOutputSpec
     BranchedProcessorOutputSpec {
         relay: output.relay.clone(),
         filter_map: output.filter_map.clone(),
+        flush_each: output
+            .flush_policy
+            .as_ref()
+            .map(|policy| policy.flush_each.clone()),
+        max_batch_size: output
+            .flush_policy
+            .as_ref()
+            .and_then(|policy| policy.max_batch_size.clone()),
+        message_error_policy: output.message_error_policy.clone(),
         children: Vec::new(),
     }
 }
@@ -123,7 +132,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     processor: identifier,
                     input_relays: deduplicator.from.relays().to_vec(),
                     mode: deduplicator.mode,
-                    error_policies: message_only_error_policies(&deduplicator.message_error_policy),
+                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&deduplicator.from),
                     filter_where: deduplicator.filter_where.clone(),
                     operation: BranchedProcessorOperationSpec::Deduplicator {
@@ -148,15 +157,13 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     processor: identifier,
                     input_relays: reorderer.from.relays().to_vec(),
                     mode: reorderer.mode,
-                    error_policies: message_only_error_policies(&reorderer.message_error_policy),
+                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&reorderer.from),
                     filter_where: reorderer.filter_where.clone(),
                     operation: BranchedProcessorOperationSpec::Reorderer {
                         output_routes: branched_outputs(&reorderer.output_routes),
                         order_by: reorderer.order_by.clone(),
                         max_time: reorderer.max_time.clone(),
-                        flush_each: reorderer.flush_each.clone(),
-                        max_batch_size: reorderer.max_batch_size.clone(),
                     },
                 };
                 for from_relay in reorderer.from.relays() {
@@ -179,7 +186,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     processor: identifier,
                     input_relays: input_relays.clone(),
                     mode: correlator.mode,
-                    error_policies: message_only_error_policies(&correlator.message_error_policy),
+                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where,
                     filter_where: correlator.filter_where.clone(),
                     operation: BranchedProcessorOperationSpec::Correlator {
@@ -190,8 +197,6 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         match_policy: correlator.match_policy,
                         output_assignments: correlator.output.clone(),
                         max_time: correlator.max_time.clone(),
-                        flush_each: correlator.flush_each.clone(),
-                        max_batch_size: correlator.max_batch_size.clone(),
                         timeout_policy: correlator.timeout_policy.clone(),
                     },
                 };
@@ -211,9 +216,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     processor: identifier,
                     input_relays: window_processor.from.relays().to_vec(),
                     mode: window_processor.mode,
-                    error_policies: message_only_error_policies(
-                        &window_processor.message_error_policy,
-                    ),
+                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&window_processor.from),
                     filter_where: window_processor.filter_where.clone(),
                     operation: BranchedProcessorOperationSpec::WindowProcessor {
@@ -239,13 +242,11 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     processor: identifier,
                     input_relays: junction.from.relays().to_vec(),
                     mode: junction.mode,
-                    error_policies: message_only_error_policies(&junction.message_error_policy),
+                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&junction.from),
                     filter_where: junction.filter_where.clone(),
                     operation: BranchedProcessorOperationSpec::Junction {
                         output_routes: branched_outputs(&junction.output_routes),
-                        flush_each: junction.flush_each.clone(),
-                        max_batch_size: junction.max_batch_size.clone(),
                     },
                 };
                 for from_relay in junction.from.relays() {
@@ -264,7 +265,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     processor: identifier,
                     input_relays: inferencer.from.relays().to_vec(),
                     mode: inferencer.mode,
-                    error_policies: message_only_error_policies(&inferencer.message_error_policy),
+                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&inferencer.from),
                     filter_where: inferencer.filter_where.clone(),
                     operation: BranchedProcessorOperationSpec::Inferencer {
@@ -274,8 +275,6 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         file: inferencer.file.clone(),
                         inputs: inferencer.inputs.clone(),
                         output_schema: inferencer.output_schema.clone(),
-                        flush_each: inferencer.flush_each.clone(),
-                        max_batch_size: inferencer.max_batch_size.clone(),
                     },
                 };
                 for from_relay in inferencer.from.relays() {
@@ -294,9 +293,8 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     processor: identifier,
                     input_relays: processor.from.relays().to_vec(),
                     mode: processor.mode,
-                    error_policies: super::wasm_error_policies(
-                        &processor.message_error_policy,
-                        &processor.global_error_policy,
+                    error_policies: internal_processor_error_policies(
+                        processor.global_error_policy.clone(),
                     ),
                     from_where: processor_input_where_by_inputs(&processor.from),
                     filter_where: processor.filter_where.clone(),
@@ -325,9 +323,20 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         entrypoint.max_instances,
                         entrypoint.values,
                         BranchInstanceAckBoundary::Preserve,
-                        ingestor.flush_each.clone(),
-                        ingestor.max_batch_size.clone(),
-                        ingestor.error_policies.clone(),
+                        output
+                            .flush_policy
+                            .as_ref()
+                            .expect("validated ingestor output must have a flush policy")
+                            .flush_each
+                            .clone(),
+                        output
+                            .flush_policy
+                            .as_ref()
+                            .and_then(|policy| policy.max_batch_size.clone()),
+                        output_error_policies(
+                            &output.message_error_policy,
+                            ingestor.general_error_policy.clone(),
+                        ),
                     ));
                 }
             }
@@ -342,9 +351,20 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         entrypoint.max_instances,
                         entrypoint.values,
                         BranchInstanceAckBoundary::Reingestor(reingestor.mode),
-                        reingestor.flush_each.clone(),
-                        reingestor.max_batch_size.clone(),
-                        message_only_error_policies(&reingestor.message_error_policy),
+                        output
+                            .flush_policy
+                            .as_ref()
+                            .expect("validated reingestor output must have a flush policy")
+                            .flush_each
+                            .clone(),
+                        output
+                            .flush_policy
+                            .as_ref()
+                            .and_then(|policy| policy.max_batch_size.clone()),
+                        output_error_policies(
+                            &output.message_error_policy,
+                            GeneralErrorPolicy::Log,
+                        ),
                     ));
                 }
             }
@@ -535,6 +555,19 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
         Ok(RelayProcessorOutputTemplate {
             output_relay: output.relay.clone(),
             filter_map: output.filter_map.clone(),
+            flush_policy: output
+                .flush_each
+                .as_deref()
+                .map(|flush_each| {
+                    parse_branch_flush_policy(
+                        "processor output",
+                        &output.relay,
+                        flush_each,
+                        output.max_batch_size.as_deref(),
+                    )
+                })
+                .transpose()?,
+            message_error_policy: output.message_error_policy.clone(),
         })
     }
 
@@ -674,8 +707,6 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         output_routes,
                         order_by,
                         max_time,
-                        flush_each,
-                        max_batch_size,
                     } => RelayProcessorOperationTemplate::Reorderer {
                         output_routes: materialize_outputs(output_routes)?,
                         order_by: order_by.clone(),
@@ -687,12 +718,6 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                                 error
                             )
                         })?,
-                        flush_each: parse_branch_flush_policy(
-                            "reorderer",
-                            &node.processor,
-                            flush_each,
-                            max_batch_size.as_deref(),
-                        )?,
                     },
                     BranchedProcessorOperationSpec::Correlator {
                         output_routes,
@@ -702,8 +727,6 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         match_policy,
                         output_assignments,
                         max_time,
-                        flush_each,
-                        max_batch_size,
                         timeout_policy,
                     } => RelayProcessorOperationTemplate::Correlator {
                         output_routes: materialize_outputs(output_routes)?,
@@ -720,27 +743,13 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                                 error
                             )
                         })?,
-                        flush_each: parse_branch_flush_policy(
-                            "correlator",
-                            &node.processor,
-                            flush_each,
-                            max_batch_size.as_deref(),
-                        )?,
                         timeout_policy: timeout_policy.clone(),
                     },
-                    BranchedProcessorOperationSpec::Junction {
-                        output_routes,
-                        flush_each,
-                        max_batch_size,
-                    } => RelayProcessorOperationTemplate::Junction {
-                        output_routes: materialize_outputs(output_routes)?,
-                        flush_each: parse_branch_flush_policy(
-                            "junction",
-                            &node.processor,
-                            flush_each,
-                            max_batch_size.as_deref(),
-                        )?,
-                    },
+                    BranchedProcessorOperationSpec::Junction { output_routes } => {
+                        RelayProcessorOperationTemplate::Junction {
+                            output_routes: materialize_outputs(output_routes)?,
+                        }
+                    }
                     BranchedProcessorOperationSpec::Inferencer {
                         output_routes,
                         resource,
@@ -748,8 +757,6 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         file,
                         inputs,
                         output_schema,
-                        flush_each,
-                        max_batch_size,
                     } => RelayProcessorOperationTemplate::Inferencer {
                         output_routes: materialize_outputs(output_routes)?,
                         resource: resource.clone(),
@@ -757,12 +764,6 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         file: file.clone(),
                         inputs: inputs.clone(),
                         output_schema: output_schema.clone(),
-                        flush_each: parse_branch_flush_policy(
-                            "inferencer",
-                            &node.processor,
-                            flush_each,
-                            max_batch_size.as_deref(),
-                        )?,
                     },
                     BranchedProcessorOperationSpec::WasmProcessor {
                         output_routes,

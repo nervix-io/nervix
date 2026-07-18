@@ -165,12 +165,13 @@ use processors::{
     BranchedProcessorSpec, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
     CompiledReordererProgram, CompiledWindowAggregateExpr, CompiledWindowAggregateProgram,
     CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
-    JunctionFlushContext, PlannedGeneralError, PlannedMessageError, RelayProcessorNode,
-    RelayProcessorOperationNode, RelayProcessorOperationTemplate, RelayProcessorOutputNode,
-    RelayProcessorOutputTemplate, RelayProcessorOutputsNode, RelayProcessorOutputsTemplate,
-    RelayProcessorRelayTemplate, RelayProcessorTemplate, ReorderKeyPart, ReordererPendingMessage,
-    SharedCorrelatorBranchState, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor,
-    WasmFlushContext, WindowBounds, WindowFlushContext,
+    InferencerOutputBuffer, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
+    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
+    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
+    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage, SharedCorrelatorBranchState,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -1442,20 +1443,20 @@ struct BranchRuntime {
     processors_by_input: HashMap<Identifier, Vec<Identifier>>,
 }
 
-fn message_only_error_policies(policy: &MessageErrorPolicy) -> ErrorPolicies {
+fn output_error_policies(
+    policy: &MessageErrorPolicy,
+    general: GeneralErrorPolicy,
+) -> ErrorPolicies {
     ErrorPolicies {
         message: policy.clone(),
-        general: GeneralErrorPolicy::Log,
+        general,
     }
 }
 
-fn wasm_error_policies(
-    message_policy: &MessageErrorPolicy,
-    global_policy: &GeneralErrorPolicy,
-) -> ErrorPolicies {
+fn internal_processor_error_policies(general: GeneralErrorPolicy) -> ErrorPolicies {
     ErrorPolicies {
-        message: message_policy.clone(),
-        general: global_policy.clone(),
+        message: MessageErrorPolicy::Log,
+        general,
     }
 }
 
@@ -3040,11 +3041,9 @@ impl RelayProcessorNode {
                     output_routes,
                     order_by,
                     max_time: _,
-                    flush_each,
                     compiled_program,
-                    pending,
+                    output_buffers,
                     arrival_sequence,
-                    next_flush,
                 } => {
                     if compiled_program.is_none() {
                         match compile_reorderer_program(
@@ -3076,31 +3075,8 @@ impl RelayProcessorNode {
                         .ok()
                         .flatten()
                         .unwrap_or_else(current_timestamp);
-                    let messages = match batch.clone().try_into_messages() {
-                        Ok(messages) => messages,
-                        Err(error_and_batch) => {
-                            let (error, batch) = *error_and_batch;
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                batch.acks.iter(),
-                                format!(
-                                    "reorderer '{}' failed to decode arrow batch: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
-                            );
-                            return;
-                        }
-                    };
-                    let records = messages
-                        .iter()
-                        .map(|message| message.record.clone())
-                        .collect::<Vec<_>>();
                     let vm_batch = match vm_typed_batch_from_runtime_records(
-                        &records,
+                        &batch.records,
                         &program.program.input_schema,
                     ) {
                         Ok(batch) => batch,
@@ -3147,7 +3123,22 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    for (row, message) in messages.into_iter().enumerate() {
+                    if output_buffers.len() != output_routes.routes.len() {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind.as_str(),
+                            &self.processor,
+                            &self.error_policies,
+                            batch.acks.iter(),
+                            format!(
+                                "reorderer '{}' output buffer count does not match its routes",
+                                self.processor.as_str()
+                            ),
+                        );
+                        return;
+                    }
+                    let mut row_ordering = Vec::with_capacity(batch.records.len());
+                    for row in 0..batch.records.len() {
                         let key = (0..program.key_count)
                             .map(|index| {
                                 reorder_key_part(
@@ -3158,40 +3149,90 @@ impl RelayProcessorNode {
                             .collect::<Vec<_>>();
                         let sequence = *arrival_sequence;
                         *arrival_sequence = arrival_sequence.saturating_add(1);
-                        pending.push(ReordererPendingMessage {
-                            key,
-                            arrival_sequence: sequence,
-                            received_at: execution_now,
-                            message,
-                        });
+                        row_ordering.push((key, sequence));
                     }
-                    match flush_each {
-                        RuntimeFlushPolicy::Immediate => {
-                            flush_branch_reorderer(
-                                ReordererFlushContext {
-                                    graph,
-                                    branch,
-                                    node_kind: self.kind.as_str(),
-                                    processor: &self.processor,
-                                    error_policies: &self.error_policies,
-                                    output_routes,
-                                    input_relays: &self.input_relays,
-                                },
-                                pending,
-                                next_flush,
-                            )
-                            .await;
-                        }
-                        RuntimeFlushPolicy::Each {
-                            interval: duration, ..
-                        } => {
-                            if next_flush.is_none() {
-                                *next_flush = Some(checked_add_duration_to_timestamp(
-                                    execution_now,
-                                    *duration,
-                                ));
+                    let estimated_bytes = batch.estimated_bytes();
+                    let route_batches = batch.into_attached_fanout(output_routes.routes.len());
+                    let mut due_outputs = Vec::new();
+                    for (output_index, route_batch) in route_batches.into_iter().enumerate() {
+                        let messages = match route_batch.try_into_messages() {
+                            Ok(messages) => messages,
+                            Err(error_and_batch) => {
+                                let (error, batch) = *error_and_batch;
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    batch.acks.iter(),
+                                    format!(
+                                        "reorderer '{}' failed to decode arrow batch: {}",
+                                        self.processor.as_str(),
+                                        error
+                                    ),
+                                );
+                                continue;
+                            }
+                        };
+                        let output_buffer = &mut output_buffers[output_index];
+                        output_buffer.estimated_bytes = output_buffer
+                            .estimated_bytes
+                            .saturating_add(estimated_bytes);
+                        output_buffer
+                            .pending
+                            .extend(messages.into_iter().enumerate().map(|(row, message)| {
+                                let (key, arrival_sequence) = &row_ordering[row];
+                                ReordererPendingMessage {
+                                    key: key.clone(),
+                                    arrival_sequence: *arrival_sequence,
+                                    received_at: execution_now,
+                                    message,
+                                }
+                            }));
+                        let output = &mut output_routes.routes[output_index];
+                        match output
+                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes)
+                        {
+                            Some(true) => {
+                                output.force_flush_at(execution_now);
+                                due_outputs.push(output_index);
+                            }
+                            Some(false) => {}
+                            None => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    output_buffer
+                                        .pending
+                                        .iter()
+                                        .map(|entry| &entry.message.acks),
+                                    format!(
+                                        "reorderer '{}' output '{}' has no flush policy",
+                                        self.processor.as_str(),
+                                        output.relay.as_str()
+                                    ),
+                                );
+                                output_buffer.clear();
                             }
                         }
+                    }
+                    for output_index in due_outputs {
+                        flush_branch_reorderer_output(
+                            ReordererFlushContext {
+                                graph,
+                                branch,
+                                node_kind: self.kind.as_str(),
+                                processor: &self.processor,
+                                error_policies: &self.error_policies,
+                                output_routes,
+                                input_relays: &self.input_relays,
+                            },
+                            &mut output_buffers[output_index],
+                            output_index,
+                        )
+                        .await;
                     }
                 }
                 RelayProcessorOperationNode::Correlator {
@@ -3202,7 +3243,6 @@ impl RelayProcessorNode {
                     match_policy,
                     output_assignments,
                     max_time: _,
-                    flush_each,
                     timeout_policy: _,
                     compiled_where_program,
                     compiled_output_program,
@@ -3554,118 +3594,35 @@ impl RelayProcessorNode {
                     if output_messages.is_empty() {
                         return;
                     }
-                    let should_flush = {
+                    {
                         let mut state = state.lock();
                         state.output_pending.extend(output_messages);
-                        match flush_each {
-                            RuntimeFlushPolicy::Immediate => true,
-                            RuntimeFlushPolicy::Each {
-                                interval,
-                                max_batch_size,
-                            } => {
-                                if state.next_flush.is_none() {
-                                    state.next_flush = Some(checked_add_duration_to_timestamp(
-                                        execution_now,
-                                        *interval,
-                                    ));
-                                }
-                                let due = state
-                                    .next_flush
-                                    .is_some_and(|deadline| deadline <= execution_now);
-                                let estimated_bytes = relay_schema_for_runtime(
-                                    &branch.runtime,
-                                    &branch.domain,
-                                    &output_routes
-                                        .routes
-                                        .first()
-                                        .map(|output| output.relay.clone())
-                                        .unwrap_or_else(|| incoming_relay.clone()),
-                                )
-                                .ok()
-                                .and_then(|schema| {
-                                    RelayRecordBatch::from_messages(
-                                        schema,
-                                        state.output_pending.clone(),
-                                    )
-                                    .ok()
-                                })
-                                .map(|batch| batch.estimated_bytes())
-                                .unwrap_or(*max_batch_size);
-                                due || estimated_bytes >= *max_batch_size
-                            }
-                        }
-                    };
-                    if should_flush {
-                        flush_branch_correlator(CorrelatorFlushContext {
+                    }
+                    flush_branch_correlator(CorrelatorFlushContext {
+                        graph,
+                        branch,
+                        node_kind: self.kind.as_str(),
+                        processor: &self.processor,
+                        error_policies: &self.error_policies,
+                        output_routes,
+                        state,
+                    })
+                    .await;
+                }
+                RelayProcessorOperationNode::Junction { output_routes } => {
+                    flush_branch_junction(
+                        JunctionFlushContext {
                             graph,
                             branch,
                             node_kind: self.kind.as_str(),
                             processor: &self.processor,
                             error_policies: &self.error_policies,
+                            input_relays: &self.input_relays,
                             output_routes,
-                            state,
-                        })
-                        .await;
-                    }
-                }
-                RelayProcessorOperationNode::Junction {
-                    output_routes,
-                    flush_each,
-                    pending,
-                    next_flush,
-                } => {
-                    let now = branch
-                        .runtime
-                        .current_stream_expiration_time(&branch.domain)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(current_timestamp);
-                    pending.push(batch);
-                    match flush_each {
-                        RuntimeFlushPolicy::Immediate => {
-                            flush_branch_junction(
-                                JunctionFlushContext {
-                                    graph,
-                                    branch,
-                                    node_kind: self.kind.as_str(),
-                                    processor: &self.processor,
-                                    error_policies: &self.error_policies,
-                                    input_relays: &self.input_relays,
-                                    output_routes,
-                                },
-                                pending,
-                                next_flush,
-                            )
-                            .await;
-                        }
-                        RuntimeFlushPolicy::Each {
-                            interval: flush_each,
-                            max_batch_size,
-                        } => {
-                            if next_flush.is_none() {
-                                *next_flush =
-                                    Some(checked_add_duration_to_timestamp(now, *flush_each));
-                            }
-                            if next_flush.is_some_and(|deadline| deadline <= now)
-                                || relay_batches_estimated_bytes(pending) >= *max_batch_size
-                            {
-                                flush_branch_junction(
-                                    JunctionFlushContext {
-                                        graph,
-                                        branch,
-                                        node_kind: self.kind.as_str(),
-                                        processor: &self.processor,
-                                        error_policies: &self.error_policies,
-                                        input_relays: &self.input_relays,
-                                        output_routes,
-                                    },
-                                    pending,
-                                    next_flush,
-                                )
-                                .await;
-                            }
-                        }
-                    }
+                        },
+                        batch,
+                    )
+                    .await;
                 }
                 RelayProcessorOperationNode::Inferencer {
                     output_routes,
@@ -3674,74 +3631,82 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
-                    flush_each,
-                    pending,
-                    next_flush,
+                    output_buffers,
                     session,
                 } => {
+                    if output_buffers.len() != output_routes.routes.len() {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind.as_str(),
+                            &self.processor,
+                            &self.error_policies,
+                            batch.acks.iter(),
+                            format!(
+                                "inferencer '{}' output buffer count does not match its routes",
+                                self.processor.as_str()
+                            ),
+                        );
+                        return;
+                    }
                     let now = branch
                         .runtime
                         .current_stream_expiration_time(&branch.domain)
                         .ok()
                         .flatten()
                         .unwrap_or_else(current_timestamp);
-                    pending.push(batch);
-                    match flush_each {
-                        RuntimeFlushPolicy::Immediate => {
-                            flush_branch_inferencer(
-                                InferencerFlushContext {
-                                    graph,
-                                    branch,
-                                    node_kind: self.kind.as_str(),
-                                    processor: &self.processor,
-                                    error_policies: &self.error_policies,
-                                    output_routes,
-                                    resource,
-                                    resource_version: *resource_version,
-                                    file,
-                                    inputs,
-                                    output_schema,
-                                    input_relays: &self.input_relays,
-                                    session,
-                                },
-                                pending,
-                                next_flush,
-                            )
-                            .await;
-                        }
-                        RuntimeFlushPolicy::Each {
-                            interval: flush_each,
-                            max_batch_size,
-                        } => {
-                            if next_flush.is_none() {
-                                *next_flush =
-                                    Some(checked_add_duration_to_timestamp(now, *flush_each));
+                    let route_batches = batch.into_attached_fanout(output_routes.routes.len());
+                    let mut due_outputs = Vec::new();
+                    for (output_index, route_batch) in route_batches.into_iter().enumerate() {
+                        let output_buffer = &mut output_buffers[output_index];
+                        output_buffer.push(route_batch);
+                        let output = &mut output_routes.routes[output_index];
+                        match output.schedule_input_flush(now, output_buffer.estimated_bytes()) {
+                            Some(true) => {
+                                output.force_flush_at(now);
+                                due_outputs.push(output_index);
                             }
-                            if next_flush.is_some_and(|deadline| deadline <= now)
-                                || relay_batches_estimated_bytes(pending) >= *max_batch_size
-                            {
-                                flush_branch_inferencer(
-                                    InferencerFlushContext {
-                                        graph,
-                                        branch,
-                                        node_kind: self.kind.as_str(),
-                                        processor: &self.processor,
-                                        error_policies: &self.error_policies,
-                                        output_routes,
-                                        resource,
-                                        resource_version: *resource_version,
-                                        file,
-                                        inputs,
-                                        output_schema,
-                                        input_relays: &self.input_relays,
-                                        session,
-                                    },
-                                    pending,
-                                    next_flush,
-                                )
-                                .await;
+                            Some(false) => {}
+                            None => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    output_buffer
+                                        .pending
+                                        .iter()
+                                        .flat_map(|batch| batch.acks.iter()),
+                                    format!(
+                                        "inferencer '{}' output '{}' has no flush policy",
+                                        self.processor.as_str(),
+                                        output.relay.as_str()
+                                    ),
+                                );
+                                output_buffer.clear();
                             }
                         }
+                    }
+                    for output_index in due_outputs {
+                        flush_branch_inferencer_output(
+                            InferencerFlushContext {
+                                graph,
+                                branch,
+                                node_kind: self.kind.as_str(),
+                                processor: &self.processor,
+                                error_policies: &self.error_policies,
+                                output_routes,
+                                resource,
+                                resource_version: *resource_version,
+                                file,
+                                inputs,
+                                output_schema,
+                                input_relays: &self.input_relays,
+                                session,
+                            },
+                            &mut output_buffers[output_index],
+                            output_index,
+                        )
+                        .await;
                     }
                 }
                 RelayProcessorOperationNode::WasmProcessor {
@@ -3790,6 +3755,21 @@ impl RelayProcessorNode {
         now: Timestamp,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            flush_due_processor_outputs(
+                ProcessorOutputDispatchContext {
+                    graph,
+                    branch,
+                    node_kind: self.kind.as_str(),
+                    source_kind: self.kind,
+                    processor: &self.processor,
+                    error_policies: &self.error_policies,
+                    input_relays: &self.input_relays,
+                    filter_source: ProcessorOutputFilterSource::InputRelays,
+                },
+                self.operation.output_routes_mut(),
+                now,
+            )
+            .await;
             match &mut self.operation {
                 RelayProcessorOperationNode::Deduplicator { .. } => {}
                 RelayProcessorOperationNode::WindowProcessor {
@@ -3845,50 +3825,29 @@ impl RelayProcessorNode {
                         state.clear(aggregate);
                     }
                 }
-                RelayProcessorOperationNode::Junction {
-                    output_routes,
-                    flush_each,
-                    pending,
-                    next_flush,
-                    ..
-                } => {
-                    if let RuntimeFlushPolicy::Each { .. } = flush_each
-                        && next_flush.is_some_and(|deadline| deadline <= now)
-                    {
-                        flush_branch_junction(
-                            JunctionFlushContext {
-                                graph,
-                                branch,
-                                node_kind: self.kind.as_str(),
-                                processor: &self.processor,
-                                error_policies: &self.error_policies,
-                                input_relays: &self.input_relays,
-                                output_routes,
-                            },
-                            pending,
-                            next_flush,
-                        )
-                        .await;
-                    }
-                }
+                RelayProcessorOperationNode::Junction { .. } => {}
                 RelayProcessorOperationNode::Reorderer {
                     output_routes,
                     max_time,
-                    flush_each,
-                    pending,
-                    next_flush,
+                    output_buffers,
                     ..
                 } => {
-                    let max_time_due = pending.first().is_some_and(|entry| {
-                        checked_add_duration_to_timestamp(entry.received_at, *max_time) <= now
-                    });
-                    let flush_due = if let RuntimeFlushPolicy::Each { .. } = flush_each {
-                        next_flush.is_some_and(|deadline| deadline <= now)
-                    } else {
-                        false
-                    };
-                    if max_time_due || flush_due {
-                        flush_branch_reorderer(
+                    let mut due_outputs = Vec::new();
+                    for (output_index, output_buffer) in output_buffers.iter().enumerate() {
+                        if output_buffer.pending.is_empty() {
+                            continue;
+                        }
+                        let max_time_due = output_buffer.pending.first().is_some_and(|entry| {
+                            checked_add_duration_to_timestamp(entry.received_at, *max_time) <= now
+                        });
+                        let flush_due = output_routes.routes[output_index].flush_deadline_due(now);
+                        if max_time_due || flush_due {
+                            output_routes.routes[output_index].force_flush_at(now);
+                            due_outputs.push(output_index);
+                        }
+                    }
+                    for output_index in due_outputs {
+                        flush_branch_reorderer_output(
                             ReordererFlushContext {
                                 graph,
                                 branch,
@@ -3898,16 +3857,14 @@ impl RelayProcessorNode {
                                 output_routes,
                                 input_relays: &self.input_relays,
                             },
-                            pending,
-                            next_flush,
+                            &mut output_buffers[output_index],
+                            output_index,
                         )
                         .await;
                     }
                 }
                 RelayProcessorOperationNode::Correlator {
-                    output_routes,
                     max_time,
-                    flush_each,
                     timeout_policy,
                     state,
                     ..
@@ -3954,24 +3911,6 @@ impl RelayProcessorNode {
                         )
                         .await;
                     }
-                    if let RuntimeFlushPolicy::Each { .. } = flush_each {
-                        let flush_due = state
-                            .lock()
-                            .next_flush
-                            .is_some_and(|deadline| deadline <= now);
-                        if flush_due {
-                            flush_branch_correlator(CorrelatorFlushContext {
-                                graph,
-                                branch,
-                                node_kind: self.kind.as_str(),
-                                processor: &self.processor,
-                                error_policies: &self.error_policies,
-                                output_routes,
-                                state,
-                            })
-                            .await;
-                        }
-                    }
                 }
                 RelayProcessorOperationNode::Inferencer {
                     output_routes,
@@ -3980,15 +3919,21 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
-                    flush_each,
-                    pending,
-                    next_flush,
+                    output_buffers,
                     session,
                 } => {
-                    if let RuntimeFlushPolicy::Each { .. } = flush_each
-                        && next_flush.is_some_and(|deadline| deadline <= now)
-                    {
-                        flush_branch_inferencer(
+                    let due_outputs = output_buffers
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(output_index, output_buffer)| {
+                            (!output_buffer.pending.is_empty()
+                                && output_routes.routes[output_index].flush_deadline_due(now))
+                            .then_some(output_index)
+                        })
+                        .collect::<Vec<_>>();
+                    for output_index in due_outputs {
+                        output_routes.routes[output_index].force_flush_at(now);
+                        flush_branch_inferencer_output(
                             InferencerFlushContext {
                                 graph,
                                 branch,
@@ -4004,8 +3949,8 @@ impl RelayProcessorNode {
                                 input_relays: &self.input_relays,
                                 session,
                             },
-                            pending,
-                            next_flush,
+                            &mut output_buffers[output_index],
+                            output_index,
                         )
                         .await;
                     }
@@ -4141,24 +4086,22 @@ impl RelayProcessorNode {
     }
 
     fn next_deadline(&self) -> Option<Timestamp> {
-        match &self.operation {
+        let operation_deadline = match &self.operation {
             RelayProcessorOperationNode::Deduplicator { .. } => None,
             RelayProcessorOperationNode::WindowProcessor {
                 width_duration,
                 state,
                 ..
             } => window_next_deadline(state, *width_duration),
-            RelayProcessorOperationNode::Junction { next_flush, .. } => *next_flush,
+            RelayProcessorOperationNode::Junction { .. } => None,
             RelayProcessorOperationNode::Reorderer {
-                next_flush,
                 max_time,
-                pending,
+                output_buffers,
                 ..
-            } => pending
-                .first()
+            } => output_buffers
+                .iter()
+                .filter_map(|buffer| buffer.pending.first())
                 .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
-                .into_iter()
-                .chain(*next_flush)
                 .min(),
             RelayProcessorOperationNode::Correlator {
                 max_time, state, ..
@@ -4169,14 +4112,17 @@ impl RelayProcessorNode {
                     .iter()
                     .chain(state.pending_right.iter())
                     .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
-                    .chain(state.next_flush)
                     .min()
             }
-            RelayProcessorOperationNode::Inferencer { next_flush, .. } => *next_flush,
+            RelayProcessorOperationNode::Inferencer { .. } => None,
             RelayProcessorOperationNode::WasmProcessor { instance, .. } => {
                 wasm_instance_next_deadline(instance.as_deref())
             }
-        }
+        };
+        operation_deadline
+            .into_iter()
+            .chain(self.operation.output_routes().next_flush())
+            .min()
     }
 }
 
@@ -4203,6 +4149,10 @@ impl RelayProcessorTemplate {
         RelayProcessorOutputNode {
             relay: output.output_relay.clone(),
             filter_map: output.filter_map.clone(),
+            flush_policy: output.flush_policy,
+            message_error_policy: output.message_error_policy.clone(),
+            pending: Vec::new(),
+            next_flush: None,
             compiled_program: None,
         }
     }
@@ -4297,17 +4247,20 @@ impl RelayProcessorTemplate {
                     output_routes,
                     order_by,
                     max_time,
-                    flush_each,
-                } => RelayProcessorOperationNode::Reorderer {
-                    output_routes: Self::instantiate_outputs(output_routes),
-                    order_by: order_by.clone(),
-                    max_time: *max_time,
-                    flush_each: *flush_each,
-                    compiled_program: None,
-                    pending: Vec::new(),
-                    arrival_sequence: 0,
-                    next_flush: None,
-                },
+                } => {
+                    let output_routes = Self::instantiate_outputs(output_routes);
+                    let output_buffers = (0..output_routes.routes.len())
+                        .map(|_| ReordererOutputBuffer::default())
+                        .collect();
+                    RelayProcessorOperationNode::Reorderer {
+                        output_routes,
+                        order_by: order_by.clone(),
+                        max_time: *max_time,
+                        compiled_program: None,
+                        output_buffers,
+                        arrival_sequence: 0,
+                    }
+                }
                 RelayProcessorOperationTemplate::Correlator {
                     output_routes,
                     left_relays,
@@ -4316,7 +4269,6 @@ impl RelayProcessorTemplate {
                     match_policy,
                     output_assignments,
                     max_time,
-                    flush_each,
                     timeout_policy,
                 } => RelayProcessorOperationNode::Correlator {
                     output_routes: Self::instantiate_outputs(output_routes),
@@ -4326,7 +4278,6 @@ impl RelayProcessorTemplate {
                     match_policy: *match_policy,
                     output_assignments: output_assignments.clone(),
                     max_time: *max_time,
-                    flush_each: *flush_each,
                     timeout_policy: timeout_policy.clone(),
                     compiled_where_program: None,
                     compiled_output_program: None,
@@ -4338,15 +4289,11 @@ impl RelayProcessorTemplate {
                         branch_key: key.clone(),
                     }),
                 },
-                RelayProcessorOperationTemplate::Junction {
-                    output_routes,
-                    flush_each,
-                } => RelayProcessorOperationNode::Junction {
-                    output_routes: Self::instantiate_outputs(output_routes),
-                    flush_each: *flush_each,
-                    pending: Vec::new(),
-                    next_flush: None,
-                },
+                RelayProcessorOperationTemplate::Junction { output_routes } => {
+                    RelayProcessorOperationNode::Junction {
+                        output_routes: Self::instantiate_outputs(output_routes),
+                    }
+                }
                 RelayProcessorOperationTemplate::Inferencer {
                     output_routes,
                     resource,
@@ -4354,19 +4301,22 @@ impl RelayProcessorTemplate {
                     file,
                     inputs,
                     output_schema,
-                    flush_each,
-                } => RelayProcessorOperationNode::Inferencer {
-                    output_routes: Self::instantiate_outputs(output_routes),
-                    resource: resource.clone(),
-                    resource_version: *resource_version,
-                    file: file.clone(),
-                    inputs: inputs.clone(),
-                    output_schema: output_schema.clone(),
-                    flush_each: *flush_each,
-                    pending: Vec::new(),
-                    next_flush: None,
-                    session: None,
-                },
+                } => {
+                    let output_routes = Self::instantiate_outputs(output_routes);
+                    let output_buffers = (0..output_routes.routes.len())
+                        .map(|_| InferencerOutputBuffer::default())
+                        .collect();
+                    RelayProcessorOperationNode::Inferencer {
+                        output_routes,
+                        resource: resource.clone(),
+                        resource_version: *resource_version,
+                        file: file.clone(),
+                        inputs: inputs.clone(),
+                        output_schema: output_schema.clone(),
+                        output_buffers,
+                        session: None,
+                    }
+                }
                 RelayProcessorOperationTemplate::WasmProcessor {
                     output_routes,
                     resource,
@@ -7195,10 +7145,10 @@ struct ReordererFlushContext<'a> {
     input_relays: &'a [Identifier],
 }
 
-async fn flush_branch_reorderer(
+async fn flush_branch_reorderer_output(
     context: ReordererFlushContext<'_>,
-    pending: &mut Vec<ReordererPendingMessage>,
-    next_flush: &mut Option<Timestamp>,
+    output_buffer: &mut ReordererOutputBuffer,
+    output_index: usize,
 ) {
     let graph = context.graph;
     let node_kind = context.node_kind;
@@ -7207,15 +7157,16 @@ async fn flush_branch_reorderer(
     let output_routes = context.output_routes;
     let input_relays = context.input_relays;
     let branch = context.branch;
+    output_routes.routes[output_index].clear_flush_deadline();
 
-    if pending.is_empty() {
-        *next_flush = None;
+    if output_buffer.pending.is_empty() {
         return;
     }
     let Some(input_relay) = input_relays.first() else {
-        *next_flush = None;
+        output_routes.routes[output_index].clear_flush_deadline();
         return;
     };
+    let mut pending = output_buffer.take_pending();
     pending.sort_by(|left, right| {
         left.key
             .cmp(&right.key)
@@ -7229,20 +7180,23 @@ async fn flush_branch_reorderer(
     {
         Ok(schema) => schema,
         Err(error) => {
+            let message_error_policy = output_routes.routes[output_index]
+                .message_error_policy
+                .clone();
             for message in messages {
                 branch
                     .runtime
-                    .handle_message_error(
+                    .handle_message_error_with_policy(
                         &branch.domain,
                         node_kind,
                         processor,
-                        error_policies,
+                        &message_error_policy,
                         message,
                         error.to_string(),
                     )
                     .await;
             }
-            *next_flush = None;
+            output_routes.routes[output_index].clear_flush_deadline();
             return;
         }
     };
@@ -7261,11 +7215,11 @@ async fn flush_branch_reorderer(
                     error
                 ),
             );
-            *next_flush = None;
+            output_routes.routes[output_index].clear_flush_deadline();
             return;
         }
     };
-    if let Some(acks) = dispatch_processor_outputs(
+    if let Some(acks) = dispatch_processor_output(
         ProcessorOutputDispatchContext {
             graph,
             branch,
@@ -7278,6 +7232,7 @@ async fn flush_branch_reorderer(
         },
         output_routes,
         batch,
+        output_index,
     )
     .await
     {
@@ -7285,7 +7240,7 @@ async fn flush_branch_reorderer(
             ack.ack_success();
         }
     }
-    *next_flush = None;
+    output_routes.routes[output_index].clear_flush_deadline();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7615,7 +7570,6 @@ async fn flush_branch_correlator(context: CorrelatorFlushContext<'_>) {
     } = context;
     let messages = {
         let mut state = state.lock();
-        state.next_flush = None;
         std::mem::take(&mut state.output_pending)
     };
     if messages.is_empty() {
@@ -7711,6 +7665,10 @@ async fn handle_correlator_timeout_action(
             let output = RelayProcessorOutputNode {
                 relay: relay.clone(),
                 filter_map: None,
+                flush_policy: None,
+                message_error_policy: error_policies.message.clone(),
+                pending: Vec::new(),
+                next_flush: None,
                 compiled_program: None,
             };
             let output_schema =
@@ -8492,9 +8450,28 @@ async fn evaluate_processor_output_events(
 }
 
 async fn dispatch_processor_outputs(
+    context: ProcessorOutputDispatchContext<'_>,
+    outputs: &mut RelayProcessorOutputsNode,
+    batch: RelayRecordBatch,
+) -> Option<Vec<AckSet>> {
+    dispatch_selected_processor_outputs(context, outputs, batch, None, false).await
+}
+
+async fn dispatch_processor_output(
+    context: ProcessorOutputDispatchContext<'_>,
+    outputs: &mut RelayProcessorOutputsNode,
+    batch: RelayRecordBatch,
+    output_index: usize,
+) -> Option<Vec<AckSet>> {
+    dispatch_selected_processor_outputs(context, outputs, batch, Some(output_index), true).await
+}
+
+async fn dispatch_selected_processor_outputs(
     mut context: ProcessorOutputDispatchContext<'_>,
     outputs: &mut RelayProcessorOutputsNode,
     batch: RelayRecordBatch,
+    selected_output: Option<usize>,
+    flush_selected_immediately: bool,
 ) -> Option<Vec<AckSet>> {
     if batch.message_count() == 0 {
         return Some(Vec::new());
@@ -8510,6 +8487,9 @@ async fn dispatch_processor_outputs(
     let mut pending_batches = Vec::new();
     let mut pending_errors = Vec::new();
     for (output_index, output) in outputs.routes.iter_mut().enumerate() {
+        if selected_output.is_some_and(|selected| selected != output_index) {
+            continue;
+        }
         let (messages, batches, errors) = match evaluate_processor_output_events(
             &mut context,
             output,
@@ -8536,7 +8516,7 @@ async fn dispatch_processor_outputs(
         };
         pending_messages.extend(messages);
         pending_batches.extend(batches);
-        pending_errors.extend(errors);
+        pending_errors.extend(errors.into_iter().map(|error| (output_index, error)));
     }
 
     let mut delivery_counts = vec![0usize; batch.acks.len()];
@@ -8548,7 +8528,7 @@ async fn dispatch_processor_outputs(
             delivery_counts[*row] += 1;
         }
     }
-    for error in &pending_errors {
+    for (_, error) in &pending_errors {
         delivery_counts[error.row] += 1;
     }
 
@@ -8625,38 +8605,43 @@ async fn dispatch_processor_outputs(
         }
     }
 
-    let mut planned_errors = Vec::new();
-    for error in pending_errors {
+    for (output_index, error) in pending_errors {
         let Some(acks) = ack_queues[error.row].pop_front() else {
             continue;
         };
-        planned_errors.push(PlannedMessageError {
-            message: RelayMessage {
-                key: error.key,
-                record: error.record,
-                acks,
-            },
-            reason: error.reason,
-        });
+        context
+            .branch
+            .runtime
+            .handle_message_error_with_policy(
+                &context.branch.domain,
+                context.node_kind,
+                context.processor,
+                &outputs.routes[output_index].message_error_policy,
+                RelayMessage {
+                    key: error.key,
+                    record: error.record,
+                    acks,
+                },
+                error.reason,
+            )
+            .await;
     }
-    context
+
+    let execution_now = context
         .branch
         .runtime
-        .handle_planned_message_errors(
-            &context.branch.domain,
-            context.node_kind,
-            context.processor,
-            context.error_policies,
-            planned_errors,
-        )
-        .await;
-
+        .current_stream_expiration_time(&context.branch.domain)
+        .ok()
+        .flatten()
+        .unwrap_or_else(current_timestamp);
     let mut dispatched_acks = Vec::new();
-    for ((relay, messages), mut batches) in output_relays
+    for (output_index, (messages, mut batches)) in messages_by_output
         .into_iter()
-        .zip(messages_by_output)
         .zip(batches_by_output)
+        .enumerate()
     {
+        let output = &mut outputs.routes[output_index];
+        let relay = &output_relays[output_index];
         if !messages.is_empty() {
             let output_schema = match relay_schema_for_runtime(
                 &context.branch.runtime,
@@ -8665,15 +8650,16 @@ async fn dispatch_processor_outputs(
             ) {
                 Ok(schema) => schema,
                 Err(error) => {
+                    let message_error_policy = output.message_error_policy.clone();
                     for message in messages {
                         context
                             .branch
                             .runtime
-                            .handle_message_error(
+                            .handle_message_error_with_policy(
                                 &context.branch.domain,
                                 context.node_kind,
                                 context.processor,
-                                context.error_policies,
+                                &message_error_policy,
                                 message,
                                 error.to_string(),
                             )
@@ -8709,11 +8695,25 @@ async fn dispatch_processor_outputs(
         if batches.is_empty() {
             continue;
         }
-        let concat_acks = batches
+        let mut should_flush = false;
+        for batch in batches.drain(..) {
+            should_flush |= output.enqueue(batch, execution_now);
+        }
+        if flush_selected_immediately
+            && selected_output.is_some_and(|selected| selected == output_index)
+        {
+            output.force_flush_at(execution_now);
+            should_flush = true;
+        }
+        if !should_flush {
+            continue;
+        }
+        let pending = output.take_pending();
+        let pending_acks = pending
             .iter()
             .flat_map(|batch| batch.acks.iter().cloned())
             .collect::<Vec<_>>();
-        let forwarded = match RelayRecordBatch::concat(batches) {
+        let forwarded = match RelayRecordBatch::concat(pending) {
             Ok(batch) => batch,
             Err(error) => {
                 context
@@ -8724,7 +8724,7 @@ async fn dispatch_processor_outputs(
                         context.node_kind,
                         context.processor,
                         context.error_policies,
-                        concat_acks.iter(),
+                        pending_acks.iter(),
                         format!(
                             "{} '{}' failed to concat output batches for relay '{}': {}",
                             context.node_kind,
@@ -8736,16 +8736,11 @@ async fn dispatch_processor_outputs(
                 return None;
             }
         };
-        let output = RelayProcessorOutputNode {
-            relay: relay.clone(),
-            filter_map: None,
-            compiled_program: None,
-        };
         if context
             .branch
             .dispatch_output(
                 context.graph,
-                &output,
+                output,
                 context.source_kind,
                 context.processor,
                 &forwarded,
@@ -8775,6 +8770,79 @@ async fn dispatch_processor_outputs(
         }
     }
     Some(dispatched_acks)
+}
+
+async fn flush_due_processor_outputs(
+    context: ProcessorOutputDispatchContext<'_>,
+    outputs: &mut RelayProcessorOutputsNode,
+    now: Timestamp,
+) {
+    for output in &mut outputs.routes {
+        if !output.flush_due(now) {
+            continue;
+        }
+        let pending = output.take_pending();
+        let pending_acks = pending
+            .iter()
+            .flat_map(|batch| batch.acks.iter().cloned())
+            .collect::<Vec<_>>();
+        let forwarded = match RelayRecordBatch::concat(pending) {
+            Ok(batch) => batch,
+            Err(error) => {
+                context
+                    .branch
+                    .runtime
+                    .handle_internal_processor_error_for_acks(
+                        &context.branch.domain,
+                        context.node_kind,
+                        context.processor,
+                        context.error_policies,
+                        pending_acks.iter(),
+                        format!(
+                            "{} '{}' failed to concat buffered output batches for relay '{}': {}",
+                            context.node_kind,
+                            context.processor.as_str(),
+                            output.relay.as_str(),
+                            error
+                        ),
+                    );
+                continue;
+            }
+        };
+        if context
+            .branch
+            .dispatch_output(
+                context.graph,
+                output,
+                context.source_kind,
+                context.processor,
+                &forwarded,
+            )
+            .await
+            .is_ok()
+        {
+            for ack in &forwarded.acks {
+                ack.ack_success();
+            }
+        } else {
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    forwarded.acks.iter(),
+                    format!(
+                        "{} '{}' failed to forward buffered output to relay '{}'",
+                        context.node_kind,
+                        context.processor.as_str(),
+                        output.relay.as_str()
+                    ),
+                );
+        }
+    }
 }
 
 async fn plan_filter_map_messages(
@@ -11684,11 +11752,7 @@ fn materialized_stream_specs_for_graph(
     execution.materialized_stream_specs.clone()
 }
 
-async fn flush_branch_junction(
-    context: JunctionFlushContext<'_>,
-    pending: &mut Vec<RelayRecordBatch>,
-    next_flush: &mut Option<Timestamp>,
-) {
+async fn flush_branch_junction(context: JunctionFlushContext<'_>, forwarded: RelayRecordBatch) {
     let JunctionFlushContext {
         graph,
         branch,
@@ -11698,33 +11762,6 @@ async fn flush_branch_junction(
         input_relays,
         output_routes,
     } = context;
-    if pending.is_empty() {
-        *next_flush = None;
-        return;
-    }
-    let grouped_batches = std::mem::take(pending);
-    *next_flush = None;
-    let forwarded = match RelayRecordBatch::concat(grouped_batches.clone()) {
-        Ok(forwarded) => forwarded,
-        Err(error) => {
-            for batch in grouped_batches {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "junction '{}' failed to concat arrow batches: {}",
-                        processor.as_str(),
-                        error
-                    ),
-                );
-            }
-            return;
-        }
-    };
-
     if let Some(acks) = dispatch_processor_outputs(
         ProcessorOutputDispatchContext {
             graph,
@@ -11747,10 +11784,10 @@ async fn flush_branch_junction(
     }
 }
 
-async fn flush_branch_inferencer(
+async fn flush_branch_inferencer_output(
     context: InferencerFlushContext<'_>,
-    pending: &mut Vec<RelayRecordBatch>,
-    next_flush: &mut Option<Timestamp>,
+    output_buffer: &mut InferencerOutputBuffer,
+    output_index: usize,
 ) {
     let InferencerFlushContext {
         graph,
@@ -11767,29 +11804,30 @@ async fn flush_branch_inferencer(
         input_relays,
         session,
     } = context;
+    output_routes.routes[output_index].clear_flush_deadline();
+    let pending = output_buffer.take_pending();
     if pending.is_empty() {
-        *next_flush = None;
         return;
     }
-    let grouped_batches = std::mem::take(pending);
-    *next_flush = None;
-    let forwarded = match RelayRecordBatch::concat(grouped_batches.clone()) {
-        Ok(forwarded) => forwarded,
+    let pending_acks = pending
+        .iter()
+        .flat_map(|batch| batch.acks.iter().cloned())
+        .collect::<Vec<_>>();
+    let forwarded = match RelayRecordBatch::concat(pending) {
+        Ok(batch) => batch,
         Err(error) => {
-            for batch in grouped_batches {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "inferencer '{}' failed to concat arrow batches: {}",
-                        processor.as_str(),
-                        error
-                    ),
-                );
-            }
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                pending_acks.iter(),
+                format!(
+                    "inferencer '{}' failed to concatenate buffered input batches for output: {}",
+                    processor.as_str(),
+                    error
+                ),
+            );
             return;
         }
     };
@@ -12017,7 +12055,7 @@ async fn flush_branch_inferencer(
             return;
         }
     };
-    if let Some(acks) = dispatch_processor_outputs(
+    if let Some(acks) = dispatch_processor_output(
         ProcessorOutputDispatchContext {
             graph,
             branch,
@@ -12030,6 +12068,7 @@ async fn flush_branch_inferencer(
         },
         output_routes,
         output_batch,
+        output_index,
     )
     .await
     {
@@ -13144,11 +13183,14 @@ async fn dispatch_wasm_output_envelopes(
     };
     let mut token_use_counts = wasm_output_token_use_counts(&validated_outputs);
     for output in validated_outputs {
+        let message_error_policy = output_routes.routes[output.output_route_index]
+            .message_error_policy
+            .clone();
         apply_wasm_sidecar_terminal_decisions(
             branch,
             node_kind,
             processor,
-            error_policies,
+            &message_error_policy,
             ack_map,
             &output.acks,
         )
@@ -13608,11 +13650,11 @@ async fn dispatch_wasm_output_route(
     context
         .branch
         .runtime
-        .handle_planned_message_errors(
+        .handle_planned_message_errors_with_policy(
             &context.branch.domain,
             context.node_kind,
             context.processor,
-            context.error_policies,
+            &output.message_error_policy,
             planned_errors,
         )
         .await;
@@ -13844,7 +13886,7 @@ async fn apply_wasm_sidecar_terminal_decisions(
     branch: &BranchRuntime,
     node_kind: &str,
     processor: &Identifier,
-    error_policies: &ErrorPolicies,
+    message_error_policy: &MessageErrorPolicy,
     ack_map: &mut WasmAckMap,
     sidecar: &WasmAckSidecar,
 ) {
@@ -13855,11 +13897,11 @@ async fn apply_wasm_sidecar_terminal_decisions(
                 .expect("message error token should have been validated");
             branch
                 .runtime
-                .handle_message_error(
+                .handle_message_error_with_policy(
                     &branch.domain,
                     node_kind,
                     processor,
-                    error_policies,
+                    message_error_policy,
                     RelayMessage {
                         key: branch.key.clone(),
                         record: context.record,
