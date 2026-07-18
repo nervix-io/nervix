@@ -275,6 +275,20 @@ impl RelayRecordBatch {
         }
     }
 
+    pub(super) fn into_attached_fanout(self, output_count: usize) -> Vec<Self> {
+        if output_count == 0 {
+            self.ack_success();
+            return Vec::new();
+        }
+        let mut batches = Vec::with_capacity(output_count);
+        batches.push(self);
+        for _ in 1..output_count {
+            let attached = batches[0].attached();
+            batches.push(attached);
+        }
+        batches
+    }
+
     pub(super) fn message_count(&self) -> u64 {
         u64::try_from(self.batch.batch().num_rows()).unwrap_or(u64::MAX)
     }

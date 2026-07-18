@@ -165,12 +165,13 @@ use processors::{
     BranchedProcessorSpec, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
     CompiledReordererProgram, CompiledWindowAggregateExpr, CompiledWindowAggregateProgram,
     CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
-    JunctionFlushContext, PlannedGeneralError, PlannedMessageError, RelayProcessorNode,
-    RelayProcessorOperationNode, RelayProcessorOperationTemplate, RelayProcessorOutputNode,
-    RelayProcessorOutputTemplate, RelayProcessorOutputsNode, RelayProcessorOutputsTemplate,
-    RelayProcessorRelayTemplate, RelayProcessorTemplate, ReorderKeyPart, ReordererPendingMessage,
-    SharedCorrelatorBranchState, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor,
-    WasmFlushContext, WindowBounds, WindowFlushContext,
+    InferencerOutputBuffer, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
+    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
+    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
+    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
+    ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage, SharedCorrelatorBranchState,
+    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
+    WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -3037,11 +3038,11 @@ impl RelayProcessorNode {
                     }
                 }
                 RelayProcessorOperationNode::Reorderer {
-                    output_routes: _,
+                    output_routes,
                     order_by,
                     max_time: _,
                     compiled_program,
-                    pending,
+                    output_buffers,
                     arrival_sequence,
                 } => {
                     if compiled_program.is_none() {
@@ -3074,31 +3075,8 @@ impl RelayProcessorNode {
                         .ok()
                         .flatten()
                         .unwrap_or_else(current_timestamp);
-                    let messages = match batch.clone().try_into_messages() {
-                        Ok(messages) => messages,
-                        Err(error_and_batch) => {
-                            let (error, batch) = *error_and_batch;
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                batch.acks.iter(),
-                                format!(
-                                    "reorderer '{}' failed to decode arrow batch: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
-                            );
-                            return;
-                        }
-                    };
-                    let records = messages
-                        .iter()
-                        .map(|message| message.record.clone())
-                        .collect::<Vec<_>>();
                     let vm_batch = match vm_typed_batch_from_runtime_records(
-                        &records,
+                        &batch.records,
                         &program.program.input_schema,
                     ) {
                         Ok(batch) => batch,
@@ -3145,7 +3123,22 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    for (row, message) in messages.into_iter().enumerate() {
+                    if output_buffers.len() != output_routes.routes.len() {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind.as_str(),
+                            &self.processor,
+                            &self.error_policies,
+                            batch.acks.iter(),
+                            format!(
+                                "reorderer '{}' output buffer count does not match its routes",
+                                self.processor.as_str()
+                            ),
+                        );
+                        return;
+                    }
+                    let mut row_ordering = Vec::with_capacity(batch.records.len());
+                    for row in 0..batch.records.len() {
                         let key = (0..program.key_count)
                             .map(|index| {
                                 reorder_key_part(
@@ -3156,12 +3149,90 @@ impl RelayProcessorNode {
                             .collect::<Vec<_>>();
                         let sequence = *arrival_sequence;
                         *arrival_sequence = arrival_sequence.saturating_add(1);
-                        pending.push(ReordererPendingMessage {
-                            key,
-                            arrival_sequence: sequence,
-                            received_at: execution_now,
-                            message,
-                        });
+                        row_ordering.push((key, sequence));
+                    }
+                    let estimated_bytes = batch.estimated_bytes();
+                    let route_batches = batch.into_attached_fanout(output_routes.routes.len());
+                    let mut due_outputs = Vec::new();
+                    for (output_index, route_batch) in route_batches.into_iter().enumerate() {
+                        let messages = match route_batch.try_into_messages() {
+                            Ok(messages) => messages,
+                            Err(error_and_batch) => {
+                                let (error, batch) = *error_and_batch;
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    batch.acks.iter(),
+                                    format!(
+                                        "reorderer '{}' failed to decode arrow batch: {}",
+                                        self.processor.as_str(),
+                                        error
+                                    ),
+                                );
+                                continue;
+                            }
+                        };
+                        let output_buffer = &mut output_buffers[output_index];
+                        output_buffer.estimated_bytes = output_buffer
+                            .estimated_bytes
+                            .saturating_add(estimated_bytes);
+                        output_buffer
+                            .pending
+                            .extend(messages.into_iter().enumerate().map(|(row, message)| {
+                                let (key, arrival_sequence) = &row_ordering[row];
+                                ReordererPendingMessage {
+                                    key: key.clone(),
+                                    arrival_sequence: *arrival_sequence,
+                                    received_at: execution_now,
+                                    message,
+                                }
+                            }));
+                        let output = &mut output_routes.routes[output_index];
+                        match output
+                            .schedule_input_flush(execution_now, output_buffer.estimated_bytes)
+                        {
+                            Some(true) => {
+                                output.force_flush_at(execution_now);
+                                due_outputs.push(output_index);
+                            }
+                            Some(false) => {}
+                            None => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    output_buffer
+                                        .pending
+                                        .iter()
+                                        .map(|entry| &entry.message.acks),
+                                    format!(
+                                        "reorderer '{}' output '{}' has no flush policy",
+                                        self.processor.as_str(),
+                                        output.relay.as_str()
+                                    ),
+                                );
+                                output_buffer.clear();
+                            }
+                        }
+                    }
+                    for output_index in due_outputs {
+                        flush_branch_reorderer_output(
+                            ReordererFlushContext {
+                                graph,
+                                branch,
+                                node_kind: self.kind.as_str(),
+                                processor: &self.processor,
+                                error_policies: &self.error_policies,
+                                output_routes,
+                                input_relays: &self.input_relays,
+                            },
+                            &mut output_buffers[output_index],
+                            output_index,
+                        )
+                        .await;
                     }
                 }
                 RelayProcessorOperationNode::Correlator {
@@ -3560,27 +3631,83 @@ impl RelayProcessorNode {
                     file,
                     inputs,
                     output_schema,
+                    output_buffers,
                     session,
                 } => {
-                    flush_branch_inferencer(
-                        InferencerFlushContext {
-                            graph,
-                            branch,
-                            node_kind: self.kind.as_str(),
-                            processor: &self.processor,
-                            error_policies: &self.error_policies,
-                            output_routes,
-                            resource,
-                            resource_version: *resource_version,
-                            file,
-                            inputs,
-                            output_schema,
-                            input_relays: &self.input_relays,
-                            session,
-                        },
-                        batch,
-                    )
-                    .await;
+                    if output_buffers.len() != output_routes.routes.len() {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind.as_str(),
+                            &self.processor,
+                            &self.error_policies,
+                            batch.acks.iter(),
+                            format!(
+                                "inferencer '{}' output buffer count does not match its routes",
+                                self.processor.as_str()
+                            ),
+                        );
+                        return;
+                    }
+                    let now = branch
+                        .runtime
+                        .current_stream_expiration_time(&branch.domain)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(current_timestamp);
+                    let route_batches = batch.into_attached_fanout(output_routes.routes.len());
+                    let mut due_outputs = Vec::new();
+                    for (output_index, route_batch) in route_batches.into_iter().enumerate() {
+                        let output_buffer = &mut output_buffers[output_index];
+                        output_buffer.push(route_batch);
+                        let output = &mut output_routes.routes[output_index];
+                        match output.schedule_input_flush(now, output_buffer.estimated_bytes()) {
+                            Some(true) => {
+                                output.force_flush_at(now);
+                                due_outputs.push(output_index);
+                            }
+                            Some(false) => {}
+                            None => {
+                                branch.runtime.handle_internal_processor_error_for_acks(
+                                    &branch.domain,
+                                    self.kind.as_str(),
+                                    &self.processor,
+                                    &self.error_policies,
+                                    output_buffer
+                                        .pending
+                                        .iter()
+                                        .flat_map(|batch| batch.acks.iter()),
+                                    format!(
+                                        "inferencer '{}' output '{}' has no flush policy",
+                                        self.processor.as_str(),
+                                        output.relay.as_str()
+                                    ),
+                                );
+                                output_buffer.clear();
+                            }
+                        }
+                    }
+                    for output_index in due_outputs {
+                        flush_branch_inferencer_output(
+                            InferencerFlushContext {
+                                graph,
+                                branch,
+                                node_kind: self.kind.as_str(),
+                                processor: &self.processor,
+                                error_policies: &self.error_policies,
+                                output_routes,
+                                resource,
+                                resource_version: *resource_version,
+                                file,
+                                inputs,
+                                output_schema,
+                                input_relays: &self.input_relays,
+                                session,
+                            },
+                            &mut output_buffers[output_index],
+                            output_index,
+                        )
+                        .await;
+                    }
                 }
                 RelayProcessorOperationNode::WasmProcessor {
                     output_routes,
@@ -3702,14 +3829,25 @@ impl RelayProcessorNode {
                 RelayProcessorOperationNode::Reorderer {
                     output_routes,
                     max_time,
-                    pending,
+                    output_buffers,
                     ..
                 } => {
-                    let max_time_due = pending.first().is_some_and(|entry| {
-                        checked_add_duration_to_timestamp(entry.received_at, *max_time) <= now
-                    });
-                    if max_time_due {
-                        flush_branch_reorderer(
+                    let mut due_outputs = Vec::new();
+                    for (output_index, output_buffer) in output_buffers.iter().enumerate() {
+                        if output_buffer.pending.is_empty() {
+                            continue;
+                        }
+                        let max_time_due = output_buffer.pending.first().is_some_and(|entry| {
+                            checked_add_duration_to_timestamp(entry.received_at, *max_time) <= now
+                        });
+                        let flush_due = output_routes.routes[output_index].flush_deadline_due(now);
+                        if max_time_due || flush_due {
+                            output_routes.routes[output_index].force_flush_at(now);
+                            due_outputs.push(output_index);
+                        }
+                    }
+                    for output_index in due_outputs {
+                        flush_branch_reorderer_output(
                             ReordererFlushContext {
                                 graph,
                                 branch,
@@ -3719,7 +3857,8 @@ impl RelayProcessorNode {
                                 output_routes,
                                 input_relays: &self.input_relays,
                             },
-                            pending,
+                            &mut output_buffers[output_index],
+                            output_index,
                         )
                         .await;
                     }
@@ -3773,7 +3912,49 @@ impl RelayProcessorNode {
                         .await;
                     }
                 }
-                RelayProcessorOperationNode::Inferencer { .. } => {}
+                RelayProcessorOperationNode::Inferencer {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    inputs,
+                    output_schema,
+                    output_buffers,
+                    session,
+                } => {
+                    let due_outputs = output_buffers
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(output_index, output_buffer)| {
+                            (!output_buffer.pending.is_empty()
+                                && output_routes.routes[output_index].flush_deadline_due(now))
+                            .then_some(output_index)
+                        })
+                        .collect::<Vec<_>>();
+                    for output_index in due_outputs {
+                        output_routes.routes[output_index].force_flush_at(now);
+                        flush_branch_inferencer_output(
+                            InferencerFlushContext {
+                                graph,
+                                branch,
+                                node_kind: self.kind.as_str(),
+                                processor: &self.processor,
+                                error_policies: &self.error_policies,
+                                output_routes,
+                                resource,
+                                resource_version: *resource_version,
+                                file,
+                                inputs,
+                                output_schema,
+                                input_relays: &self.input_relays,
+                                session,
+                            },
+                            &mut output_buffers[output_index],
+                            output_index,
+                        )
+                        .await;
+                    }
+                }
                 RelayProcessorOperationNode::WasmProcessor {
                     output_routes,
                     instance,
@@ -3914,10 +4095,14 @@ impl RelayProcessorNode {
             } => window_next_deadline(state, *width_duration),
             RelayProcessorOperationNode::Junction { .. } => None,
             RelayProcessorOperationNode::Reorderer {
-                max_time, pending, ..
-            } => pending
-                .first()
-                .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time)),
+                max_time,
+                output_buffers,
+                ..
+            } => output_buffers
+                .iter()
+                .filter_map(|buffer| buffer.pending.first())
+                .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
+                .min(),
             RelayProcessorOperationNode::Correlator {
                 max_time, state, ..
             } => {
@@ -4062,14 +4247,20 @@ impl RelayProcessorTemplate {
                     output_routes,
                     order_by,
                     max_time,
-                } => RelayProcessorOperationNode::Reorderer {
-                    output_routes: Self::instantiate_outputs(output_routes),
-                    order_by: order_by.clone(),
-                    max_time: *max_time,
-                    compiled_program: None,
-                    pending: Vec::new(),
-                    arrival_sequence: 0,
-                },
+                } => {
+                    let output_routes = Self::instantiate_outputs(output_routes);
+                    let output_buffers = (0..output_routes.routes.len())
+                        .map(|_| ReordererOutputBuffer::default())
+                        .collect();
+                    RelayProcessorOperationNode::Reorderer {
+                        output_routes,
+                        order_by: order_by.clone(),
+                        max_time: *max_time,
+                        compiled_program: None,
+                        output_buffers,
+                        arrival_sequence: 0,
+                    }
+                }
                 RelayProcessorOperationTemplate::Correlator {
                     output_routes,
                     left_relays,
@@ -4110,15 +4301,22 @@ impl RelayProcessorTemplate {
                     file,
                     inputs,
                     output_schema,
-                } => RelayProcessorOperationNode::Inferencer {
-                    output_routes: Self::instantiate_outputs(output_routes),
-                    resource: resource.clone(),
-                    resource_version: *resource_version,
-                    file: file.clone(),
-                    inputs: inputs.clone(),
-                    output_schema: output_schema.clone(),
-                    session: None,
-                },
+                } => {
+                    let output_routes = Self::instantiate_outputs(output_routes);
+                    let output_buffers = (0..output_routes.routes.len())
+                        .map(|_| InferencerOutputBuffer::default())
+                        .collect();
+                    RelayProcessorOperationNode::Inferencer {
+                        output_routes,
+                        resource: resource.clone(),
+                        resource_version: *resource_version,
+                        file: file.clone(),
+                        inputs: inputs.clone(),
+                        output_schema: output_schema.clone(),
+                        output_buffers,
+                        session: None,
+                    }
+                }
                 RelayProcessorOperationTemplate::WasmProcessor {
                     output_routes,
                     resource,
@@ -6947,9 +7145,10 @@ struct ReordererFlushContext<'a> {
     input_relays: &'a [Identifier],
 }
 
-async fn flush_branch_reorderer(
+async fn flush_branch_reorderer_output(
     context: ReordererFlushContext<'_>,
-    pending: &mut Vec<ReordererPendingMessage>,
+    output_buffer: &mut ReordererOutputBuffer,
+    output_index: usize,
 ) {
     let graph = context.graph;
     let node_kind = context.node_kind;
@@ -6958,13 +7157,16 @@ async fn flush_branch_reorderer(
     let output_routes = context.output_routes;
     let input_relays = context.input_relays;
     let branch = context.branch;
+    output_routes.routes[output_index].clear_flush_deadline();
 
-    if pending.is_empty() {
+    if output_buffer.pending.is_empty() {
         return;
     }
     let Some(input_relay) = input_relays.first() else {
+        output_routes.routes[output_index].clear_flush_deadline();
         return;
     };
+    let mut pending = output_buffer.take_pending();
     pending.sort_by(|left, right| {
         left.key
             .cmp(&right.key)
@@ -6978,19 +7180,23 @@ async fn flush_branch_reorderer(
     {
         Ok(schema) => schema,
         Err(error) => {
+            let message_error_policy = output_routes.routes[output_index]
+                .message_error_policy
+                .clone();
             for message in messages {
                 branch
                     .runtime
-                    .handle_message_error(
+                    .handle_message_error_with_policy(
                         &branch.domain,
                         node_kind,
                         processor,
-                        error_policies,
+                        &message_error_policy,
                         message,
                         error.to_string(),
                     )
                     .await;
             }
+            output_routes.routes[output_index].clear_flush_deadline();
             return;
         }
     };
@@ -7009,10 +7215,11 @@ async fn flush_branch_reorderer(
                     error
                 ),
             );
+            output_routes.routes[output_index].clear_flush_deadline();
             return;
         }
     };
-    if let Some(acks) = dispatch_processor_outputs(
+    if let Some(acks) = dispatch_processor_output(
         ProcessorOutputDispatchContext {
             graph,
             branch,
@@ -7025,6 +7232,7 @@ async fn flush_branch_reorderer(
         },
         output_routes,
         batch,
+        output_index,
     )
     .await
     {
@@ -7032,6 +7240,7 @@ async fn flush_branch_reorderer(
             ack.ack_success();
         }
     }
+    output_routes.routes[output_index].clear_flush_deadline();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8241,9 +8450,28 @@ async fn evaluate_processor_output_events(
 }
 
 async fn dispatch_processor_outputs(
+    context: ProcessorOutputDispatchContext<'_>,
+    outputs: &mut RelayProcessorOutputsNode,
+    batch: RelayRecordBatch,
+) -> Option<Vec<AckSet>> {
+    dispatch_selected_processor_outputs(context, outputs, batch, None, false).await
+}
+
+async fn dispatch_processor_output(
+    context: ProcessorOutputDispatchContext<'_>,
+    outputs: &mut RelayProcessorOutputsNode,
+    batch: RelayRecordBatch,
+    output_index: usize,
+) -> Option<Vec<AckSet>> {
+    dispatch_selected_processor_outputs(context, outputs, batch, Some(output_index), true).await
+}
+
+async fn dispatch_selected_processor_outputs(
     mut context: ProcessorOutputDispatchContext<'_>,
     outputs: &mut RelayProcessorOutputsNode,
     batch: RelayRecordBatch,
+    selected_output: Option<usize>,
+    flush_selected_immediately: bool,
 ) -> Option<Vec<AckSet>> {
     if batch.message_count() == 0 {
         return Some(Vec::new());
@@ -8259,6 +8487,9 @@ async fn dispatch_processor_outputs(
     let mut pending_batches = Vec::new();
     let mut pending_errors = Vec::new();
     for (output_index, output) in outputs.routes.iter_mut().enumerate() {
+        if selected_output.is_some_and(|selected| selected != output_index) {
+            continue;
+        }
         let (messages, batches, errors) = match evaluate_processor_output_events(
             &mut context,
             output,
@@ -8467,6 +8698,12 @@ async fn dispatch_processor_outputs(
         let mut should_flush = false;
         for batch in batches.drain(..) {
             should_flush |= output.enqueue(batch, execution_now);
+        }
+        if flush_selected_immediately
+            && selected_output.is_some_and(|selected| selected == output_index)
+        {
+            output.force_flush_at(execution_now);
+            should_flush = true;
         }
         if !should_flush {
             continue;
@@ -11547,7 +11784,11 @@ async fn flush_branch_junction(context: JunctionFlushContext<'_>, forwarded: Rel
     }
 }
 
-async fn flush_branch_inferencer(context: InferencerFlushContext<'_>, forwarded: RelayRecordBatch) {
+async fn flush_branch_inferencer_output(
+    context: InferencerFlushContext<'_>,
+    output_buffer: &mut InferencerOutputBuffer,
+    output_index: usize,
+) {
     let InferencerFlushContext {
         graph,
         branch,
@@ -11563,6 +11804,33 @@ async fn flush_branch_inferencer(context: InferencerFlushContext<'_>, forwarded:
         input_relays,
         session,
     } = context;
+    output_routes.routes[output_index].clear_flush_deadline();
+    let pending = output_buffer.take_pending();
+    if pending.is_empty() {
+        return;
+    }
+    let pending_acks = pending
+        .iter()
+        .flat_map(|batch| batch.acks.iter().cloned())
+        .collect::<Vec<_>>();
+    let forwarded = match RelayRecordBatch::concat(pending) {
+        Ok(batch) => batch,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                pending_acks.iter(),
+                format!(
+                    "inferencer '{}' failed to concatenate buffered input batches for output: {}",
+                    processor.as_str(),
+                    error
+                ),
+            );
+            return;
+        }
+    };
 
     let version = match resource_version {
         Some(version) => version,
@@ -11787,7 +12055,7 @@ async fn flush_branch_inferencer(context: InferencerFlushContext<'_>, forwarded:
             return;
         }
     };
-    if let Some(acks) = dispatch_processor_outputs(
+    if let Some(acks) = dispatch_processor_output(
         ProcessorOutputDispatchContext {
             graph,
             branch,
@@ -11800,6 +12068,7 @@ async fn flush_branch_inferencer(context: InferencerFlushContext<'_>, forwarded:
         },
         output_routes,
         output_batch,
+        output_index,
     )
     .await
     {

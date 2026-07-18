@@ -358,7 +358,7 @@ pub(super) enum RelayProcessorOperationNode {
         order_by: String,
         max_time: Duration,
         compiled_program: Option<Box<CompiledReordererProgram>>,
-        pending: Vec<ReordererPendingMessage>,
+        output_buffers: Vec<ReordererOutputBuffer>,
         arrival_sequence: u64,
     },
     Correlator {
@@ -384,6 +384,7 @@ pub(super) enum RelayProcessorOperationNode {
         file: String,
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
+        output_buffers: Vec<InferencerOutputBuffer>,
         session: Option<OnnxInferencerSession>,
     },
     WasmProcessor {
@@ -676,6 +677,37 @@ pub(super) struct RelayProcessorOutputNode {
 }
 
 impl RelayProcessorOutputNode {
+    pub(super) fn schedule_input_flush(
+        &mut self,
+        now: Timestamp,
+        pending_bytes: u64,
+    ) -> Option<bool> {
+        match self.flush_policy? {
+            RuntimeFlushPolicy::Immediate => Some(true),
+            RuntimeFlushPolicy::Each {
+                interval,
+                max_batch_size,
+            } => {
+                let deadline = self
+                    .next_flush
+                    .get_or_insert_with(|| super::checked_add_duration_to_timestamp(now, interval));
+                Some(*deadline <= now || pending_bytes >= max_batch_size)
+            }
+        }
+    }
+
+    pub(super) fn flush_deadline_due(&self, now: Timestamp) -> bool {
+        self.next_flush.is_some_and(|deadline| deadline <= now)
+    }
+
+    pub(super) fn force_flush_at(&mut self, now: Timestamp) {
+        self.next_flush = Some(now);
+    }
+
+    pub(super) fn clear_flush_deadline(&mut self) {
+        self.next_flush = None;
+    }
+
     pub(super) fn enqueue(&mut self, batch: RelayRecordBatch, now: Timestamp) -> bool {
         self.pending.push(batch);
         match self.flush_policy {
@@ -731,6 +763,51 @@ pub(super) struct ReordererPendingMessage {
     pub(super) arrival_sequence: u64,
     pub(super) received_at: Timestamp,
     pub(super) message: RelayMessage,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ReordererOutputBuffer {
+    pub(super) pending: Vec<ReordererPendingMessage>,
+    pub(super) estimated_bytes: u64,
+}
+
+impl ReordererOutputBuffer {
+    pub(super) fn clear(&mut self) {
+        self.pending.clear();
+        self.estimated_bytes = 0;
+    }
+
+    pub(super) fn take_pending(&mut self) -> Vec<ReordererPendingMessage> {
+        self.estimated_bytes = 0;
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct InferencerOutputBuffer {
+    pub(super) pending: Vec<RelayRecordBatch>,
+    estimated_bytes: u64,
+}
+
+impl InferencerOutputBuffer {
+    pub(super) fn push(&mut self, batch: RelayRecordBatch) {
+        self.estimated_bytes = self.estimated_bytes.saturating_add(batch.estimated_bytes());
+        self.pending.push(batch);
+    }
+
+    pub(super) fn estimated_bytes(&self) -> u64 {
+        self.estimated_bytes
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.pending.clear();
+        self.estimated_bytes = 0;
+    }
+
+    pub(super) fn take_pending(&mut self) -> Vec<RelayRecordBatch> {
+        self.estimated_bytes = 0;
+        std::mem::take(&mut self.pending)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
