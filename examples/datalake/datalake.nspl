@@ -649,11 +649,8 @@ CREATE CORRELATOR device_edge_connect_correlator
   CORRELATE WHERE device_connect_events.session_id = edge_connect_events.session_id
     AND device_connect_events.edge_id = edge_connect_events.edge_id
   MATCH EARLIEST
-  TO device_edge_connect_events FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
-  BRANCHED BY by_device
-
-  OUTPUT
-    device_edge_connect_events.event_id = concat(device_connect_events.event_id, "-", edge_connect_events.event_id),
+  TO device_edge_connect_events FLUSH EACH 250ms MAX BATCH SIZE 512kb
+  SET device_edge_connect_events.event_id = concat(device_connect_events.event_id, "-", edge_connect_events.event_id),
     device_edge_connect_events.tenant_id = device_connect_events.tenant_id,
     device_edge_connect_events.device_id = device_connect_events.device_id,
     device_edge_connect_events.session_id = device_connect_events.session_id,
@@ -674,6 +671,8 @@ CREATE CORRELATOR device_edge_connect_correlator
     device_edge_connect_events.edge_lat = edge_connect_events.edge_lat,
     device_edge_connect_events.edge_lon = edge_connect_events.edge_lon,
     device_edge_connect_events.distance_to_edge_km = NULL
+  ON MESSAGE ERROR LOG
+  BRANCHED BY by_device
   MAX TIME 5s
   ON CORRELATION TIMEOUT DROP, DROP;
 
@@ -691,11 +690,8 @@ CREATE CORRELATOR connected_session_correlator
   CORRELATE WHERE device_edge_connect_scored_events.session_id = auth_authorized_events.session_id
     AND device_edge_connect_scored_events.edge_id = auth_authorized_events.edge_id
   MATCH EARLIEST
-  TO connected_sessions FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
-  BRANCHED BY by_device
-
-  OUTPUT
-    connected_sessions.event_id = concat(device_edge_connect_scored_events.event_id, "-", auth_authorized_events.event_id),
+  TO connected_sessions FLUSH EACH 250ms MAX BATCH SIZE 512kb
+  SET connected_sessions.event_id = concat(device_edge_connect_scored_events.event_id, "-", auth_authorized_events.event_id),
     connected_sessions.tenant_id = device_edge_connect_scored_events.tenant_id,
     connected_sessions.device_id = device_edge_connect_scored_events.device_id,
     connected_sessions.session_id = device_edge_connect_scored_events.session_id,
@@ -720,6 +716,8 @@ CREATE CORRELATOR connected_session_correlator
     connected_sessions.edge_lon = device_edge_connect_scored_events.edge_lon,
     connected_sessions.distance_to_edge_km = device_edge_connect_scored_events.distance_to_edge_km,
     connected_sessions.risk_score = auth_authorized_events.risk_score
+  ON MESSAGE ERROR LOG
+  BRANCHED BY by_device
   MAX TIME 10s
   ON CORRELATION TIMEOUT SEND TO connect_without_auth_events, SEND TO uncorrelated_auth_events;
 
@@ -729,11 +727,8 @@ CREATE CORRELATOR disconnect_correlator
   CORRELATE WHERE device_disconnect_events.session_id = edge_disconnect_events.session_id
     AND device_disconnect_events.edge_id = edge_disconnect_events.edge_id
   MATCH EARLIEST
-  TO disconnect_events_matched FLUSH EACH 250ms MAX BATCH SIZE 512kb ON MESSAGE ERROR LOG
-  BRANCHED BY by_device
-
-  OUTPUT
-    disconnect_events_matched.event_id = concat(device_disconnect_events.event_id, "-", edge_disconnect_events.event_id),
+  TO disconnect_events_matched FLUSH EACH 250ms MAX BATCH SIZE 512kb
+  SET disconnect_events_matched.event_id = concat(device_disconnect_events.event_id, "-", edge_disconnect_events.event_id),
     disconnect_events_matched.tenant_id = device_disconnect_events.tenant_id,
     disconnect_events_matched.device_id = device_disconnect_events.device_id,
     disconnect_events_matched.session_id = device_disconnect_events.session_id,
@@ -754,6 +749,8 @@ CREATE CORRELATOR disconnect_correlator
     disconnect_events_matched.edge_site_tier = edge_disconnect_events.edge_site_tier,
     disconnect_events_matched.edge_lat = edge_disconnect_events.edge_lat,
     disconnect_events_matched.edge_lon = edge_disconnect_events.edge_lon
+  ON MESSAGE ERROR LOG
+  BRANCHED BY by_device
   MAX TIME 5s
   ON CORRELATION TIMEOUT SEND TO device_disconnect_unmatched, SEND TO edge_disconnect_unmatched;
 
