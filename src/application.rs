@@ -9852,7 +9852,6 @@ fn format_correlator_describe_output(
         format!("match: {}", correlator.match_policy.as_ref()),
         format!("correlate where: {}", correlator.correlate_where),
         format!("max time: {}", correlator.max_time),
-        format!("output: {}", correlator.output),
         format!(
             "filter-where: {}",
             if correlator.filter_where.is_some() {

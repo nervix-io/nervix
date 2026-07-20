@@ -644,28 +644,34 @@ pub(crate) fn from_where_boundary_token(token: &Token) -> bool {
         )
 }
 
+fn validated_vm_program_with_head_until<'src>(
+    head: impl Parser<'src, &'src [Token], Identifier, extra::Err<ParseError<'src>>> + Clone,
+    stop: fn(&Token) -> bool,
+) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    head.then(
+        any()
+            .filter(move |token: &Token| !stop(token))
+            .repeated()
+            .collect::<Vec<_>>(),
+    )
+    .try_map(|(head, tail), span| {
+        let head: &'static str = head.into();
+        let tail = render_vm_program_tokens(&tail);
+        let source = if tail.is_empty() {
+            head.to_string()
+        } else {
+            format!("{head} {tail}")
+        };
+        crate::vm_program::parse_program(&source)
+            .map(|_| source)
+            .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+    })
+}
+
 fn validated_vm_program_until<'src>(
     stop: fn(&Token) -> bool,
 ) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    vm_program_head()
-        .then(
-            any()
-                .filter(move |token: &Token| !stop(token))
-                .repeated()
-                .collect::<Vec<_>>(),
-        )
-        .try_map(|(head, tail), span| {
-            let head: &'static str = head.into();
-            let tail = render_vm_program_tokens(&tail);
-            let source = if tail.is_empty() {
-                head.to_string()
-            } else {
-                format!("{head} {tail}")
-            };
-            crate::vm_program::parse_program(&source)
-                .map(|_| source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
-        })
+    validated_vm_program_with_head_until(vm_program_head(), stop)
 }
 
 pub fn filter_map_program<'src>()
@@ -685,6 +691,14 @@ pub fn filter_map_program<'src>()
 pub fn output_filter_map_program<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     validated_vm_program_until(processor_output_boundary_token)
+}
+
+fn explicit_output_filter_map_program<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    validated_vm_program_with_head_until(
+        kw(Identifier::Set).to(Identifier::Set),
+        processor_output_boundary_token,
+    )
 }
 
 fn source_where_clause_with_boundary<'src>(
@@ -829,6 +843,44 @@ fn flushed_processor_output_route<'src>()
         )
 }
 
+fn flushed_explicit_processor_output_route<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(flush_each())
+        .then(
+            explicit_output_filter_map_program().try_map(|source, span| {
+                let parsed = crate::vm_program::parse_program(&source)
+                    .map_err(|error| Rich::custom(span, vm_program_error_message(error)))?;
+                if parsed.inner.set.is_empty()
+                    || !parsed.inner.branch_filters.is_empty()
+                    || !parsed.inner.unset.is_empty()
+                    || !parsed.inner.invoke.is_empty()
+                {
+                    return Err(Rich::custom(
+                        span,
+                        "output route must contain SET assignments and may contain WHERE",
+                    ));
+                }
+                Ok(source)
+            }),
+        )
+        .then(message_error_policy())
+        .map(
+            |(((relay, (flush_each, max_batch_size)), filter_map), message_error_policy)| {
+                ProcessorOutput {
+                    relay,
+                    filter_map: Some(filter_map),
+                    flush_policy: Some(OutputFlushPolicy {
+                        flush_each,
+                        max_batch_size,
+                    }),
+                    message_error_policy,
+                }
+            },
+        )
+}
+
 fn flushed_ingestor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
@@ -863,6 +915,15 @@ pub fn processor_outputs<'src>()
 pub fn flushed_processor_outputs<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
     flushed_processor_output_route()
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(ProcessorOutputs::new)
+}
+
+pub fn flushed_explicit_processor_outputs<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
+    flushed_explicit_processor_output_route()
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()

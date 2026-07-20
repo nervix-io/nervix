@@ -932,7 +932,7 @@ impl CreateDeduplicator {
 impl CreateCorrelator {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} CORRELATOR {} {} {} CORRELATE {} MATCH {}{}{} {} OUTPUT {} MAX TIME {} ON \
+            "CREATE {} CORRELATOR {} {} {} CORRELATE {} MATCH {}{}{} {} MAX TIME {} ON \
              CORRELATION TIMEOUT {}, {};",
             self.mode.as_ref(),
             self.name.as_str(),
@@ -943,7 +943,6 @@ impl CreateCorrelator {
             filter_where_suffix(&self.filter_where),
             processor_outputs_to_nspl(&self.output_routes),
             branch_selection_to_nspl(&self.branched_by),
-            self.output,
             self.max_time,
             correlation_timeout_action_to_nspl(&self.timeout_policy.left),
             correlation_timeout_action_to_nspl(&self.timeout_policy.right)
@@ -1986,10 +1985,11 @@ mod tests {
     use crate::{
         AckMode, AvroType, BranchInitiatorSelection, BranchSelection, BranchValueMapping,
         CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-        CodecProtobufConfig, CodecWireFormat, CreateClientHttp, CreateClientKafka,
-        CreateClientKinesis, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
-        CreateClientRabbitMq, CreateClientRedis, CreateClientSqs, CreateClientWebsockets,
-        CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateEndpoint,
+        CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+        CorrelatorMatchPolicy, CreateClientHttp, CreateClientKafka, CreateClientKinesis,
+        CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq,
+        CreateClientRedis, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq,
+        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateSchema,
         CreateSignalingProtocol, CreateVhost, CreateWindowProcessor, CreateWireSchema,
         CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
@@ -2583,6 +2583,34 @@ mod tests {
             "CREATE DETACHED DEDUPLICATOR orders_dedup FROM orders_in TO orders_out FLUSH EACH \
              100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch \
              DEDUPLICATE ON ss1.transaction_id MAX TIME 10m;"
+        );
+
+        let correlator = CreateCorrelator {
+            name: identifier("orders_correlator"),
+            left: ProcessorInputs::single(identifier("orders_left")),
+            right: ProcessorInputs::single(identifier("orders_right")),
+            output_routes: ProcessorOutputs::new(vec![flushed_output(
+                "orders_matched",
+                Some("SET orders_matched.id = orders_left.id".to_string()),
+            )]),
+            branched_by: processor_branched_by("tenant_branch"),
+            correlate_where: "WHERE orders_left.id = orders_right.id".to_string(),
+            match_policy: CorrelatorMatchPolicy::Earliest,
+            max_time: "5s".to_string(),
+            timeout_policy: CorrelationTimeoutPolicy {
+                left: CorrelationTimeoutAction::Drop,
+                right: CorrelationTimeoutAction::Drop,
+            },
+            mode: AckMode::Attached,
+            filter_where: None,
+        };
+        assert_eq!(
+            correlator.to_canonical_nspl().expect("must render"),
+            "CREATE ATTACHED CORRELATOR orders_correlator LEFT FROM orders_left RIGHT FROM \
+             orders_right CORRELATE WHERE orders_left.id = orders_right.id MATCH EARLIEST TO \
+             orders_matched FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET orders_matched.id = \
+             orders_left.id ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch MAX TIME 5s ON \
+             CORRELATION TIMEOUT DROP, DROP;"
         );
 
         let window_processor = CreateWindowProcessor {

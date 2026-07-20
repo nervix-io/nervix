@@ -18,12 +18,16 @@ Feature: Relay correlation
         first_name STRING,
         surname STRING
       );
-        CREATE SCHEMA correlated_profile (
+      CREATE SCHEMA correlated_profile (
         tenant STRING,
         normalized_name STRING,
         left_marker I64,
         surname STRING,
         memo STRING OPTIONAL
+      );
+        CREATE SCHEMA correlation_audit (
+        tenant STRING,
+        audit_name STRING
       );
         CREATE STRICT WIRE JSON SCHEMA left_profile_wire (
         tenant string,
@@ -56,6 +60,7 @@ Feature: Relay correlation
         CREATE RELAY right_profiles SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
         CREATE RELAY right_profile_aliases SCHEMA right_profile BRANCHED BY by_left_profile_ingestor;
         CREATE RELAY correlated_profiles SCHEMA correlated_profile BRANCHED BY by_left_profile_ingestor;
+        CREATE RELAY correlation_audits SCHEMA correlation_audit BRANCHED BY by_left_profile_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT left_ingress
         ON edge
@@ -104,17 +109,22 @@ Feature: Relay correlation
         RIGHT FROM right_profile_aliases WHERE right_profile_aliases.tenant = 'acme'
         CORRELATE WHERE lower(left_profile_aliases.first_name) = lower(right_profile_aliases.first_name)
         MATCH <match_policy>
-        TO correlated_profiles FLUSH IMMEDIATE ON MESSAGE ERROR LOG BRANCHED BY by_left_profile_ingestor
-
-        OUTPUT
-          correlated_profiles.tenant = left_profile_aliases.tenant,
+        TO correlated_profiles FLUSH IMMEDIATE
+        SET correlated_profiles.tenant = left_profile_aliases.tenant,
           correlated_profiles.normalized_name = lower(left_profile_aliases.first_name),
           correlated_profiles.left_marker = left_profile_aliases.marker,
           correlated_profiles.surname = upper(right_profile_aliases.surname),
           correlated_profiles.memo = NULL
+        ON MESSAGE ERROR LOG
+        TO correlation_audits FLUSH IMMEDIATE
+        SET correlation_audits.tenant = right_profile_aliases.tenant,
+          correlation_audits.audit_name = concat(upper(left_profile_aliases.first_name), ' ', upper(right_profile_aliases.surname))
+        ON MESSAGE ERROR LOG
+        BRANCHED BY by_left_profile_ingestor
         MAX TIME 5s
         ON CORRELATION TIMEOUT DROP, DROP;
         CREATE SUBSCRIPTION correlated_profiles_subscription TO correlated_profiles WHERE correlated_profiles.tenant = 'acme';
+        CREATE SUBSCRIPTION correlation_audits_subscription TO correlation_audits WHERE correlation_audits.tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
@@ -134,14 +144,10 @@ Feature: Relay correlation
       """
       {"tenant":"acme","first_name":"john","surname":"smith"}
       """
-    Then within "5s" the relay subscription receives a payload
+    Then within "5s" the relay subscription receives payloads containing all fragments
       """
-      "left_marker":<expected_left_marker>
-      """
-    And the last relay subscription payload contains
-      """
-      "normalized_name":"john"
-      "surname":"SMITH"
+      "left_marker":<expected_left_marker> | "normalized_name":"john" | "surname":"SMITH"
+      "audit_name":"JOHN SMITH"
       """
     And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
     And the last relay subscription payload does not contain "memo\""

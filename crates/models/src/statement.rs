@@ -2135,7 +2135,6 @@ pub struct CreateCorrelator {
     pub branched_by: BranchSelection,
     pub correlate_where: String,
     pub match_policy: CorrelatorMatchPolicy,
-    pub output: String,
     pub max_time: String,
     pub timeout_policy: CorrelationTimeoutPolicy,
     #[serde(default)]

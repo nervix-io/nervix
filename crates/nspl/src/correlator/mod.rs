@@ -8,42 +8,12 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, correlator_name,
-        current_word_prefix, duration_lit, filter_where_clause, flushed_processor_outputs,
+        current_word_prefix, duration_lit, filter_where_clause, flushed_explicit_processor_outputs,
         from_relay_clause_with_boundary, from_where_boundary_token, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, relay_ref,
         render_vm_program_tokens, suggestions_from_errors, tok, vm_program_error_message,
     },
 };
-
-fn output_boundary_token(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Semicolon
-            | Token::Word(Word::KnownWord {
-                iden: Identifier::Max,
-                ..
-            })
-    )
-}
-
-fn output_assignments<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Output)
-        .ignore_then(
-            any()
-                .filter(|token: &Token| !output_boundary_token(token))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .try_map(|tokens, span| {
-            let source = render_vm_program_tokens(&tokens);
-            crate::vm_program::parse_program(&format!("SET {source}"))
-                .map(|_| source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
-        })
-        .labelled("correlator_output")
-}
 
 fn correlate_where_boundary_token(token: &Token) -> bool {
     matches!(
@@ -162,9 +132,8 @@ pub fn create_correlator_parser<'src>()
         .then(correlate_where_clause())
         .then(match_policy())
         .then(filter_where_clause().or_not())
-        .then(flushed_processor_outputs())
+        .then(flushed_explicit_processor_outputs())
         .then(branch_selection())
-        .then(output_assignments())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
         .then(duration_lit())
@@ -174,14 +143,8 @@ pub fn create_correlator_parser<'src>()
             let (
                 (
                     (
-                        (
-                            (
-                                (((base, correlate_where), match_policy), filter_where),
-                                output_routes,
-                            ),
-                            branched_by,
-                        ),
-                        output,
+                        ((((base, correlate_where), match_policy), filter_where), output_routes),
+                        branched_by,
                     ),
                     max_time,
                 ),
@@ -197,7 +160,6 @@ pub fn create_correlator_parser<'src>()
                     branched_by,
                     correlate_where,
                     match_policy,
-                    output,
                     max_time,
                     timeout_policy,
                     mode: mode.unwrap_or(AckMode::Attached),
@@ -268,9 +230,11 @@ mod tests {
             "CREATE CORRELATOR correlate LEFT FROM relay1 WHERE relay1.name != '' LEFT FROM \
              relay1_extra RIGHT FROM relay2 WHERE relay2.first_name != '' RIGHT FROM relay2_extra \
              CORRELATE WHERE lower(relay1.name) = lower(relay2.first_name) MATCH EARLIEST TO \
-             relay3 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY \
-             tenant_branch OUTPUT relay3.name = lower(relay1.name), relay3.surname = \
-             upper(relay2.surname) MAX TIME 1s ON CORRELATION TIMEOUT DROP, SEND TO relay4;",
+             relay3 FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET relay3.name = lower(relay1.name), \
+             relay3.surname = upper(relay2.surname) ON MESSAGE ERROR LOG TO relay5 FLUSH \
+             IMMEDIATE SET relay5.display_name = relay2.first_name WHERE relay1.name != '' ON \
+             MESSAGE ERROR LOG BRANCHED BY tenant_branch MAX TIME 1s ON CORRELATION TIMEOUT DROP, \
+             SEND TO relay4;",
         );
         let parsed = parse_create_correlator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "correlate");
@@ -310,9 +274,19 @@ mod tests {
         );
         assert_eq!(parsed.match_policy, CorrelatorMatchPolicy::Earliest);
         assert!(
-            parsed
-                .output
+            parsed.output_routes.routes[0]
+                .filter_map
+                .as_deref()
+                .expect("correlator route should have SET assignments")
                 .contains("relay3.name = lower ( relay1.name )")
+        );
+        assert_eq!(parsed.output_routes.routes.len(), 2);
+        assert!(
+            parsed.output_routes.routes[1]
+                .filter_map
+                .as_deref()
+                .expect("second correlator route should have a filter-map")
+                .starts_with("SET relay5.display_name = relay2.first_name WHERE")
         );
         assert_eq!(parsed.max_time, "1s");
     }
@@ -322,9 +296,9 @@ mod tests {
         let tokens = to_tokens(
             "CREATE DETACHED CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
              WHERE lower(relay1.name) = lower(relay2.first_name) AND relay1.tenant = \
-             relay2.tenant MATCH LATEST TO relay3 FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED  \
-             OUTPUT relay3.name = lower(relay1.name), relay3.surname = upper(relay2.surname) MAX \
-             TIME 1s ON CORRELATION TIMEOUT DROP, DROP;",
+             relay2.tenant MATCH LATEST TO relay3 FLUSH IMMEDIATE SET relay3.name = \
+             lower(relay1.name), relay3.surname = upper(relay2.surname) ON MESSAGE ERROR LOG \
+             UNBRANCHED MAX TIME 1s ON CORRELATION TIMEOUT DROP, DROP;",
         );
         let parsed = parse_create_correlator_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.mode, AckMode::Detached);
@@ -348,9 +322,9 @@ mod tests {
     fn rejects_legacy_comma_separated_inputs() {
         let tokens = to_tokens(
             "CREATE CORRELATOR correlate FROM relay1, relay2 CORRELATE WHERE relay1.name = \
-             relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
-             UNBRANCHED  OUTPUT relay3.name = relay1.name MAX TIME 1s ON CORRELATION TIMEOUT \
-             DROP, DROP ON MESSAGE ERROR LOG;",
+             relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE SET relay3.name = \
+             relay1.name ON MESSAGE ERROR LOG UNBRANCHED MAX TIME 1s ON CORRELATION TIMEOUT DROP, \
+             DROP ON MESSAGE ERROR LOG;",
         );
         assert!(parse_create_correlator_tokens(&tokens).is_err());
     }
@@ -359,9 +333,30 @@ mod tests {
     fn rejects_missing_right_inputs() {
         let tokens = to_tokens(
             "CREATE CORRELATOR correlate LEFT FROM relay1 CORRELATE WHERE relay1.name = \
-             relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
-             UNBRANCHED  OUTPUT relay3.name = relay1.name MAX TIME 1s ON CORRELATION TIMEOUT \
-             DROP, DROP ON MESSAGE ERROR LOG;",
+             relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE SET relay3.name = \
+             relay1.name ON MESSAGE ERROR LOG UNBRANCHED MAX TIME 1s ON CORRELATION TIMEOUT DROP, \
+             DROP ON MESSAGE ERROR LOG;",
+        );
+        assert!(parse_create_correlator_tokens(&tokens).is_err());
+    }
+
+    #[test]
+    fn rejects_output_route_without_set_assignments() {
+        let tokens = to_tokens(
+            "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE WHERE \
+             relay1.name = relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG UNBRANCHED MAX TIME 1s ON CORRELATION TIMEOUT DROP, DROP;",
+        );
+        assert!(parse_create_correlator_tokens(&tokens).is_err());
+    }
+
+    #[test]
+    fn rejects_legacy_output_block() {
+        let tokens = to_tokens(
+            "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE WHERE \
+             relay1.name = relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE SET \
+             relay3.name = relay1.name ON MESSAGE ERROR LOG UNBRANCHED OUTPUT relay3.name = \
+             relay1.name MAX TIME 1s ON CORRELATION TIMEOUT DROP, DROP;",
         );
         assert!(parse_create_correlator_tokens(&tokens).is_err());
     }
@@ -409,13 +404,35 @@ mod tests {
     }
 
     #[test]
+    fn suggests_set_at_the_start_of_each_output_route() {
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
+                     WHERE relay1.name = relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE ";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(suggestions.contains(&"SET".to_string()));
+        assert!(!suggestions.contains(&"WHERE".to_string()));
+        assert!(!suggestions.contains(&"UNSET".to_string()));
+        assert!(!suggestions.contains(&"ON".to_string()));
+    }
+
+    #[test]
     fn suggests_correlation_timeout_phrase() {
         let input = "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
                      WHERE relay1.name = relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE \
-                     ON MESSAGE ERROR LOG
-                     UNBRANCHED OUTPUT relay3.name = relay1.name MAX TIME 1s ";
+                     SET relay3.name = relay1.name ON MESSAGE ERROR LOG
+                     UNBRANCHED MAX TIME 1s ";
         let suggestions = suggest_create_correlator(input, input.len());
         assert!(suggestions.contains(&"ON CORRELATION TIMEOUT".to_string()));
         assert!(!suggestions.contains(&"ON MESSAGE ERROR".to_string()));
+    }
+
+    #[test]
+    fn suggests_max_after_branch_selection_without_output_leakage() {
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 RIGHT FROM relay2 CORRELATE \
+                     WHERE relay1.name = relay2.first_name MATCH LATEST TO relay3 FLUSH IMMEDIATE \
+                     SET relay3.name = relay1.name ON MESSAGE ERROR LOG UNBRANCHED ";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(suggestions.contains(&"MAX".to_string()));
+        assert!(!suggestions.contains(&"OUTPUT".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
     }
 }
