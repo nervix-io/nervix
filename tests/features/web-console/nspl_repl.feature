@@ -385,7 +385,7 @@ Feature: Web console NSPL REPL
         CORRELATE WHERE lower(left_profiles.first_name) = lower(right_profiles.first_name)
         MATCH EARLIEST
         TO correlated_profiles FLUSH IMMEDIATE
-        ON MESSAGE ERROR DLQ correlator_errors SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
+        ON MESSAGE ERROR SEND TO correlator_errors SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
         BRANCHED BY by_left_profile_ingestor
 
         OUTPUT

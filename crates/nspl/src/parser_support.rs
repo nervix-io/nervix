@@ -239,7 +239,7 @@ pub fn relay_ref<'src>()
     parse_identifier_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch])
 }
 
-pub fn dlq_relay_ref<'src>()
+pub fn message_error_relay_ref<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
     parse_identifier_excluding_reserved("ref:relay", &[Identifier::Message, Identifier::Branch])
 }
@@ -566,8 +566,8 @@ pub fn message_error_policy<'src>()
         .ignore_then(choice((
             kw(Identifier::Ignore).to(MessageErrorPolicy::Ignore),
             kw(Identifier::Log).to(MessageErrorPolicy::Log),
-            kw(Identifier::Dlq)
-                .ignore_then(dlq_relay_ref())
+            kw_phrase2(Identifier::Send, Identifier::To)
+                .ignore_then(message_error_relay_ref())
                 .then_ignore(kw(Identifier::Set))
                 .then(
                     error_field_mapping()

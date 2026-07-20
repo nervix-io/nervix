@@ -45,7 +45,7 @@ Feature: Processor output routing
           ON MESSAGE ERROR LOG
         TO failing_events FLUSH IMMEDIATE
           SET failing_events.result = 10 / source_events.divisor
-          ON MESSAGE ERROR DLQ route_errors
+          ON MESSAGE ERROR SEND TO route_errors
             SET error_message = message_error.message,
                 failed_record = message_error.record
         UNBRANCHED;

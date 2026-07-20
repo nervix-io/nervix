@@ -883,7 +883,11 @@ fn message_error_policy_to_nspl(policy: &MessageErrorPolicy) -> String {
                 .map(|mapping| format!("{} = {}", mapping.field.as_str(), mapping.value))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("ON MESSAGE ERROR DLQ {} SET {}", relay.as_str(), mappings)
+            format!(
+                "ON MESSAGE ERROR SEND TO {} SET {}",
+                relay.as_str(),
+                mappings
+            )
         }
     }
 }
