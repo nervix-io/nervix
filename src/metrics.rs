@@ -1,10 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::VecDeque,
-    sync::{
-        Arc,
-        atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering},
-    },
+    sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,6 +17,7 @@ use prometheus::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
+use triomphe::Arc;
 
 const MESSAGES_TOTAL: &str = "messages_total";
 const BATCHES_TOTAL: &str = "batches_total";

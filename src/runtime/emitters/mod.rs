@@ -45,7 +45,7 @@ pub(in crate::runtime) struct EmitterSinkContext {
     domain: Domain,
     emitter: Identifier,
     from_relay: Identifier,
-    branch_schema: Option<Arc<arrow_schema::Schema>>,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
     temp_dir: Arc<PathBuf>,
     events: broadcast::Sender<RuntimeEvent>,
 }
@@ -293,8 +293,8 @@ fn compile_sql_values_program(
     emitter: &Identifier,
     input_relay: &Identifier,
     values: &[ClickHouseValueMapping],
-    input_schema: Arc<arrow_schema::Schema>,
-    branch_schema: Option<Arc<arrow_schema::Schema>>,
+    input_schema: StdArc<arrow_schema::Schema>,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     if values.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
@@ -320,7 +320,8 @@ fn compile_sql_values_program(
             Runtime::vm_program_error(error)
         ),
     })?;
-    let empty_sink_schema = Arc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
+    let empty_sink_schema =
+        StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
     let mut infer_bindings = vec![
         VmCompileBinding::writeonly(namespace, empty_sink_schema),
         VmCompileBinding::readonly(input_relay.as_str(), input_schema.clone()),
@@ -339,7 +340,7 @@ fn compile_sql_values_program(
                 ),
             }
         })?;
-    let output_schema = Arc::new(arrow_schema::Schema::new(
+    let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred_fields
             .into_iter()
             .map(|(field, data_type, nullable)| {
@@ -384,8 +385,8 @@ fn compile_clickhouse_values_program(
     emitter: &Identifier,
     input_relay: &Identifier,
     values: &[ClickHouseValueMapping],
-    input_schema: Arc<arrow_schema::Schema>,
-    branch_schema: Option<Arc<arrow_schema::Schema>>,
+    input_schema: StdArc<arrow_schema::Schema>,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "ClickHouse",
@@ -404,8 +405,8 @@ fn compile_postgres_values_program(
     emitter: &Identifier,
     input_relay: &Identifier,
     values: &[PostgresValueMapping],
-    input_schema: Arc<arrow_schema::Schema>,
-    branch_schema: Option<Arc<arrow_schema::Schema>>,
+    input_schema: StdArc<arrow_schema::Schema>,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "Postgres",
@@ -424,8 +425,8 @@ fn compile_mysql_values_program(
     emitter: &Identifier,
     input_relay: &Identifier,
     values: &[MySqlValueMapping],
-    input_schema: Arc<arrow_schema::Schema>,
-    branch_schema: Option<Arc<arrow_schema::Schema>>,
+    input_schema: StdArc<arrow_schema::Schema>,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "MySQL",
@@ -444,8 +445,8 @@ fn compile_mongodb_values_program(
     emitter: &Identifier,
     input_relay: &Identifier,
     values: &[MongoDbValueMapping],
-    input_schema: Arc<arrow_schema::Schema>,
-    branch_schema: Option<Arc<arrow_schema::Schema>>,
+    input_schema: StdArc<arrow_schema::Schema>,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "MongoDB",
@@ -464,8 +465,8 @@ fn compile_iceberg_values_program(
     emitter: &Identifier,
     input_relay: &Identifier,
     values: &[IcebergValueMapping],
-    input_schema: Arc<arrow_schema::Schema>,
-    branch_schema: Option<Arc<arrow_schema::Schema>>,
+    input_schema: StdArc<arrow_schema::Schema>,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "Iceberg",

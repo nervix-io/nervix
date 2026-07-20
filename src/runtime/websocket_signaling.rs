@@ -1,4 +1,4 @@
-use std::{fmt::Display, sync::Arc, time::Duration};
+use std::{fmt::Display, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use nervix_models::CreateSignalingProtocol;
@@ -10,6 +10,7 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Error as WebSocketError, Message},
 };
+use triomphe::Arc;
 
 #[derive(Debug)]
 pub(crate) enum WebsocketSignalingError {

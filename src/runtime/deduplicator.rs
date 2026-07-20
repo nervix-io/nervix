@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc as StdArc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -55,7 +55,7 @@ pub(super) fn compile_deduplicator_key_program(
     processor: &Identifier,
     input_relays: &[Identifier],
     deduplicate_on: &str,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<CompiledDeduplicatorKeyProgram, String> {
     let expressions = split_reorder_by_expressions(deduplicate_on);
     if expressions.is_empty() {

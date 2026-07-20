@@ -3,7 +3,7 @@ use std::{
     io::{self, Cursor},
     ops::RangeBounds,
     path::Path,
-    sync::Arc,
+    sync::Arc as StdArc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -41,6 +41,7 @@ use tokio::{
     time::{Instant, timeout},
 };
 use tracing::info;
+use triomphe::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsensusCommand {
@@ -146,7 +147,7 @@ openraft::declare_raft_types!(
         Node = BasicNode
 );
 
-pub type NervixRaft = Raft<TypeConfig, Arc<FjallStore>>;
+pub type NervixRaft = Raft<TypeConfig, StdArc<FjallStore>>;
 pub type NodeId = String;
 pub type Node = BasicNode;
 pub type LogIdOf = LogId<CommittedLeaderIdOf<TypeConfig>>;
@@ -257,7 +258,7 @@ pub enum ConsensusError {
 #[derive(Clone)]
 pub struct ConsensusHandle {
     raft: NervixRaft,
-    store: Arc<FjallStore>,
+    store: StdArc<FjallStore>,
     local_node: GossipNode,
     cluster_api_http_client: HttpClient,
     node_unavailability_timeout: Duration,
@@ -285,8 +286,8 @@ impl ConsensusHandle {
         db: Database,
         settings: ConsensusSettings,
     ) -> Result<Self, ConsensusError> {
-        let store = Arc::new(FjallStore::from_database(db)?);
-        let config = Arc::new(
+        let store = StdArc::new(FjallStore::from_database(db)?);
+        let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,
                 heartbeat_interval: u64::try_from(settings.raft_heartbeat_interval.as_millis())
@@ -1355,7 +1356,7 @@ impl Clone for FjallStore {
     }
 }
 
-impl RaftLogReader<TypeConfig> for Arc<FjallStore> {
+impl RaftLogReader<TypeConfig> for StdArc<FjallStore> {
     async fn try_get_log_entries<
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
     >(
@@ -1382,8 +1383,8 @@ impl RaftLogReader<TypeConfig> for Arc<FjallStore> {
     }
 }
 
-impl RaftLogStorage<TypeConfig> for Arc<FjallStore> {
-    type LogReader = Arc<FjallStore>;
+impl RaftLogStorage<TypeConfig> for StdArc<FjallStore> {
+    type LogReader = StdArc<FjallStore>;
 
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, io::Error> {
         let mut last_log_id = self.read_last_purged().await?;
@@ -1467,10 +1468,10 @@ impl RaftLogStorage<TypeConfig> for Arc<FjallStore> {
     }
 }
 
-impl RaftStateMachine<TypeConfig> for Arc<FjallStore> {
+impl RaftStateMachine<TypeConfig> for StdArc<FjallStore> {
     type SnapshotData = Cursor<Vec<u8>>;
 
-    type SnapshotBuilder = Arc<FjallStore>;
+    type SnapshotBuilder = StdArc<FjallStore>;
 
     async fn applied_state(&mut self) -> Result<(Option<LogIdOf>, StoredMembershipOf), io::Error> {
         let state = self.inner.state_machine.read().await;
@@ -1555,7 +1556,7 @@ impl RaftStateMachine<TypeConfig> for Arc<FjallStore> {
     }
 }
 
-impl RaftSnapshotBuilder<TypeConfig> for Arc<FjallStore> {
+impl RaftSnapshotBuilder<TypeConfig> for StdArc<FjallStore> {
     type SnapshotData = Cursor<Vec<u8>>;
 
     async fn build_snapshot(&mut self) -> Result<SnapshotOf, io::Error> {

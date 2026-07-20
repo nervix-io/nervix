@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc as StdArc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -13,6 +13,7 @@ use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use triomphe::Arc;
 use wasmtime::{
     Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel, Store,
     TypedFunc,
@@ -95,7 +96,7 @@ impl Default for WasmRuntimeConfig {
 #[derive(Clone, Debug)]
 pub struct WasmRuntime {
     engine: Engine,
-    stop: Arc<AtomicBool>,
+    stop: StdArc<AtomicBool>,
     epoch_deadline_ticks: u64,
     max_guest_buffer_bytes: usize,
 }
@@ -114,10 +115,10 @@ impl WasmRuntime {
             OptLevel::None
         });
         let engine = Engine::new(&wasmtime_config).map_err(WasmProcessorError::Configure)?;
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = StdArc::new(AtomicBool::new(false));
         spawn_epoch_driver(
             engine.clone(),
-            Arc::clone(&stop),
+            StdArc::clone(&stop),
             config.epoch_tick_interval,
         );
         Ok(Self {
@@ -155,14 +156,14 @@ impl WasmRuntime {
 
 impl Drop for WasmRuntime {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.stop) == 1 {
+        if StdArc::strong_count(&self.stop) == 1 {
             self.stop.store(true, Ordering::Relaxed);
         }
     }
 }
 
-fn spawn_epoch_driver(engine: Engine, stop: Arc<AtomicBool>, interval: Duration) {
-    let weak_stop = Arc::downgrade(&stop);
+fn spawn_epoch_driver(engine: Engine, stop: StdArc<AtomicBool>, interval: Duration) {
+    let weak_stop = StdArc::downgrade(&stop);
     thread::Builder::new()
         .name("nervix-wasm-epoch".to_string())
         .spawn(move || {

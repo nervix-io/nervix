@@ -2,7 +2,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex as StdMutex,
+        Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -27,6 +27,7 @@ use reedline::{
 };
 use thiserror::Error;
 use tokio::{runtime::Handle, signal, task::block_in_place};
+use triomphe::Arc;
 
 const HISTORY_FILE: &str = ".nervix_client_history";
 
