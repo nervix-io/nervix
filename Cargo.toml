@@ -33,7 +33,8 @@ aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-kinesis = { workspace = true }
 aws-sdk-sqs = { workspace = true }
-aws-smithy-http-client = { workspace = true, features = ["rustls-ring"] }
+# The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
+aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 base64 = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
@@ -72,7 +73,8 @@ jaq-std = { workspace = true }
 lapin = { workspace = true }
 mongodb = { workspace = true }
 multer = { workspace = true }
-mysql_async = { workspace = true, features = ["default-rustls-ring"] }
+# This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
+mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
@@ -83,6 +85,7 @@ nervix-proto = { workspace = true, features = ["client", "server"] }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
 opendal = { workspace = true }
+# rdkafka remains the only OpenSSL consumer; use one crate-built OpenSSL for static linking.
 openssl = { workspace = true, features = ["vendored"] }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
@@ -110,6 +113,7 @@ prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = { workspace = true }
 protox = { workspace = true }
 pulsar = { workspace = true }
+# librdkafka remains on OpenSSL by design and is linked statically with its native dependencies.
 rdkafka = { workspace = true, features = [
   "tokio",
   "curl-static",
@@ -206,23 +210,36 @@ apache-avro = "0.21.0"
 arc-swap = "1.9.1"
 argon2 = "0.5"
 ariadne = "0.5"
-arrow-arith = "57.1"
-arrow-array = "57.1"
-arrow-cast = "57.1"
-arrow-ipc = "57.1"
-arrow-ord = "57.1"
-arrow-schema = "57.1"
-arrow-select = "57.1"
-arrow-string = "57.1"
+# The pinned Iceberg revision uses Arrow/Parquet 58 types; keep every direct Arrow crate aligned.
+arrow-arith = "58"
+arrow-array = "58"
+arrow-cast = "58"
+arrow-ipc = "58"
+arrow-ord = "58"
+arrow-schema = "58"
+arrow-select = "58"
+arrow-string = "58"
 ascii-dag = "0.9"
 async-broadcast = "0.7.2"
-async-nats = "0.42"
+# 0.49 uses provider-selectable rustls-webpki 0.103; the previous 0.42 line pulled in Ring.
+async-nats = { version = "0.49.1", default-features = false, features = [
+  "aws-lc-rs",
+  "server_2_10",
+  "server_2_11",
+] }
 async-tar = { version = "0.6", default-features = false }
 async-trait = "0.1"
 aws-config = "1.8"
 aws-credential-types = "1.2"
-aws-sdk-kinesis = "1.77"
-aws-sdk-sqs = "1.76"
+# Disable the AWS SDK TLS defaults so the root's Smithy client owns AWS-LC selection.
+aws-sdk-kinesis = { version = "1.77", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
+aws-sdk-sqs = { version = "1.76", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+] }
 aws-smithy-http-client = "1.1.12"
 base64 = "0.22"
 blake3 = "1"
@@ -257,9 +274,11 @@ humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"
 hyper-util = "0.1"
-iceberg = "0.9.1"
-iceberg-catalog-rest = "0.9.1"
-iceberg-storage-opendal = { version = "0.9.1", features = [
+# Pin the last trunk revision with OpenDAL 0.56/reqsign 3 before Iceberg enabled
+# Ring-backed Parquet encryption unconditionally.
+iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "9c70b9795e8112f59682d87b71bd86fc69787108" }
+iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust.git", rev = "9c70b9795e8112f59682d87b71bd86fc69787108" }
+iceberg-storage-opendal = { git = "https://github.com/apache/iceberg-rust.git", rev = "9c70b9795e8112f59682d87b71bd86fc69787108", features = [
   "opendal-s3",
   "opendal-gcs",
   "opendal-azdls",
@@ -275,7 +294,12 @@ leptos = { version = "0.8.19", features = ["csr"] }
 libc = "0.2"
 loom = "0.7"
 md5 = "0.8"
-mongodb = "3.6.0"
+# MongoDB 3.6 exposes an explicit AWS-LC backend; its TLS defaults select another provider.
+mongodb = { version = "3.6.0", default-features = false, features = [
+  "compat-3-0-0",
+  "dns-resolver",
+  "rustls-tls-aws-lc",
+] }
 multer = "3"
 mysql_async = "0.36.2"
 nervix = { path = "" }
@@ -291,7 +315,8 @@ nervix-proto = { package = "nervix-proto", path = "crates/proto" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
-opendal = { version = "0.55.0", features = [
+# Match the pinned Iceberg revision to avoid duplicate, incompatible OpenDAL APIs.
+opendal = { version = "0.56.0", features = [
   "services-s3",
   "services-gcs",
   "services-azdls",
@@ -304,9 +329,13 @@ opentelemetry_sdk = "0.31"
 ordered-float = "4"
 ort = { version = "2.0.0-rc.12", default-features = false }
 parking_lot = "0.12"
-parquet = { version = "57.1", features = ["async"] }
+# Match Iceberg's Arrow 58 major so RecordBatch and writer types are identical.
+parquet = { version = "58", features = ["async"] }
 petgraph = "0.8"
-playwright-rs = "0.14"
+# Dev-only exception: native TLS is disabled, but Playwright's build-time ureq still pulls Ring.
+playwright-rs = { version = "0.14", default-features = false, features = [
+  "rustls-tls-webpki-roots",
+] }
 postgres-types = "0.2"
 prometheus = "0.14.0"
 prost = "0.13"
@@ -318,7 +347,11 @@ pulsar = { version = "6.7.2", default-features = false, features = [
   "tokio-rustls-runtime",
 ] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-rcgen = "0.13"
+# 0.13 provides explicit AWS-LC selection while retaining the PEM support used by tests.
+rcgen = { version = "0.13", default-features = false, features = [
+  "aws_lc_rs",
+  "pem",
+] }
 rdkafka = { version = "0.39.0", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
@@ -332,10 +365,14 @@ registry = { package = "nervix-registry", path = "crates/registry" }
 reqwest = "0.13"
 rkyv = "0.8"
 rpassword = "7"
-rumqttc = "0.25.1"
+# This rumqttc-next line exposes the MQTT 5 facade with explicit AWS-LC selection.
+rumqttc = { package = "rumqttc-next", version = "0.34.0-alpha", default-features = false, features = [
+  "use-rustls-aws-lc",
+] }
+# Workspace-wide Rustls policy: AWS-LC only, apart from the dev-only Playwright exception.
 rustls = { version = "0.23", default-features = false, features = [
+  "aws_lc_rs",
   "logging",
-  "ring",
   "std",
   "tls12",
 ] }
@@ -355,13 +392,15 @@ tikv-jemalloc-ctl = { version = "0.6.1", features = ["stats"] }
 tikv-jemallocator = { version = "0.6.1", features = ["stats"] }
 tokio = "1"
 tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.13"
+# 0.14 adds explicit AWS-LC support; the previous 0.13 line depended on Ring.
+tokio-postgres-rustls = { version = "0.14", features = ["aws-lc-rs"] }
 tokio-rustls = "0.26"
 tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["rt"] }
-tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
-tonic-build = "0.12"
+# Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
+tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
+tonic-build = "0.13"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = "0.3"

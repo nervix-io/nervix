@@ -47,7 +47,9 @@ use rdkafka::{
     producer::{FutureProducer, FutureRecord},
 };
 use redis::AsyncCommands;
-use rumqttc::{AsyncClient, Event as MqttEvent, Incoming, MqttOptions, QoS};
+use rumqttc::{
+    AsyncClient, Event as MqttEvent, Incoming, MqttOptions, PublishOptions, QoS, SessionMode,
+};
 use rustls::{
     ClientConfig as RustlsClientConfig, RootCertStore,
     pki_types::{CertificateDer, ServerName},
@@ -2544,8 +2546,8 @@ async fn publish_mqtt_with_qos(
     retain: bool,
 ) -> io::Result<()> {
     let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
-    let options = MqttOptions::new(client_id, MQTT_HOST, MQTT_PORT);
-    let (client, mut eventloop) = AsyncClient::new(options, 16);
+    let options = MqttOptions::new(client_id, (MQTT_HOST, MQTT_PORT));
+    let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
     let driver = tokio::spawn(async move {
         loop {
             tokio::task::consume_budget().await;
@@ -2561,7 +2563,10 @@ async fn publish_mqtt_with_qos(
         // Runtime ingestors can still be attaching to the broker immediately after START.
         // Retaining the per-test input payload makes MQTT publishes deterministic without
         // changing application-level topic reuse, because scenario topics are unique.
-        match client.publish(topic, qos, retain, payload).await {
+        match client
+            .publish(topic, payload, PublishOptions::new(qos).retain(retain))
+            .await
+        {
             Ok(()) => {
                 sleep(POLL_INTERVAL).await;
                 driver.abort();
@@ -2598,8 +2603,10 @@ async fn publish_mqtt_burst_with_qos(
     qos: QoS,
 ) -> io::Result<()> {
     let client_id = format!("nervix-cucumber-burst-{}", Uuid::now_v7().as_simple());
-    let options = MqttOptions::new(client_id, MQTT_HOST, MQTT_PORT);
-    let (client, mut eventloop) = AsyncClient::new(options, count.max(16));
+    let options = MqttOptions::new(client_id, (MQTT_HOST, MQTT_PORT));
+    let (client, mut eventloop) = AsyncClient::builder(options)
+        .capacity(count.max(16))
+        .build();
     let driver = tokio::spawn(async move {
         loop {
             tokio::task::consume_budget().await;
@@ -2612,7 +2619,7 @@ async fn publish_mqtt_burst_with_qos(
     for _ in 0..count {
         tokio::task::consume_budget().await;
         client
-            .publish(topic, qos, false, payload)
+            .publish(topic, payload, PublishOptions::new(qos))
             .await
             .map_err(|error| {
                 io::Error::other(format!(
@@ -3262,9 +3269,9 @@ async fn observe_mqtt(topic: &str) -> io::Result<BrokerObserver> {
             .expect("system clock must be after unix epoch")
             .as_nanos()
     );
-    let mut options = MqttOptions::new(client_id, MQTT_HOST, MQTT_PORT);
-    options.set_clean_session(true);
-    let (client, mut eventloop) = AsyncClient::new(options, 16);
+    let mut options = MqttOptions::new(client_id, (MQTT_HOST, MQTT_PORT));
+    options.set_session_mode(SessionMode::Clean);
+    let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
     let (ready_tx, ready_rx) = oneshot::channel();
     let (payload_tx, payload_rx) = mpsc::channel(16);
     let topic = topic.to_string();
@@ -3286,13 +3293,15 @@ async fn observe_mqtt(topic: &str) -> io::Result<BrokerObserver> {
                     }
                 }
                 Ok(MqttEvent::Incoming(Incoming::Publish(publish))) => {
-                    if publish.topic == topic {
+                    if publish.topic.as_ref() == topic.as_bytes() {
                         let payload = String::from_utf8_lossy(publish.payload.as_ref()).to_string();
                         let _ = payload_tx.send(BrokerMessage::payload(payload)).await;
                         break;
                     }
                 }
-                Ok(MqttEvent::Incoming(_)) | Ok(MqttEvent::Outgoing(_)) => {}
+                Ok(MqttEvent::Incoming(_))
+                | Ok(MqttEvent::Outgoing(_))
+                | Ok(MqttEvent::Auth(_)) => {}
                 Err(_) => break,
             }
         }
