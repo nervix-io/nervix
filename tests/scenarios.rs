@@ -74,6 +74,8 @@ const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static PLAYWRIGHT_SCENARIO_PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+const MAX_CONCURRENT_PLAYWRIGHT_SCENARIOS: usize = 2;
 
 #[derive(cucumber::World, Debug, Default)]
 struct ScenarioWorld {
@@ -113,6 +115,7 @@ struct ScenarioWorld {
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
+    playwright_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ScenarioWorld {
@@ -2595,6 +2598,19 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
 }
 
 async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(), String> {
+    // Multiple optimized WASM consoles and Chromium processes can otherwise starve renderer
+    // event loops under Cucumber's global scenario concurrency and make UI state transitions
+    // miss their bounded assertion deadlines.
+    let playwright_permit = PLAYWRIGHT_SCENARIO_PERMITS
+        .get_or_init(|| {
+            Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_PLAYWRIGHT_SCENARIOS,
+            ))
+        })
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| error.to_string())?;
     let playwright = Playwright::launch()
         .await
         .map_err(|error| error.to_string())?;
@@ -2619,6 +2635,7 @@ async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(
     world.browser_context = Some(context);
     world.browser = Some(browser);
     world.playwright = Some(playwright);
+    world.playwright_permit = Some(playwright_permit);
     Ok(())
 }
 
@@ -2631,6 +2648,7 @@ async fn close_browser(world: &mut ScenarioWorld) {
         let _ = browser.close().await;
     }
     world.playwright = None;
+    world.playwright_permit = None;
 }
 
 fn chromium_launch_options() -> LaunchOptions {
