@@ -3121,7 +3121,7 @@ async fn when_selector_is_filled_with(world: &mut ScenarioWorld, selector: Strin
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     let value = expand_placeholders(world, &value);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     locator
         .fill(&value, None)
         .await
@@ -3136,7 +3136,7 @@ async fn when_selector_is_pressed_with(world: &mut ScenarioWorld, selector: Stri
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     let key = expand_placeholders(world, &key);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     locator
         .press(&key, None)
         .await
@@ -3151,7 +3151,7 @@ async fn when_selector_is_typed_with(world: &mut ScenarioWorld, selector: String
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     let value = expand_placeholders(world, &value);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     locator
         .press_sequentially(&value, None)
         .await
@@ -3166,7 +3166,6 @@ async fn when_selector_is_clicked(world: &mut ScenarioWorld, selector: String) {
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     page.locator(&selector)
-        .await
         .click(None)
         .await
         .expect("selector must be clickable");
@@ -3180,7 +3179,6 @@ async fn when_selector_is_clicked_by_script(world: &mut ScenarioWorld, selector:
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     page.locator(&selector)
-        .await
         .evaluate::<(), ()>("element => element.click()", None::<()>)
         .await
         .expect("selector must be script-clickable");
@@ -3221,7 +3219,6 @@ async fn when_selector_uploads_resource_directory(
         })
         .collect::<Vec<_>>();
     page.locator(&selector)
-        .await
         .set_input_files_payload_multiple(&payloads, None)
         .await
         .expect("selector must accept uploaded files");
@@ -3528,7 +3525,7 @@ async fn then_selector_contains_text_exactly_times(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         tokio::task::consume_budget().await;
@@ -3562,7 +3559,7 @@ async fn then_selector_contains_text(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         tokio::task::consume_budget().await;
@@ -3595,7 +3592,7 @@ async fn then_selector_contains_text_for_milliseconds(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_millis(duration_milliseconds as u64);
     loop {
         tokio::task::consume_budget().await;
@@ -3627,7 +3624,7 @@ async fn then_selector_does_not_contain_text(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let unexpected = expand_placeholders(world, &unexpected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         tokio::task::consume_budget().await;
@@ -3682,7 +3679,7 @@ async fn then_selector_has_value(world: &mut ScenarioWorld, selector: String, ex
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     locator
         .wait_for(Some(
             WaitForOptions::builder()
@@ -4375,11 +4372,11 @@ async fn when_graph_edge_from_to_is_clicked_with_viewport_focused_on_its_middle(
         if status == "OK" {
             let x = result
                 .get("x")
-                .and_then(|value| value.parse::<i32>().ok())
+                .and_then(|value| value.parse::<f64>().ok())
                 .expect("graph edge click setup must return x coordinate");
             let y = result
                 .get("y")
-                .and_then(|value| value.parse::<i32>().ok())
+                .and_then(|value| value.parse::<f64>().ok())
                 .expect("graph edge click setup must return y coordinate");
             page.mouse()
                 .click(x, y, None)

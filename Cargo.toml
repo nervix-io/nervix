@@ -85,8 +85,6 @@ nervix-proto = { workspace = true, features = ["client", "server"] }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
 opendal = { workspace = true }
-# rdkafka remains the only OpenSSL consumer; use one crate-built OpenSSL for static linking.
-openssl = { workspace = true, features = ["vendored"] }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
   "grpc-tonic",
@@ -113,14 +111,13 @@ prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = { workspace = true }
 protox = { workspace = true }
 pulsar = { workspace = true }
-# librdkafka remains on OpenSSL by design and is linked statically with its native dependencies.
+# Use the patched AWS-LC backend for Kafka TLS. Keep curl disabled because curl-sys defaults to OpenSSL;
+# use the configure build because the draft PR's CMake path still includes curl headers with OIDC disabled.
 rdkafka = { workspace = true, features = [
   "tokio",
-  "curl-static",
   "libz-static",
-  "cmake_build",
   "static-linking",
-  "ssl",
+  "aws-lc",
 ] }
 redis = { workspace = true }
 registry = { workspace = true }
@@ -322,7 +319,6 @@ opendal = { version = "0.56.0", features = [
   "services-azdls",
 ] }
 openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
-openssl = "0.10"
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"
@@ -353,7 +349,8 @@ rcgen = { version = "0.13", default-features = false, features = [
   "aws_lc_rs",
   "pem",
 ] }
-rdkafka = { version = "0.39.0", default-features = false }
+# PR #850 adds AWS-LC support to librdkafka and pins PR #1184, which exports its native library paths.
+rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", rev = "1a66965ac0add66c273eee3355372816a49210b9", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
   "tokio-comp",
@@ -425,6 +422,10 @@ wasmtime = { version = "46.0.0", default-features = false, features = [
 web-sys = "0.3"
 webpki-roots = "1"
 zeromq = "0.4"
+
+[patch.crates-io]
+# Unify all AWS-LC consumers on PR #1184 so Cargo links one aws-lc-sys native library.
+aws-lc-sys = { git = "https://github.com/nervix-io/aws-lc-rs.git", rev = "6332c54d1cf0535312a0e5cd73232f5d1e21f958" }
 
 [profile.release]
 codegen-units = 1
