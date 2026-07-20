@@ -74,8 +74,9 @@ const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-static PLAYWRIGHT_SCENARIO_PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-const MAX_CONCURRENT_PLAYWRIGHT_SCENARIOS: usize = 2;
+static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
+const WEB_CONSOLE_FEATURE_NAME: &str = "Web console NSPL REPL";
 
 #[derive(cucumber::World, Debug, Default)]
 struct ScenarioWorld {
@@ -115,7 +116,7 @@ struct ScenarioWorld {
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
-    playwright_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ScenarioWorld {
@@ -2598,19 +2599,6 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
 }
 
 async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(), String> {
-    // Multiple optimized WASM consoles and Chromium processes can otherwise starve renderer
-    // event loops under Cucumber's global scenario concurrency and make UI state transitions
-    // miss their bounded assertion deadlines.
-    let playwright_permit = PLAYWRIGHT_SCENARIO_PERMITS
-        .get_or_init(|| {
-            Arc::new(tokio::sync::Semaphore::new(
-                MAX_CONCURRENT_PLAYWRIGHT_SCENARIOS,
-            ))
-        })
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| error.to_string())?;
     let playwright = Playwright::launch()
         .await
         .map_err(|error| error.to_string())?;
@@ -2635,7 +2623,6 @@ async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(
     world.browser_context = Some(context);
     world.browser = Some(browser);
     world.playwright = Some(playwright);
-    world.playwright_permit = Some(playwright_permit);
     Ok(())
 }
 
@@ -2648,7 +2635,6 @@ async fn close_browser(world: &mut ScenarioWorld) {
         let _ = browser.close().await;
     }
     world.playwright = None;
-    world.playwright_permit = None;
 }
 
 fn chromium_launch_options() -> LaunchOptions {
@@ -9995,13 +9981,29 @@ async fn run_scenarios() {
     ScenarioWorld::cucumber()
         .max_concurrent_scenarios(8)
         .retries(1)
-        .before(|feature, _rule, scenario, _world| {
+        .before(|feature, _rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             Box::pin(async move {
                 append_cucumber_log_line(&format!(
                     "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
                 ));
+                if feature_name == WEB_CONSOLE_FEATURE_NAME {
+                    // Starting many three-node clusters and optimized WASM consoles together can
+                    // starve Chromium renderer event loops under the suite's global concurrency.
+                    world.web_console_scenario_permit = Some(
+                        WEB_CONSOLE_SCENARIO_PERMITS
+                            .get_or_init(|| {
+                                Arc::new(tokio::sync::Semaphore::new(
+                                    MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS,
+                                ))
+                            })
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .expect("web console scenario semaphore must remain open"),
+                    );
+                }
             })
         })
         .after(|_feature, _rule, _scenario, _ev, world| {
@@ -10035,6 +10037,7 @@ async fn run_scenarios() {
                             ));
                         }
                     }
+                    world.web_console_scenario_permit = None;
                 }
             })
         })
