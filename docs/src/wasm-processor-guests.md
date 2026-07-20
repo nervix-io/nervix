@@ -221,7 +221,7 @@ If the guest drops an input row, put that row's token set in `acked`. To fail it
 directly without invoking the processor message error policy, put it in
 `nacked` with a reason.
 
-Use `message_errors` for per-message guest errors that must be handled through `ON MESSAGE ERROR` (`IGNORE`, `LOG`, or `DLQ`). Global errors are not part of the ACK sidecar because they are guest/node state, not message lineage.
+Use `message_errors` for per-message guest errors that must be handled through `ON MESSAGE ERROR` (`IGNORE`, `LOG`, or `SEND TO`). Global errors are not part of the ACK sidecar because they are guest/node state, not message lineage.
 
 Guests may expose this optional global-error channel:
 

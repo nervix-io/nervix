@@ -234,7 +234,7 @@ Generator-specific rules:
 Every `TO` route on an ingestor or relay-consuming processor must declare its message error policy after that route's construction clauses:
 
 ```nspl
-ON MESSAGE ERROR IGNORE | LOG | DLQ error_stream SET error_message = message_error.message
+ON MESSAGE ERROR IGNORE | LOG | SEND TO error_stream SET error_message = message_error.message
 ```
 
 An ingestor additionally declares its node-level general policy after the source configuration:
@@ -245,7 +245,7 @@ ON GENERAL ERROR IGNORE | LOG
 
 Emitters retain their message and general policies at node level because they have one external sink rather than relay `TO` routes. WASM processors keep `ON GLOBAL ERROR` at node level for guest failures that are not tied to a message.
 
-`MESSAGE` errors are tied to one concrete message and one output construction, such as decode, transform, or route publication failures for that message. `GENERAL` and `GLOBAL` errors are not tied to a concrete message or `TO` route. `DLQ` is therefore only valid for `ON MESSAGE ERROR`. Pure processors do not expose `ON GENERAL ERROR` because they do not own external transport/client failures.
+`MESSAGE` errors are tied to one concrete message and one output construction, such as decode, transform, or route publication failures for that message. `GENERAL` and `GLOBAL` errors are not tied to a concrete message or `TO` route. `SEND TO` is therefore only valid for `ON MESSAGE ERROR`. Pure processors do not expose `ON GENERAL ERROR` because they do not own external transport/client failures.
 
 Client definitions are key-value based and may optionally mount a resource for file-backed settings such as TLS material:
 

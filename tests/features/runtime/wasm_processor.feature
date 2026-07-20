@@ -970,7 +970,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         FROM raw_metrics
         TO filtered_metrics
-        ON MESSAGE ERROR DLQ error_stream SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
+        ON MESSAGE ERROR SEND TO error_stream SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
         UNBRANCHED
         ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION error_stream_subscription TO error_stream;

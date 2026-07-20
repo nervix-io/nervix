@@ -139,7 +139,7 @@ mod tests {
                 FROM incoming
                 TO accepted FLUSH IMMEDIATE ON MESSAGE ERROR IGNORE
                 TO rejected FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-                    ON MESSAGE ERROR DLQ errors
+                    ON MESSAGE ERROR SEND TO errors
                     SET reason = message_error.message
                 UNBRANCHED;
         "#;

@@ -1744,24 +1744,45 @@ mod tests {
     }
 
     #[test]
-    fn message_error_policy_accepts_dlq_but_general_policy_does_not() {
-        parse_statement(
+    fn message_error_policy_accepts_send_to_and_rejects_legacy_dlq() {
+        let parsed = parse_statement(
             "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR DLQ error_stream SET error_message = \
-             message_error.message BRANCHED BY tenant_branch VALUES { tenant = \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR SEND TO error_stream SET \
+             error_message = message_error.message BRANCHED BY tenant_branch VALUES { tenant = \
              forwarded_notifications.tenant };",
         )
-        .expect("message error DLQ policy should parse");
+        .expect("message error SEND TO policy should parse");
+        let Statement::Create(parsed) = parsed else {
+            panic!("expected create statement");
+        };
+        let canonical = parsed.to_canonical_nspl().expect("policy should render");
+        assert!(canonical.contains(
+            "ON MESSAGE ERROR SEND TO error_stream SET error_message = message_error.message"
+        ));
+        assert!(!canonical.contains("ON MESSAGE ERROR DLQ"));
 
         assert!(
             parse_statement(
-                "CREATE EMITTER kafka_emit FROM notifications ENCODE USING notification_codec TO \
-                 KAFKA kafka_main TOPIC notifications_out ON GENERAL ERROR DLQ error_stream SET \
-                 error_message = general_error.message;",
+                "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications \
+                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR DLQ error_stream SET \
+                 error_message = message_error.message BRANCHED BY tenant_branch VALUES { tenant \
+                 = forwarded_notifications.tenant };",
             )
             .is_err(),
-            "general error policy must not accept DLQ"
+            "legacy DLQ syntax must be rejected"
         );
+    }
+
+    #[test]
+    fn message_error_policy_completion_suggests_send_to_without_branch_leakage() {
+        let input = "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications \
+                     FLUSH IMMEDIATE ON MESSAGE ERROR ";
+        let suggestions = suggest_statement(input, input.len());
+
+        assert!(suggestions.contains(&"SEND TO".to_string()));
+        assert!(!suggestions.contains(&"DLQ".to_string()));
+        assert!(!suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(!suggestions.contains(&"UNBRANCHED".to_string()));
     }
 
     #[test]

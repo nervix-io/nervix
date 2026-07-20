@@ -107,7 +107,6 @@ pub enum Identifier {
     Ignore,
     Log,
     Sensitive,
-    Dlq,
     Branched,
     Unbranched,
     Path,

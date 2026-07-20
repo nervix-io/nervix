@@ -44,7 +44,7 @@ Feature: Runtime node error policies
       | inferencer       | CREATE INFERENCER score_model FROM features TO scored FLUSH IMMEDIATE SET scored.tenant = features.tenant, scored.score = inner_output.score UNSET features.vector ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }  ON GENERAL ERROR LOG |
       | reorderer        | CREATE REORDERER order_notifications FROM incoming_notifications TO ordered_notifications FLUSH EACH 2s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG UNBRANCHED BY incoming_notifications.sequence MAX TIME 10s  ON GENERAL ERROR LOG                                                                                                                                                                  |
 
-  Scenario: General error policy rejects DLQ because it is not tied to a concrete message
+  Scenario: General error policy rejects SEND TO because it is not tied to a concrete message
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -58,10 +58,10 @@ Feature: Runtime node error policies
         ENCODE USING notification_codec
         TO KAFKA kafka_main TOPIC notifications_out
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR DLQ error_stream SET error_message = general_error.message FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        ON GENERAL ERROR SEND TO error_stream SET error_message = general_error.message FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
       """
 
-  Scenario Outline: Emitter message errors can be routed to a DLQ relay
+  Scenario Outline: Emitter message errors can be sent to an error relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -110,7 +110,7 @@ Feature: Runtime node error policies
         FROM notifications
         ENCODE USING notification_codec
         TO ZEROMQ zeromq_main
-        ON MESSAGE ERROR DLQ error_stream SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
+        ON MESSAGE ERROR SEND TO error_stream SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
         ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
         CREATE SUBSCRIPTION error_stream_subscription TO error_stream;
         START;
