@@ -101,7 +101,6 @@ pub(super) enum BranchedProcessorOperationSpec {
         right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
-        output_assignments: String,
         max_time: String,
         timeout_policy: CorrelationTimeoutPolicy,
     },
@@ -281,7 +280,6 @@ pub(super) enum RelayProcessorOperationTemplate {
         right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
-        output_assignments: String,
         max_time: Duration,
         timeout_policy: CorrelationTimeoutPolicy,
     },
@@ -368,11 +366,10 @@ pub(super) enum RelayProcessorOperationNode {
         right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
-        output_assignments: String,
         max_time: Duration,
         timeout_policy: CorrelationTimeoutPolicy,
         compiled_where_program: Option<Box<CompiledCorrelatorWhereProgram>>,
-        compiled_output_program: Option<Box<CompiledCorrelatorOutputProgram>>,
+        compiled_output_programs: Vec<Option<Box<CompiledCorrelatorOutputProgram>>>,
         state: SharedCorrelatorBranchState,
     },
     Junction {
@@ -828,7 +825,6 @@ pub(super) type SharedCorrelatorBranchState = Arc<parking_lot::Mutex<CorrelatorB
 pub(super) struct CorrelatorBranchState {
     pub(super) pending_left: Vec<CorrelatorPendingMessage>,
     pub(super) pending_right: Vec<CorrelatorPendingMessage>,
-    pub(super) output_pending: Vec<RelayMessage>,
 }
 
 #[derive(Debug)]
