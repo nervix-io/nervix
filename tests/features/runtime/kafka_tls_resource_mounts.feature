@@ -33,7 +33,7 @@ Feature: Kafka TLS resource mounts
         TYPE KAFKA
         MOUNT dev_tls
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9094',
+          'bootstrap.servers' = 'localhost:9094',
           'security.protocol' = 'ssl',
           'ssl.ca.location' = '{{dev_tls}}/ca.pem'
         };
