@@ -1053,11 +1053,9 @@ fn handle_session_response(
             domains_loaded.set(true);
             domains.set(next_domains.clone());
             let current = active_domain.get_untracked();
-            let current_is_missing = current
+            if current
                 .as_ref()
-                .is_some_and(|id| !next_domains.iter().any(|domain| domain.id == *id));
-            if current.is_none()
-                || (!user_selected_domain.get_untracked() && current_is_missing)
+                .is_none_or(|id| !next_domains.iter().any(|domain| domain.id == *id))
             {
                 active_domain.set(next_domains.first().map(|domain| domain.id.clone()));
             }
