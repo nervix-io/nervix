@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use nervix_models::{
@@ -19,6 +19,7 @@ use nervix_vm::{
 use nervix_wasm::{CompiledWasmProcessor, WasmBranchInstance};
 use ordered_float::OrderedFloat;
 use registry::ActiveGraph;
+use triomphe::Arc;
 
 use super::{
     BranchRuntime, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
@@ -327,7 +328,7 @@ pub(super) struct RelayProcessorNode {
     pub(super) filter_where: Option<String>,
     pub(super) compiled_filter_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
-    pub(super) last_graph: Option<Arc<ActiveGraph>>,
+    pub(super) last_graph: Option<StdArc<ActiveGraph>>,
     pub(super) generation: u64,
 }
 
@@ -531,7 +532,7 @@ impl CompiledWindowAggregateProgram {
         match expr {
             WindowAggregateExpr::Scalar(expr) => {
                 let output_schema =
-                    Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+                    StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
                         &target.field,
                         target_type.clone(),
                         false,

@@ -139,7 +139,7 @@ Primary goals:
 - When code relies on sorted vectors/arrays as an invariant, prefer the `sorted-vec` crate (`SortedVec` / `SortedSet`) over a plain `Vec` plus manual `sort`/`dedup`.
 - Prefer synchronous locks from `parking_lot` over `std::sync` lock types.
 - For shared concurrent maps, prefer `DashMap` over `Arc<Mutex<HashMap<...>>>`.
-- Prefer `triomphe::Arc` over `std::sync::Arc` when weak references are not needed and the shared pointer does not cross an API boundary that requires `std::sync::Arc`.
+- `triomphe::Arc` is the default shared-ownership type for Nervix-owned state. Use `std::sync::Arc` only when weak references are required or an external API requires that exact type. In modules that need both, import the standard type as `StdArc` and keep it confined to the boundary; do not use `StdArc` for unrelated Nervix-owned values in the same module.
 - Do not use `matches!` inside `if` conditions when the same logic can be expressed with `if let` or `if let` chains. Prefer `if let` forms for readability. Fall back to `matches!` only when the condition cannot be expressed cleanly without it, or when it is used outside an `if` condition.
 - Time values must use typed datetime/timestamp representations internally. Do not model internal runtime, application, persistence, or domain-clock state as raw Unix integer counters when a semantic timestamp type can be used instead.
 - Nanosecond Unix integers are a boundary format only. Use them explicitly for serialization/deserialization, cross-node/public protocol payloads, rkyv/CBOR/JSON encoding, and Arrow timestamp arrays, but convert to typed timestamps immediately after decoding and only back to integers at the boundary.

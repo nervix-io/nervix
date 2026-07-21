@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path};
 
 use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
@@ -10,6 +10,7 @@ use ort::{
     value::Tensor,
 };
 use parking_lot::Mutex;
+use triomphe::Arc;
 
 use crate::runtime_schema::{RuntimeRecord, RuntimeValue};
 

@@ -5,7 +5,7 @@ use std::{
     num::NonZeroUsize,
     path::Path,
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{Arc as StdArc, RwLock},
     time::Duration,
 };
 
@@ -50,6 +50,7 @@ use sorted_vec::SortedSet;
 pub use stored::StoredModelVersioned;
 use thiserror::Error;
 use tracing::{info, warn};
+use triomphe::Arc;
 
 const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
@@ -4403,7 +4404,7 @@ fn lookup_hash_map_bindings(mut fields: Vec<(String, ArrowDataType)>) -> Vec<Com
     fields.dedup_by(|left, right| left.0 == right.0);
     vec![CompileBinding::internal_readonly(
         InternalFieldNamespace::LookupHashMap,
-        Arc::new(ArrowSchema::new(
+        StdArc::new(ArrowSchema::new(
             fields
                 .into_iter()
                 .map(|(name, data_type)| ArrowField::new(name, data_type, true))
@@ -4818,8 +4819,11 @@ fn referenced_materialized_stream_bindings(
                 .map(|field| field.name.as_str().to_string()),
         );
         bindings.push(
-            CompileBinding::readonly(relay.as_str(), Arc::new(ArrowSchema::new(projected_fields)))
-                .with_sensitivity(projected_sensitivity),
+            CompileBinding::readonly(
+                relay.as_str(),
+                StdArc::new(ArrowSchema::new(projected_fields)),
+            )
+            .with_sensitivity(projected_sensitivity),
         );
     }
 
@@ -4985,7 +4989,7 @@ fn effective_generator_schema(
 
     let mut bindings = vec![CompileBinding::writable(
         generator.into_relay.as_str(),
-        Arc::new(ArrowSchema::new(Vec::<ArrowField>::new())),
+        StdArc::new(ArrowSchema::new(Vec::<ArrowField>::new())),
     )];
     let mut local_schemas = HashMap::new();
     for source_stream in &source_streams {
@@ -5191,8 +5195,8 @@ fn first_vm_program_error(error: nervix_nspl::vm_program::ParseFromSourceError) 
     }
 }
 
-fn arrow_schema_for_internal_schema(schema: &CreateSchema) -> Arc<ArrowSchema> {
-    Arc::new(ArrowSchema::new(
+fn arrow_schema_for_internal_schema(schema: &CreateSchema) -> StdArc<ArrowSchema> {
+    StdArc::new(ArrowSchema::new(
         schema
             .fields
             .iter()

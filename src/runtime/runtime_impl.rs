@@ -23,7 +23,7 @@ fn relay_branching_schema_for_runtime(
     relay: &CreateRelay,
     effective_branching_schema: Option<&Identifier>,
     schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
-) -> Result<Option<Arc<arrow_schema::Schema>>, RuntimeError> {
+) -> Result<Option<StdArc<arrow_schema::Schema>>, RuntimeError> {
     let Some(schema_name) = effective_branching_schema else {
         if let Some(branch) = relay.branching.branch() {
             return Err(RuntimeError::BuildDomainExecution {
@@ -3210,7 +3210,7 @@ impl Runtime {
     ) -> SharedActiveGraph {
         self.domain_graphs
             .entry(domain.clone())
-            .or_insert_with(|| Arc::new(ArcSwapOption::from(None)))
+            .or_insert_with(|| StdArc::new(ArcSwapOption::from(None)))
             .clone()
     }
 
@@ -5160,7 +5160,7 @@ impl Runtime {
         }
 
         let domain_graph = self.domain_graph_handle(domain).await;
-        domain_graph.store(Some(Arc::new(graph.clone())));
+        domain_graph.store(Some(StdArc::new(graph.clone())));
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();

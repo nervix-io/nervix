@@ -3,7 +3,7 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc as StdArc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -93,6 +93,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, trace, warn};
+use triomphe::Arc;
 use upon::Engine as TemplateEngine;
 
 use crate::{
@@ -214,7 +215,7 @@ const WASM_INPUT_NAMESPACE: &str = "input";
 
 pub(crate) type IngestHeaders = Vec<(String, String)>;
 
-type SharedActiveGraph = Arc<ArcSwapOption<ActiveGraph>>;
+type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
 type PendingStateSyncSender = oneshot::Sender<Result<Option<PersistedRuntimeStateEntry>, String>>;
 
 #[derive(Debug, Clone, Copy)]
@@ -425,7 +426,7 @@ struct DomainExecution {
     relay_services: HashMap<Identifier, Arc<RelayBoundaryServices>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,
     relay_branchings: HashMap<Identifier, Vec<Identifier>>,
-    relay_branching_schemas: HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
+    relay_branching_schemas: HashMap<Identifier, Option<StdArc<arrow_schema::Schema>>>,
     materialized_stream_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_stream_owner_nodes: HashMap<Identifier, Option<String>>,
     branched_ingestors: HashMap<Identifier, Vec<BranchedIngestorSpec>>,
@@ -967,7 +968,7 @@ impl IngestHeaderFunctionInjector {
     fn from_metadata(
         metadata: Option<&[IngestFilterMapMetadata]>,
         row_count: usize,
-    ) -> Arc<dyn VmFunctionInjector> {
+    ) -> Arc<Box<dyn VmFunctionInjector>> {
         let rows = metadata
             .map(|metadata| {
                 metadata
@@ -976,7 +977,7 @@ impl IngestHeaderFunctionInjector {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| vec![HashMap::new(); row_count]);
-        Arc::new(Self { rows })
+        Arc::new(Box::new(Self { rows }))
     }
 }
 
@@ -1018,7 +1019,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
             return Ok(VmTypedArray::Utf8(arrow_array::StringArray::from(values)));
         }
         if let FunctionName::ReadHeaders = function {
-            let field = Arc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
+            let field = StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
             let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field);
             for (name, headers) in names.iter().zip(&self.rows) {
                 if let Some(values) = name.and_then(|name| headers.get(name)) {
@@ -1028,7 +1029,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 }
                 builder.append(true);
             }
-            return Ok(VmTypedArray::Generic(Arc::new(builder.finish())));
+            return Ok(VmTypedArray::Generic(StdArc::new(builder.finish())));
         }
         Err(nervix_vm::RuntimeError::InvalidBatch {
             message: format!("function '{}' is not injectable", function.as_str()),
@@ -1670,7 +1671,7 @@ struct ExecutionBuildDeps<'a> {
     domain: &'a Domain,
     relay_schemas: &'a HashMap<Identifier, Arc<CompiledSchema>>,
     relay_branchings: &'a HashMap<Identifier, Vec<Identifier>>,
-    relay_branching_schemas: &'a HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
+    relay_branching_schemas: &'a HashMap<Identifier, Option<StdArc<arrow_schema::Schema>>>,
     materialized_relay_specs: &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_relay_owner_nodes: &'a HashMap<Identifier, Option<String>>,
     lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
@@ -1680,7 +1681,7 @@ struct ExecutionBuildDeps<'a> {
 struct EmitterTaskDeps {
     input_schema: Arc<CompiledSchema>,
     input_branching: Vec<Identifier>,
-    input_branching_schema: Option<Arc<arrow_schema::Schema>>,
+    input_branching_schema: Option<StdArc<arrow_schema::Schema>>,
     materialized_relay_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_relay_owner_nodes: HashMap<Identifier, Option<String>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,
@@ -1792,7 +1793,7 @@ pub(crate) struct MaterializedProgramInterest {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeMaterializedRelaySpec {
-    pub(crate) schema: Arc<arrow_schema::Schema>,
+    pub(crate) schema: StdArc<arrow_schema::Schema>,
     pub(crate) sensitivity: VmSchemaSensitivity,
     pub(crate) branching: Vec<Identifier>,
 }
@@ -1819,7 +1820,7 @@ pub(crate) struct RuntimeVmCompileContext<'a> {
         &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     pub(crate) available_lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
     pub(crate) current_branching: &'a [Identifier],
-    pub(crate) current_branch_schema: Option<&'a Arc<arrow_schema::Schema>>,
+    pub(crate) current_branch_schema: Option<&'a StdArc<arrow_schema::Schema>>,
     pub(crate) current_branch_sensitivity: Option<&'a VmSchemaSensitivity>,
 }
 
@@ -1835,9 +1836,9 @@ impl RuntimeVmCompileContext<'_> {
 
 #[derive(Debug, Clone)]
 struct RuntimeVmSchemaPair {
-    input: Arc<arrow_schema::Schema>,
+    input: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output: Arc<arrow_schema::Schema>,
+    output: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
 }
 
@@ -2396,9 +2397,9 @@ impl ProcessorInputFilterKind {
 }
 
 impl RelayProcessorNode {
-    fn refresh(&mut self, graph: Option<Arc<ActiveGraph>>) {
+    fn refresh(&mut self, graph: Option<StdArc<ActiveGraph>>) {
         let changed = match (&self.last_graph, &graph) {
-            (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+            (Some(previous), Some(current)) => !StdArc::ptr_eq(previous, current),
             (None, None) => false,
             _ => true,
         };
@@ -2648,7 +2649,7 @@ impl RelayProcessorNode {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let current = graph.load_full();
-            let current = current.as_ref().map(Arc::clone);
+            let current = current.as_ref().map(StdArc::clone);
             self.refresh(current);
             let Some(batch) = self
                 .filter_input_batch(graph, branch, incoming_relay, batch)
@@ -5908,7 +5909,7 @@ fn compile_lookup_hash_map_calls(
         .collect::<Vec<_>>();
     let lookup_binding = VmCompileBinding::internal_readonly(
         InternalFieldNamespace::LookupHashMap,
-        Arc::new(arrow_schema::Schema::new(lookup_fields)),
+        StdArc::new(arrow_schema::Schema::new(lookup_fields)),
     );
     let mut compiled_calls = Vec::with_capacity(pending_calls.len());
     for call in pending_calls {
@@ -5939,7 +5940,7 @@ fn compile_lookup_hash_map_calls(
                     )
                 },
             )?;
-        let key_output_schema = Arc::new(arrow_schema::Schema::new(
+        let key_output_schema = StdArc::new(arrow_schema::Schema::new(
             key_types
                 .into_iter()
                 .map(|(name, data_type, nullable)| {
@@ -6031,7 +6032,7 @@ fn referenced_materialized_stream_bindings(
         bindings.push(
             VmCompileBinding::readonly(
                 relay.as_str(),
-                Arc::new(arrow_schema::Schema::new(projected_fields)),
+                StdArc::new(arrow_schema::Schema::new(projected_fields)),
             )
             .with_sensitivity(projected_sensitivity),
         );
@@ -6088,7 +6089,7 @@ fn emitter_filter_map_local_namespaces(from_relay: &Identifier) -> HashSet<Strin
 
 fn emitter_filter_map_message_bindings(
     from_relay: &Identifier,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
 ) -> Vec<VmCompileBinding> {
     let mut bindings = vec![
@@ -6109,9 +6110,9 @@ pub(crate) fn compile_filter_map_program(
     identifier: &Identifier,
     relay_names: &[Identifier],
     filter_map: Option<&str>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     allow_header_reads: bool,
     context: RuntimeVmCompileContext<'_>,
@@ -6160,10 +6161,10 @@ fn compile_processor_output_filter_map_program(
     input_relays: &[Identifier],
     output_relay: &Identifier,
     filter_map: Option<&str>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
@@ -6307,9 +6308,9 @@ fn compile_wasm_output_filter_map_program(
     input_relays: &[Identifier],
     output_relay: &Identifier,
     filter_map: Option<&str>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
@@ -6437,9 +6438,9 @@ fn compile_wasm_output_filter_map_program(
 pub(crate) fn compile_emitter_filter_map_program(
     domain: &Domain,
     emitter: &CreateEmitter,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledEmitterFilterMapProgram>, RuntimeError> {
@@ -6502,9 +6503,9 @@ fn compile_emitter_filter_map_part(
     identifier: &Identifier,
     from_relay: &Identifier,
     parsed: nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
@@ -6586,7 +6587,7 @@ pub(crate) fn compile_session_filter_map_program(
     identifier: &Identifier,
     relay_names: &[Identifier],
     filter_map: Option<&str>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
@@ -6636,7 +6637,7 @@ fn prepare_filter_map_program(
     identifier: &Identifier,
     relay_names: &[Identifier],
     filter_map: &str,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<PreparedFilterMapProgram, RuntimeError> {
@@ -6733,9 +6734,9 @@ fn infer_session_filter_map_output_schema(
     domain: &Domain,
     identifier: &Identifier,
     prepared: &PreparedFilterMapProgram,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-) -> Result<(Arc<arrow_schema::Schema>, VmSchemaSensitivity), RuntimeError> {
+) -> Result<(StdArc<arrow_schema::Schema>, VmSchemaSensitivity), RuntimeError> {
     let unset = prepared
         .parsed
         .inner
@@ -6782,7 +6783,7 @@ fn infer_session_filter_map_output_schema(
     }
 
     Ok((
-        Arc::new(arrow_schema::Schema::new(output_fields)),
+        StdArc::new(arrow_schema::Schema::new(output_fields)),
         VmSchemaSensitivity::from_sensitive_fields(output_sensitive_fields),
     ))
 }
@@ -6831,7 +6832,7 @@ pub(super) fn compile_key_projection_program(
     clause: &str,
     input_relays: &[Identifier],
     expressions: &[String],
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<VmCompiledProgram, String> {
     let Some(primary_input_relay) = input_relays.first() else {
         return Err(format!(
@@ -6885,7 +6886,7 @@ pub(super) fn compile_key_projection_program(
             clause
         ));
     }
-    let output_schema = Arc::new(arrow_schema::Schema::new(
+    let output_schema = StdArc::new(arrow_schema::Schema::new(
         key_types
             .into_iter()
             .map(|(name, data_type, nullable)| arrow_schema::Field::new(name, data_type, nullable))
@@ -6916,7 +6917,7 @@ fn compile_reorderer_program(
     processor: &Identifier,
     input_relays: &[Identifier],
     order_by: &str,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<CompiledReordererProgram, String> {
     let expressions = split_reorder_by_expressions(order_by);
     if expressions.is_empty() {
@@ -6944,9 +6945,9 @@ fn compile_correlator_where_program(
     processor: &Identifier,
     correlate_where: &str,
     left_relays: &[Identifier],
-    left_schema: Arc<arrow_schema::Schema>,
+    left_schema: StdArc<arrow_schema::Schema>,
     right_relays: &[Identifier],
-    right_schema: Arc<arrow_schema::Schema>,
+    right_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<CompiledCorrelatorWhereProgram, String> {
     let parsed = parse_program(correlate_where).map_err(|error| {
         format!(
@@ -7005,11 +7006,11 @@ fn compile_correlator_where_program(
 struct CorrelatorOutputCompileContext<'a> {
     processor: &'a Identifier,
     left_relays: &'a [Identifier],
-    left_schema: Arc<arrow_schema::Schema>,
+    left_schema: StdArc<arrow_schema::Schema>,
     right_relays: &'a [Identifier],
-    right_schema: Arc<arrow_schema::Schema>,
+    right_schema: StdArc<arrow_schema::Schema>,
     output_relay: &'a Identifier,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     filter_map: &'a str,
 }
 
@@ -7980,9 +7981,9 @@ fn generator_source_streams(
 fn compile_generator_set_program(
     domain: &Domain,
     generator: &CreateGenerator,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
-    source_schemas: &[(Identifier, Arc<arrow_schema::Schema>)],
+    source_schemas: &[(Identifier, StdArc<arrow_schema::Schema>)],
 ) -> Result<Arc<CompiledFilterMapProgram>, RuntimeError> {
     let parsed = parse_generator_program(&generator.name, &generator.set).map_err(|reason| {
         RuntimeError::BuildDomainExecution {
@@ -7992,7 +7993,7 @@ fn compile_generator_set_program(
     })?;
     let mut bindings = vec![VmCompileBinding::writable(
         generator.into_relay.as_str(),
-        Arc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new())),
+        StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new())),
     )];
     for (relay, schema) in source_schemas {
         bindings.push(VmCompileBinding::readonly(relay.as_str(), schema.clone()));
@@ -8016,9 +8017,9 @@ fn compile_generator_set_program(
 
 fn ingestor_filter_map_metadata_arrow_schema(
     source: &IngestSource,
-) -> Option<Arc<arrow_schema::Schema>> {
+) -> Option<StdArc<arrow_schema::Schema>> {
     match source {
-        IngestSource::Kafka { .. } => Some(Arc::new(arrow_schema::Schema::new(vec![
+        IngestSource::Kafka { .. } => Some(StdArc::new(arrow_schema::Schema::new(vec![
             arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
             arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
             arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
@@ -8088,8 +8089,8 @@ struct InferencerFilterMapTensors<'a> {
 }
 
 impl InferencerFilterMapTensors<'_> {
-    fn input_arrow_schema(&self) -> Arc<arrow_schema::Schema> {
-        Arc::new(arrow_schema::Schema::new(
+    fn input_arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
+        StdArc::new(arrow_schema::Schema::new(
             self.inputs
                 .iter()
                 .map(|mapping| {
@@ -8103,8 +8104,8 @@ impl InferencerFilterMapTensors<'_> {
         ))
     }
 
-    fn output_arrow_schema(&self) -> Arc<arrow_schema::Schema> {
-        Arc::new(arrow_schema::Schema::new(
+    fn output_arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
+        StdArc::new(arrow_schema::Schema::new(
             self.output_schema
                 .iter()
                 .map(|declaration| {
@@ -10433,7 +10434,7 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
                 )
             })
             .collect::<Vec<_>>();
-        let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
             "value",
             data_type.clone(),
             false,
@@ -10449,10 +10450,11 @@ async fn evaluate_window_aggregate(
     state: &WindowProcessorState,
 ) -> Result<DecodedRecord, String> {
     let mut fields = Vec::with_capacity(program.assignments.len());
-    let injector: Arc<dyn VmFunctionInjector> = Arc::new(WindowAggregateFunctionInjector {
-        accumulators: state.accumulators.clone(),
-        demand_types: program.demand_types.clone(),
-    });
+    let injector: Arc<Box<dyn VmFunctionInjector>> =
+        Arc::new(Box::new(WindowAggregateFunctionInjector {
+            accumulators: state.accumulators.clone(),
+            demand_types: program.demand_types.clone(),
+        }));
     for assignment in &program.assignments {
         let value = evaluate_window_aggregate_expr(
             &assignment.value,
@@ -10468,7 +10470,7 @@ async fn evaluate_window_aggregate(
 fn evaluate_window_aggregate_expr<'a>(
     expr: &'a CompiledWindowAggregateExpr,
     target_field: &'a str,
-    injector: Arc<dyn VmFunctionInjector>,
+    injector: Arc<Box<dyn VmFunctionInjector>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RuntimeValue, String>> + Send + 'a>>
 {
     Box::pin(async move {
@@ -10856,7 +10858,7 @@ fn compare_runtime_values(left: &RuntimeValue, right: &RuntimeValue) -> std::cmp
 fn vm_typed_batch_from_runtime_record(
     record: &RuntimeRecord,
     filter_map_metadata: Option<&IngestFilterMapMetadata>,
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
 ) -> Result<VmTypedBatch, String> {
     vm_typed_batch_from_runtime_records_with_metadata(
         std::slice::from_ref(record),
@@ -10867,20 +10869,20 @@ fn vm_typed_batch_from_runtime_record(
 
 fn vm_typed_batch_from_runtime_records(
     records: &[RuntimeRecord],
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
 ) -> Result<VmTypedBatch, String> {
     vm_typed_batch_from_runtime_records_with_metadata(records, None, schema)
 }
 
 fn vm_typed_batch_from_runtime_records_with_uninitialized(
     records: &[RuntimeRecord],
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
     uninitialized: Option<&VmUninitializedInput<'_>>,
 ) -> Result<VmTypedBatch, String> {
     let Some(uninitialized) = uninitialized else {
         return vm_typed_batch_from_runtime_records(records, schema);
     };
-    let relaxed_schema = Arc::new(arrow_schema::Schema::new(
+    let relaxed_schema = StdArc::new(arrow_schema::Schema::new(
         schema
             .fields()
             .iter()
@@ -11410,7 +11412,7 @@ fn append_filter_map_nested_value(
 fn vm_typed_batch_from_runtime_records_with_metadata(
     records: &[RuntimeRecord],
     filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
 ) -> Result<VmTypedBatch, String> {
     if let Some(metadata_rows) = filter_map_metadata
         && metadata_rows.len() != records.len()
@@ -11805,7 +11807,7 @@ fn relay_branch_schema_for_runtime(
     runtime: &Runtime,
     domain: &Domain,
     relay: &Identifier,
-) -> Option<Arc<arrow_schema::Schema>> {
+) -> Option<StdArc<arrow_schema::Schema>> {
     runtime
         .executions
         .get(domain)
@@ -13100,7 +13102,7 @@ impl WasmOutputValidator<'_> {
         &self,
         output_relay: &str,
         field_index: usize,
-        destination_field: &Arc<arrow_schema::Field>,
+        destination_field: &StdArc<arrow_schema::Field>,
         column_index: u32,
         rows: &[WasmOutputRow],
     ) -> Result<ArrayRef, WasmOutputError> {
@@ -14084,7 +14086,7 @@ fn relay_batch_from_wasm_output(
 }
 
 fn generator_context_batch(
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
     values: &HashMap<String, RuntimeValue>,
 ) -> Result<VmTypedBatch, String> {
     let columns = schema

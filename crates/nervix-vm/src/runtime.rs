@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc as StdArc};
 
 use ahash::{HashMap, HashMapExt};
 use arrow_arith::{
@@ -606,7 +606,7 @@ pub trait FunctionInjector: Send + Sync + fmt::Debug {
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
     pub now: Timestamp,
-    pub injector: Option<Arc<dyn FunctionInjector>>,
+    pub injector: Option<triomphe::Arc<Box<dyn FunctionInjector>>>,
 }
 
 impl Default for ExecutionContext {
@@ -1113,19 +1113,19 @@ fn typed_array_as_array(column: &TypedArray) -> &dyn Array {
 
 fn typed_array_to_array_ref(column: TypedArray) -> ArrayRef {
     match column {
-        TypedArray::UInt8(array) => std::sync::Arc::new(array),
-        TypedArray::Int8(array) => std::sync::Arc::new(array),
-        TypedArray::UInt16(array) => std::sync::Arc::new(array),
-        TypedArray::Int16(array) => std::sync::Arc::new(array),
-        TypedArray::UInt32(array) => std::sync::Arc::new(array),
-        TypedArray::Int32(array) => std::sync::Arc::new(array),
-        TypedArray::UInt64(array) => std::sync::Arc::new(array),
-        TypedArray::Int64(array) => std::sync::Arc::new(array),
-        TypedArray::Float32(array) => std::sync::Arc::new(array),
-        TypedArray::Float64(array) => std::sync::Arc::new(array),
-        TypedArray::Boolean(array) => std::sync::Arc::new(array),
-        TypedArray::Utf8(array) => std::sync::Arc::new(array),
-        TypedArray::Datetime(array) => std::sync::Arc::new(array),
+        TypedArray::UInt8(array) => StdArc::new(array),
+        TypedArray::Int8(array) => StdArc::new(array),
+        TypedArray::UInt16(array) => StdArc::new(array),
+        TypedArray::Int16(array) => StdArc::new(array),
+        TypedArray::UInt32(array) => StdArc::new(array),
+        TypedArray::Int32(array) => StdArc::new(array),
+        TypedArray::UInt64(array) => StdArc::new(array),
+        TypedArray::Int64(array) => StdArc::new(array),
+        TypedArray::Float32(array) => StdArc::new(array),
+        TypedArray::Float64(array) => StdArc::new(array),
+        TypedArray::Boolean(array) => StdArc::new(array),
+        TypedArray::Utf8(array) => StdArc::new(array),
+        TypedArray::Datetime(array) => StdArc::new(array),
         TypedArray::Generic(array) => array,
         TypedArray::Uninitialized { data_type, len } => new_null_array(&data_type, len),
     }
@@ -3748,8 +3748,6 @@ fn push_error(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow_array::{
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
         StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
@@ -3813,11 +3811,11 @@ mod tests {
         batch.column(index)
     }
 
-    fn schema(fields: Vec<Field>) -> Arc<Schema> {
-        Arc::new(Schema::new(fields))
+    fn schema(fields: Vec<Field>) -> StdArc<Schema> {
+        StdArc::new(Schema::new(fields))
     }
 
-    fn with_output_fields(input_schema: &Arc<Schema>, fields: Vec<Field>) -> Arc<Schema> {
+    fn with_output_fields(input_schema: &StdArc<Schema>, fields: Vec<Field>) -> StdArc<Schema> {
         let mut output_fields = input_schema
             .fields()
             .iter()
@@ -3829,7 +3827,7 @@ mod tests {
 
     fn compile_program_with_output_fields(
         program: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-        input_schema: Arc<Schema>,
+        input_schema: StdArc<Schema>,
         fields: Vec<Field>,
     ) -> CompiledProgram {
         let output_schema = with_output_fields(&input_schema, fields);
@@ -4098,12 +4096,12 @@ mod tests {
 
     #[test]
     fn executes_array_builtins() {
-        let values = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
+        let values = StdArc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
             Some(vec![Some(1), Some(2), Some(3)]),
             Some(vec![]),
             None,
         ]));
-        let fixed = Arc::new(FixedSizeListArray::from_iter_primitive::<Int64Type, _, _>(
+        let fixed = StdArc::new(FixedSizeListArray::from_iter_primitive::<Int64Type, _, _>(
             [
                 Some(vec![Some(10), Some(20)]),
                 Some(vec![Some(30), Some(40)]),
@@ -5266,7 +5264,7 @@ mod tests {
             &batch,
             &ExecutionContext {
                 now: Timestamp::from_unix_nanos(1),
-                injector: Some(Arc::new(TestHeaderInjector)),
+                injector: Some(triomphe::Arc::new(Box::new(TestHeaderInjector))),
             },
         )
         .expect("program must execute");
@@ -5292,7 +5290,7 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_runtime_register_type() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Float64,
             true,
@@ -5301,7 +5299,7 @@ mod tests {
         let utf8_output = RegisterRef::new(RegisterSpace::Output, RegisterType::Utf8, 0);
         let program = CompiledProgram {
             input_schema: schema.clone(),
-            output_schema: Arc::new(Schema::new(vec![Field::new(
+            output_schema: StdArc::new(Schema::new(vec![Field::new(
                 "lowered",
                 DataType::Utf8,
                 true,
@@ -5358,7 +5356,7 @@ mod tests {
 
     #[test]
     fn rejects_binary_instruction_written_to_wrong_destination_type() {
-        let schema = Arc::new(Schema::new(vec![
+        let schema = StdArc::new(Schema::new(vec![
             Field::new("left", DataType::Int64, true),
             Field::new("right", DataType::Int64, true),
         ]));
@@ -5367,7 +5365,7 @@ mod tests {
         let utf8_output = RegisterRef::new(RegisterSpace::Output, RegisterType::Utf8, 0);
         let program = CompiledProgram {
             input_schema: schema.clone(),
-            output_schema: Arc::new(Schema::new(vec![Field::new("bad", DataType::Utf8, true)])),
+            output_schema: StdArc::new(Schema::new(vec![Field::new("bad", DataType::Utf8, true)])),
             inputs: vec![
                 InputBinding {
                     column_index: 0,
