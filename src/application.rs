@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     convert::Infallible,
     fs::OpenOptions,
+    future::Future,
     io,
     net::SocketAddr,
     num::NonZeroU32,
@@ -1063,6 +1064,8 @@ fn ingest_headers_from_hyper(headers: &hyper::HeaderMap) -> IngestHeaders {
 
 async fn handle_http_request(
     runtime: Arc<Runtime>,
+    request_tasks: TaskTracker,
+    shutdown: CancellationToken,
     mut request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Empty<Bytes>>, Infallible> {
     let host = request
@@ -1100,8 +1103,12 @@ async fn handle_http_request(
             .expect("websocket upgrade response must build");
 
         let on_upgrade = upgrade::on(&mut request);
-        tokio::spawn(async move {
-            match on_upgrade.await {
+        request_tasks.spawn(async move {
+            let upgraded = tokio::select! {
+                _ = shutdown.cancelled() => return,
+                upgraded = on_upgrade => upgraded,
+            };
+            match upgraded {
                 Ok(upgraded) => {
                     let io = TokioIo::new(upgraded);
                     let mut websocket =
@@ -1123,7 +1130,11 @@ async fn handle_http_request(
                                 return;
                             }
                         };
-                        let buffered_payloads = match session.run(&mut websocket).await {
+                        let session_result = tokio::select! {
+                            _ = shutdown.cancelled() => return,
+                            result = session.run(&mut websocket) => result,
+                        };
+                        let buffered_payloads = match session_result {
                             Ok(buffered_payloads) => buffered_payloads,
                             Err(error) => {
                                 warn!(
@@ -1147,7 +1158,14 @@ async fn handle_http_request(
                         }
                     }
 
-                    while let Some(message) = futures_util::StreamExt::next(&mut websocket).await {
+                    loop {
+                        let message = tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            message = futures_util::StreamExt::next(&mut websocket) => message,
+                        };
+                        let Some(message) = message else {
+                            break;
+                        };
                         match message {
                             Ok(Message::Text(payload)) => {
                                 runtime
@@ -1217,6 +1235,7 @@ async fn handle_http_request(
 
 async fn serve_http(
     runtime: Arc<Runtime>,
+    request_tasks: TaskTracker,
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> Result<(), Report<AppError>> {
@@ -1236,12 +1255,21 @@ async fn serve_http(
             .set_nodelay(true)
             .change_context(AppError::ServeHttp)?;
         let runtime = runtime.clone();
+        let request_tasks = request_tasks.clone();
+        let request_shutdown = shutdown.clone();
         connection_tasks.spawn(async move {
             let io = TokioIo::new(stream);
             if let Err(error) = http1::Builder::new()
                 .serve_connection(
                     io,
-                    service_fn(move |request| handle_http_request(runtime.clone(), request)),
+                    service_fn(move |request| {
+                        handle_http_request(
+                            runtime.clone(),
+                            request_tasks.clone(),
+                            request_shutdown.clone(),
+                            request,
+                        )
+                    }),
                 )
                 .with_upgrades()
                 .await
@@ -1257,6 +1285,7 @@ async fn serve_http(
 
 async fn serve_https(
     runtime: Arc<Runtime>,
+    request_tasks: TaskTracker,
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     listener: TcpListener,
     shutdown: CancellationToken,
@@ -1277,6 +1306,8 @@ async fn serve_https(
             .set_nodelay(true)
             .change_context(AppError::ServeHttps)?;
         let runtime = runtime.clone();
+        let request_tasks = request_tasks.clone();
+        let request_shutdown = shutdown.clone();
         let http_tls_server_config = http_tls_server_config.clone();
         connection_tasks.spawn(async move {
             let Some(tls_config) = http_tls_server_config.read().clone() else {
@@ -1291,7 +1322,12 @@ async fn serve_https(
                         .serve_connection(
                             io,
                             service_fn(move |request| {
-                                handle_http_request(runtime.clone(), request)
+                                handle_http_request(
+                                    runtime.clone(),
+                                    request_tasks.clone(),
+                                    request_shutdown.clone(),
+                                    request,
+                                )
                             }),
                         )
                         .with_upgrades()
@@ -1711,8 +1747,13 @@ async fn handle_web_console_request(
             .expect("web console websocket upgrade response must build");
 
         let on_upgrade = upgrade::on(&mut request);
-        tokio::spawn(async move {
-            match on_upgrade.await {
+        let service_tasks = service.service_tasks.clone();
+        service_tasks.spawn(async move {
+            let upgraded = tokio::select! {
+                _ = service.shutdown.cancelled() => return,
+                upgraded = on_upgrade => upgraded,
+            };
+            match upgraded {
                 Ok(upgraded) => {
                     let io = TokioIo::new(upgraded);
                     let mut websocket =
@@ -1730,6 +1771,7 @@ async fn handle_web_console_request(
                     loop {
                         tokio::task::consume_budget().await;
                         tokio::select! {
+                            _ = service.shutdown.cancelled() => break,
                             message = futures_util::StreamExt::next(&mut websocket) => {
                                 let Some(message) = message else {
                                     break;
@@ -2936,6 +2978,8 @@ pub enum AppError {
     StartInterconnect,
     #[error("failed to start cluster membership")]
     StartCluster,
+    #[error("failed to stop cluster membership")]
+    ShutdownCluster,
     #[error("memory high watermark requires memory low watermark")]
     MissingMemoryPressureLowWatermark,
     #[error("memory low watermark requires memory high watermark")]
@@ -3030,6 +3074,30 @@ pub struct Application {
     pub graceful_shutdown_drain: bool,
     #[builder(default = DEFAULT_DRAIN_TIMEOUT)]
     pub drain_timeout: Duration,
+}
+
+struct ApplicationStartup {
+    db: Database,
+    resource_store: Arc<ResourceStore>,
+    registry: Arc<Registry>,
+    runtime: Arc<Runtime>,
+    consensus: Option<Arc<ConsensusHandle>>,
+    interconnect: Option<Arc<Transport>>,
+}
+
+impl ApplicationStartup {
+    async fn terminate(self) {
+        self.runtime.shutdown().await;
+        if let Some(consensus) = &self.consensus {
+            consensus.shutdown().await;
+        }
+        if let Some(interconnect) = &self.interconnect {
+            interconnect.shutdown().await;
+        }
+        if let Err(error) = tokio::task::spawn_blocking(move || drop(self)).await {
+            error!(error = %error, "failed to join application startup cleanup task");
+        }
+    }
 }
 
 impl TryFrom<Args> for Application {
@@ -11993,7 +12061,14 @@ impl Application {
         let raft_election_timeout_max = self.raft_election_timeout_max;
         let replica_count = self.replica_count;
         let state_snapshot_interval = self.state_snapshot_interval;
-        let memory_pressure = self.memory_pressure;
+        let memory_pressure_controller = self
+            .memory_pressure
+            .map(MemoryPressureController::new)
+            .transpose()
+            .map_err(|error| {
+                error!(?error, "failed to initialize memory pressure monitor");
+                Report::new(AppError::InitMemoryPressureMonitor).attach_printable(error)
+            })?;
         let db_path = self.db_path.clone();
         let temp_dir = self.temp_dir.clone();
         let shutdown = self.shutdown.clone();
@@ -12084,12 +12159,6 @@ impl Application {
             } else {
                 AppError::BindClusterApiListenAddress
             })?;
-        let peer_keys = Arc::new(RwLock::new(HashMap::new()));
-        {
-            peer_keys
-                .write()
-                .insert(node_id.clone(), interconnect_identity.public_key());
-        }
         let interconnect_tls = if interconnect_mode.is_tls() {
             let ca_path = internal_tls_path(INTERNAL_TLS_CA_FILE);
             let cert_path = internal_tls_path(INTERNAL_TLS_CERT_FILE);
@@ -12101,24 +12170,6 @@ impl Application {
         } else {
             None
         };
-        let peer_verifier = {
-            let peer_keys = peer_keys.clone();
-            PeerVerifier::new(move |node_id| peer_keys.read().get(node_id).copied())
-        };
-        let (interconnect, mut interconnect_rx) = Transport::bind(
-            interconnect_listen_addr,
-            interconnect_mode.interconnect_transport_mode(),
-            interconnect_tls,
-            interconnect_identity,
-            peer_verifier,
-            Default::default(),
-        )
-        .await
-        .change_context(AppError::StartInterconnect)?;
-        let interconnect = Arc::new(interconnect);
-        let cluster_transport = cluster::bind_gossip_transport(cluster_listen_addr)
-            .await
-            .change_context(AppError::StartCluster)?;
 
         info!(
             grpc_mode = grpc_mode.scheme(),
@@ -12185,23 +12236,40 @@ impl Application {
                 Report::new(AppError::OpenRuntimeState)
             })?,
         );
-        runtime.attach_resource_store(resource_store.clone());
+        let mut startup = ApplicationStartup {
+            db,
+            resource_store,
+            registry,
+            runtime,
+            consensus: None,
+            interconnect: None,
+        };
+        startup
+            .runtime
+            .attach_resource_store(startup.resource_store.clone());
         info!(
-            runtime_state_store_enabled = runtime.has_state_store(),
-            runtime_state_snapshot_interval = ?runtime.state_snapshot_interval(),
+            runtime_state_store_enabled = startup.runtime.has_state_store(),
+            runtime_state_snapshot_interval = ?startup.runtime.state_snapshot_interval(),
             "initialized runtime persistence"
         );
-        for changes in registry
-            .startup_runtime_changes()
-            .map_err(|err| Report::new(AppError::ApplyStartupRuntime(err.to_string())))?
-        {
-            if let Err(err) = runtime.apply_changes(changes).await {
-                error!(error = %err, "failed to apply startup runtime changes");
-                return Err(Report::new(AppError::ApplyStartupRuntime(err.to_string())));
+        let startup_runtime_changes = match startup.registry.startup_runtime_changes() {
+            Ok(changes) => changes,
+            Err(error) => {
+                let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
+                startup.terminate().await;
+                return Err(error);
+            }
+        };
+        for changes in startup_runtime_changes {
+            if let Err(error) = startup.runtime.apply_changes(changes).await {
+                error!(error = %error, "failed to apply startup runtime changes");
+                let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
+                startup.terminate().await;
+                return Err(error);
             }
         }
-        let mut consensus = ConsensusHandle::from_database(
-            db.clone(),
+        let consensus_result = ConsensusHandle::from_database(
+            startup.db.clone(),
             ConsensusSettings {
                 cluster_name: cluster_id.clone(),
                 node_id: node_id.clone(),
@@ -12214,34 +12282,104 @@ impl Application {
             },
         )
         .await
-        .change_context(AppError::StartConsensus)?;
+        .change_context(AppError::StartConsensus);
+        let mut consensus = match consensus_result {
+            Ok(consensus) => consensus,
+            Err(error) => {
+                startup.terminate().await;
+                return Err(error);
+            }
+        };
         consensus.set_local_grpc_advertise_addr(grpc_advertise_url.clone());
-        let consensus = Arc::new(consensus);
-        runtime.attach_resources(resource_store.clone(), consensus.current_resources().await);
-        let cluster = Arc::new(
-            cluster::start_cluster_with_transport(
-                cluster::ClusterSettings {
-                    cluster_id,
-                    node_id: node_id.clone(),
-                    cluster_listen_addr,
-                    cluster_advertise_addr,
-                    grpc_listen_addr,
-                    grpc_advertise_addr: grpc_advertise_url.clone(),
-                    web_console_advertise_addr: web_console_advertise_url.clone(),
-                    cluster_api_listen_addr,
-                    cluster_api_advertise_addr: cluster_api_advertise_url.clone(),
-                    interconnect_listen_addr,
-                    interconnect_advertise_addr,
-                    interconnect_mode: interconnect_mode.scheme().to_string(),
-                    interconnect_public_key,
-                    bootstrap_host: cluster_bootstrap_host.clone(),
-                    node_unavailability_timeout,
-                },
-                &cluster_transport,
-            )
-            .await
-            .change_context(AppError::StartCluster)?,
+        startup.consensus = Some(Arc::new(consensus));
+        let consensus = startup
+            .consensus
+            .as_ref()
+            .expect("consensus is initialized before cluster startup");
+        startup.runtime.attach_resources(
+            startup.resource_store.clone(),
+            consensus.current_resources().await,
         );
+
+        let peer_keys = Arc::new(RwLock::new(HashMap::new()));
+        {
+            peer_keys
+                .write()
+                .insert(node_id.clone(), interconnect_identity.public_key());
+        }
+        let peer_verifier = {
+            let peer_keys = peer_keys.clone();
+            PeerVerifier::new(move |node_id| peer_keys.read().get(node_id).copied())
+        };
+        let interconnect_result = Transport::bind(
+            interconnect_listen_addr,
+            interconnect_mode.interconnect_transport_mode(),
+            interconnect_tls,
+            interconnect_identity,
+            peer_verifier,
+            Default::default(),
+        )
+        .await
+        .change_context(AppError::StartInterconnect);
+        let (interconnect, interconnect_rx) = match interconnect_result {
+            Ok(interconnect) => interconnect,
+            Err(error) => {
+                startup.terminate().await;
+                return Err(error);
+            }
+        };
+        startup.interconnect = Some(Arc::new(interconnect));
+
+        let cluster_transport = match cluster::bind_gossip_transport(cluster_listen_addr)
+            .await
+            .change_context(AppError::StartCluster)
+        {
+            Ok(cluster_transport) => cluster_transport,
+            Err(error) => {
+                startup.terminate().await;
+                return Err(error);
+            }
+        };
+        let cluster_result = cluster::start_cluster_with_transport(
+            cluster::ClusterSettings {
+                cluster_id,
+                node_id: node_id.clone(),
+                cluster_listen_addr,
+                cluster_advertise_addr,
+                grpc_listen_addr,
+                grpc_advertise_addr: grpc_advertise_url.clone(),
+                web_console_advertise_addr: web_console_advertise_url.clone(),
+                cluster_api_listen_addr,
+                cluster_api_advertise_addr: cluster_api_advertise_url.clone(),
+                interconnect_listen_addr,
+                interconnect_advertise_addr,
+                interconnect_mode: interconnect_mode.scheme().to_string(),
+                interconnect_public_key,
+                bootstrap_host: cluster_bootstrap_host.clone(),
+                node_unavailability_timeout,
+            },
+            &cluster_transport,
+        )
+        .await
+        .change_context(AppError::StartCluster);
+        let cluster = match cluster_result {
+            Ok(cluster) => Arc::new(cluster),
+            Err(error) => {
+                startup.terminate().await;
+                return Err(error);
+            }
+        };
+        let ApplicationStartup {
+            db,
+            resource_store,
+            registry,
+            runtime,
+            consensus,
+            interconnect,
+        } = startup;
+        let consensus = consensus.expect("consensus is initialized before server startup");
+        let interconnect = interconnect.expect("interconnect is initialized before server startup");
+        let mut interconnect_rx = interconnect_rx;
         runtime.attach_remote_dispatcher(node_id.clone(), cluster.clone(), interconnect.clone());
 
         let cluster_for_reconcile = cluster.clone();
@@ -12249,11 +12387,7 @@ impl Application {
         let registry_for_reconcile = registry.clone();
         let reconcile_shutdown = shutdown.clone();
         let mut background_tasks = Vec::new();
-        if let Some(config) = memory_pressure {
-            let controller = MemoryPressureController::new(config).map_err(|error| {
-                error!(?error, "failed to initialize memory pressure monitor");
-                Report::new(AppError::InitMemoryPressureMonitor).attach_printable(error)
-            })?;
+        if let Some(controller) = memory_pressure_controller {
             let memory_runtime = runtime.as_ref().clone();
             let memory_shutdown = shutdown.clone();
             background_tasks.push(tokio::spawn(async move {
@@ -13054,9 +13188,15 @@ impl Application {
                 .await
             }
         };
-        let http_server = serve_http(runtime.clone(), http_listener, shutdown.clone());
+        let http_server = serve_http(
+            runtime.clone(),
+            service.service_tasks.clone(),
+            http_listener,
+            shutdown.clone(),
+        );
         let https_server = serve_https(
             runtime.clone(),
+            service.service_tasks.clone(),
             service.http_tls_server_config.clone(),
             https_listener,
             shutdown.clone(),
@@ -13088,66 +13228,65 @@ impl Application {
             }
         };
 
-        let shutdown_after_run = self.shutdown.clone();
-        let shutdown_cluster = cluster.clone();
-        let shutdown_consensus = consensus.clone();
-        let shutdown_interconnect = interconnect.clone();
-        let shutdown_runtime = runtime.clone();
-        let shutdown_service = service.clone();
-        let shutdown_task = tokio::spawn(async move {
-            shutdown.cancelled().await;
-            if graceful_shutdown_drain {
-                match tokio::time::timeout(
-                    drain_timeout,
-                    shutdown_service.drain_local_node_before_shutdown(),
-                )
+        let server_shutdown = self.shutdown.clone();
+        let (
+            api_result,
+            cluster_api_result,
+            http_result,
+            https_result,
+            observability_result,
+            web_console_result,
+            web_console_https_result,
+        ) = tokio::join!(
+            cancel_shutdown_on_completion(api_server, server_shutdown.clone()),
+            cancel_shutdown_on_completion(cluster_api_server, server_shutdown.clone()),
+            cancel_shutdown_on_completion(http_server, server_shutdown.clone()),
+            cancel_shutdown_on_completion(https_server, server_shutdown.clone()),
+            cancel_shutdown_on_completion(observability_server, server_shutdown.clone()),
+            cancel_shutdown_on_completion(web_console_server, server_shutdown.clone()),
+            cancel_shutdown_on_completion(web_console_https_server, server_shutdown.clone()),
+        );
+        let result = api_result
+            .and(cluster_api_result)
+            .and(http_result)
+            .and(https_result)
+            .and(observability_result)
+            .and(web_console_result)
+            .and(web_console_https_result);
+
+        if graceful_shutdown_drain {
+            match tokio::time::timeout(drain_timeout, service.drain_local_node_before_shutdown())
                 .await
-                {
-                    Ok(()) => {}
-                    Err(_) => {
-                        warn!(
-                            timeout = ?drain_timeout,
-                            "timed out draining local node before graceful shutdown"
-                        );
-                    }
+            {
+                Ok(()) => {}
+                Err(_) => {
+                    warn!(
+                        timeout = ?drain_timeout,
+                        "timed out draining local node before graceful shutdown"
+                    );
                 }
             }
-            shutdown_service.service_tasks.close();
-            shutdown_service.service_tasks.wait().await;
-            shutdown_runtime.shutdown().await;
-            shutdown_consensus.shutdown().await;
-            let _ = shutdown_cluster.initiate_shutdown();
-            shutdown_interconnect.shutdown().await;
-        });
+        }
 
-        let result = tokio::try_join!(
-            api_server,
-            cluster_api_server,
-            http_server,
-            https_server,
-            observability_server,
-            web_console_server,
-            web_console_https_server
-        );
-        if result.is_err() {
-            shutdown_after_run.cancel();
+        for task in background_tasks {
+            await_background_task_shutdown(task, "application background task").await;
         }
-        if shutdown_after_run.is_cancelled() {
-            let _ = shutdown_task.await;
-            for task in background_tasks {
-                await_background_task_shutdown(task, "application background task").await;
-            }
-        } else {
-            shutdown_task.abort();
-            for task in background_tasks {
-                task.abort();
-            }
-        }
+        service.service_tasks.close();
+        service.service_tasks.wait().await;
+        runtime.shutdown().await;
+        consensus.shutdown().await;
+        let cluster_shutdown_result = cluster
+            .shutdown()
+            .await
+            .change_context(AppError::ShutdownCluster);
+        interconnect.shutdown().await;
 
         tokio::task::spawn_blocking(move || {
             drop(service);
             drop(runtime);
             drop(consensus);
+            drop(cluster);
+            drop(interconnect);
             drop(db);
         })
         .await
@@ -13157,9 +13296,22 @@ impl Application {
         })?;
 
         result?;
+        cluster_shutdown_result?;
 
         Ok(())
     }
+}
+
+async fn cancel_shutdown_on_completion<F>(
+    server: F,
+    shutdown: CancellationToken,
+) -> Result<(), Report<AppError>>
+where
+    F: Future<Output = Result<(), Report<AppError>>>,
+{
+    let result = server.await;
+    shutdown.cancel();
+    result
 }
 
 async fn await_background_task_shutdown(mut task: JoinHandle<()>, task_kind: &'static str) {
@@ -13251,6 +13403,51 @@ mod tests {
         )])
         .expect("test branch key must be non-empty")
         .into()
+    }
+
+    #[tokio::test]
+    async fn startup_failure_releases_the_shared_database_before_returning() {
+        let root = tempfile::tempdir().expect("temporary root should be created");
+        let db_path = root.path().join("db");
+        let listen_addr = test_addr(0);
+        let application = Application::builder()
+            .addr(listen_addr)
+            .http_listen_addr(listen_addr)
+            .https_listen_addr(listen_addr)
+            .observability_listen_addr(listen_addr)
+            .web_console_listen_addr(listen_addr)
+            .cluster_id("startup-failure-test".to_string())
+            .node_id("node-1".to_string())
+            .grpc_advertise_addr(listen_addr.into())
+            .cluster_listen_addr(listen_addr)
+            .cluster_advertise_addr(cluster::HostPort::new("invalid host name", 1))
+            .cluster_api_listen_addr(listen_addr)
+            .cluster_api_advertise_addr(listen_addr.into())
+            .interconnect_listen_addr(listen_addr)
+            .interconnect_advertise_addr(listen_addr.into())
+            .allow_bootstrap(true)
+            .node_unavailability_timeout(Duration::from_secs(1))
+            .raft_heartbeat_interval(Duration::from_millis(100))
+            .raft_election_timeout_min(Duration::from_millis(300))
+            .raft_election_timeout_max(Duration::from_millis(600))
+            .cluster_bootstrap_host(None)
+            .db_path(db_path.clone())
+            .graceful_shutdown_drain(false)
+            .build();
+
+        let error = application
+            .run()
+            .await
+            .expect_err("invalid cluster advertise host should fail startup");
+        assert!(
+            format!("{error:?}").contains("failed to start cluster membership"),
+            "unexpected startup error: {error:?}"
+        );
+
+        tokio::task::spawn_blocking(move || Database::builder(db_path).open())
+            .await
+            .expect("database open task should join")
+            .expect("application startup failure must release the database lock");
     }
 
     #[cfg(feature = "testing")]

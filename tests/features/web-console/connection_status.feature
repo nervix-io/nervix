@@ -28,3 +28,17 @@ Feature: Web console connection status
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
+
+  Scenario Outline: A server with an active web console session fully terminates before restart
+    Given a <cluster_size> node nervix cluster is started
+    Then the current leader node is saved as placeholder "stopped_node"
+    When the web console is opened on node "{{stopped_node}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When node "{{stopped_node}}" is stopped
+    And node "{{stopped_node}}" is started
+    Then node "{{stopped_node}}" eventually observes a stable leader
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
