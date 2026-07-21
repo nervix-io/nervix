@@ -3,12 +3,13 @@ use std::{
     fmt, io,
     net::SocketAddr,
     str::FromStr,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use chitchat::{
-    ChitchatHandle, ChitchatId, NodeState, spawn_chitchat,
+    Chitchat, ChitchatHandle, ChitchatId, NodeState, spawn_chitchat,
     transport::{Socket, Transport, UdpSocket},
 };
 use nervix_consensus::{GossipNode, GossipState};
@@ -34,11 +35,12 @@ const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
 
 pub struct ClusterHandle {
-    chitchat: ChitchatHandle,
+    chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
+    chitchat_server: Mutex<Option<ChitchatHandle>>,
     events: broadcast::Sender<String>,
     interconnect_state: RwLock<BTreeMap<String, InterconnectPeerState>>,
     node_unavailability_timeout: Duration,
-    _membership_task: JoinHandle<()>,
+    membership_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,7 +297,8 @@ pub async fn start_cluster_with_transport(
         .map_err(|err| io::Error::other(format!("failed to start chitchat: {err}")))?;
 
     let (events, _) = broadcast::channel(256);
-    let mut live_nodes = chitchat.chitchat().lock().await.live_nodes_watch_stream();
+    let chitchat_state = chitchat.chitchat();
+    let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
     let event_tx = events.clone();
     let membership_task = tokio::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
@@ -307,17 +310,34 @@ pub async fn start_cluster_with_transport(
     });
 
     Ok(ClusterHandle {
-        chitchat,
+        chitchat: chitchat_state,
+        chitchat_server: Mutex::new(Some(chitchat)),
         events,
         interconnect_state: RwLock::new(BTreeMap::new()),
         node_unavailability_timeout: settings.node_unavailability_timeout,
-        _membership_task: membership_task,
+        membership_task: Mutex::new(Some(membership_task)),
     })
 }
 
 impl ClusterHandle {
-    pub fn initiate_shutdown(&self) -> io::Result<()> {
-        self.chitchat.initiate_shutdown().map_err(io::Error::other)
+    pub async fn shutdown(&self) -> io::Result<()> {
+        let chitchat_server = self.chitchat_server.lock().take();
+        let result = match chitchat_server {
+            Some(chitchat_server) => chitchat_server.shutdown().await.map_err(io::Error::other),
+            None => Ok(()),
+        };
+
+        let membership_task = self.membership_task.lock().take();
+        if let Some(membership_task) = membership_task {
+            membership_task.abort();
+            if let Err(error) = membership_task.await
+                && !error.is_cancelled()
+            {
+                return Err(io::Error::other(error));
+            }
+        }
+
+        result
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<String> {
@@ -325,7 +345,7 @@ impl ClusterHandle {
     }
 
     pub async fn status_lines(&self) -> Vec<String> {
-        let chitchat_handle = self.chitchat.chitchat();
+        let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
         let cluster_id = chitchat.cluster_id().to_string();
@@ -365,7 +385,7 @@ impl ClusterHandle {
     }
 
     pub async fn gossip_state(&self) -> GossipState {
-        let chitchat_handle = self.chitchat.chitchat();
+        let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
 
@@ -421,7 +441,7 @@ impl ClusterHandle {
         interested: bool,
     ) {
         let key = subscription_interest_key(domain, relay);
-        let chitchat_handle = self.chitchat.chitchat();
+        let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
         let state = chitchat.self_node_state();
         if interested {
@@ -437,7 +457,7 @@ impl ClusterHandle {
         relay: &str,
     ) -> BTreeSet<String> {
         let key = subscription_interest_key(domain, relay);
-        let chitchat_handle = self.chitchat.chitchat();
+        let chitchat_handle = self.chitchat.clone();
         let chitchat = chitchat_handle.lock().await;
         let self_id = chitchat.self_chitchat_id().clone();
         let mut interested = BTreeSet::new();
