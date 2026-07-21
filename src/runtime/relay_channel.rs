@@ -1,9 +1,6 @@
 use std::{
     num::NonZeroUsize,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use async_broadcast::{
@@ -12,6 +9,7 @@ use async_broadcast::{
 };
 use parking_lot::Mutex;
 use tokio::sync::Notify;
+use triomphe::Arc;
 
 #[derive(Debug)]
 pub(crate) struct RelayBroadcast<T> {
@@ -128,7 +126,7 @@ impl<T: Clone> RelayBroadcast<T> {
             return self.broadcast_message(message).await;
         }
 
-        let permit = self.inner.publish_permit().await;
+        let permit = self.publish_permit().await;
         let result = self.broadcast_message(message).await;
         drop(permit);
         self.inner.maintain_dirty_capacity();
@@ -140,6 +138,35 @@ impl<T: Clone> RelayBroadcast<T> {
             Ok(None) => Ok(()),
             Ok(Some(_)) => unreachable!("relay broadcast overflow must be disabled"),
             Err(error) => Err(error),
+        }
+    }
+
+    async fn publish_permit(&self) -> RelayPublishPermit<T> {
+        loop {
+            let changed = self.inner.changed.notified();
+            {
+                let mut control = self.inner.control.lock();
+                control.apply_pending_capacity();
+                let queued_or_entering = control.guard.len() + control.active_publishers;
+                if queued_or_entering < control.target_capacity.get() {
+                    control.active_publishers += 1;
+                    self.inner
+                        .dirty
+                        .store(control.is_dirty(), Ordering::Relaxed);
+                    return RelayPublishPermit {
+                        inner: self.inner.clone(),
+                    };
+                }
+                control.waiting_publishers += 1;
+                self.inner
+                    .dirty
+                    .store(control.is_dirty(), Ordering::Relaxed);
+            }
+            let waiter = RelayPublishWaiter {
+                inner: self.inner.clone(),
+            };
+            changed.await;
+            drop(waiter);
         }
     }
 }
@@ -156,33 +183,6 @@ impl<T> RelayBroadcastInner<T> {
         let is_dirty = self.control.lock().apply_pending_capacity();
         self.dirty.store(is_dirty, Ordering::Relaxed);
         self.changed.notify_waiters();
-    }
-}
-
-impl<T: Clone> RelayBroadcastInner<T> {
-    async fn publish_permit(self: &Arc<Self>) -> RelayPublishPermit<T> {
-        loop {
-            let changed = self.changed.notified();
-            {
-                let mut control = self.control.lock();
-                control.apply_pending_capacity();
-                let queued_or_entering = control.guard.len() + control.active_publishers;
-                if queued_or_entering < control.target_capacity.get() {
-                    control.active_publishers += 1;
-                    self.dirty.store(control.is_dirty(), Ordering::Relaxed);
-                    return RelayPublishPermit {
-                        inner: self.clone(),
-                    };
-                }
-                control.waiting_publishers += 1;
-                self.dirty.store(control.is_dirty(), Ordering::Relaxed);
-            }
-            let waiter = RelayPublishWaiter {
-                inner: self.clone(),
-            };
-            changed.await;
-            drop(waiter);
-        }
     }
 }
 
@@ -234,11 +234,9 @@ impl<T: Clone> RelayReceiver<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        num::NonZeroUsize,
-        sync::{Arc, atomic::Ordering},
-        time::Duration,
-    };
+    use std::{num::NonZeroUsize, sync::atomic::Ordering, time::Duration};
+
+    use triomphe::Arc;
 
     use super::RelayBroadcast;
 

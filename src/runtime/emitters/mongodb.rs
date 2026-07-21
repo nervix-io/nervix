@@ -27,7 +27,7 @@ impl MongoDbEmitter {
         resolved: Option<&ResolvedClientConfig>,
         context: &EmitterSinkContext,
         values: &[MongoDbValueMapping],
-        input_schema: Arc<arrow_schema::Schema>,
+        input_schema: StdArc<arrow_schema::Schema>,
     ) -> Self {
         let client = match Self::client_from_config(
             resolved

@@ -3,7 +3,7 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc as StdArc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -93,6 +93,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, trace, warn};
+use triomphe::Arc;
 use upon::Engine as TemplateEngine;
 
 use crate::{
@@ -214,7 +215,7 @@ const WASM_INPUT_NAMESPACE: &str = "input";
 
 pub(crate) type IngestHeaders = Vec<(String, String)>;
 
-type SharedActiveGraph = Arc<ArcSwapOption<ActiveGraph>>;
+type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
 type PendingStateSyncSender = oneshot::Sender<Result<Option<PersistedRuntimeStateEntry>, String>>;
 
 #[derive(Debug, Clone, Copy)]
@@ -425,7 +426,7 @@ struct DomainExecution {
     relay_services: HashMap<Identifier, Arc<RelayBoundaryServices>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,
     relay_branchings: HashMap<Identifier, Vec<Identifier>>,
-    relay_branching_schemas: HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
+    relay_branching_schemas: HashMap<Identifier, Option<StdArc<arrow_schema::Schema>>>,
     materialized_stream_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_stream_owner_nodes: HashMap<Identifier, Option<String>>,
     branched_ingestors: HashMap<Identifier, Vec<BranchedIngestorSpec>>,
@@ -967,7 +968,7 @@ impl IngestHeaderFunctionInjector {
     fn from_metadata(
         metadata: Option<&[IngestFilterMapMetadata]>,
         row_count: usize,
-    ) -> Arc<dyn VmFunctionInjector> {
+    ) -> Arc<Box<dyn VmFunctionInjector>> {
         let rows = metadata
             .map(|metadata| {
                 metadata
@@ -976,7 +977,7 @@ impl IngestHeaderFunctionInjector {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| vec![HashMap::new(); row_count]);
-        Arc::new(Self { rows })
+        Arc::new(Box::new(Self { rows }))
     }
 }
 
@@ -1018,7 +1019,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
             return Ok(VmTypedArray::Utf8(arrow_array::StringArray::from(values)));
         }
         if let FunctionName::ReadHeaders = function {
-            let field = Arc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
+            let field = StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
             let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field);
             for (name, headers) in names.iter().zip(&self.rows) {
                 if let Some(values) = name.and_then(|name| headers.get(name)) {
@@ -1028,7 +1029,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 }
                 builder.append(true);
             }
-            return Ok(VmTypedArray::Generic(Arc::new(builder.finish())));
+            return Ok(VmTypedArray::Generic(StdArc::new(builder.finish())));
         }
         Err(nervix_vm::RuntimeError::InvalidBatch {
             message: format!("function '{}' is not injectable", function.as_str()),
@@ -1670,7 +1671,7 @@ struct ExecutionBuildDeps<'a> {
     domain: &'a Domain,
     relay_schemas: &'a HashMap<Identifier, Arc<CompiledSchema>>,
     relay_branchings: &'a HashMap<Identifier, Vec<Identifier>>,
-    relay_branching_schemas: &'a HashMap<Identifier, Option<Arc<arrow_schema::Schema>>>,
+    relay_branching_schemas: &'a HashMap<Identifier, Option<StdArc<arrow_schema::Schema>>>,
     materialized_relay_specs: &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_relay_owner_nodes: &'a HashMap<Identifier, Option<String>>,
     lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
@@ -1680,7 +1681,7 @@ struct ExecutionBuildDeps<'a> {
 struct EmitterTaskDeps {
     input_schema: Arc<CompiledSchema>,
     input_branching: Vec<Identifier>,
-    input_branching_schema: Option<Arc<arrow_schema::Schema>>,
+    input_branching_schema: Option<StdArc<arrow_schema::Schema>>,
     materialized_relay_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_relay_owner_nodes: HashMap<Identifier, Option<String>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,
@@ -1792,7 +1793,7 @@ pub(crate) struct MaterializedProgramInterest {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeMaterializedRelaySpec {
-    pub(crate) schema: Arc<arrow_schema::Schema>,
+    pub(crate) schema: StdArc<arrow_schema::Schema>,
     pub(crate) sensitivity: VmSchemaSensitivity,
     pub(crate) branching: Vec<Identifier>,
 }
@@ -1819,7 +1820,7 @@ pub(crate) struct RuntimeVmCompileContext<'a> {
         &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     pub(crate) available_lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
     pub(crate) current_branching: &'a [Identifier],
-    pub(crate) current_branch_schema: Option<&'a Arc<arrow_schema::Schema>>,
+    pub(crate) current_branch_schema: Option<&'a StdArc<arrow_schema::Schema>>,
     pub(crate) current_branch_sensitivity: Option<&'a VmSchemaSensitivity>,
 }
 
@@ -1835,9 +1836,9 @@ impl RuntimeVmCompileContext<'_> {
 
 #[derive(Debug, Clone)]
 struct RuntimeVmSchemaPair {
-    input: Arc<arrow_schema::Schema>,
+    input: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output: Arc<arrow_schema::Schema>,
+    output: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
 }
 
@@ -2396,9 +2397,9 @@ impl ProcessorInputFilterKind {
 }
 
 impl RelayProcessorNode {
-    fn refresh(&mut self, graph: Option<Arc<ActiveGraph>>) {
+    fn refresh(&mut self, graph: Option<StdArc<ActiveGraph>>) {
         let changed = match (&self.last_graph, &graph) {
-            (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+            (Some(previous), Some(current)) => !StdArc::ptr_eq(previous, current),
             (None, None) => false,
             _ => true,
         };
@@ -2648,7 +2649,7 @@ impl RelayProcessorNode {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let current = graph.load_full();
-            let current = current.as_ref().map(Arc::clone);
+            let current = current.as_ref().map(StdArc::clone);
             self.refresh(current);
             let Some(batch) = self
                 .filter_input_batch(graph, branch, incoming_relay, batch)
@@ -3241,11 +3242,10 @@ impl RelayProcessorNode {
                     right_relays,
                     correlate_where,
                     match_policy,
-                    output_assignments,
                     max_time: _,
                     timeout_policy: _,
                     compiled_where_program,
-                    compiled_output_program,
+                    compiled_output_programs,
                     state,
                 } => {
                     let side = if left_relays.contains(incoming_relay) {
@@ -3421,64 +3421,33 @@ impl RelayProcessorNode {
                         return;
                     }
 
-                    if compiled_output_program.is_none() {
-                        let Some(base_output_relay) = output_routes
-                            .routes
-                            .first()
-                            .map(|output| output.relay.clone())
-                        else {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                correlations.iter().flat_map(|(left, right)| {
-                                    [&left.message.acks, &right.message.acks]
-                                }),
-                                format!(
-                                    "correlator '{}' has no output destinations",
-                                    self.processor.as_str()
-                                ),
-                            );
-                            return;
-                        };
-                        let Some(left_relay) = left_relays.first() else {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                correlations.iter().flat_map(|(left, right)| {
-                                    [&left.message.acks, &right.message.acks]
-                                }),
-                                format!(
-                                    "correlator '{}' has no LEFT input relays",
-                                    self.processor.as_str()
-                                ),
-                            );
-                            return;
-                        };
-                        let Some(right_relay) = right_relays.first() else {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind.as_str(),
-                                &self.processor,
-                                &self.error_policies,
-                                correlations.iter().flat_map(|(left, right)| {
-                                    [&left.message.acks, &right.message.acks]
-                                }),
-                                format!(
-                                    "correlator '{}' has no RIGHT input relays",
-                                    self.processor.as_str()
-                                ),
-                            );
-                            return;
-                        };
-                        let left_schema = match relay_schema_for_runtime(
-                            &branch.runtime,
+                    if output_routes.routes.is_empty()
+                        || compiled_output_programs.len() != output_routes.routes.len()
+                    {
+                        branch.runtime.handle_internal_processor_error_for_acks(
                             &branch.domain,
-                            left_relay,
-                        ) {
+                            self.kind.as_str(),
+                            &self.processor,
+                            &self.error_policies,
+                            correlations.iter().flat_map(|(left, right)| {
+                                [&left.message.acks, &right.message.acks]
+                            }),
+                            format!(
+                                "correlator '{}' output programs do not match its destinations",
+                                self.processor.as_str()
+                            ),
+                        );
+                        return;
+                    }
+                    let Some(left_relay) = left_relays.first() else {
+                        return;
+                    };
+                    let Some(right_relay) = right_relays.first() else {
+                        return;
+                    };
+                    let left_schema =
+                        match relay_schema_for_runtime(&branch.runtime, &branch.domain, left_relay)
+                        {
                             Ok(schema) => schema,
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -3494,30 +3463,52 @@ impl RelayProcessorNode {
                                 return;
                             }
                         };
-                        let right_schema = match relay_schema_for_runtime(
-                            &branch.runtime,
-                            &branch.domain,
-                            right_relay,
-                        ) {
-                            Ok(schema) => schema,
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    correlations.iter().flat_map(|(left, right)| {
-                                        [&left.message.acks, &right.message.acks]
-                                    }),
-                                    error,
-                                );
-                                return;
-                            }
+                    let right_schema = match relay_schema_for_runtime(
+                        &branch.runtime,
+                        &branch.domain,
+                        right_relay,
+                    ) {
+                        Ok(schema) => schema,
+                        Err(error) => {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
+                                &self.processor,
+                                &self.error_policies,
+                                correlations.iter().flat_map(|(left, right)| {
+                                    [&left.message.acks, &right.message.acks]
+                                }),
+                                error,
+                            );
+                            return;
+                        }
+                    };
+                    for output_index in 0..output_routes.routes.len() {
+                        if compiled_output_programs[output_index].is_some() {
+                            continue;
+                        }
+                        let output = &output_routes.routes[output_index];
+                        let Some(filter_map) = output.filter_map.as_deref() else {
+                            branch.runtime.handle_internal_processor_error_for_acks(
+                                &branch.domain,
+                                self.kind.as_str(),
+                                &self.processor,
+                                &self.error_policies,
+                                correlations.iter().flat_map(|(left, right)| {
+                                    [&left.message.acks, &right.message.acks]
+                                }),
+                                format!(
+                                    "correlator '{}' TO output '{}' has no SET assignments",
+                                    self.processor.as_str(),
+                                    output.relay.as_str()
+                                ),
+                            );
+                            return;
                         };
                         let output_schema = match relay_schema_for_runtime(
                             &branch.runtime,
                             &branch.domain,
-                            &base_output_relay,
+                            &output.relay,
                         ) {
                             Ok(schema) => schema,
                             Err(error) => {
@@ -3534,19 +3525,21 @@ impl RelayProcessorNode {
                                 return;
                             }
                         };
-                        match (CorrelatorOutputCompileContext {
+                        let compiled = CorrelatorOutputCompileContext {
                             processor: &self.processor,
                             left_relays,
                             left_schema: left_schema.arrow_schema(),
                             right_relays,
                             right_schema: right_schema.arrow_schema(),
-                            output_relay: &base_output_relay,
+                            output_relay: &output.relay,
                             output_schema: output_schema.arrow_schema(),
-                            output_assignments,
-                        })
-                        .compile()
-                        {
-                            Ok(program) => *compiled_output_program = Some(Box::new(program)),
+                            filter_map,
+                        }
+                        .compile();
+                        match compiled {
+                            Ok(program) => {
+                                compiled_output_programs[output_index] = Some(Box::new(program));
+                            }
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
@@ -3562,52 +3555,92 @@ impl RelayProcessorNode {
                             }
                         }
                     }
-                    let Some(output_program) = compiled_output_program.as_ref() else {
-                        return;
-                    };
-                    let mut output_messages = Vec::new();
+
+                    let output_count = output_routes.routes.len();
+                    let mut messages_by_output = (0..output_count)
+                        .map(|_| Vec::<RelayMessage>::new())
+                        .collect::<Vec<_>>();
                     for (left, right) in correlations {
-                        match evaluate_correlator_output_message(
-                            &self.processor,
+                        let key = left.message.key.clone();
+                        let combined = correlator_combined_record(
                             left_relays,
+                            &left.message.record,
                             right_relays,
-                            output_program,
-                            left,
-                            right,
-                            execution_now,
-                        )
-                        .await
-                        {
-                            Ok(message) => output_messages.push(message),
-                            Err((reason, acks)) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind.as_str(),
-                                    &self.processor,
-                                    &self.error_policies,
-                                    acks.iter(),
-                                    reason,
-                                );
+                            &right.message.record,
+                        );
+                        let mut pair_acks = Some(AckSet::merged([
+                            left.message.acks.attached(),
+                            right.message.acks.attached(),
+                        ]));
+                        for output_index in 0..output_count {
+                            let route_acks = if output_index + 1 == output_count {
+                                pair_acks
+                                    .take()
+                                    .expect("last correlator output must own the pair ACKs")
+                            } else {
+                                pair_acks
+                                    .as_ref()
+                                    .expect("correlator pair ACKs must remain available")
+                                    .attached()
+                            };
+                            let Some(output_program) =
+                                compiled_output_programs[output_index].as_deref()
+                            else {
+                                route_acks.no_ack(format!(
+                                    "correlator '{}' output program is unavailable",
+                                    self.processor.as_str()
+                                ));
+                                continue;
+                            };
+                            match evaluate_correlator_output_message(
+                                &self.processor,
+                                output_program,
+                                key.clone(),
+                                combined.clone(),
+                                route_acks,
+                                execution_now,
+                            )
+                            .await
+                            {
+                                Ok(Some(message)) => {
+                                    messages_by_output[output_index].push(message);
+                                }
+                                Ok(None) => {}
+                                Err((reason, message)) => {
+                                    let policy = output_routes.routes[output_index]
+                                        .message_error_policy
+                                        .clone();
+                                    branch
+                                        .runtime
+                                        .handle_message_error_with_policy(
+                                            &branch.domain,
+                                            self.kind.as_str(),
+                                            &self.processor,
+                                            &policy,
+                                            message,
+                                            reason,
+                                        )
+                                        .await;
+                                }
                             }
                         }
                     }
-                    if output_messages.is_empty() {
-                        return;
+                    for (output_index, messages) in messages_by_output.into_iter().enumerate() {
+                        enqueue_correlator_output(
+                            CorrelatorOutputContext {
+                                graph,
+                                branch,
+                                node_kind: self.kind.as_str(),
+                                processor: &self.processor,
+                                error_policies: &self.error_policies,
+                                output_routes,
+                            },
+                            output_index,
+                            messages,
+                            execution_now,
+                        )
+                        .await;
                     }
-                    {
-                        let mut state = state.lock();
-                        state.output_pending.extend(output_messages);
-                    }
-                    flush_branch_correlator(CorrelatorFlushContext {
-                        graph,
-                        branch,
-                        node_kind: self.kind.as_str(),
-                        processor: &self.processor,
-                        error_policies: &self.error_policies,
-                        output_routes,
-                        state,
-                    })
-                    .await;
                 }
                 RelayProcessorOperationNode::Junction { output_routes } => {
                     flush_branch_junction(
@@ -4267,28 +4300,31 @@ impl RelayProcessorTemplate {
                     right_relays,
                     correlate_where,
                     match_policy,
-                    output_assignments,
                     max_time,
                     timeout_policy,
-                } => RelayProcessorOperationNode::Correlator {
-                    output_routes: Self::instantiate_outputs(output_routes),
-                    left_relays: left_relays.clone(),
-                    right_relays: right_relays.clone(),
-                    correlate_where: correlate_where.clone(),
-                    match_policy: *match_policy,
-                    output_assignments: output_assignments.clone(),
-                    max_time: *max_time,
-                    timeout_policy: timeout_policy.clone(),
-                    compiled_where_program: None,
-                    compiled_output_program: None,
-                    state: runtime.correlator_state(RuntimeStatePlacement {
-                        domain: domain.clone(),
-                        state: RuntimeStateKind::Correlator,
-                        kind: self.kind,
-                        identifier: self.processor.clone(),
-                        branch_key: key.clone(),
-                    }),
-                },
+                } => {
+                    let output_routes = Self::instantiate_outputs(output_routes);
+                    let compiled_output_programs =
+                        (0..output_routes.routes.len()).map(|_| None).collect();
+                    RelayProcessorOperationNode::Correlator {
+                        output_routes,
+                        left_relays: left_relays.clone(),
+                        right_relays: right_relays.clone(),
+                        correlate_where: correlate_where.clone(),
+                        match_policy: *match_policy,
+                        max_time: *max_time,
+                        timeout_policy: timeout_policy.clone(),
+                        compiled_where_program: None,
+                        compiled_output_programs,
+                        state: runtime.correlator_state(RuntimeStatePlacement {
+                            domain: domain.clone(),
+                            state: RuntimeStateKind::Correlator,
+                            kind: self.kind,
+                            identifier: self.processor.clone(),
+                            branch_key: key.clone(),
+                        }),
+                    }
+                }
                 RelayProcessorOperationTemplate::Junction { output_routes } => {
                     RelayProcessorOperationNode::Junction {
                         output_routes: Self::instantiate_outputs(output_routes),
@@ -5873,7 +5909,7 @@ fn compile_lookup_hash_map_calls(
         .collect::<Vec<_>>();
     let lookup_binding = VmCompileBinding::internal_readonly(
         InternalFieldNamespace::LookupHashMap,
-        Arc::new(arrow_schema::Schema::new(lookup_fields)),
+        StdArc::new(arrow_schema::Schema::new(lookup_fields)),
     );
     let mut compiled_calls = Vec::with_capacity(pending_calls.len());
     for call in pending_calls {
@@ -5904,7 +5940,7 @@ fn compile_lookup_hash_map_calls(
                     )
                 },
             )?;
-        let key_output_schema = Arc::new(arrow_schema::Schema::new(
+        let key_output_schema = StdArc::new(arrow_schema::Schema::new(
             key_types
                 .into_iter()
                 .map(|(name, data_type, nullable)| {
@@ -5996,7 +6032,7 @@ fn referenced_materialized_stream_bindings(
         bindings.push(
             VmCompileBinding::readonly(
                 relay.as_str(),
-                Arc::new(arrow_schema::Schema::new(projected_fields)),
+                StdArc::new(arrow_schema::Schema::new(projected_fields)),
             )
             .with_sensitivity(projected_sensitivity),
         );
@@ -6053,7 +6089,7 @@ fn emitter_filter_map_local_namespaces(from_relay: &Identifier) -> HashSet<Strin
 
 fn emitter_filter_map_message_bindings(
     from_relay: &Identifier,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
 ) -> Vec<VmCompileBinding> {
     let mut bindings = vec![
@@ -6074,9 +6110,9 @@ pub(crate) fn compile_filter_map_program(
     identifier: &Identifier,
     relay_names: &[Identifier],
     filter_map: Option<&str>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     allow_header_reads: bool,
     context: RuntimeVmCompileContext<'_>,
@@ -6125,10 +6161,10 @@ fn compile_processor_output_filter_map_program(
     input_relays: &[Identifier],
     output_relay: &Identifier,
     filter_map: Option<&str>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
@@ -6272,9 +6308,9 @@ fn compile_wasm_output_filter_map_program(
     input_relays: &[Identifier],
     output_relay: &Identifier,
     filter_map: Option<&str>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
@@ -6402,9 +6438,9 @@ fn compile_wasm_output_filter_map_program(
 pub(crate) fn compile_emitter_filter_map_program(
     domain: &Domain,
     emitter: &CreateEmitter,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledEmitterFilterMapProgram>, RuntimeError> {
@@ -6467,9 +6503,9 @@ fn compile_emitter_filter_map_part(
     identifier: &Identifier,
     from_relay: &Identifier,
     parsed: nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
@@ -6551,7 +6587,7 @@ pub(crate) fn compile_session_filter_map_program(
     identifier: &Identifier,
     relay_names: &[Identifier],
     filter_map: Option<&str>,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
@@ -6601,7 +6637,7 @@ fn prepare_filter_map_program(
     identifier: &Identifier,
     relay_names: &[Identifier],
     filter_map: &str,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<PreparedFilterMapProgram, RuntimeError> {
@@ -6698,9 +6734,9 @@ fn infer_session_filter_map_output_schema(
     domain: &Domain,
     identifier: &Identifier,
     prepared: &PreparedFilterMapProgram,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-) -> Result<(Arc<arrow_schema::Schema>, VmSchemaSensitivity), RuntimeError> {
+) -> Result<(StdArc<arrow_schema::Schema>, VmSchemaSensitivity), RuntimeError> {
     let unset = prepared
         .parsed
         .inner
@@ -6747,7 +6783,7 @@ fn infer_session_filter_map_output_schema(
     }
 
     Ok((
-        Arc::new(arrow_schema::Schema::new(output_fields)),
+        StdArc::new(arrow_schema::Schema::new(output_fields)),
         VmSchemaSensitivity::from_sensitive_fields(output_sensitive_fields),
     ))
 }
@@ -6796,7 +6832,7 @@ pub(super) fn compile_key_projection_program(
     clause: &str,
     input_relays: &[Identifier],
     expressions: &[String],
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<VmCompiledProgram, String> {
     let Some(primary_input_relay) = input_relays.first() else {
         return Err(format!(
@@ -6850,7 +6886,7 @@ pub(super) fn compile_key_projection_program(
             clause
         ));
     }
-    let output_schema = Arc::new(arrow_schema::Schema::new(
+    let output_schema = StdArc::new(arrow_schema::Schema::new(
         key_types
             .into_iter()
             .map(|(name, data_type, nullable)| arrow_schema::Field::new(name, data_type, nullable))
@@ -6881,7 +6917,7 @@ fn compile_reorderer_program(
     processor: &Identifier,
     input_relays: &[Identifier],
     order_by: &str,
-    input_schema: Arc<arrow_schema::Schema>,
+    input_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<CompiledReordererProgram, String> {
     let expressions = split_reorder_by_expressions(order_by);
     if expressions.is_empty() {
@@ -6909,9 +6945,9 @@ fn compile_correlator_where_program(
     processor: &Identifier,
     correlate_where: &str,
     left_relays: &[Identifier],
-    left_schema: Arc<arrow_schema::Schema>,
+    left_schema: StdArc<arrow_schema::Schema>,
     right_relays: &[Identifier],
-    right_schema: Arc<arrow_schema::Schema>,
+    right_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<CompiledCorrelatorWhereProgram, String> {
     let parsed = parse_program(correlate_where).map_err(|error| {
         format!(
@@ -6970,33 +7006,33 @@ fn compile_correlator_where_program(
 struct CorrelatorOutputCompileContext<'a> {
     processor: &'a Identifier,
     left_relays: &'a [Identifier],
-    left_schema: Arc<arrow_schema::Schema>,
+    left_schema: StdArc<arrow_schema::Schema>,
     right_relays: &'a [Identifier],
-    right_schema: Arc<arrow_schema::Schema>,
+    right_schema: StdArc<arrow_schema::Schema>,
     output_relay: &'a Identifier,
-    output_schema: Arc<arrow_schema::Schema>,
-    output_assignments: &'a str,
+    output_schema: StdArc<arrow_schema::Schema>,
+    filter_map: &'a str,
 }
 
 impl CorrelatorOutputCompileContext<'_> {
     fn compile(self) -> Result<CompiledCorrelatorOutputProgram, String> {
-        let source = format!("SET {}", self.output_assignments);
-        let parsed = parse_program(&source).map_err(|error| {
+        let parsed = parse_program(self.filter_map).map_err(|error| {
             format!(
-                "correlator '{}' OUTPUT parse failed: {}",
+                "correlator '{}' TO output '{}' parse failed: {}",
                 self.processor.as_str(),
+                self.output_relay.as_str(),
                 Runtime::vm_program_error(error)
             )
         })?;
-        if parsed.inner.filter.is_some()
-            || !parsed.inner.branch_filters.is_empty()
+        if !parsed.inner.branch_filters.is_empty()
             || !parsed.inner.unset.is_empty()
             || !parsed.inner.invoke.is_empty()
             || parsed.inner.set.is_empty()
         {
             return Err(format!(
-                "correlator '{}' OUTPUT must contain explicit assignments only",
-                self.processor.as_str()
+                "correlator '{}' TO output '{}' must contain SET assignments and may contain WHERE",
+                self.processor.as_str(),
+                self.output_relay.as_str()
             ));
         }
         let mut bindings = Vec::with_capacity(self.left_relays.len() + self.right_relays.len() + 1);
@@ -7028,8 +7064,9 @@ impl CorrelatorOutputCompileContext<'_> {
         )
         .map_err(|error| {
             format!(
-                "correlator '{}' OUTPUT compile failed: {}",
+                "correlator '{}' TO output '{}' compile failed: {}",
                 self.processor.as_str(),
+                self.output_relay.as_str(),
                 error.message
             )
         })?;
@@ -7464,32 +7501,32 @@ fn correlator_output_metadata(
 
 async fn evaluate_correlator_output_message(
     processor: &Identifier,
-    left_relays: &[Identifier],
-    right_relays: &[Identifier],
     program: &CompiledCorrelatorOutputProgram,
-    left: CorrelatorPendingMessage,
-    right: CorrelatorPendingMessage,
+    key: Option<BranchKey>,
+    combined: RuntimeRecord,
+    acks: AckSet,
     execution_now: Timestamp,
-) -> Result<RelayMessage, (String, Vec<AckSet>)> {
-    let key = left.message.key.clone();
-    let acks = AckSet::merged([left.message.acks.attached(), right.message.acks.attached()]);
-    let combined = correlator_combined_record(
-        left_relays,
-        &left.message.record,
-        right_relays,
-        &right.message.record,
-    );
-    let input = vm_typed_batch_from_runtime_record(&combined, None, &program.program.input_schema)
-        .map_err(|error| {
-            (
-                format!(
-                    "correlator '{}' failed to build OUTPUT input batch: {}",
-                    processor.as_str(),
-                    error
-                ),
-                vec![acks.clone()],
-            )
-        })?;
+) -> Result<Option<RelayMessage>, (String, RelayMessage)> {
+    let source_message = RelayMessage {
+        key,
+        record: combined,
+        acks,
+    };
+    let input = vm_typed_batch_from_runtime_record(
+        &source_message.record,
+        None,
+        &program.program.input_schema,
+    )
+    .map_err(|error| {
+        (
+            format!(
+                "correlator '{}' failed to build TO output input batch: {}",
+                processor.as_str(),
+                error
+            ),
+            source_message.clone(),
+        )
+    })?;
     let result = execute_program_with_selection_in_context(
         &program.program,
         &input,
@@ -7502,104 +7539,111 @@ async fn evaluate_correlator_output_message(
     .map_err(|error| {
         (
             format!(
-                "correlator '{}' failed to evaluate OUTPUT: {}",
+                "correlator '{}' failed to evaluate TO output: {}",
                 processor.as_str(),
                 error
             ),
-            vec![acks.clone()],
+            source_message.clone(),
         )
     })?;
-    if result.batch.row_count() != 1 {
+    if result.selected_rows.is_empty() {
+        source_message.acks.ack_success();
+        return Ok(None);
+    }
+    if result.selected_rows.len() != 1 || result.batch.row_count() != 1 {
         return Err((
             format!(
-                "correlator '{}' OUTPUT produced {} rows for one correlation",
+                "correlator '{}' TO output produced {} rows for one correlation",
                 processor.as_str(),
                 result.batch.row_count()
             ),
-            vec![acks],
+            source_message,
         ));
     }
     if let Some(side_error) = result.batch.errors().iter().flatten().next() {
         return Err((
             format!(
-                "correlator '{}' OUTPUT side error {}: {} at {}",
+                "correlator '{}' TO output side error {}: {} at {}",
                 processor.as_str(),
                 side_error.code.as_str(),
                 side_error.message,
                 side_error.span
             ),
-            vec![acks],
+            source_message,
         ));
     }
     let record = vm_output_row_to_decoded_record(&result.batch, 0).map_err(|error| {
         (
             format!(
-                "correlator '{}' failed to decode OUTPUT row: {}",
+                "correlator '{}' failed to decode TO output row: {}",
                 processor.as_str(),
                 error
             ),
-            vec![acks.clone()],
+            source_message.clone(),
         )
     })?;
-    Ok(RelayMessage {
+    let RelayMessage {
         key,
-        record: record.into_runtime_record(combined.metadata().clone()),
+        record: source,
         acks,
-    })
+    } = source_message;
+    Ok(Some(RelayMessage {
+        key,
+        record: record.into_runtime_record(source.metadata().clone()),
+        acks,
+    }))
 }
 
-struct CorrelatorFlushContext<'a> {
+struct CorrelatorOutputContext<'a> {
     graph: &'a SharedActiveGraph,
     branch: &'a mut BranchRuntime,
     node_kind: &'a str,
     processor: &'a Identifier,
     error_policies: &'a ErrorPolicies,
     output_routes: &'a mut RelayProcessorOutputsNode,
-    state: &'a SharedCorrelatorBranchState,
 }
 
-async fn flush_branch_correlator(context: CorrelatorFlushContext<'_>) {
-    let CorrelatorFlushContext {
+async fn enqueue_correlator_output(
+    context: CorrelatorOutputContext<'_>,
+    output_index: usize,
+    messages: Vec<RelayMessage>,
+    execution_now: Timestamp,
+) {
+    let CorrelatorOutputContext {
         graph,
         branch,
         node_kind,
         processor,
         error_policies,
         output_routes,
-        state,
     } = context;
-    let messages = {
-        let mut state = state.lock();
-        std::mem::take(&mut state.output_pending)
-    };
     if messages.is_empty() {
         return;
     }
-    let Some(base_output_relay) = output_routes
-        .routes
-        .first()
-        .map(|output| output.relay.clone())
-    else {
+    let Some(output) = output_routes.routes.get_mut(output_index) else {
         for message in messages {
             message.acks.no_ack(format!(
-                "correlator '{}' has no output destinations",
-                processor.as_str()
+                "correlator '{}' has no output destination at index {}",
+                processor.as_str(),
+                output_index
             ));
         }
         return;
     };
+    let output_relay = output.relay.clone();
     let output_schema =
-        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &base_output_relay) {
+        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &output_relay) {
             Ok(schema) => schema,
             Err(error) => {
+                let policy = output.message_error_policy.clone();
                 for message in messages {
                     branch
                         .runtime
-                        .handle_message_error(
+                        .handle_message_error_with_policy(
                             &branch.domain,
                             node_kind,
                             processor,
-                            error_policies,
+                            &policy,
                             message,
                             error.to_string(),
                         )
@@ -7626,25 +7670,54 @@ async fn flush_branch_correlator(context: CorrelatorFlushContext<'_>) {
             return;
         }
     };
-    if let Some(acks) = dispatch_processor_outputs(
-        ProcessorOutputDispatchContext {
-            graph,
-            branch,
-            node_kind,
-            source_kind: ModelKind::Correlator,
-            processor,
-            error_policies,
-            input_relays: std::slice::from_ref(&base_output_relay),
-            filter_source: ProcessorOutputFilterSource::OutputRelay,
-        },
-        output_routes,
-        batch,
-    )
-    .await
+    if !output.enqueue(batch, execution_now) {
+        return;
+    }
+    let pending = output.take_pending();
+    let pending_acks = pending
+        .iter()
+        .flat_map(|batch| batch.acks.iter().cloned())
+        .collect::<Vec<_>>();
+    let forwarded = match RelayRecordBatch::concat(pending) {
+        Ok(batch) => batch,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                pending_acks.iter(),
+                format!(
+                    "correlator '{}' failed to concatenate output for relay '{}': {}",
+                    processor.as_str(),
+                    output_relay.as_str(),
+                    error
+                ),
+            );
+            return;
+        }
+    };
+    if branch
+        .dispatch_output(graph, output, ModelKind::Correlator, processor, &forwarded)
+        .await
+        .is_ok()
     {
-        for ack in acks {
+        for ack in &forwarded.acks {
             ack.ack_success();
         }
+    } else {
+        branch.runtime.handle_internal_processor_error_for_acks(
+            &branch.domain,
+            node_kind,
+            processor,
+            error_policies,
+            forwarded.acks.iter(),
+            format!(
+                "correlator '{}' failed to forward output to relay '{}'",
+                processor.as_str(),
+                output_relay.as_str()
+            ),
+        );
     }
 }
 
@@ -7908,9 +7981,9 @@ fn generator_source_streams(
 fn compile_generator_set_program(
     domain: &Domain,
     generator: &CreateGenerator,
-    output_schema: Arc<arrow_schema::Schema>,
+    output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
-    source_schemas: &[(Identifier, Arc<arrow_schema::Schema>)],
+    source_schemas: &[(Identifier, StdArc<arrow_schema::Schema>)],
 ) -> Result<Arc<CompiledFilterMapProgram>, RuntimeError> {
     let parsed = parse_generator_program(&generator.name, &generator.set).map_err(|reason| {
         RuntimeError::BuildDomainExecution {
@@ -7920,7 +7993,7 @@ fn compile_generator_set_program(
     })?;
     let mut bindings = vec![VmCompileBinding::writable(
         generator.into_relay.as_str(),
-        Arc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new())),
+        StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new())),
     )];
     for (relay, schema) in source_schemas {
         bindings.push(VmCompileBinding::readonly(relay.as_str(), schema.clone()));
@@ -7944,9 +8017,9 @@ fn compile_generator_set_program(
 
 fn ingestor_filter_map_metadata_arrow_schema(
     source: &IngestSource,
-) -> Option<Arc<arrow_schema::Schema>> {
+) -> Option<StdArc<arrow_schema::Schema>> {
     match source {
-        IngestSource::Kafka { .. } => Some(Arc::new(arrow_schema::Schema::new(vec![
+        IngestSource::Kafka { .. } => Some(StdArc::new(arrow_schema::Schema::new(vec![
             arrow_schema::Field::new("topic", ArrowDataType::Utf8, true),
             arrow_schema::Field::new("partition", ArrowDataType::Int32, true),
             arrow_schema::Field::new("offset", ArrowDataType::Int64, true),
@@ -8016,8 +8089,8 @@ struct InferencerFilterMapTensors<'a> {
 }
 
 impl InferencerFilterMapTensors<'_> {
-    fn input_arrow_schema(&self) -> Arc<arrow_schema::Schema> {
-        Arc::new(arrow_schema::Schema::new(
+    fn input_arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
+        StdArc::new(arrow_schema::Schema::new(
             self.inputs
                 .iter()
                 .map(|mapping| {
@@ -8031,8 +8104,8 @@ impl InferencerFilterMapTensors<'_> {
         ))
     }
 
-    fn output_arrow_schema(&self) -> Arc<arrow_schema::Schema> {
-        Arc::new(arrow_schema::Schema::new(
+    fn output_arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
+        StdArc::new(arrow_schema::Schema::new(
             self.output_schema
                 .iter()
                 .map(|declaration| {
@@ -10361,7 +10434,7 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
                 )
             })
             .collect::<Vec<_>>();
-        let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
             "value",
             data_type.clone(),
             false,
@@ -10377,10 +10450,11 @@ async fn evaluate_window_aggregate(
     state: &WindowProcessorState,
 ) -> Result<DecodedRecord, String> {
     let mut fields = Vec::with_capacity(program.assignments.len());
-    let injector: Arc<dyn VmFunctionInjector> = Arc::new(WindowAggregateFunctionInjector {
-        accumulators: state.accumulators.clone(),
-        demand_types: program.demand_types.clone(),
-    });
+    let injector: Arc<Box<dyn VmFunctionInjector>> =
+        Arc::new(Box::new(WindowAggregateFunctionInjector {
+            accumulators: state.accumulators.clone(),
+            demand_types: program.demand_types.clone(),
+        }));
     for assignment in &program.assignments {
         let value = evaluate_window_aggregate_expr(
             &assignment.value,
@@ -10396,7 +10470,7 @@ async fn evaluate_window_aggregate(
 fn evaluate_window_aggregate_expr<'a>(
     expr: &'a CompiledWindowAggregateExpr,
     target_field: &'a str,
-    injector: Arc<dyn VmFunctionInjector>,
+    injector: Arc<Box<dyn VmFunctionInjector>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RuntimeValue, String>> + Send + 'a>>
 {
     Box::pin(async move {
@@ -10784,7 +10858,7 @@ fn compare_runtime_values(left: &RuntimeValue, right: &RuntimeValue) -> std::cmp
 fn vm_typed_batch_from_runtime_record(
     record: &RuntimeRecord,
     filter_map_metadata: Option<&IngestFilterMapMetadata>,
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
 ) -> Result<VmTypedBatch, String> {
     vm_typed_batch_from_runtime_records_with_metadata(
         std::slice::from_ref(record),
@@ -10795,20 +10869,20 @@ fn vm_typed_batch_from_runtime_record(
 
 fn vm_typed_batch_from_runtime_records(
     records: &[RuntimeRecord],
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
 ) -> Result<VmTypedBatch, String> {
     vm_typed_batch_from_runtime_records_with_metadata(records, None, schema)
 }
 
 fn vm_typed_batch_from_runtime_records_with_uninitialized(
     records: &[RuntimeRecord],
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
     uninitialized: Option<&VmUninitializedInput<'_>>,
 ) -> Result<VmTypedBatch, String> {
     let Some(uninitialized) = uninitialized else {
         return vm_typed_batch_from_runtime_records(records, schema);
     };
-    let relaxed_schema = Arc::new(arrow_schema::Schema::new(
+    let relaxed_schema = StdArc::new(arrow_schema::Schema::new(
         schema
             .fields()
             .iter()
@@ -11338,7 +11412,7 @@ fn append_filter_map_nested_value(
 fn vm_typed_batch_from_runtime_records_with_metadata(
     records: &[RuntimeRecord],
     filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
 ) -> Result<VmTypedBatch, String> {
     if let Some(metadata_rows) = filter_map_metadata
         && metadata_rows.len() != records.len()
@@ -11733,7 +11807,7 @@ fn relay_branch_schema_for_runtime(
     runtime: &Runtime,
     domain: &Domain,
     relay: &Identifier,
-) -> Option<Arc<arrow_schema::Schema>> {
+) -> Option<StdArc<arrow_schema::Schema>> {
     runtime
         .executions
         .get(domain)
@@ -13028,7 +13102,7 @@ impl WasmOutputValidator<'_> {
         &self,
         output_relay: &str,
         field_index: usize,
-        destination_field: &Arc<arrow_schema::Field>,
+        destination_field: &StdArc<arrow_schema::Field>,
         column_index: u32,
         rows: &[WasmOutputRow],
     ) -> Result<ArrayRef, WasmOutputError> {
@@ -14012,7 +14086,7 @@ fn relay_batch_from_wasm_output(
 }
 
 fn generator_context_batch(
-    schema: &Arc<arrow_schema::Schema>,
+    schema: &StdArc<arrow_schema::Schema>,
     values: &HashMap<String, RuntimeValue>,
 ) -> Result<VmTypedBatch, String> {
     let columns = schema

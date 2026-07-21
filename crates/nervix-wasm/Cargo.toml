@@ -14,6 +14,7 @@ nervix-wasm-protocol = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
+triomphe = { workspace = true }
 wasmtime = { workspace = true }
 
 [dev-dependencies]

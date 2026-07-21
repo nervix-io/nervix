@@ -195,7 +195,6 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         right_relays: correlator.right.relays().to_vec(),
                         correlate_where: correlator.correlate_where.clone(),
                         match_policy: correlator.match_policy,
-                        output_assignments: correlator.output.clone(),
                         max_time: correlator.max_time.clone(),
                         timeout_policy: correlator.timeout_policy.clone(),
                     },
@@ -725,7 +724,6 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         right_relays,
                         correlate_where,
                         match_policy,
-                        output_assignments,
                         max_time,
                         timeout_policy,
                     } => RelayProcessorOperationTemplate::Correlator {
@@ -734,7 +732,6 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         right_relays: right_relays.clone(),
                         correlate_where: correlate_where.clone(),
                         match_policy: *match_policy,
-                        output_assignments: output_assignments.clone(),
                         max_time: humantime::parse_duration(max_time).map_err(|error| {
                             format!(
                                 "invalid correlator '{}' MAX TIME duration '{}': {}",

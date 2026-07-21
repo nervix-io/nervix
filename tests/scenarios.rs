@@ -3,7 +3,7 @@ use std::{
     fs::{OpenOptions, create_dir_all},
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc as StdArc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -74,7 +74,7 @@ const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
 const WEB_CONSOLE_FEATURE_NAME: &str = "Web console NSPL REPL";
 
@@ -9553,8 +9553,8 @@ fn rustfs_iceberg_props() -> [(String, String); 7] {
     ]
 }
 
-fn rustfs_iceberg_storage_factory() -> Arc<dyn iceberg::io::StorageFactory> {
-    Arc::new(OpenDalStorageFactory::S3 {
+fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
+    StdArc::new(OpenDalStorageFactory::S3 {
         customized_credential_load: None,
     })
 }
@@ -9991,7 +9991,7 @@ async fn run_scenarios() {
                     world.web_console_scenario_permit = Some(
                         WEB_CONSOLE_SCENARIO_PERMITS
                             .get_or_init(|| {
-                                Arc::new(tokio::sync::Semaphore::new(
+                                StdArc::new(tokio::sync::Semaphore::new(
                                     MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS,
                                 ))
                             })

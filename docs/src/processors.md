@@ -267,19 +267,19 @@ CREATE [IF NOT EXISTS] [ATTACHED|DETACHED] CORRELATOR <name>
   [RIGHT FROM <right_input> [WHERE <expr>] ...]
   CORRELATE WHERE <left_right_predicate>
   MATCH EARLIEST | LATEST
-  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) WHERE <expr> ON MESSAGE ERROR <policy>]
-  [TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE) ON MESSAGE ERROR <policy>]
+  TO <output> (FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE)
+    SET <output>.<field> = <expr>, ...
+    [WHERE <expr>]
+    ON MESSAGE ERROR <policy>
+  [TO <output> ...]
   BRANCHED BY <branch>
-  OUTPUT
-    <output>.<field> = <expr>,
-    ...
   MAX TIME <duration>
   ON CORRELATION TIMEOUT <left_action>, <right_action>;
 ```
 
 A correlator stores unmatched records in branch-local pending state and matches a left/right pair when the `CORRELATE WHERE` predicate evaluates to true against both input records. Relays declared on the same side must share that side's schema; the left and right sides may use different schemas. Source-level `WHERE` clauses apply only to the relay they follow. The predicate must compile to `BOOLEAN`. `MATCH EARLIEST` keeps the first pending record on a side for a matching predicate and acknowledges later same-side duplicates. `MATCH LATEST` replaces the pending same-side record and acknowledges the replaced one.
 
-When a left/right pair matches, the pair is removed from pending state and an output record is produced. Correlators do not implicitly copy any input fields into the output. The `OUTPUT` block must explicitly assign every required field on the output relay schema; optional output fields may be omitted.
+When a left/right pair matches, the pair is removed from pending state and each `TO` route independently projects an output record. Correlators do not implicitly copy input fields. Every route must use `SET` to assign all required fields in that destination relay's schema; optional output fields may be omitted. A route-level `WHERE` may suppress that destination without affecting the other routes.
 
 `MAX TIME` is evaluated against the domain clock and bounds how long an unmatched record can remain pending. `ON CORRELATION TIMEOUT` has one action for the left input and one for the right input. `DROP` acknowledges and forgets the record. `SEND TO <relay>` forwards the original unmodified record to another schema-compatible relay and acknowledges it after the send succeeds.
 

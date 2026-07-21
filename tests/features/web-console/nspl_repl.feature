@@ -386,14 +386,12 @@ Feature: Web console NSPL REPL
         CORRELATE WHERE lower(left_profiles.first_name) = lower(right_profiles.first_name)
         MATCH EARLIEST
         TO correlated_profiles FLUSH IMMEDIATE
-        ON MESSAGE ERROR SEND TO correlator_errors SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
-        BRANCHED BY by_left_profile_ingestor
-
-        OUTPUT
-          correlated_profiles.tenant = left_profiles.tenant,
+        SET correlated_profiles.tenant = left_profiles.tenant,
           correlated_profiles.normalized_name = lower(left_profiles.first_name),
           correlated_profiles.left_marker = left_profiles.marker,
           correlated_profiles.surname = upper(right_profiles.surname)
+        ON MESSAGE ERROR SEND TO correlator_errors SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
+        BRANCHED BY by_left_profile_ingestor
         MAX TIME 5s
         ON CORRELATION TIMEOUT SEND TO uncorrelated_left_profiles, SEND TO uncorrelated_right_profiles;
       """

@@ -156,6 +156,7 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+triomphe = { workspace = true }
 typed-builder = { workspace = true }
 ubyte = { workspace = true }
 upon = { workspace = true }

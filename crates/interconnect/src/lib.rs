@@ -3,7 +3,7 @@ use std::{
     io,
     net::SocketAddr,
     path::Path,
-    sync::{Arc, OnceLock},
+    sync::{Arc as StdArc, OnceLock},
     time::Duration,
 };
 
@@ -32,6 +32,7 @@ use tokio::{
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, warn};
+use triomphe::Arc;
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEND_QUEUE_CAPACITY: usize = 1024;
@@ -360,8 +361,8 @@ pub struct Transport {
 
 struct TransportInner {
     mode: TransportMode,
-    client_config: Option<Arc<ClientConfig>>,
-    server_config: Option<Arc<ServerConfig>>,
+    client_config: Option<StdArc<ClientConfig>>,
+    server_config: Option<StdArc<ServerConfig>>,
     identity: LocalIdentity,
     peer_verifier: PeerVerifier,
     options: TransportOptions,
@@ -370,7 +371,7 @@ struct TransportInner {
     outbound: DashMap<ConnectionKey, ConnectionHandle, RandomState>,
     outbound_state: DashMap<ConnectionKey, ConnectionState, RandomState>,
     connected_peers: DashMap<String, usize, RandomState>,
-    outbound_permits: Arc<Semaphore>,
+    outbound_permits: StdArc<Semaphore>,
     shutdown: CancellationToken,
     tasks: TaskTracker,
 }
@@ -471,7 +472,7 @@ impl LocalIdentity {
 
 #[derive(Clone)]
 pub struct PeerVerifier {
-    resolver: Arc<PeerKeyResolver>,
+    resolver: Arc<Box<PeerKeyResolver>>,
 }
 
 impl std::fmt::Debug for PeerVerifier {
@@ -483,7 +484,7 @@ impl std::fmt::Debug for PeerVerifier {
 impl PeerVerifier {
     pub fn new(resolver: impl Fn(&str) -> Option<VerifyingKey> + Send + Sync + 'static) -> Self {
         Self {
-            resolver: Arc::new(resolver),
+            resolver: Arc::new(Box::new(resolver)),
         }
     }
 
@@ -552,7 +553,7 @@ impl Transport {
             outbound: DashMap::default(),
             outbound_state: DashMap::default(),
             connected_peers: DashMap::default(),
-            outbound_permits: Arc::new(Semaphore::new(options.max_connections)),
+            outbound_permits: StdArc::new(Semaphore::new(options.max_connections)),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
         });
@@ -1640,8 +1641,8 @@ pub fn install_rustls_crypto_provider() {
 
 #[derive(Clone)]
 pub struct TlsConfigBundle {
-    client_config: Arc<ClientConfig>,
-    server_config: Arc<ServerConfig>,
+    client_config: StdArc<ClientConfig>,
+    server_config: StdArc<ServerConfig>,
 }
 
 impl TlsConfigBundle {
@@ -1665,7 +1666,7 @@ impl TlsConfigBundle {
             .with_root_certificates(roots.clone())
             .with_client_auth_cert(cert_chain.clone(), private_key.clone_key())?;
 
-        let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        let verifier = WebPkiClientVerifier::builder(StdArc::new(roots))
             .build()
             .map_err(|err| TlsConfigError::Io(io::Error::other(err.to_string())))?;
         let server_config = ServerConfig::builder()
@@ -1673,8 +1674,8 @@ impl TlsConfigBundle {
             .with_single_cert(cert_chain, private_key)?;
 
         Ok(Self {
-            client_config: Arc::new(client_config),
-            server_config: Arc::new(server_config),
+            client_config: StdArc::new(client_config),
+            server_config: StdArc::new(server_config),
         })
     }
 }
@@ -1715,7 +1716,7 @@ fn map_pem_error(err: PemError) -> TlsConfigError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, io::ErrorKind, path::PathBuf, process::Command, sync::Arc};
+    use std::{collections::HashMap, io::ErrorKind, path::PathBuf, process::Command};
 
     use nervix_models::{Domain, Identifier};
     use tokio::time::timeout;
@@ -2282,7 +2283,7 @@ mod tests {
             outbound: DashMap::default(),
             outbound_state: DashMap::default(),
             connected_peers: DashMap::default(),
-            outbound_permits: Arc::new(Semaphore::new(1)),
+            outbound_permits: StdArc::new(Semaphore::new(1)),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
         });

@@ -6143,6 +6143,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "triomphe",
  "typed-builder 0.20.1",
  "ubyte",
  "upon",
@@ -6167,6 +6168,7 @@ dependencies = [
  "rpassword",
  "thiserror 2.0.19",
  "tokio",
+ "triomphe",
 ]
 
 [[package]]
@@ -6206,6 +6208,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "triomphe",
 ]
 
 [[package]]
@@ -6239,6 +6242,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
+ "triomphe",
 ]
 
 [[package]]
@@ -6301,6 +6305,7 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.19",
  "tracing",
+ "triomphe",
  "ubyte",
 ]
 
@@ -6324,6 +6329,7 @@ dependencies = [
  "regex",
  "thiserror 2.0.19",
  "tokio",
+ "triomphe",
  "uuid",
 ]
 
@@ -6340,6 +6346,7 @@ dependencies = [
  "parking_lot",
  "thiserror 2.0.19",
  "tokio",
+ "triomphe",
  "wasmtime",
 ]
 

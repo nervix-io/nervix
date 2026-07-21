@@ -19,3 +19,4 @@ reedline = { workspace = true, features = ["external_printer"] }
 rpassword = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+triomphe = { workspace = true }

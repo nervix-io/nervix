@@ -5,7 +5,7 @@ use std::{
     num::NonZeroUsize,
     path::Path,
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{Arc as StdArc, RwLock},
     time::Duration,
 };
 
@@ -50,6 +50,7 @@ use sorted_vec::SortedSet;
 pub use stored::StoredModelVersioned;
 use thiserror::Error;
 use tracing::{info, warn};
+use triomphe::Arc;
 
 const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
@@ -1605,34 +1606,24 @@ impl DomainState {
                         branch_schema,
                         correlator.filter_where.as_deref(),
                     )?;
+                    validate_correlator(
+                        domain,
+                        identifier,
+                        models,
+                        correlator,
+                        &left_schemas,
+                        &right_schemas,
+                    )?;
                     for output in correlator.output_routes.outputs() {
                         let output_schema =
                             schema_for_ack_model(domain, identifier, models, &output.relay)?;
-                        validate_correlator(
+                        validate_correlator_output(
                             domain,
                             identifier,
-                            models,
-                            correlator,
                             &left_schemas,
                             &right_schemas,
-                            &output.relay,
-                            output_schema,
-                        )?;
-                        let effective_schema = effective_processor_output_filter_map_schema(
-                            domain,
-                            identifier,
-                            models,
-                            &[(&output.relay, output_schema)],
                             output,
                             output_schema,
-                            None,
-                        )?;
-                        ensure_equal_internal_schema(
-                            domain,
-                            identifier,
-                            &effective_schema,
-                            output_schema,
-                            "correlator flow",
                         )?;
                     }
                     add_output_message_error_policy_edges(
@@ -4413,7 +4404,7 @@ fn lookup_hash_map_bindings(mut fields: Vec<(String, ArrowDataType)>) -> Vec<Com
     fields.dedup_by(|left, right| left.0 == right.0);
     vec![CompileBinding::internal_readonly(
         InternalFieldNamespace::LookupHashMap,
-        Arc::new(ArrowSchema::new(
+        StdArc::new(ArrowSchema::new(
             fields
                 .into_iter()
                 .map(|(name, data_type)| ArrowField::new(name, data_type, true))
@@ -4828,8 +4819,11 @@ fn referenced_materialized_stream_bindings(
                 .map(|field| field.name.as_str().to_string()),
         );
         bindings.push(
-            CompileBinding::readonly(relay.as_str(), Arc::new(ArrowSchema::new(projected_fields)))
-                .with_sensitivity(projected_sensitivity),
+            CompileBinding::readonly(
+                relay.as_str(),
+                StdArc::new(ArrowSchema::new(projected_fields)),
+            )
+            .with_sensitivity(projected_sensitivity),
         );
     }
 
@@ -4995,7 +4989,7 @@ fn effective_generator_schema(
 
     let mut bindings = vec![CompileBinding::writable(
         generator.into_relay.as_str(),
-        Arc::new(ArrowSchema::new(Vec::<ArrowField>::new())),
+        StdArc::new(ArrowSchema::new(Vec::<ArrowField>::new())),
     )];
     let mut local_schemas = HashMap::new();
     for source_stream in &source_streams {
@@ -5201,8 +5195,8 @@ fn first_vm_program_error(error: nervix_nspl::vm_program::ParseFromSourceError) 
     }
 }
 
-fn arrow_schema_for_internal_schema(schema: &CreateSchema) -> Arc<ArrowSchema> {
-    Arc::new(ArrowSchema::new(
+fn arrow_schema_for_internal_schema(schema: &CreateSchema) -> StdArc<ArrowSchema> {
+    StdArc::new(ArrowSchema::new(
         schema
             .fields
             .iter()
@@ -5601,8 +5595,6 @@ fn validate_correlator(
     correlator: &CreateCorrelator,
     left_schemas: &[(&Identifier, &CreateSchema)],
     right_schemas: &[(&Identifier, &CreateSchema)],
-    output_relay: &Identifier,
-    output_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
     humantime::parse_duration(&correlator.max_time).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -5624,15 +5616,6 @@ fn validate_correlator(
         right_schemas,
     )?;
 
-    validate_correlator_output(
-        domain,
-        identifier,
-        correlator,
-        left_schemas,
-        right_schemas,
-        output_relay,
-        output_schema,
-    )?;
     let Some((_left_relay, left_schema)) = left_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5737,25 +5720,33 @@ fn validate_correlate_where_for_internal_schemas(
 fn validate_correlator_output(
     domain: &Domain,
     identifier: &Identifier,
-    correlator: &CreateCorrelator,
     left_schemas: &[(&Identifier, &CreateSchema)],
     right_schemas: &[(&Identifier, &CreateSchema)],
-    output_relay: &Identifier,
+    output: &ProcessorOutput,
     output_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    let source = format!("SET {}", correlator.output);
+    let Some(source) = output.filter_map.as_deref() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "correlator TO output '{}' must declare SET assignments",
+                output.relay.as_str()
+            ),
+        }));
+    };
     let parsed = parse_program(&source).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "correlator OUTPUT parse failed: {}",
+                "correlator TO output '{}' parse failed: {}",
+                output.relay.as_str(),
                 first_vm_program_error(error)
             ),
         })
     })?;
-    if parsed.inner.filter.is_some()
-        || !parsed.inner.branch_filters.is_empty()
+    if !parsed.inner.branch_filters.is_empty()
         || !parsed.inner.unset.is_empty()
         || !parsed.inner.invoke.is_empty()
         || parsed.inner.set.is_empty()
@@ -5763,7 +5754,10 @@ fn validate_correlator_output(
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "correlator OUTPUT must contain explicit assignments only".to_string(),
+            reason: format!(
+                "correlator TO output '{}' must contain SET assignments and may contain WHERE",
+                output.relay.as_str()
+            ),
         }));
     }
 
@@ -5776,7 +5770,7 @@ fn validate_correlator_output(
         bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
     }
     bindings.push(writeonly_binding_for_internal_schema(
-        output_relay.as_str(),
+        output.relay.as_str(),
         output_schema,
     ));
     let compiled = compile_program_with_options_for_bindings_with_sensitivity(
@@ -5793,7 +5787,11 @@ fn validate_correlator_output(
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("correlator OUTPUT compile failed: {}", error.message),
+            reason: format!(
+                "correlator TO output '{}' compile failed: {}",
+                output.relay.as_str(),
+                error.message
+            ),
         })
     })?;
 
@@ -5807,8 +5805,9 @@ fn validate_correlator_output(
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "correlator OUTPUT assigns unknown field '{}.{}'",
-                    output_relay.as_str(),
+                    "correlator TO output '{}' assigns unknown field '{}.{}'",
+                    output.relay.as_str(),
+                    output.relay.as_str(),
                     field.name()
                 ),
             }));
@@ -5818,10 +5817,33 @@ fn validate_correlator_output(
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "correlator OUTPUT field '{}' type mismatch: expression {:?}, schema {:?}",
+                    "correlator TO output '{}' field '{}' type mismatch: expression {:?}, schema \
+                     {:?}",
+                    output.relay.as_str(),
                     field.name(),
                     field.data_type(),
                     target.data_type()
+                ),
+            }));
+        }
+    }
+
+    for target in output_arrow_schema.fields() {
+        if !target.is_nullable()
+            && !compiled
+                .output_schema
+                .fields()
+                .iter()
+                .any(|field| field.name() == target.name())
+        {
+            return Err(Report::new(RegistryError::IncompatibleSchema {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "correlator TO output '{}' does not assign required field '{}.{}'",
+                    output.relay.as_str(),
+                    output.relay.as_str(),
+                    target.name()
                 ),
             }));
         }
@@ -8186,16 +8208,18 @@ mod tests {
         right_relay: &str,
         into_relay: &str,
     ) -> Model {
+        let mut output_routes = (ProcessorOutputs::single(identifier(into_relay)))
+            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()));
+        output_routes.routes[0].filter_map =
+            Some(format!("SET {into_relay}.value = {left_relay}.value"));
         Model::Correlator(CreateCorrelator {
             name: identifier(name),
             left: ProcessorInputs::single(identifier(left_relay)),
             right: ProcessorInputs::single(identifier(right_relay)),
-            output_routes: (ProcessorOutputs::single(identifier(into_relay)))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            output_routes,
             branched_by: BranchSelection::unbranched(),
             correlate_where: format!("WHERE {left_relay}.value = {right_relay}.value"),
             match_policy: CorrelatorMatchPolicy::Earliest,
-            output: format!("{into_relay}.value = {left_relay}.value"),
             max_time: "5s".to_string(),
             timeout_policy: CorrelationTimeoutPolicy {
                 left: CorrelationTimeoutAction::Drop,
@@ -10855,9 +10879,9 @@ mod tests {
               RIGHT FROM right_events
               CORRELATE WHERE lower(left_events.value)
               MATCH EARLIEST
-              TO correlated_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
-
-              OUTPUT correlated_events.value = left_events.value
+              TO correlated_events FLUSH IMMEDIATE
+              SET correlated_events.value = left_events.value
+              ON MESSAGE ERROR LOG UNBRANCHED
               MAX TIME 5s
               ON CORRELATION TIMEOUT DROP, DROP;
             "#,
@@ -10910,9 +10934,9 @@ mod tests {
               RIGHT FROM right_events
               CORRELATE WHERE branch.tenant = left_events.tenant
               MATCH EARLIEST
-              TO correlated_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
-
-              OUTPUT correlated_events.value = left_events.value
+              TO correlated_events FLUSH IMMEDIATE
+              SET correlated_events.value = left_events.value
+              ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
               MAX TIME 5s
               ON CORRELATION TIMEOUT DROP, DROP;
             "#,
@@ -10931,6 +10955,60 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(
             rendered.contains("CORRELATE WHERE compile failed") && rendered.contains("branch"),
+            "unexpected error: {rendered}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_validates_each_correlator_output_against_its_destination_schema() {
+        let (domain, models) = example_graph_models(
+            "correlator destination schemas",
+            r#"
+            CREATE SCHEMA event (
+              value STRING
+            );
+
+            CREATE SCHEMA correlated_event (
+              value STRING
+            );
+
+            CREATE SCHEMA correlation_count (
+              count I64
+            );
+
+            CREATE RELAY left_events SCHEMA event UNBRANCHED;
+            CREATE RELAY right_events SCHEMA event UNBRANCHED;
+            CREATE RELAY correlated_events SCHEMA correlated_event UNBRANCHED;
+            CREATE RELAY correlation_counts SCHEMA correlation_count UNBRANCHED;
+
+            CREATE CORRELATOR correlate_events
+              LEFT FROM left_events
+              RIGHT FROM right_events
+              CORRELATE WHERE left_events.value = right_events.value
+              MATCH EARLIEST
+              TO correlated_events FLUSH IMMEDIATE
+                SET correlated_events.value = left_events.value
+                ON MESSAGE ERROR LOG
+              TO correlation_counts FLUSH IMMEDIATE
+                SET correlation_counts.count = left_events.value
+                ON MESSAGE ERROR LOG
+              UNBRANCHED
+              MAX TIME 5s
+              ON CORRELATION TIMEOUT DROP, DROP;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let err = registry
+            .apply_batch(&domain, models)
+            .expect_err("each correlator route must use its own destination schema");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("correlator TO output 'correlation_counts' compile failed"),
             "unexpected error: {rendered}"
         );
 
@@ -10969,9 +11047,9 @@ mod tests {
               RIGHT FROM right_events
               CORRELATE WHERE left_events.value = right_events.value
               MATCH EARLIEST
-              TO correlated_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
-
-              OUTPUT correlated_events.value = left_events.value
+              TO correlated_events FLUSH IMMEDIATE
+              SET correlated_events.value = left_events.value
+              ON MESSAGE ERROR LOG UNBRANCHED
               MAX TIME 5s
               ON CORRELATION TIMEOUT DROP, DROP;
             "#,

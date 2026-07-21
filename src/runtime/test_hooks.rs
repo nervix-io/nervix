@@ -1,9 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use ahash::RandomState;
 use dashmap::DashMap;
 use nervix_models::Identifier;
 use tokio::sync::broadcast;
+use triomphe::Arc;
 
 #[derive(Debug, Default)]
 pub struct EmitterFaultInjector {

@@ -5,7 +5,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, TcpListener},
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, LazyLock, OnceLock},
+    sync::{Arc as StdArc, LazyLock, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -74,6 +74,7 @@ use tonic::{
     metadata::MetadataValue,
     transport::{Certificate, ClientTlsConfig, Endpoint},
 };
+use triomphe::Arc;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
@@ -82,7 +83,6 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(40);
 const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
-const FJALL_UNLOCK_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const NODE_START_ATTEMPTS: usize = 8;
 const KAFKA_ADDR: &str = "127.0.0.1:9092";
@@ -1568,31 +1568,19 @@ impl NodeHandle {
             }
         };
         if task_result.is_ok() {
-            self.wait_database_unlocked().await?;
+            self.ensure_database_unlocked().await?;
         }
         task_result
     }
 
-    async fn wait_database_unlocked(&self) -> io::Result<()> {
+    async fn ensure_database_unlocked(&self) -> io::Result<()> {
         let db_path = self.spec.db_path()?;
-        let deadline = Instant::now() + FJALL_UNLOCK_TIMEOUT;
-
-        loop {
-            tokio::task::consume_budget().await;
-            match database_opens(db_path.clone()).await {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(io::Error::other(format!(
-                            "timed out waiting for node '{}' database lock to release: {error}",
-                            self.spec.node_id
-                        )));
-                    }
-                    sleep(deadline.saturating_duration_since(now).min(POLL_INTERVAL)).await;
-                }
-            }
-        }
+        database_opens(db_path).await.map_err(|error| {
+            io::Error::other(format!(
+                "node '{}' returned before releasing its database lock: {error}",
+                self.spec.node_id
+            ))
+        })
     }
 
     async fn wait_until_ready(&mut self) -> io::Result<()> {
@@ -2065,7 +2053,7 @@ async fn publish_secure_websocket(
     let client_config = RustlsClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(client_config));
+    let connector = TlsConnector::from(StdArc::new(client_config));
     let tcp_stream = TcpStream::connect(parse_addr(&spec.https_addr())?)
         .await
         .map_err(io::Error::other)?;

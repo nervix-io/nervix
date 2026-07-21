@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::Arc as StdArc,
 };
 
 use ::iceberg::{
@@ -37,6 +37,7 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use parquet::file::properties::WriterProperties;
 use thiserror::Error;
+use triomphe::Arc;
 use url::Url;
 
 use super::*;
@@ -44,7 +45,7 @@ use super::*;
 pub(in crate::runtime) struct IcebergEmitter {
     client: IcebergEmitterClient,
     program: CompiledSqlValuesProgram,
-    mapped_schema: Arc<arrow_schema::Schema>,
+    mapped_schema: StdArc<arrow_schema::Schema>,
     input_schema: Arc<CompiledSchema>,
     flush_policy: RuntimeFlushPolicy,
     commit_policy: IcebergCommitPolicy,
@@ -61,7 +62,7 @@ pub(in crate::runtime) struct IcebergEmitter {
 }
 
 struct IcebergEmitterClient {
-    catalog: Arc<RestCatalog>,
+    catalog: StdArc<RestCatalog>,
     table: Table,
     file_name_prefix: String,
     data_file_sequence: u64,
@@ -170,7 +171,7 @@ pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
 
 trait IcebergStorageBackendExt {
     fn accepts_location_scheme(self, scheme: &str) -> bool;
-    fn storage_factory(self) -> Arc<dyn ::iceberg::io::StorageFactory>;
+    fn storage_factory(self) -> StdArc<dyn ::iceberg::io::StorageFactory>;
 }
 
 impl IcebergStorageBackendExt for IcebergStorageBackend {
@@ -182,13 +183,13 @@ impl IcebergStorageBackendExt for IcebergStorageBackend {
         }
     }
 
-    fn storage_factory(self) -> Arc<dyn ::iceberg::io::StorageFactory> {
+    fn storage_factory(self) -> StdArc<dyn ::iceberg::io::StorageFactory> {
         match self {
-            Self::S3 => Arc::new(OpenDalStorageFactory::S3 {
+            Self::S3 => StdArc::new(OpenDalStorageFactory::S3 {
                 customized_credential_load: None,
             }),
-            Self::Gcs => Arc::new(OpenDalStorageFactory::Gcs),
-            Self::AzureBlob => Arc::new(OpenDalStorageFactory::Azdls),
+            Self::Gcs => StdArc::new(OpenDalStorageFactory::Gcs),
+            Self::AzureBlob => StdArc::new(OpenDalStorageFactory::Azdls),
         }
     }
 }
@@ -329,7 +330,7 @@ impl IcebergEmitter {
     fn mapped_arrow_schema(
         program: &CompiledSqlValuesProgram,
         values: &[IcebergValueMapping],
-    ) -> IcebergEmitterResult<Arc<arrow_schema::Schema>> {
+    ) -> IcebergEmitterResult<StdArc<arrow_schema::Schema>> {
         let output_fields = program.program.output_schema.fields();
         if output_fields.len() != values.len() {
             return Err(
@@ -349,7 +350,7 @@ impl IcebergEmitter {
             }
             fields.push(Self::iceberg_arrow_field(field, &mapping.column));
         }
-        Ok(Arc::new(arrow_schema::Schema::new(fields)))
+        Ok(StdArc::new(arrow_schema::Schema::new(fields)))
     }
 
     fn iceberg_arrow_field(field: &arrow_schema::Field, column: &str) -> arrow_schema::Field {
@@ -400,7 +401,7 @@ impl IcebergEmitter {
         }
         Self::validate_blob_location(backend, "table", location)?;
         let properties = IcebergObjectStoreProperties::from_entries(backend, config);
-        let catalog = Arc::new(
+        let catalog = StdArc::new(
             properties
                 .rest_catalog(catalog_client.name.as_str(), catalog_config)
                 .await
@@ -779,7 +780,7 @@ impl IcebergEmitter {
                     arrow_schema::TimeUnit::Microsecond,
                     Some(timezone),
                 ),
-            ) if timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC" => Arc::new(
+            ) if timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC" => StdArc::new(
                 values
                     .iter()
                     .map(|value| value.map(|nanos| nanos.div_euclid(1_000)))
@@ -827,7 +828,7 @@ impl IcebergEmitter {
     }
 
     async fn read_ipc_batches(
-        schema: Arc<arrow_schema::Schema>,
+        schema: StdArc<arrow_schema::Schema>,
         paths: &[PathBuf],
     ) -> IcebergEmitterResult<RecordBatch> {
         let paths = paths.to_vec();
@@ -861,7 +862,7 @@ impl IcebergEmitter {
     }
 
     fn concat_arrow_batches(
-        schema: Arc<arrow_schema::Schema>,
+        schema: StdArc<arrow_schema::Schema>,
         batches: Vec<RecordBatch>,
     ) -> IcebergEmitterResult<RecordBatch> {
         let Some(first) = batches.first() else {

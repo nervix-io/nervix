@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use nervix_models::{
@@ -19,6 +19,7 @@ use nervix_vm::{
 use nervix_wasm::{CompiledWasmProcessor, WasmBranchInstance};
 use ordered_float::OrderedFloat;
 use registry::ActiveGraph;
+use triomphe::Arc;
 
 use super::{
     BranchRuntime, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
@@ -100,7 +101,6 @@ pub(super) enum BranchedProcessorOperationSpec {
         right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
-        output_assignments: String,
         max_time: String,
         timeout_policy: CorrelationTimeoutPolicy,
     },
@@ -280,7 +280,6 @@ pub(super) enum RelayProcessorOperationTemplate {
         right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
-        output_assignments: String,
         max_time: Duration,
         timeout_policy: CorrelationTimeoutPolicy,
     },
@@ -329,7 +328,7 @@ pub(super) struct RelayProcessorNode {
     pub(super) filter_where: Option<String>,
     pub(super) compiled_filter_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
-    pub(super) last_graph: Option<Arc<ActiveGraph>>,
+    pub(super) last_graph: Option<StdArc<ActiveGraph>>,
     pub(super) generation: u64,
 }
 
@@ -367,11 +366,10 @@ pub(super) enum RelayProcessorOperationNode {
         right_relays: Vec<Identifier>,
         correlate_where: String,
         match_policy: CorrelatorMatchPolicy,
-        output_assignments: String,
         max_time: Duration,
         timeout_policy: CorrelationTimeoutPolicy,
         compiled_where_program: Option<Box<CompiledCorrelatorWhereProgram>>,
-        compiled_output_program: Option<Box<CompiledCorrelatorOutputProgram>>,
+        compiled_output_programs: Vec<Option<Box<CompiledCorrelatorOutputProgram>>>,
         state: SharedCorrelatorBranchState,
     },
     Junction {
@@ -534,7 +532,7 @@ impl CompiledWindowAggregateProgram {
         match expr {
             WindowAggregateExpr::Scalar(expr) => {
                 let output_schema =
-                    Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+                    StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
                         &target.field,
                         target_type.clone(),
                         false,
@@ -827,7 +825,6 @@ pub(super) type SharedCorrelatorBranchState = Arc<parking_lot::Mutex<CorrelatorB
 pub(super) struct CorrelatorBranchState {
     pub(super) pending_left: Vec<CorrelatorPendingMessage>,
     pub(super) pending_right: Vec<CorrelatorPendingMessage>,
-    pub(super) output_pending: Vec<RelayMessage>,
 }
 
 #[derive(Debug)]
