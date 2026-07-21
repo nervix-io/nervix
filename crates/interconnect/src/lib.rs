@@ -1635,7 +1635,7 @@ fn introduction_message(node_id: &str) -> Vec<u8> {
 pub fn install_rustls_crypto_provider() {
     static PROVIDER: OnceLock<()> = OnceLock::new();
     PROVIDER.get_or_init(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     });
 }
 

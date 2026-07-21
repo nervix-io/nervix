@@ -1,6 +1,6 @@
 use rumqttc::{
-    AsyncClient, Event, Incoming, MqttOptions, Publish, QoS, SubscribeReasonCode, TlsConfiguration,
-    Transport as MqttTransport,
+    AckMode, AsyncClient, BrokerSessionResumePolicy, Event, Incoming, MqttOptions, Publish, QoS,
+    SessionMode, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
 };
 use url::{Host, Url};
 
@@ -294,31 +294,10 @@ impl MqttIngestor {
                             continue;
                         }
                     };
-                    if let Err(error) = client_handle
-                        .subscribe(task_subscribe_filter.as_str(), qos)
-                        .await
-                    {
-                        task_context
-                            .runtime
-                            .record_ingestor_transient_error_with_backoff(
-                                &task_context.domain,
-                                &task_context.ingestor,
-                                format!("mqtt subscribe failed: {error}"),
-                                backoff.next_delay(),
-                            );
-                        warn!(
-                            domain = task_context.domain.as_str(),
-                            ingestor = task_context.ingestor.as_str(),
-                            error = %error,
-                            "failed to subscribe mqtt source"
-                        );
-                        if !backoff.wait(&mut shutdown_rx).await {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    match Self::wait_for_subscription_ack(
+                    match Self::establish_subscription(
+                        &client_handle,
+                        task_subscribe_filter.as_str(),
+                        qos,
                         &mut eventloop,
                         &mut shutdown_rx,
                         &task_context,
@@ -459,7 +438,10 @@ impl MqttIngestor {
         Ok(())
     }
 
-    async fn wait_for_subscription_ack(
+    async fn establish_subscription(
+        client: &AsyncClient,
+        subscribe_filter: &str,
+        qos: QoS,
         eventloop: &mut rumqttc::EventLoop,
         shutdown_rx: &mut watch::Receiver<bool>,
         context: &MqttTaskContext,
@@ -475,11 +457,44 @@ impl MqttIngestor {
                 }
                 event = eventloop.poll() => {
                     match event {
+                        Ok(Event::Incoming(Incoming::ConnAck(connack))) => {
+                            if connack.session_present {
+                                // A broker-only persistent-session resume cannot allocate a new
+                                // SUBSCRIBE packet ID. The broker retained the existing
+                                // subscription, so the successful CONNACK is the readiness
+                                // boundary and queued QoS messages can be consumed immediately.
+                                context.runtime.mark_ingestor_instance_ready(
+                                    &context.domain,
+                                    &context.ingestor,
+                                    instance_idx,
+                                );
+                                return MqttSubscriptionState::Ready;
+                            }
+                            if let Err(error) = client.subscribe(subscribe_filter, qos).await {
+                                context.runtime.record_ingestor_transient_error(
+                                    &context.domain,
+                                    &context.ingestor,
+                                    format!("mqtt subscribe failed: {error}"),
+                                );
+                                warn!(
+                                    domain = context.domain.as_str(),
+                                    ingestor = context.ingestor.as_str(),
+                                    error = %error,
+                                    "failed to subscribe mqtt source"
+                                );
+                                return MqttSubscriptionState::Reconnect;
+                            }
+                        }
                         Ok(Event::Incoming(Incoming::SubAck(suback))) => {
                             if suback
                                 .return_codes
                                 .iter()
-                                .all(|code| *code != SubscribeReasonCode::Failure)
+                                .all(|code| {
+                                    let SubscribeReasonCode::Success(_) = code else {
+                                        return false;
+                                    };
+                                    true
+                                })
                             {
                                 context.runtime.mark_ingestor_instance_ready(
                                     &context.domain,
@@ -508,7 +523,7 @@ impl MqttIngestor {
                             );
                             return MqttSubscriptionState::Reconnect;
                         }
-                        Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) => {}
+                        Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {}
                         Err(error) => {
                             let _ = context.events.send(RuntimeEvent::Error(format!(
                                 "failed to subscribe mqtt source for ingestor '{}' in domain '{}': {}",
@@ -553,7 +568,7 @@ impl MqttIngestor {
                         Ok(Event::Incoming(Incoming::Publish(publish))) => {
                             return MqttNextPublish::Publish(publish);
                         }
-                        Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) => {}
+                        Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {}
                         Err(error) => {
                             let _ = context.events.send(RuntimeEvent::Error(format!(
                                 "failed to receive mqtt message for ingestor '{}' in domain '{}': {}",
@@ -806,8 +821,8 @@ impl MqttIngestor {
         trace!(
             domain = context.domain.as_str(),
             ingestor = context.ingestor.as_str(),
-            topic = publish.topic,
-            key = key,
+            topic = %String::from_utf8_lossy(publish.topic.as_ref()),
+            key = ?key,
             payload = String::from_utf8_lossy(payload).to_string(),
             "received mqtt message"
         );
@@ -896,9 +911,23 @@ impl MqttIngestor {
             .unwrap_or_else(|| default_client_id.to_string());
 
         let mqtt_addr = Self::parse_addr(&addr)?;
-        let mut options = MqttOptions::new(client_id, mqtt_addr.host, mqtt_addr.port);
-        options.set_clean_session(settings.session == MqttSession::Clean);
-        options.set_manual_acks(settings.manual_acks);
+        let mut options = MqttOptions::new(client_id, (mqtt_addr.host, mqtt_addr.port));
+        options.set_session_mode(if settings.session == MqttSession::Clean {
+            SessionMode::Clean
+        } else {
+            SessionMode::Persistent
+        });
+        if settings.session == MqttSession::Persistent {
+            // Nervix deliberately keeps in-flight messages and ACK state in memory. After an
+            // owner change, accept the broker's retained session and let it redeliver pending
+            // QoS messages instead of requiring a local rumqttc protocol checkpoint.
+            options.set_broker_session_resume_policy(BrokerSessionResumePolicy::AllowBrokerOnly);
+        }
+        options.set_ack_mode(if settings.manual_acks {
+            AckMode::Manual
+        } else {
+            AckMode::Automatic
+        });
         if mqtt_addr.tls {
             let tls = client_tls_paths(config);
             let ca = if let Some(ca_file) = tls.ca_file.as_ref() {
@@ -925,7 +954,10 @@ impl MqttIngestor {
                 client_auth,
             }));
         }
-        Ok(AsyncClient::new(options, 1024))
+        AsyncClient::builder(options)
+            .capacity(1024)
+            .try_build()
+            .map_err(|error| format!("invalid MQTT client config: {error}"))
     }
 
     fn client_id_template(
@@ -984,15 +1016,44 @@ impl MqttIngestor {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::ClientConfigEntry;
+    use nervix_models::{ClientConfigEntry, MqttSession};
+    use rumqttc::BrokerSessionResumePolicy;
 
-    use super::{MQTT_INSTANCE_PLACEHOLDER, MqttIngestor};
+    use super::{MQTT_INSTANCE_PLACEHOLDER, MqttClientSettings, MqttIngestor};
 
     fn config_with_client_id(client_id: &str) -> Vec<ClientConfigEntry> {
         vec![ClientConfigEntry {
             key: "client_id".to_string(),
             value: client_id.to_string(),
         }]
+    }
+
+    #[test]
+    fn persistent_sessions_allow_broker_only_resume() {
+        let config = vec![
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "mqtt://127.0.0.1:1883".to_string(),
+            },
+            ClientConfigEntry {
+                key: "client_id".to_string(),
+                value: "persistent-client".to_string(),
+            },
+        ];
+        let (_, eventloop) = MqttIngestor::client_from_config(
+            &config,
+            "fallback",
+            &MqttClientSettings {
+                session: MqttSession::Persistent,
+                manual_acks: true,
+            },
+        )
+        .expect("persistent MQTT client must be valid");
+
+        assert_eq!(
+            eventloop.options.broker_session_resume_policy(),
+            BrokerSessionResumePolicy::AllowBrokerOnly
+        );
     }
 
     #[test]

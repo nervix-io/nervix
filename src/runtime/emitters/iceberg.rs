@@ -132,7 +132,6 @@ struct IcebergStagedBatch {
 #[derive(Debug, Clone)]
 struct IcebergObjectStoreProperties {
     backend: IcebergStorageBackend,
-    configured_scheme: String,
     props: HashMap<String, String>,
 }
 
@@ -172,7 +171,7 @@ pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
 
 trait IcebergStorageBackendExt {
     fn accepts_location_scheme(self, scheme: &str) -> bool;
-    fn storage_factory(self, configured_scheme: &str) -> StdArc<dyn ::iceberg::io::StorageFactory>;
+    fn storage_factory(self) -> StdArc<dyn ::iceberg::io::StorageFactory>;
 }
 
 impl IcebergStorageBackendExt for IcebergStorageBackend {
@@ -184,18 +183,13 @@ impl IcebergStorageBackendExt for IcebergStorageBackend {
         }
     }
 
-    fn storage_factory(self, configured_scheme: &str) -> StdArc<dyn ::iceberg::io::StorageFactory> {
+    fn storage_factory(self) -> StdArc<dyn ::iceberg::io::StorageFactory> {
         match self {
             Self::S3 => StdArc::new(OpenDalStorageFactory::S3 {
-                configured_scheme: configured_scheme.to_string(),
                 customized_credential_load: None,
             }),
             Self::Gcs => StdArc::new(OpenDalStorageFactory::Gcs),
-            Self::AzureBlob => StdArc::new(OpenDalStorageFactory::Azdls {
-                configured_scheme: configured_scheme
-                    .parse()
-                    .expect("validated Azure Blob scheme must parse"),
-            }),
+            Self::AzureBlob => StdArc::new(OpenDalStorageFactory::Azdls),
         }
     }
 }
@@ -405,9 +399,8 @@ impl IcebergEmitter {
                 )),
             );
         }
-        let configured_scheme = Self::validate_blob_location(backend, "table", location)?;
-        let properties =
-            IcebergObjectStoreProperties::from_entries(backend, &configured_scheme, config);
+        Self::validate_blob_location(backend, "table", location)?;
+        let properties = IcebergObjectStoreProperties::from_entries(backend, config);
         let catalog = StdArc::new(
             properties
                 .rest_catalog(catalog_client.name.as_str(), catalog_config)
@@ -966,7 +959,6 @@ impl IcebergEmitterClient {
 impl IcebergObjectStoreProperties {
     fn from_entries(
         backend: IcebergStorageBackend,
-        configured_scheme: &str,
         config: &[nervix_models::ClientConfigEntry],
     ) -> Self {
         let mut props = HashMap::new();
@@ -976,11 +968,7 @@ impl IcebergObjectStoreProperties {
                 entry.value.clone(),
             );
         }
-        Self {
-            backend,
-            configured_scheme: configured_scheme.to_string(),
-            props,
-        }
+        Self { backend, props }
     }
 
     fn property_key(backend: IcebergStorageBackend, key: &str) -> &str {
@@ -1082,7 +1070,7 @@ impl IcebergObjectStoreProperties {
                     .map(|entry| (entry.key.clone(), entry.value.clone())),
             );
         RestCatalogBuilder::default()
-            .with_storage_factory(self.backend.storage_factory(&self.configured_scheme))
+            .with_storage_factory(self.backend.storage_factory())
             .load(name, props.collect())
             .await
     }

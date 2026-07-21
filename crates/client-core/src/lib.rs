@@ -14,7 +14,7 @@ use proto::{
     CommandRequest, ListDomainsRequest, SessionRequest,
     session_service_client::SessionServiceClient,
 };
-use rustls::crypto::ring;
+use rustls::crypto::aws_lc_rs;
 use thiserror::Error;
 use tokio::{
     fs::File,
@@ -220,7 +220,7 @@ impl GrpcConnector {
             return Err(ClientError::TlsRequired);
         }
         if is_https {
-            let _ = ring::default_provider().install_default();
+            let _ = aws_lc_rs::default_provider().install_default();
             let mut tls = ClientTlsConfig::new();
             if let Some(pem) = self.options.ca_certificate_pem.clone() {
                 tls = tls.ca_certificate(Certificate::from_pem(pem));

@@ -277,9 +277,10 @@ Feature: Web console NSPL REPL
     When selector ".domain-select" is clicked
     And selector ".domain-menu [data-domain='{{domain}}_empty']" is clicked
     Then selector ".prompt-row" contains "{{domain}}_empty"
+    And selector ".domain-select" contains "{{domain}}_empty"
     And selector ".domain-select" contains "{{domain}}_empty" for 2500 milliseconds
-    And selector ".graph-hit-layer" does not contain "http_notifications"
     And selector ".graph-error" contains "NO ACTIVE DATAFLOW GRAPH"
+    And selector ".graph-hit-layer" does not contain "http_notifications"
     And selector ".graph-error" contains "NO ACTIVE DATAFLOW GRAPH" for 2500 milliseconds
     When selector ".domain-select" is clicked
     And selector ".domain-menu [data-domain='{{domain}}']" is clicked

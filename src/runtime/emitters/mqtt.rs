@@ -1,4 +1,7 @@
-use rumqttc::{AsyncClient, Event, MqttOptions, QoS, TlsConfiguration, Transport as MqttTransport};
+use rumqttc::{
+    AsyncClient, Event, MqttOptions, PublishOptions, SessionMode, TlsConfiguration,
+    Transport as MqttTransport,
+};
 use url::{Host, Url};
 
 use super::*;
@@ -26,7 +29,7 @@ impl MqttEmitter {
             loop {
                 tokio::task::consume_budget().await;
                 match eventloop.poll().await {
-                    Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) => {}
+                    Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {}
                     Err(error) => {
                         let _ = events.send(RuntimeEvent::Error(format!(
                             "mqtt emitter event loop failed for '{}' in domain '{}': {}",
@@ -62,8 +65,8 @@ impl MqttEmitter {
             .unwrap_or_else(|| default_client_id.to_string());
 
         let mqtt_addr = Self::parse_addr(&addr)?;
-        let mut options = MqttOptions::new(client_id, mqtt_addr.host, mqtt_addr.port);
-        options.set_clean_session(true);
+        let mut options = MqttOptions::new(client_id, (mqtt_addr.host, mqtt_addr.port));
+        options.set_session_mode(SessionMode::Clean);
         if mqtt_addr.tls {
             let tls = client_tls_paths(config);
             let ca = if let Some(ca_file) = tls.ca_file.as_ref() {
@@ -92,7 +95,10 @@ impl MqttEmitter {
                 client_auth,
             }));
         }
-        Ok(AsyncClient::new(options, 1024))
+        AsyncClient::builder(options)
+            .capacity(1024)
+            .try_build()
+            .map_err(|error| emitter_config_error(format!("invalid MQTT client config: {error}")))
     }
 
     fn parse_addr(addr: &str) -> EmitterRuntimeResult<MqttEmitterAddr> {
@@ -134,7 +140,11 @@ impl MqttEmitter {
                 .attach_printable("no initialized mqtt sink client"));
         };
         client
-            .publish(topic.as_str(), QoS::AtMostOnce, false, payload.to_vec())
+            .publish(
+                topic.as_str(),
+                payload.to_vec(),
+                PublishOptions::at_most_once(),
+            )
             .await
             .map_err(emitter_publish_error)
     }

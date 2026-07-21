@@ -74,6 +74,9 @@ const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
+const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
+const WEB_CONSOLE_FEATURE_NAME: &str = "Web console NSPL REPL";
 
 #[derive(cucumber::World, Debug, Default)]
 struct ScenarioWorld {
@@ -113,6 +116,7 @@ struct ScenarioWorld {
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
+    web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ScenarioWorld {
@@ -3117,7 +3121,7 @@ async fn when_selector_is_filled_with(world: &mut ScenarioWorld, selector: Strin
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     let value = expand_placeholders(world, &value);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     locator
         .fill(&value, None)
         .await
@@ -3132,7 +3136,7 @@ async fn when_selector_is_pressed_with(world: &mut ScenarioWorld, selector: Stri
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     let key = expand_placeholders(world, &key);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     locator
         .press(&key, None)
         .await
@@ -3147,7 +3151,7 @@ async fn when_selector_is_typed_with(world: &mut ScenarioWorld, selector: String
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     let value = expand_placeholders(world, &value);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     locator
         .press_sequentially(&value, None)
         .await
@@ -3162,7 +3166,6 @@ async fn when_selector_is_clicked(world: &mut ScenarioWorld, selector: String) {
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     page.locator(&selector)
-        .await
         .click(None)
         .await
         .expect("selector must be clickable");
@@ -3176,7 +3179,6 @@ async fn when_selector_is_clicked_by_script(world: &mut ScenarioWorld, selector:
         .expect("a browser page must be opened before selector actions");
     let selector = expand_placeholders(world, &selector);
     page.locator(&selector)
-        .await
         .evaluate::<(), ()>("element => element.click()", None::<()>)
         .await
         .expect("selector must be script-clickable");
@@ -3217,7 +3219,6 @@ async fn when_selector_uploads_resource_directory(
         })
         .collect::<Vec<_>>();
     page.locator(&selector)
-        .await
         .set_input_files_payload_multiple(&payloads, None)
         .await
         .expect("selector must accept uploaded files");
@@ -3524,7 +3525,7 @@ async fn then_selector_contains_text_exactly_times(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         tokio::task::consume_budget().await;
@@ -3558,7 +3559,7 @@ async fn then_selector_contains_text(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         tokio::task::consume_budget().await;
@@ -3591,7 +3592,7 @@ async fn then_selector_contains_text_for_milliseconds(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_millis(duration_milliseconds as u64);
     loop {
         tokio::task::consume_budget().await;
@@ -3623,7 +3624,7 @@ async fn then_selector_does_not_contain_text(
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let unexpected = expand_placeholders(world, &unexpected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         tokio::task::consume_budget().await;
@@ -3678,7 +3679,7 @@ async fn then_selector_has_value(world: &mut ScenarioWorld, selector: String, ex
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
-    let locator = page.locator(&selector).await;
+    let locator = page.locator(&selector);
     locator
         .wait_for(Some(
             WaitForOptions::builder()
@@ -4371,11 +4372,11 @@ async fn when_graph_edge_from_to_is_clicked_with_viewport_focused_on_its_middle(
         if status == "OK" {
             let x = result
                 .get("x")
-                .and_then(|value| value.parse::<i32>().ok())
+                .and_then(|value| value.parse::<f64>().ok())
                 .expect("graph edge click setup must return x coordinate");
             let y = result
                 .get("y")
-                .and_then(|value| value.parse::<i32>().ok())
+                .and_then(|value| value.parse::<f64>().ok())
                 .expect("graph edge click setup must return y coordinate");
             page.mouse()
                 .click(x, y, None)
@@ -9554,7 +9555,6 @@ fn rustfs_iceberg_props() -> [(String, String); 7] {
 
 fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
     StdArc::new(OpenDalStorageFactory::S3 {
-        configured_scheme: "s3".to_string(),
         customized_credential_load: None,
     })
 }
@@ -9978,13 +9978,29 @@ async fn run_scenarios() {
     ScenarioWorld::cucumber()
         .max_concurrent_scenarios(8)
         .retries(1)
-        .before(|feature, _rule, scenario, _world| {
+        .before(|feature, _rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             Box::pin(async move {
                 append_cucumber_log_line(&format!(
                     "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
                 ));
+                if feature_name == WEB_CONSOLE_FEATURE_NAME {
+                    // Starting many three-node clusters and optimized WASM consoles together can
+                    // starve Chromium renderer event loops under the suite's global concurrency.
+                    world.web_console_scenario_permit = Some(
+                        WEB_CONSOLE_SCENARIO_PERMITS
+                            .get_or_init(|| {
+                                StdArc::new(tokio::sync::Semaphore::new(
+                                    MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS,
+                                ))
+                            })
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .expect("web console scenario semaphore must remain open"),
+                    );
+                }
             })
         })
         .after(|_feature, _rule, _scenario, _ev, world| {
@@ -10018,6 +10034,7 @@ async fn run_scenarios() {
                             ));
                         }
                     }
+                    world.web_console_scenario_permit = None;
                 }
             })
         })
