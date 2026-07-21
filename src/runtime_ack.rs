@@ -1,11 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
+use triomphe::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AckOutcome {

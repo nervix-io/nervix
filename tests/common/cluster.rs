@@ -5,7 +5,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, TcpListener},
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, LazyLock, OnceLock},
+    sync::{Arc as StdArc, LazyLock, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -72,6 +72,7 @@ use tonic::{
     metadata::MetadataValue,
     transport::{Certificate, ClientTlsConfig, Endpoint},
 };
+use triomphe::Arc;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
@@ -2050,7 +2051,7 @@ async fn publish_secure_websocket(
     let client_config = RustlsClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(client_config));
+    let connector = TlsConnector::from(StdArc::new(client_config));
     let tcp_stream = TcpStream::connect(parse_addr(&spec.https_addr())?)
         .await
         .map_err(io::Error::other)?;

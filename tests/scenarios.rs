@@ -3,7 +3,7 @@ use std::{
     fs::{OpenOptions, create_dir_all},
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc as StdArc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -9552,8 +9552,8 @@ fn rustfs_iceberg_props() -> [(String, String); 7] {
     ]
 }
 
-fn rustfs_iceberg_storage_factory() -> Arc<dyn iceberg::io::StorageFactory> {
-    Arc::new(OpenDalStorageFactory::S3 {
+fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
+    StdArc::new(OpenDalStorageFactory::S3 {
         configured_scheme: "s3".to_string(),
         customized_credential_load: None,
     })

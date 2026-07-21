@@ -3,7 +3,7 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc as StdArc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -50,6 +50,7 @@ use tokio::{
     sync::{Mutex, mpsc, watch},
     time::{Duration, Instant, sleep, timeout},
 };
+use triomphe::Arc;
 
 use super::{
     BranchInstanceRegistry, BranchKey, BranchedProcessorOperationSpec, RelayMessage,
@@ -195,7 +196,7 @@ fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices> {
         )),
         attached_runtime_consumer_count: 0,
         detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from([]),
+        remote_runtime_consumers: Arc::from(Vec::new()),
         remote_dispatcher: None,
     })
 }
@@ -1124,14 +1125,14 @@ fn wasm_test_generated_output(
 }
 
 fn wasm_guest_column(field: arrow_schema::Field, array: ArrayRef) -> Vec<u8> {
-    let schema = Arc::new(ArrowSchema::new(vec![field.with_name("")]));
+    let schema = StdArc::new(ArrowSchema::new(vec![field.with_name("")]));
     let batch =
         RecordBatch::try_new(schema.clone(), vec![array]).expect("guest column batch must build");
     wasm_guest_stream(schema, &[batch])
 }
 
 fn wasm_generated_pool(fields: Vec<arrow_schema::Field>, arrays: Vec<ArrayRef>) -> Vec<u8> {
-    let schema = Arc::new(ArrowSchema::new(
+    let schema = StdArc::new(ArrowSchema::new(
         fields
             .into_iter()
             .map(|field| field.with_name(""))
@@ -1142,7 +1143,7 @@ fn wasm_generated_pool(fields: Vec<arrow_schema::Field>, arrays: Vec<ArrayRef>) 
     wasm_guest_stream(schema, &[batch])
 }
 
-fn wasm_guest_stream(schema: Arc<ArrowSchema>, batches: &[RecordBatch]) -> Vec<u8> {
+fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBatch]) -> Vec<u8> {
     let mut ipc = Vec::new();
     {
         let mut writer =
@@ -1197,7 +1198,7 @@ fn wasm_identity_input_reference_reuses_exact_source_array() {
     )
     .expect("identity reference must materialize");
 
-    assert!(Arc::ptr_eq(&source, outputs[0].batch.batch().column(0)));
+    assert!(StdArc::ptr_eq(&source, outputs[0].batch.batch().column(0)));
 }
 
 #[test]
@@ -1385,7 +1386,7 @@ fn wasm_identity_references_support_every_internal_arrow_field_kind() {
         .iter()
         .zip(outputs[0].batch.batch().columns())
     {
-        assert!(Arc::ptr_eq(source, output));
+        assert!(StdArc::ptr_eq(source, output));
     }
 }
 
@@ -1451,7 +1452,7 @@ fn wasm_mixed_input_and_generated_columns_match_destination_schema() {
         test_schema(&[("value", ParseAsType::I32), ("bucket", ParseAsType::String)]);
     let (input, ack_map) = wasm_input_for_values(&input_schema, &[2, 4]);
     let field = output_schema.arrow_schema().field(1).clone();
-    let ipc = wasm_guest_column(field, Arc::new(StringArray::from(vec!["EVEN", "EVEN"])));
+    let ipc = wasm_guest_column(field, StdArc::new(StringArray::from(vec!["EVEN", "EVEN"])));
     let outputs = validate_wasm_test_outputs(
         &input_schema,
         &output_schema,
@@ -1490,7 +1491,7 @@ fn wasm_shared_generated_column_reuses_one_array_across_routes_and_fields() {
     let rows = wasm_input_acks(&input).rows.clone();
     let generated_arrow_ipc_batch = wasm_guest_column(
         enriched_schema.arrow_schema().field(1).clone(),
-        Arc::new(StringArray::from(vec!["EVEN", "EVEN"])),
+        StdArc::new(StringArray::from(vec!["EVEN", "EVEN"])),
     );
     let output = WasmEnvelope::output(
         generated_arrow_ipc_batch,
@@ -1529,8 +1530,8 @@ fn wasm_shared_generated_column_reuses_one_array_across_routes_and_fields() {
     .expect("shared generated output must materialize");
 
     let first = outputs[0].batch.batch().column(1);
-    assert!(Arc::ptr_eq(first, outputs[0].batch.batch().column(2)));
-    assert!(Arc::ptr_eq(first, outputs[1].batch.batch().column(1)));
+    assert!(StdArc::ptr_eq(first, outputs[0].batch.batch().column(2)));
+    assert!(StdArc::ptr_eq(first, outputs[1].batch.batch().column(1)));
     let input_values = outputs[0]
         .batch
         .batch()
@@ -1546,7 +1547,8 @@ fn wasm_generated_pool_rejects_out_of_range_and_unreferenced_columns() {
     let input_schema = test_schema(&[("input", ParseAsType::I32)]);
     let output_schema = test_schema(&[("generated", ParseAsType::String)]);
     let field = output_schema.arrow_schema().field(0).clone();
-    let one_column = wasm_guest_column(field.clone(), Arc::new(StringArray::from(vec!["value"])));
+    let one_column =
+        wasm_guest_column(field.clone(), StdArc::new(StringArray::from(vec!["value"])));
     let rows = vec![WasmOutputRow {
         tokens: Vec::new(),
         source_token: None,
@@ -1573,8 +1575,8 @@ fn wasm_generated_pool_rejects_out_of_range_and_unreferenced_columns() {
     let two_columns = wasm_generated_pool(
         vec![field.clone(), field],
         vec![
-            Arc::new(StringArray::from(vec!["used"])),
-            Arc::new(StringArray::from(vec!["unused"])),
+            StdArc::new(StringArray::from(vec!["used"])),
+            StdArc::new(StringArray::from(vec!["unused"])),
         ],
     );
     let unreferenced = validate_wasm_test_outputs(
@@ -1601,7 +1603,7 @@ fn wasm_generated_pool_rejects_route_shape_type_and_row_mismatches() {
     let field = output_schema.arrow_schema().field(0).clone();
     let generated = wasm_guest_column(
         field.clone(),
-        Arc::new(StringArray::from(vec!["first", "second"])),
+        StdArc::new(StringArray::from(vec!["first", "second"])),
     );
     let one_row = vec![WasmOutputRow {
         tokens: Vec::new(),
@@ -1633,7 +1635,7 @@ fn wasm_generated_pool_rejects_route_shape_type_and_row_mismatches() {
         &nullable_output_schema,
         &super::WasmAckMap::default(),
         vec![wasm_test_generated_output(
-            wasm_guest_column(field, Arc::new(StringArray::from(vec!["value"]))),
+            wasm_guest_column(field, StdArc::new(StringArray::from(vec!["value"]))),
             vec![WasmOutputColumnRef::generated(0)],
             one_row.clone(),
         )],
@@ -1680,7 +1682,7 @@ fn wasm_shared_generated_column_requires_each_route_to_use_the_pool_row_layout()
     let second_schema = test_schema(&[("second", ParseAsType::String)]);
     let generated = wasm_guest_column(
         first_schema.arrow_schema().field(0).clone(),
-        Arc::new(StringArray::from(vec!["one", "two"])),
+        StdArc::new(StringArray::from(vec!["one", "two"])),
     );
     let row = WasmOutputRow {
         tokens: Vec::new(),
@@ -1810,7 +1812,7 @@ fn wasm_guest_generated_rows_do_not_require_source_tokens() {
     let output_schema = test_schema(&[("value", ParseAsType::I32)]);
     let ipc = wasm_guest_column(
         output_schema.arrow_schema().field(0).clone(),
-        Arc::new(Int32Array::from(vec![42])),
+        StdArc::new(Int32Array::from(vec![42])),
     );
     let outputs = validate_wasm_test_outputs(
         &input_schema,
@@ -1856,7 +1858,7 @@ fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
         super::WasmOutputError::GeneratedColumnOutOfRange { .. }
     ));
 
-    let empty_schema = Arc::new(ArrowSchema::empty());
+    let empty_schema = StdArc::new(ArrowSchema::empty());
     let zero_fields = wasm_guest_stream(
         empty_schema.clone(),
         &[RecordBatch::new_empty(empty_schema)],
@@ -1867,10 +1869,10 @@ fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
         super::WasmOutputError::InvalidGeneratedArrowIpc { .. }
     ));
 
-    let named_field_schema = Arc::new(ArrowSchema::new(vec![destination_field.clone()]));
+    let named_field_schema = StdArc::new(ArrowSchema::new(vec![destination_field.clone()]));
     let named_field_batch = RecordBatch::try_new(
         named_field_schema.clone(),
-        vec![Arc::new(Int32Array::from(vec![2]))],
+        vec![StdArc::new(Int32Array::from(vec![2]))],
     )
     .expect("named field batch must build");
     let named_field = validate_ipc(wasm_guest_stream(named_field_schema, &[named_field_batch]))
@@ -1880,7 +1882,7 @@ fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
         super::WasmOutputError::InvalidGeneratedArrowIpc { .. }
     ));
 
-    let one_field_schema = Arc::new(ArrowSchema::new(vec![
+    let one_field_schema = StdArc::new(ArrowSchema::new(vec![
         destination_field.clone().with_name(""),
     ]));
     let no_batches = validate_ipc(wasm_guest_stream(one_field_schema.clone(), &[]))
@@ -1891,7 +1893,7 @@ fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
     ));
     let one_batch = RecordBatch::try_new(
         one_field_schema.clone(),
-        vec![Arc::new(Int32Array::from(vec![2]))],
+        vec![StdArc::new(Int32Array::from(vec![2]))],
     )
     .expect("one-field batch must build");
     let multiple_batches = validate_ipc(wasm_guest_stream(
@@ -1906,7 +1908,7 @@ fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
 
     let mismatched_field = validate_ipc(wasm_guest_column(
         arrow_schema::Field::new("ignored", arrow_schema::DataType::Utf8, false),
-        Arc::new(StringArray::from(vec!["wrong type"])),
+        StdArc::new(StringArray::from(vec!["wrong type"])),
     ))
     .expect_err("guest field mismatch must fail");
     assert!(matches!(
@@ -1916,7 +1918,7 @@ fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
 
     let row_count = validate_ipc(wasm_guest_column(
         destination_field.clone(),
-        Arc::new(Int32Array::from(vec![2, 4])),
+        StdArc::new(Int32Array::from(vec![2, 4])),
     ))
     .expect_err("guest row-count mismatch must fail");
     assert!(matches!(
@@ -1925,7 +1927,7 @@ fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
     ));
 
     let mut trailing_ipc =
-        wasm_guest_column(destination_field, Arc::new(Int32Array::from(vec![2])));
+        wasm_guest_column(destination_field, StdArc::new(Int32Array::from(vec![2])));
     trailing_ipc.push(0);
     let trailing = validate_ipc(trailing_ipc).expect_err("trailing guest IPC must fail");
     assert!(matches!(
@@ -3261,7 +3263,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         fanout: super::RelayBoundaryFanout::BranchCollapse(branch_collapse),
         attached_runtime_consumer_count: 2,
         detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from([]),
+        remote_runtime_consumers: Arc::from(Vec::new()),
         remote_dispatcher: None,
     });
     let mut relay_runtime = super::ConcreteRelayRuntime::new(super::ConcreteRelayRuntimeBuild {
@@ -3691,7 +3693,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             },
             passive_only: false,
             shutdown,
-            graph: Arc::new(ArcSwapOption::empty()),
+            graph: StdArc::new(ArcSwapOption::empty()),
             relay_registries,
             relay_schemas,
             relay_services,
@@ -3763,7 +3765,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 },
                 passive_only: false,
                 shutdown,
-                graph: Arc::new(ArcSwapOption::empty()),
+                graph: StdArc::new(ArcSwapOption::empty()),
                 relay_registries: HashMap::default(),
                 relay_schemas: HashMap::default(),
                 relay_services: HashMap::default(),
@@ -3820,7 +3822,7 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             },
             passive_only: false,
             shutdown,
-            graph: Arc::new(ArcSwapOption::empty()),
+            graph: StdArc::new(ArcSwapOption::empty()),
             relay_registries: HashMap::default(),
             relay_schemas: HashMap::default(),
             relay_services: HashMap::default(),
@@ -5833,7 +5835,7 @@ async fn branched_root_without_children_acks_success() {
         processors: HashMap::default(),
         processors_by_input: HashMap::default(),
     };
-    let graph = Arc::new(ArcSwapOption::from(None));
+    let graph = StdArc::new(ArcSwapOption::from(None));
     let (acks, completion) = AckSet::root();
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
 
@@ -5874,7 +5876,7 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         fanout,
         attached_runtime_consumer_count: 1,
         detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from([]),
+        remote_runtime_consumers: Arc::from(Vec::new()),
         remote_dispatcher: None,
     });
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
@@ -5941,7 +5943,7 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         ],
     )
     .expect("batch should build");
-    let graph = Arc::new(ArcSwapOption::from(None));
+    let graph = StdArc::new(ArcSwapOption::from(None));
     let mut instances =
         BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
 
@@ -5986,7 +5988,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         fanout: super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1)),
         attached_runtime_consumer_count: 0,
         detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from([]),
+        remote_runtime_consumers: Arc::from(Vec::new()),
         remote_dispatcher: None,
     });
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
@@ -6014,7 +6016,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         processors: HashMap::default(),
         processors_by_input: HashMap::default(),
     };
-    let graph = Arc::new(ArcSwapOption::from(None));
+    let graph = StdArc::new(ArcSwapOption::from(None));
     let mut instances =
         BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
 
@@ -6069,7 +6071,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
         runtime.clone(),
         domain.clone(),
         identifier("tenant_partition"),
-        Arc::new(ArcSwapOption::from(None)),
+        StdArc::new(ArcSwapOption::from(None)),
         super::BranchInstanceTemplate {
             source_kind: ModelKind::Reingestor,
             source: identifier("tenant_partition"),
@@ -6286,7 +6288,7 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
         runtime,
         domain.clone(),
         identifier("tenant_ingestor"),
-        Arc::new(ArcSwapOption::from(None)),
+        StdArc::new(ArcSwapOption::from(None)),
         super::BranchInstanceTemplate {
             source_kind: ModelKind::Ingestor,
             source: identifier("tenant_ingestor"),
@@ -6360,7 +6362,7 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
         fanout: fanout.clone(),
         attached_runtime_consumer_count: 1,
         detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from([]),
+        remote_runtime_consumers: Arc::from(Vec::new()),
         remote_dispatcher: None,
     });
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
@@ -6397,7 +6399,7 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
             acks: AckSet::empty(),
         })
         .collect::<Vec<_>>();
-    let graph = Arc::new(ArcSwapOption::from(None));
+    let graph = StdArc::new(ArcSwapOption::from(None));
     let dispatch_task = tokio::spawn({
         let runtime = runtime.clone();
         let domain = domain.clone();

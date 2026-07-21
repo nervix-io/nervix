@@ -1,4 +1,4 @@
-use std::{io::Cursor, str::FromStr, sync::Arc};
+use std::{io::Cursor, str::FromStr, sync::Arc as StdArc};
 
 use ahash::{HashMap, HashMapExt, HashSet};
 use apache_avro::{
@@ -52,11 +52,12 @@ use prost_reflect::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use thiserror::Error;
+use triomphe::Arc;
 
 #[derive(Debug, Clone)]
 pub struct CompiledSchema {
     fields: Vec<CompiledSchemaField>,
-    arrow_schema: Arc<ArrowSchema>,
+    arrow_schema: StdArc<ArrowSchema>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,7 +165,7 @@ pub trait RuntimeRecordValues {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeRecordBatch {
-    schema: Arc<ArrowSchema>,
+    schema: StdArc<ArrowSchema>,
     batch: RecordBatch,
 }
 
@@ -284,7 +285,7 @@ impl CompiledSchema {
         &self.fields
     }
 
-    pub fn arrow_schema(&self) -> Arc<ArrowSchema> {
+    pub fn arrow_schema(&self) -> StdArc<ArrowSchema> {
         self.arrow_schema.clone()
     }
 
@@ -520,57 +521,41 @@ impl CompiledSchema {
         records: &[RuntimeRecord],
     ) -> Result<ArrayRef, String> {
         match &field.ty {
-            ParseAsType::U8 => Ok(Arc::new(UInt8Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_u8,
-            )?))),
-            ParseAsType::I8 => Ok(Arc::new(Int8Array::from(collect_optional_typed_values(
+            ParseAsType::U8 => Ok(StdArc::new(UInt8Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_u8)?,
+            ))),
+            ParseAsType::I8 => Ok(StdArc::new(Int8Array::from(collect_optional_typed_values(
                 records,
                 field,
                 RuntimeValue::as_i8,
             )?))),
-            ParseAsType::U16 => Ok(Arc::new(UInt16Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_u16,
-            )?))),
-            ParseAsType::I16 => Ok(Arc::new(Int16Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_i16,
-            )?))),
-            ParseAsType::U32 => Ok(Arc::new(UInt32Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_u32,
-            )?))),
-            ParseAsType::I32 => Ok(Arc::new(Int32Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_i32,
-            )?))),
-            ParseAsType::U64 => Ok(Arc::new(UInt64Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_u64,
-            )?))),
-            ParseAsType::I64 => Ok(Arc::new(Int64Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_i64,
-            )?))),
-            ParseAsType::Bool => Ok(Arc::new(BooleanArray::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_bool,
-            )?))),
-            ParseAsType::String => Ok(Arc::new(StringArray::from(collect_optional_typed_values(
-                records,
-                field,
-                |value| value.as_string().map(str::to_owned),
-            )?))),
-            ParseAsType::Datetime => Ok(Arc::new(
+            ParseAsType::U16 => Ok(StdArc::new(UInt16Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_u16)?,
+            ))),
+            ParseAsType::I16 => Ok(StdArc::new(Int16Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_i16)?,
+            ))),
+            ParseAsType::U32 => Ok(StdArc::new(UInt32Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_u32)?,
+            ))),
+            ParseAsType::I32 => Ok(StdArc::new(Int32Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_i32)?,
+            ))),
+            ParseAsType::U64 => Ok(StdArc::new(UInt64Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_u64)?,
+            ))),
+            ParseAsType::I64 => Ok(StdArc::new(Int64Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_i64)?,
+            ))),
+            ParseAsType::Bool => Ok(StdArc::new(BooleanArray::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_bool)?,
+            ))),
+            ParseAsType::String => Ok(StdArc::new(StringArray::from(
+                collect_optional_typed_values(records, field, |value| {
+                    value.as_string().map(str::to_owned)
+                })?,
+            ))),
+            ParseAsType::Datetime => Ok(StdArc::new(
                 TimestampNanosecondArray::from(collect_optional_typed_values(
                     records,
                     field,
@@ -582,16 +567,12 @@ impl CompiledSchema {
                 )?)
                 .with_timezone_utc(),
             )),
-            ParseAsType::F32 => Ok(Arc::new(Float32Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_f32,
-            )?))),
-            ParseAsType::F64 => Ok(Arc::new(Float64Array::from(collect_optional_typed_values(
-                records,
-                field,
-                RuntimeValue::as_f64,
-            )?))),
+            ParseAsType::F32 => Ok(StdArc::new(Float32Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_f32)?,
+            ))),
+            ParseAsType::F64 => Ok(StdArc::new(Float64Array::from(
+                collect_optional_typed_values(records, field, RuntimeValue::as_f64)?,
+            ))),
             ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
                 build_recursive_arrow_column(records, field)
             }
@@ -842,7 +823,7 @@ impl RuntimeRecordValues for DecodedRecord {
 
 impl RuntimeRecordBatch {
     pub(crate) fn from_record_batch(
-        expected_schema: Arc<ArrowSchema>,
+        expected_schema: StdArc<ArrowSchema>,
         batch: RecordBatch,
     ) -> Result<Self, String> {
         if batch.schema().as_ref() != expected_schema.as_ref() {
@@ -854,7 +835,7 @@ impl RuntimeRecordBatch {
         })
     }
 
-    pub fn schema(&self) -> Arc<ArrowSchema> {
+    pub fn schema(&self) -> StdArc<ArrowSchema> {
         self.schema.clone()
     }
 
@@ -892,7 +873,7 @@ impl RuntimeRecordBatch {
     }
 
     pub fn from_arrow_ipc_bytes(
-        expected_schema: Arc<ArrowSchema>,
+        expected_schema: StdArc<ArrowSchema>,
         bytes: &[u8],
     ) -> Result<Self, String> {
         let reader =
@@ -1349,7 +1330,7 @@ pub fn compile_schema(schema: &CreateSchema) -> CompiledSchema {
         .collect::<Vec<_>>();
     CompiledSchema {
         fields,
-        arrow_schema: Arc::new(ArrowSchema::new(arrow_fields)),
+        arrow_schema: StdArc::new(ArrowSchema::new(arrow_fields)),
     }
 }
 
@@ -2996,8 +2977,6 @@ fn avro_type_name(ty: AvroType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use chrono::DateTime;
     use nervix_models::{
         CodecJaqTransformations, CodecProtobufConfig, CreateCodec, CreateSchema, CreateWireSchema,

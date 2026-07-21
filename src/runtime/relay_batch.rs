@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::sync::Arc as StdArc;
 
 use nervix_models::Timestamp;
+use triomphe::Arc;
 
 use super::BranchKey;
 use crate::{
@@ -293,7 +294,7 @@ impl RelayRecordBatch {
         u64::try_from(self.batch.batch().num_rows()).unwrap_or(u64::MAX)
     }
 
-    pub(super) fn arrow_schema(&self) -> Arc<arrow_schema::Schema> {
+    pub(super) fn arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
         self.batch.schema()
     }
 

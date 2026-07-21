@@ -1,7 +1,8 @@
-use std::{hash::Hash, sync::Arc, time::Duration};
+use std::{hash::Hash, time::Duration};
 
 use indexmap::IndexMap;
 use nervix_models::Timestamp;
+use triomphe::Arc;
 
 pub(super) struct BranchInstanceRegistry<K, V>
 where
@@ -217,11 +218,12 @@ mod tests {
     };
 
     use nervix_models::Timestamp;
+    use triomphe::Arc;
 
     use super::BranchInstanceRegistry;
 
     #[derive(Debug)]
-    struct DropCounter(std::sync::Arc<AtomicUsize>);
+    struct DropCounter(Arc<AtomicUsize>);
 
     impl Drop for DropCounter {
         fn drop(&mut self) {
@@ -325,7 +327,7 @@ mod tests {
 
     #[test]
     fn clear_and_drop_release_state_once() {
-        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
 
         {
             let mut registry = BranchInstanceRegistry::<String, DropCounter>::new();

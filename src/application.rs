@@ -8,7 +8,7 @@ use std::{
     num::NonZeroU32,
     path::{Component, Path, PathBuf},
     sync::{
-        Arc,
+        Arc as StdArc,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -305,6 +305,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::{
     EnvFilter, fmt, fmt::writer::BoxMakeWriter, layer::SubscriberExt, util::SubscriberInitExt,
 };
+use triomphe::Arc;
 use typed_builder::TypedBuilder;
 
 use crate::{
@@ -1285,7 +1286,7 @@ async fn serve_http(
 async fn serve_https(
     runtime: Arc<Runtime>,
     request_tasks: TaskTracker,
-    http_tls_server_config: Arc<RwLock<Option<Arc<ServerConfig>>>>,
+    http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> Result<(), Report<AppError>> {
@@ -2383,7 +2384,7 @@ async fn serve_web_console_http(
 
 async fn serve_web_console_https(
     service: SessionServiceImpl,
-    tls_server_config: Arc<ServerConfig>,
+    tls_server_config: StdArc<ServerConfig>,
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> Result<(), Report<AppError>> {
@@ -2482,7 +2483,7 @@ async fn serve_cluster_api_http(
 async fn serve_cluster_api_https(
     consensus: Arc<ConsensusHandle>,
     resource_store: Arc<ResourceStore>,
-    cluster_api_tls_server_config: Arc<ServerConfig>,
+    cluster_api_tls_server_config: StdArc<ServerConfig>,
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> Result<(), Report<AppError>> {
@@ -2784,7 +2785,7 @@ struct SessionServiceImpl {
     registry: Arc<Registry>,
     resource_store: Arc<ResourceStore>,
     cluster_api_clients: Arc<ClusterApiClients>,
-    http_tls_server_config: Arc<RwLock<Option<Arc<ServerConfig>>>>,
+    http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     runtime: Arc<Runtime>,
     replica_count: usize,
     shutdown: CancellationToken,
@@ -3956,8 +3957,8 @@ impl SessionServiceImpl {
         if configured_tls {
             let config = ServerConfig::builder()
                 .with_no_client_auth()
-                .with_cert_resolver(Arc::new(resolver));
-            *guard = Some(Arc::new(config));
+                .with_cert_resolver(StdArc::new(resolver));
+            *guard = Some(StdArc::new(config));
         } else {
             *guard = None;
         }
@@ -8754,7 +8755,7 @@ impl SessionServiceImpl {
         &self,
         domain: &Domain,
         relay: &Identifier,
-    ) -> Result<Option<Arc<arrow_schema::Schema>>, String> {
+    ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
         match self.registry.get(domain, ModelKind::Relay, relay) {
             Ok(Some(Model::Relay(relay_model))) => {
                 let Some(branch_ref) = relay_model.branching.branch() else {
@@ -8821,7 +8822,7 @@ impl SessionServiceImpl {
         &self,
         domain: &Domain,
         relay: &Identifier,
-    ) -> Result<Option<Arc<arrow_schema::Schema>>, String> {
+    ) -> Result<Option<StdArc<arrow_schema::Schema>>, String> {
         let schedule = self.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
@@ -9920,7 +9921,6 @@ fn format_correlator_describe_output(
         format!("match: {}", correlator.match_policy.as_ref()),
         format!("correlate where: {}", correlator.correlate_where),
         format!("max time: {}", correlator.max_time),
-        format!("output: {}", correlator.output),
         format!(
             "filter-where: {}",
             if correlator.filter_where.is_some() {
@@ -11154,7 +11154,7 @@ fn build_cluster_api_http_client(
         })
 }
 
-fn load_cluster_api_tls_server_config() -> Result<Arc<ServerConfig>, Report<AppError>> {
+fn load_cluster_api_tls_server_config() -> Result<StdArc<ServerConfig>, Report<AppError>> {
     nervix_interconnect::install_rustls_crypto_provider();
     let cert_path = internal_tls_path(INTERNAL_TLS_CERT_FILE);
     let key_path = internal_tls_path(INTERNAL_TLS_KEY_FILE);
@@ -11168,13 +11168,13 @@ fn load_cluster_api_tls_server_config() -> Result<Arc<ServerConfig>, Report<AppE
         .map_err(|error| {
             Report::new(AppError::LoadClusterApiTls).attach_printable(error.to_string())
         })?;
-    Ok(Arc::new(config))
+    Ok(StdArc::new(config))
 }
 
 fn load_web_console_tls_server_config(
     cert_path: &Path,
     key_path: &Path,
-) -> Result<Arc<ServerConfig>, Report<AppError>> {
+) -> Result<StdArc<ServerConfig>, Report<AppError>> {
     nervix_interconnect::install_rustls_crypto_provider();
     let cert_chain = load_certificates_from_pem_file(cert_path)
         .map_err(|error| Report::new(AppError::LoadWebConsoleTls).attach_printable(error))?;
@@ -11186,7 +11186,7 @@ fn load_web_console_tls_server_config(
         .map_err(|error| {
             Report::new(AppError::LoadWebConsoleTls).attach_printable(error.to_string())
         })?;
-    Ok(Arc::new(config))
+    Ok(StdArc::new(config))
 }
 
 async fn load_grpc_tls_server_config() -> Result<ServerTlsConfig, Report<AppError>> {
