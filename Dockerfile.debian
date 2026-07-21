@@ -110,36 +110,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     esac \
     && case "${TARGETARCH}" in \
     amd64) \
-      export CC=clang-${LLVM_VERSION}; \
-      export CXX=clang++-${LLVM_VERSION}; \
-      export AR=llvm-ar-${LLVM_VERSION}; \
-      export CFLAGS="--target=x86_64-unknown-linux-gnu"; \
-      export CXXFLAGS="${CFLAGS}"; \
-      export LDFLAGS="--target=x86_64-unknown-linux-gnu"; \
       export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang-${LLVM_VERSION}; \
       export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--target=x86_64-unknown-linux-gnu -C link-arg=-fuse-ld=lld"; \
-      export CC_x86_64_unknown_linux_gnu="${CC}"; \
-      export CXX_x86_64_unknown_linux_gnu="${CXX}"; \
-      export AR_x86_64_unknown_linux_gnu="${AR}"; \
-      export CFLAGS_x86_64_unknown_linux_gnu="${CFLAGS}"; \
-      export CXXFLAGS_x86_64_unknown_linux_gnu="${CXXFLAGS}"; \
-      export LDFLAGS_x86_64_unknown_linux_gnu="${LDFLAGS}"; \
+      export CC_x86_64_unknown_linux_gnu=clang-${LLVM_VERSION}; \
+      export CXX_x86_64_unknown_linux_gnu=clang++-${LLVM_VERSION}; \
+      export AR_x86_64_unknown_linux_gnu=llvm-ar-${LLVM_VERSION}; \
+      export CFLAGS_x86_64_unknown_linux_gnu="--target=x86_64-unknown-linux-gnu"; \
       export CARGO_SONIC_LOADER_RUSTFLAGS="-C link-arg=--target=x86_64-unknown-linux-gnu -C link-arg=-fuse-ld=lld";; \
     arm64) \
-      export CC=clang-${LLVM_VERSION}; \
-      export CXX=clang++-${LLVM_VERSION}; \
-      export AR=llvm-ar-${LLVM_VERSION}; \
-      export CFLAGS="--target=aarch64-unknown-linux-gnu --gcc-toolchain=/usr -I/usr/include/aarch64-linux-gnu"; \
-      export CXXFLAGS="${CFLAGS}"; \
-      export LDFLAGS="--target=aarch64-unknown-linux-gnu --gcc-toolchain=/usr"; \
       export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=clang-${LLVM_VERSION}; \
       export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--target=aarch64-unknown-linux-gnu -C link-arg=--gcc-toolchain=/usr -C link-arg=-fuse-ld=lld"; \
-      export CC_aarch64_unknown_linux_gnu="${CC}"; \
-      export CXX_aarch64_unknown_linux_gnu="${CXX}"; \
-      export AR_aarch64_unknown_linux_gnu="${AR}"; \
-      export CFLAGS_aarch64_unknown_linux_gnu="${CFLAGS}"; \
-      export CXXFLAGS_aarch64_unknown_linux_gnu="${CXXFLAGS}"; \
-      export LDFLAGS_aarch64_unknown_linux_gnu="${LDFLAGS}"; \
+      export CC_aarch64_unknown_linux_gnu=clang-${LLVM_VERSION}; \
+      export CXX_aarch64_unknown_linux_gnu=clang++-${LLVM_VERSION}; \
+      export AR_aarch64_unknown_linux_gnu=llvm-ar-${LLVM_VERSION}; \
+      export CFLAGS_aarch64_unknown_linux_gnu="--target=aarch64-unknown-linux-gnu --gcc-toolchain=/usr -I/usr/include/aarch64-linux-gnu"; \
+      export CXXFLAGS_aarch64_unknown_linux_gnu="--target=aarch64-unknown-linux-gnu --gcc-toolchain=/usr -I/usr/include/aarch64-linux-gnu"; \
       export CARGO_SONIC_LOADER_RUSTFLAGS="-C link-arg=--target=aarch64-unknown-linux-gnu -C link-arg=--gcc-toolchain=/usr -C link-arg=-fuse-ld=lld";; \
     esac \
     && export LIBCLANG_PATH="$(dirname "$(find /usr -type f \

@@ -111,11 +111,13 @@ prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = { workspace = true }
 protox = { workspace = true }
 pulsar = { workspace = true }
-# Use the patched AWS-LC backend for Kafka TLS. Keep curl disabled because curl-sys defaults to OpenSSL;
-# use the configure build because the draft PR's CMake path still includes curl headers with OIDC disabled.
+# Use AWS-LC for Kafka TLS and Rustls for the statically linked curl/OIDC path.
 rdkafka = { workspace = true, features = [
   "tokio",
+  "curl-static",
+  "curl-rustls",
   "libz-static",
+  "cmake_build",
   "static-linking",
   "aws-lc",
 ] }
@@ -350,7 +352,7 @@ rcgen = { version = "0.13", default-features = false, features = [
   "pem",
 ] }
 # PR #850 adds AWS-LC support to librdkafka and pins PR #1184, which exports its native library paths.
-rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", rev = "1a66965ac0add66c273eee3355372816a49210b9", default-features = false }
+rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", rev = "b6d96bd5381691276b1ba8b12ce2c419909f2b20", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
   "tokio-comp",
