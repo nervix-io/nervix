@@ -34,8 +34,8 @@ jobs:
 
   checks:
     name: checks
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 15
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97
