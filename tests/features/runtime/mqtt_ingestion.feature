@@ -475,10 +475,21 @@ Feature: MQTT ingestion
         ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
+      """
+      ready: true
+      """
+    When these NSPL commands are executed
+      """
         DRAIN NODE node-1;
         SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "ingestor" "mqtt_notifications" is saved as placeholder "mqtt_owner"
+    And within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
+      """
+      ready: true
+      """
     When 4 JSON messages with user id 46 are rapidly published to "MQTT_QOS1" input "notifications_ack_parallel_{{test_id}}"
     Then within "10s" the relay subscription receives payloads
       """
