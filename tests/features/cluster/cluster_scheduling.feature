@@ -80,20 +80,24 @@ Feature: Cluster scheduling
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         }; CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR passthrough
-        FROM notifications
-        TO forwarded_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
-        DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m;
+      CREATE DEDUPLICATOR passthrough FROM notifications
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
+        BRANCHED BY by_kafka_notifications
+        TO forwarded_notifications
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
 
       START;
       """
@@ -139,11 +143,15 @@ Feature: Cluster scheduling
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       """
     Then within "15s" node "node-2" eventually reports describe relay as "not exists"
       """
@@ -207,22 +215,29 @@ Feature: Cluster scheduling
         };
 
       CREATE INGESTOR source_logs
-        TO incoming_logs FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC deduplicator_describe_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_deduplicator_describe_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_source_logs VALUES { id = incoming_logs.id }
-
-        FROM KAFKA kafka_main
-        TOPIC deduplicator_describe_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_deduplicator_describe_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR remote_deduplicator
-        FROM incoming_logs
-        TO routed_logs FLUSH EACH 100ms MAX BATCH SIZE 1MiB WHERE incoming_logs.level = "error" ON MESSAGE ERROR LOG
-        TO routed_logs FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        TO incoming_logs
+        INHERIT ALL
         BRANCHED BY by_source_logs
-        DEDUPLICATE ON incoming_logs.id
-        MAX TIME 10m;
+        SET id = message.id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE DEDUPLICATOR remote_deduplicator FROM incoming_logs
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
+        BRANCHED BY by_source_logs
+        TO routed_logs
+        INHERIT ALL
+        WHERE level = "error"
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        TO routed_logs
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
 
       START;
 
@@ -288,11 +303,15 @@ Feature: Cluster scheduling
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       """
     Then within "15s" node "node-1" eventually reports describe relay as "not exists"
       """
@@ -357,19 +376,20 @@ Feature: Cluster scheduling
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward
-        FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main
-        TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And emitter "kafka_forward" enters fault mode
@@ -419,14 +439,15 @@ Feature: Cluster scheduling
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       """
     And these NSPL commands are executed through the client on node "node-1"
       """
@@ -453,11 +474,11 @@ Feature: Cluster scheduling
       """
     When these NSPL commands are executed on the leader node
       """
-      CREATE EMITTER kafka_forward
-        FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main
-        TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+      CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       """
     And these NSPL commands are executed through the client on node "node-1"
       """

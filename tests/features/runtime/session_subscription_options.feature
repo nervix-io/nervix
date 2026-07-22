@@ -30,13 +30,17 @@ Feature: Session subscription delivery options
         PATH '/telemetry'
         TYPE HTTP;
         CREATE INGESTOR telemetry_http
-        TO telemetry FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING telemetry_codec
-        BRANCHED BY by_telemetry_http VALUES { device = telemetry.device }
-
         TIMESTAMP NOW
-        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE SUBSCRIPTION telemetry_subscription TO telemetry DROPPING BATCH SAMPLE RATE 0.0 WHERE telemetry.active;
+        TO telemetry
+        INHERIT ALL
+        BRANCHED BY by_telemetry_http
+        SET device = message.device
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION telemetry_subscription TO telemetry DROPPING BATCH SAMPLE RATE 0.0 WHERE active;
         START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/telemetry"
@@ -81,13 +85,17 @@ Feature: Session subscription delivery options
         PATH '/telemetry'
         TYPE HTTP;
         CREATE INGESTOR telemetry_http
-        TO telemetry FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING telemetry_codec
-        BRANCHED BY by_telemetry_http VALUES { device = telemetry.device }
-
         TIMESTAMP NOW
-        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE SUBSCRIPTION telemetry_subscription TO telemetry BLOCKING BATCH SAMPLE RATE 1.0 WHERE telemetry.active;
+        TO telemetry
+        INHERIT ALL
+        BRANCHED BY by_telemetry_http
+        SET device = message.device
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION telemetry_subscription TO telemetry BLOCKING BATCH SAMPLE RATE 1.0 WHERE active;
         START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/telemetry"

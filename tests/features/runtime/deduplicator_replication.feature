@@ -22,7 +22,6 @@ Feature: Deduplicator state replication
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
-        CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
@@ -32,24 +31,33 @@ Feature: Deduplicator state replication
         PATH '/dedup'
         TYPE HTTP;
         CREATE INGESTOR source_txns
-        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING transaction_codec
-        BRANCHED BY by_source_txns VALUES { transaction_id = ss1.transaction_id }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
-        DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 10m;
+        TO ss1
+        INHERIT ALL
+        BRANCHED BY by_source_txns
+        SET transaction_id = message.transaction_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR dedup_txns FROM ss1
+        DEDUPLICATE ON input.transaction_id
+        MAX TIME 10m
+        BRANCHED BY by_source_txns
+        TO ss2
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-        CREATE EMITTER kafka_notifications
-        FROM ss2
-        ENCODE USING transaction_codec
-        TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER kafka_notifications FROM ss2 ENCODE USING transaction_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     Then within "10s" repeatedly posting http payload to node "node-1" with host "http-{{test_id}}.example.com" path "/dedup" yields an observed broker payload

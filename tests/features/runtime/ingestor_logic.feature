@@ -8,7 +8,9 @@ Feature: Ingestor filter-map logic
       """
     When the ingestor logic fixture "<transport_fixture>" starts with output schema "rewritten" and program
       """
-      SET logic_notifications.amount = message.amount + 1, logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw WHERE message.active
+      INHERIT ALL EXCEPT raw
+      SET amount = message.amount + 1, normalized = lower(input.raw)
+      WHERE message.active
       """
     And the ingestor logic transport "<transport_fixture>" delivers payload fixture "mixed_filter_messages"
     Then the ingestor logic expectation "rewritten_filtered_once" is observed
@@ -31,7 +33,9 @@ Feature: Ingestor filter-map logic
       """
     When the ingestor logic fixture "<transport_fixture>" starts with output schema "header_routed" and program
       """
-      SET logic_notifications.amount = message.amount + 1, logic_notifications.normalized = first(read_headers(lower("ROUTE"))) UNSET logic_notifications.raw WHERE read_header(lower("TENANT")) = message.tenant AND count(read_headers("missing")) = 0
+      INHERIT ALL EXCEPT raw
+      SET amount = message.amount + 1, normalized = first(read_headers(lower("ROUTE")))
+      WHERE read_header(lower("TENANT")) = message.tenant AND count(read_headers("missing")) = 0
       """
     And the ingestor logic transport "<transport_fixture>" delivers payload fixture "header_message" with headers
     Then the ingestor logic expectation "header_routed_once" is observed
@@ -59,29 +63,19 @@ Feature: Ingestor filter-map logic
     Then the ingestor logic expectation "compile_error" is observed
 
     Examples:
-      | cluster_size | transport_fixture  | output_schema_fixture | logic_program                                                                         |
-      | 1            | http_endpoint      | input                 | SET logic_notifications.total = message.missing + 1                                   |
-      | 3            | http_endpoint      | input                 | SET logic_notifications.total = message.missing + 1                                   |
-      | 1            | kafka              | input                 | SET logic_notifications.total = message.missing + 1                                   |
-      | 3            | kafka              | input                 | SET logic_notifications.total = message.missing + 1                                   |
-      | 1            | websocket_endpoint | input                 | SET logic_notifications.total = message.missing + 1                                   |
-      | 3            | websocket_endpoint | input                 | SET logic_notifications.total = message.missing + 1                                   |
-      | 1            | zeromq             | input                 | SET logic_notifications.total = message.missing + 1                                   |
-      | 3            | zeromq             | input                 | SET logic_notifications.total = message.missing + 1                                   |
-      | 1            | http_endpoint      | input                 | SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw |
-      | 3            | http_endpoint      | input                 | SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw |
-      | 1            | kafka              | input                 | SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw |
-      | 3            | kafka              | input                 | SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw |
-      | 1            | websocket_endpoint | input                 | SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw |
-      | 3            | websocket_endpoint | input                 | SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw |
-      | 1            | zeromq             | input                 | SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw |
-      | 3            | zeromq             | input                 | SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw |
-      | 1            | http_endpoint      | input                 | SET logic_notifications.total = metadata.offset                                       |
-      | 3            | http_endpoint      | input                 | SET logic_notifications.total = metadata.offset                                       |
-      | 1            | http_endpoint      | input                 | SET message.amount = message.amount + 1                                               |
-      | 3            | http_endpoint      | input                 | SET message.amount = message.amount + 1                                               |
-      | 1            | zeromq             | input                 | WHERE read_header("tenant") = message.tenant                                          |
-      | 3            | zeromq             | input                 | WHERE read_header("tenant") = message.tenant                                          |
+      | cluster_size | transport_fixture  | output_schema_fixture | logic_program                                |
+      | 1            | http_endpoint      | input                 | SET total = message.missing + 1              |
+      | 3            | http_endpoint      | input                 | SET total = message.missing + 1              |
+      | 1            | kafka              | input                 | SET total = message.missing + 1              |
+      | 3            | kafka              | input                 | SET total = message.missing + 1              |
+      | 1            | websocket_endpoint | input                 | SET total = message.missing + 1              |
+      | 3            | websocket_endpoint | input                 | SET total = message.missing + 1              |
+      | 1            | zeromq             | input                 | SET total = message.missing + 1              |
+      | 3            | zeromq             | input                 | SET total = message.missing + 1              |
+      | 1            | http_endpoint      | input                 | SET total = metadata.offset                  |
+      | 3            | http_endpoint      | input                 | SET total = metadata.offset                  |
+      | 1            | zeromq             | input                 | WHERE read_header("tenant") = message.tenant |
+      | 3            | zeromq             | input                 | WHERE read_header("tenant") = message.tenant |
 
   Scenario Outline: Ingestor filter-map runtime failures emit errors and drop messages
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -92,7 +86,8 @@ Feature: Ingestor filter-map logic
       """
     When the ingestor logic fixture "<transport_fixture>" starts with output schema "parsed" and program
       """
-      SET logic_notifications.parsed = message.raw AS INT64 UNSET logic_notifications.active, logic_notifications.amount, logic_notifications.raw
+      INHERIT ALL EXCEPT active, amount, raw
+      SET parsed = input.raw AS INT64
       """
     And the ingestor logic transport "<transport_fixture>" delivers payload fixture "runtime_failure_message"
     Then the ingestor logic expectation "runtime_error_drop" is observed

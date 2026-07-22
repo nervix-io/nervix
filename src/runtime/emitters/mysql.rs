@@ -38,10 +38,8 @@ impl MySqlEmitter {
         let program = match compile_mysql_values_program(
             &context.domain,
             &context.emitter,
-            &context.from_relay,
             values,
             input_schema,
-            context.branch_schema.clone(),
         ) {
             Ok(program) => Some(program),
             Err(error) => {

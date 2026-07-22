@@ -47,7 +47,10 @@ Runtime branch rules:
 - a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <branch>`
 - an `EMITTER` consumes records across the whole input relay and terminates the branch at an external sink
 
-`branch` is a reserved namespace, so a relay cannot be named `branch`. Inside a branched branch, filter-map and branch mapping expressions can read the current branch key with `branch.<key>`. The key must exist in the branch schema, and unbranched execution has no `branch.<key>` fields.
+`branch` is a reserved namespace, so a relay cannot be named `branch`. Expressions inside a
+concrete branch may read its immutable key with `branch.<key>`. Bare fields never resolve to branch
+fields. Unbranched execution has no `branch.<key>` values, and successful emitter expressions do
+not expose the branch scope.
 
 ## Internal Payload Model
 
@@ -62,7 +65,8 @@ Operationally that means:
 
 - ingestors and reingestors batch decoded rows before writing into a relay
 - deduplicators still apply row-level state semantics inside the node, while junctions stay Arrow-native and concatenate compatible branch-local batches before forwarding
-- window processors keep branch-local online aggregate state and emit Arrow batches containing only the fields declared by their `AGGREGATE` block
+- window processors keep branch-local online aggregate state and construct each route through
+  aggregate expressions in ordered `SET` assignments
 - batches remain branch-local until a `REINGESTOR` or `EMITTER` boundary changes the routing behavior
 - inter-node relay transport serializes those batches with Arrow IPC, so the batch stays Arrow-native over the network too
 
@@ -145,7 +149,7 @@ Operational notes:
 - after a crash, Nervix restores persisted materialized entries from Fjall
 - per-group TTL metadata is not yet persisted, so crash recovery does not currently perform a startup sweep of stale materialized entries
 
-Materialized state is also the readable snapshot surface for `GENERATOR` nodes. A generator may reference `materialized_stream.field` values from any relay in the same domain that declares materialized state.
+Materialized state is also the readable snapshot surface for `GENERATOR` nodes. A generator declares exactly one materialized relay with `USING MATERIALIZED STATE <relay>` and reads it through `relay_state.<relay>.<field>`.
 
 `SHOW RELAY <relay> MATERIALIZED STATE` includes the scheduled materializer owner and replicas before the materialized entries or empty-state message. This matches the placement visibility exposed by other state-holding runtime nodes.
 

@@ -37,15 +37,15 @@ Feature: NATS TLS resource mounts
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE INGESTOR nats_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM NATS nats_tls SUBJECT notifications_{{test_id}} QUEUE GROUP nats_tls_notifications_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_nats_notifications VALUES { user_id = notifications.user_id }
-
-        FROM NATS nats_tls
-        SUBJECT notifications_{{test_id}}
-        QUEUE GROUP nats_tls_notifications_group_{{test_id}}
-        INSTANCES 1
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_nats_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

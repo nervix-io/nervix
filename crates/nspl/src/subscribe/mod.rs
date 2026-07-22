@@ -7,9 +7,10 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, field_ref, filter_map_program,
-        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, session_subscription_name,
-        session_subscription_ref, string_lit, suggestions_from_errors, tok, word_raw,
+        ParseError, ParseFromSourceError, current_word_prefix, field_ref, into_parse_error, kw,
+        kw_phrase2, lex_input, relay_ref, render_vm_program_tokens, session_subscription_name,
+        session_subscription_ref, string_lit, suggestions_from_errors, tok,
+        vm_program_error_message, word_raw,
     },
 };
 
@@ -81,6 +82,23 @@ fn batch_sample_rate<'src>()
         )
 }
 
+fn subscription_where_clause<'src>()
+-> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::Where)
+        .ignore_then(
+            any()
+                .filter(|token: &Token| !matches!(token, Token::Semicolon))
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .try_map(|tokens, span| {
+            crate::parse_expression(&render_vm_program_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
+}
+
 pub fn create_subscription_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateSubscription, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase2(Identifier::Create, Identifier::Subscription)
@@ -89,16 +107,16 @@ pub fn create_subscription_parser<'src>()
         .then(relay_ref())
         .then(subscription_delivery_behavior().or_not())
         .then(batch_sample_rate().or_not())
-        .then(filter_map_program().or_not())
+        .then(subscription_where_clause().or_not())
         .map(
-            |((((name, relay), delivery_behavior), batch_sample_rate), filter_map)| {
+            |((((name, relay), delivery_behavior), batch_sample_rate), where_clause)| {
                 CreateSubscription {
                     name,
                     relay,
                     delivery_behavior: delivery_behavior
                         .unwrap_or(SubscriptionDeliveryBehavior::Blocking),
                     batch_sample_rate,
-                    filter_map,
+                    where_clause,
                 }
             },
         )
@@ -110,7 +128,7 @@ pub fn create_subscription_query(
     relay: &str,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<&str>,
-    filter_map: Option<&str>,
+    where_clause: Option<&nervix_models::Expression>,
 ) -> String {
     let mut query = format!("CREATE SUBSCRIPTION {name} TO {relay}");
     if delivery_behavior != SubscriptionDeliveryBehavior::Blocking {
@@ -121,9 +139,12 @@ pub fn create_subscription_query(
         query.push_str(" BATCH SAMPLE RATE ");
         query.push_str(batch_sample_rate);
     }
-    if let Some(filter_map) = filter_map {
-        query.push(' ');
-        query.push_str(filter_map);
+    if let Some(where_clause) = where_clause {
+        query.push_str(" WHERE ");
+        query.push_str(
+            &nervix_models::expression_to_nspl(where_clause)
+                .expect("a parsed subscription expression must be canonically renderable"),
+        );
     }
     query.push(';');
     query
@@ -201,37 +222,32 @@ mod tests {
         let parsed = parse_create_subscription_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "live_notifications");
         assert_eq!(parsed.relay.as_str(), "notifications");
-        assert_eq!(parsed.filter_map, None);
+        assert_eq!(parsed.where_clause, None);
     }
 
     #[test]
-    fn parses_create_subscription_with_filter_map_program() {
+    fn rejects_subscription_value_construction() {
         let tokens = to_tokens(
-            "CREATE SUBSCRIPTION live_notifications TO notifications SET notifications.normalized \
-             = lower(notifications.name) UNSET notifications.raw WHERE notifications.active;",
+            "CREATE SUBSCRIPTION live_notifications TO notifications SET normalized = \
+             lower(input.name);",
         );
-        let parsed = parse_create_subscription_tokens(&tokens).expect("parse should succeed");
-        assert_eq!(parsed.relay.as_str(), "notifications");
-        assert_eq!(
-            parsed.filter_map.as_deref(),
-            Some(
-                "SET notifications.normalized = lower ( notifications.name ) UNSET \
-                 notifications.raw WHERE notifications.active"
-            )
-        );
+        assert!(parse_create_subscription_tokens(&tokens).is_err());
     }
 
     #[test]
     fn parses_create_subscription_with_delivery_options() {
         let tokens = to_tokens(
             "CREATE SUBSCRIPTION sampled_telemetry TO telemetry DROPPING BATCH SAMPLE RATE 0.1 \
-             WHERE telemetry.active;",
+             WHERE input.active;",
         );
         let parsed = parse_create_subscription_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.relay.as_str(), "telemetry");
         assert_eq!(parsed.delivery_behavior.as_ref(), "DROPPING");
         assert_eq!(parsed.batch_sample_rate.as_deref(), Some("0.1"));
-        assert_eq!(parsed.filter_map.as_deref(), Some("WHERE telemetry.active"));
+        assert_eq!(
+            parsed.where_clause,
+            Some(crate::parse_expression("input.active").expect("valid expression"))
+        );
     }
 
     #[test]
@@ -253,10 +269,10 @@ mod tests {
                 "telemetry",
                 SubscriptionDeliveryBehavior::Dropping,
                 Some("0.1"),
-                Some("WHERE telemetry.active"),
+                Some(&crate::parse_expression("input.active").expect("valid expression")),
             ),
             "CREATE SUBSCRIPTION sampled_telemetry TO telemetry DROPPING BATCH SAMPLE RATE 0.1 \
-             WHERE telemetry.active;"
+             WHERE input.active;"
         );
     }
 

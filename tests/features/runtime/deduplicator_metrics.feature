@@ -21,23 +21,29 @@ Feature: Deduplicator metrics
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_dedup_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY raw_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
         CREATE RELAY deduped_txns SCHEMA transaction BRANCHED BY by_dedup_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT dedup_metrics_ingress ON edge PATH '/dedup-metrics' TYPE HTTP;
         CREATE INGESTOR dedup_metrics_source
-        TO raw_txns FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT dedup_metrics_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING transaction_codec
-        BRANCHED BY by_dedup_metrics_source VALUES { tenant = raw_txns.tenant }
-
-        FROM ENDPOINT dedup_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE DEDUPLICATOR dedup_metrics_node
-        FROM raw_txns TO deduped_txns FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_dedup_metrics_source
-        DEDUPLICATE ON raw_txns.transaction_id
-        MAX TIME 10m;
+        TO raw_txns
+        INHERIT ALL
+        BRANCHED BY by_dedup_metrics_source
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR dedup_metrics_node FROM raw_txns
+        DEDUPLICATE ON input.transaction_id
+        MAX TIME 10m
+        BRANCHED BY by_dedup_metrics_source
+        TO deduped_txns
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION deduped_txns_subscription TO deduped_txns;
         START;
       """

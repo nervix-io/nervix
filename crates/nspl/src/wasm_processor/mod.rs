@@ -1,7 +1,7 @@
 use chumsky::prelude::*;
 use nervix_models::{
     AckMode, CreateStatement, CreateWasmProcessor, GeneralErrorPolicy, ProcessorOutput,
-    ProcessorOutputs,
+    ProcessorOutputs, RouteConstruction,
 };
 
 use crate::{
@@ -9,8 +9,8 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
-        lex_input, message_error_policy, output_filter_map_program, relay_ref, resource_ref,
-        string_lit, suggestions_from_errors, tok, wasm_processor_name,
+        lex_input, materialized_state_dependencies, message_error_policy, relay_ref, resource_ref,
+        route_construction, string_lit, suggestions_from_errors, tok, wasm_processor_name,
     },
 };
 
@@ -37,19 +37,22 @@ fn global_error_policy<'src>()
         )))
 }
 
-fn wasm_output_filter_map_program<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    output_filter_map_program().try_map(|source, span| {
-        let parsed = crate::vm_program::parse_program(&source).map_err(|error| {
-            Rich::custom(span, crate::parser_support::vm_program_error_message(error))
-        })?;
-        if !parsed.inner.unset.is_empty() {
+fn wasm_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    route_construction().try_map(|construction, span| {
+        if construction.inherit.is_some() {
             return Err(Rich::custom(
                 span,
-                "WASM processor TO clauses may use SET and WHERE, but not UNSET",
+                "WASM processor TO clauses do not support INHERIT",
             ));
         }
-        Ok(source)
+        if !construction.invocations.is_empty() {
+            return Err(Rich::custom(
+                span,
+                "WASM processor TO clauses do not support INVOKE",
+            ));
+        }
+        Ok(construction)
     })
 }
 
@@ -57,14 +60,15 @@ fn wasm_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
         .ignore_then(relay_ref())
-        .then(wasm_output_filter_map_program().or_not())
+        .then(wasm_route_construction().or_not())
         .then(message_error_policy())
         .map(
-            |((relay, filter_map), message_error_policy)| ProcessorOutput {
+            |((relay, construction), message_error_policy)| ProcessorOutput {
                 relay,
-                filter_map,
+                construction: construction.unwrap_or_default(),
                 flush_policy: None,
                 message_error_policy,
+                branch: None,
             },
         )
 }
@@ -87,17 +91,18 @@ pub fn create_wasm_processor_parser<'src>()
         .then_ignore(kw(Identifier::Wasm))
         .then_ignore(kw(Identifier::Processor))
         .then(wasm_processor_name())
+        .then_ignore(kw(Identifier::From))
+        .then(from_relay_clauses())
+        .then(filter_where_clause().or_not())
         .then_ignore(kw(Identifier::Using))
         .then_ignore(kw(Identifier::Resource))
         .then(resource_ref())
         .then(kw(Identifier::Version).ignore_then(u64_value()).or_not())
         .then_ignore(kw(Identifier::File))
         .then(string_lit())
-        .then_ignore(kw(Identifier::From))
-        .then(from_relay_clauses())
-        .then(filter_where_clause().or_not())
-        .then(wasm_processor_outputs())
         .then(branch_selection())
+        .then(materialized_state_dependencies())
+        .then(wasm_processor_outputs())
         .then(global_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(|(base, global_error_policy)| {
@@ -105,14 +110,20 @@ pub fn create_wasm_processor_parser<'src>()
                 (
                     (
                         (
-                            (((((if_not_exists, mode), name), resource), resource_version), file),
-                            from_input,
+                            (
+                                (
+                                    ((((if_not_exists, mode), name), from_input), filter_where),
+                                    resource,
+                                ),
+                                resource_version,
+                            ),
+                            file,
                         ),
-                        filter_where,
+                        branched_by,
                     ),
-                    outputs,
+                    materialized_state,
                 ),
-                branched_by,
+                outputs,
             ) = base;
             CreateStatement::new(
                 CreateWasmProcessor {
@@ -126,6 +137,7 @@ pub fn create_wasm_processor_parser<'src>()
                     global_error_policy,
                     mode: mode.unwrap_or(AckMode::Attached),
                     filter_where,
+                    materialized_state,
                 },
                 if_not_exists,
             )
@@ -192,9 +204,11 @@ mod tests {
     fn parses_create_wasm_processor() {
         let input = r#"
             CREATE DETACHED WASM PROCESSOR filter_even
+            FROM raw_orders
             USING RESOURCE wasm_filters VERSION 2 FILE 'processors/filter_even.wasm'
-            FROM raw_orders TO filtered_orders ON MESSAGE ERROR LOG
-            BRANCHED BY tenant_branch ON GLOBAL ERROR IGNORE;
+            BRANCHED BY tenant_branch
+            TO filtered_orders SET value = value ON MESSAGE ERROR LOG
+            ON GLOBAL ERROR IGNORE;
         "#;
 
         let parsed = parse_create_wasm_processor_tokens(&to_tokens(input)).expect("parse works");
@@ -229,11 +243,11 @@ mod tests {
     fn keeps_global_error_policy_on_node_after_route_message_policies() {
         let input = r#"
             CREATE WASM PROCESSOR route_wasm
-                USING RESOURCE wasm_resource FILE 'processor.wasm'
                 FROM incoming
+                USING RESOURCE wasm_resource FILE 'processor.wasm'
+                UNBRANCHED
                 TO accepted ON MESSAGE ERROR IGNORE
                 TO rejected ON MESSAGE ERROR LOG
-                UNBRANCHED
                 ON GLOBAL ERROR IGNORE;
         "#;
 
@@ -251,17 +265,16 @@ mod tests {
 
     #[test]
     fn rejects_values_block() {
-        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b ON \
-                     MESSAGE ERROR LOG BRANCHED BY tenant_branch VALUES { tenant = a.tenant } ON \
+        let input = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r FILE 'p.wasm' BRANCHED BY \
+                     tenant_branch VALUES { tenant = input.tenant } TO b ON MESSAGE ERROR LOG ON \
                      GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 
     #[test]
     fn rejects_flush_policy() {
-        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b ON \
-                     MESSAGE ERROR LOG
-                     UNBRANCHED FLUSH IMMEDIATE ON GLOBAL ERROR LOG;";
+        let input = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r FILE 'p.wasm' UNBRANCHED TO \
+                     b FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 
@@ -269,11 +282,12 @@ mod tests {
     fn parses_conditional_and_unconditional_output_routes() {
         let input = r#"
             CREATE WASM PROCESSOR filter_even
+            FROM raw_orders FILTER WHERE input.value >= 0
             USING RESOURCE wasm_filters FILE 'processors/filter_even.wasm'
-            FROM raw_orders FILTER WHERE raw_orders.value >= 0
-            TO even_orders WHERE even_orders.value = even_orders.value ON MESSAGE ERROR LOG
-            TO other_orders SET other_orders.bucket = "fallback" ON MESSAGE ERROR LOG
-            UNBRANCHED ON GLOBAL ERROR LOG;
+            UNBRANCHED
+            TO even_orders SET value = value WHERE output.value = output.value ON MESSAGE ERROR LOG
+            TO other_orders SET bucket = "fallback" ON MESSAGE ERROR LOG
+            ON GLOBAL ERROR LOG;
         "#;
 
         let parsed = parse_create_wasm_processor_tokens(&to_tokens(input)).expect("parse works");
@@ -292,35 +306,40 @@ mod tests {
 
     #[test]
     fn parses_unconditional_output_route() {
-        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM a TO b ON \
-                     MESSAGE ERROR LOG
-                     UNBRANCHED ON GLOBAL ERROR LOG;";
+        let input = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r FILE 'p.wasm' UNBRANCHED TO \
+                     b ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         let tokens = to_tokens(input);
         let parsed =
             parse_create_wasm_processor_tokens(&tokens).expect("unconditional TO should parse");
         assert_eq!(parsed.output_routes.routes.len(), 1);
         assert_eq!(parsed.output_routes.routes[0].relay.as_str(), "b");
-        assert_eq!(parsed.output_routes.routes[0].filter_map, None);
+        assert_eq!(
+            parsed.output_routes.routes[0].construction,
+            RouteConstruction::default()
+        );
     }
 
     #[test]
     fn parses_output_route_with_set_but_no_where() {
-        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM input TO out1 \
-                     SET out1.name = lower(out1.name), out1.surname = input.surname ON MESSAGE \
-                     ERROR LOG UNBRANCHED ON GLOBAL ERROR LOG;";
+        let input = "CREATE WASM PROCESSOR p FROM source USING RESOURCE r FILE 'p.wasm' \
+                     UNBRANCHED TO out1 SET name = lower(name), surname = surname ON MESSAGE \
+                     ERROR LOG ON GLOBAL ERROR LOG;";
         let tokens = to_tokens(input);
         let parsed = parse_create_wasm_processor_tokens(&tokens)
             .expect("TO with SET and no WHERE should parse");
         assert_eq!(
-            parsed.output_routes.routes[0].filter_map.as_deref(),
-            Some("SET out1.name = lower ( out1.name ) , out1.surname = input.surname")
+            parsed.output_routes.routes[0]
+                .construction
+                .assignments
+                .len(),
+            2
         );
     }
 
     #[test]
     fn rejects_output_route_with_unset() {
-        let input = "CREATE WASM PROCESSOR p USING RESOURCE r FILE 'p.wasm' FROM input TO out1 \
-                     UNSET out1.legacy ON MESSAGE ERROR LOG UNBRANCHED ON GLOBAL ERROR LOG;";
+        let input = "CREATE WASM PROCESSOR p FROM input USING RESOURCE r FILE 'p.wasm' UNBRANCHED \
+                     TO out1 UNSET legacy ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 }

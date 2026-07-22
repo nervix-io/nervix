@@ -131,108 +131,127 @@ CREATE CLIENT nats_edge
   };
 
 CREATE INGESTOR nats_machine_signals
-  TO signals_by_site FLUSH EACH 250ms MAX BATCH SIZE 32kb
-    SET signals_by_site.status = lower(trim(message.status)),
-        signals_by_site.sensor = lower(trim(message.sensor)),
-        signals_by_site.unit = lower(trim(message.unit)) ON MESSAGE ERROR LOG
-  DECODE USING machine_signal_codec
-  BRANCHED BY by_site VALUES { site = signals_by_site.site }
-
-  TIMESTAMP AT ts
   FROM NATS nats_edge
   SUBJECT factory_signals
   QUEUE GROUP factory_signal_workers
   INSTANCES 4
-  MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+  MODE NO_ACK SEQUENTIAL
+  DECODE USING machine_signal_codec
+  TIMESTAMP AT ts
+  TO signals_by_site
+    INHERIT ALL
+    SET status = lower(trim(message.status)),
+        sensor = lower(trim(message.sensor)),
+        unit = lower(trim(message.unit))
+    BRANCHED BY by_site SET site = message.site
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
 CREATE DEDUPLICATOR intake_quality_gate
   FROM signals_by_site
-  TO rejected_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb WHERE signals_by_site.asset_id = "" OR signals_by_site.sensor = "" OR signals_by_site.status = "offline" ON MESSAGE ERROR LOG
-  TO battery_alerts FLUSH EACH 250ms MAX BATCH SIZE 32kb WHERE signals_by_site.battery_pct < 15.0 ON MESSAGE ERROR LOG
-  TO clean_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
+  DEDUPLICATE ON input.site, input.line, input.asset_id, input.sensor, input.ts, input.seq
+  MAX TIME 5m
   BRANCHED BY by_site
-  DEDUPLICATE ON signals_by_site.site, signals_by_site.line, signals_by_site.asset_id, signals_by_site.sensor, signals_by_site.ts, signals_by_site.seq
-  MAX TIME 5m;
+  TO rejected_signals INHERIT ALL
+    WHERE asset_id = "" OR sensor = "" OR status = "offline"
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
+  TO battery_alerts INHERIT ALL WHERE battery_pct < 15.0
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
+  TO clean_signals INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG;
 
 CREATE REINGESTOR asset_signal_repartition
   FROM clean_signals
-  TO signals_by_asset FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
-  BRANCHED BY by_asset_signal VALUES {
-    site = signals_by_asset.site,
-    line = signals_by_asset.line,
-    asset_id = signals_by_asset.asset_id,
-    sensor = signals_by_asset.sensor
-  };
+  TO signals_by_asset
+    INHERIT ALL
+    BRANCHED BY by_asset_signal
+    SET site = message.site, line = message.line, asset_id = message.asset_id, sensor = message.sensor
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG;
 
 CREATE REORDERER asset_signal_reorderer
   FROM signals_by_asset
-  TO signals_ordered FLUSH EACH 500ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
+  BY input.ts, input.seq
+  MAX TIME 5s
   BRANCHED BY by_asset_signal
-  BY signals_by_asset.ts, signals_by_asset.seq
-  MAX TIME 5s;
+  TO signals_ordered INHERIT ALL
+    FLUSH EACH 500ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG;
 
 CREATE DEDUPLICATOR process_alert_splitter
   FROM signals_ordered
-  TO critical_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb WHERE signals_ordered.status = "fault" OR signals_ordered.value >= signals_ordered.critical_high ON MESSAGE ERROR LOG
-  TO drift_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb WHERE signals_ordered.value < signals_ordered.target_min OR signals_ordered.value > signals_ordered.target_max ON MESSAGE ERROR LOG
-  TO normal_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
+  DEDUPLICATE ON input.site, input.line, input.asset_id, input.sensor, input.ts, input.seq
+  MAX TIME 5m
   BRANCHED BY by_asset_signal
-  DEDUPLICATE ON signals_ordered.site, signals_ordered.line, signals_ordered.asset_id, signals_ordered.sensor, signals_ordered.ts, signals_ordered.seq
-  MAX TIME 5m;
+  TO critical_signals INHERIT ALL WHERE status = "fault" OR value >= critical_high
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
+  TO drift_signals INHERIT ALL WHERE value < target_min OR value > target_max
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
+  TO normal_signals INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG;
 
 CREATE WINDOW PROCESSOR asset_signal_window
   FROM signals_ordered
-  TO signal_windows ON MESSAGE ERROR LOG
-  BRANCHED BY by_asset_signal
   WIDTH 20 MESSAGES 30s DURATION
   STEP 10 MESSAGES 10s DURATION
-  AGGREGATE
-    signal_windows.site = FIRST(signals_ordered.site),
-    signal_windows.line = FIRST(signals_ordered.line),
-    signal_windows.asset_id = FIRST(signals_ordered.asset_id),
-    signal_windows.sensor = FIRST(signals_ordered.sensor),
-    signal_windows.sample_count = COUNT(signals_ordered.value),
-    signal_windows.first_ts = FIRST(signals_ordered.ts),
-    signal_windows.last_ts = LAST(signals_ordered.ts),
-    signal_windows.first_value = FIRST(signals_ordered.value),
-    signal_windows.last_value = LAST(signals_ordered.value),
-    signal_windows.min_value = MIN(signals_ordered.value),
-    signal_windows.max_value = MAX(signals_ordered.value),
-    signal_windows.total_value = SUM(signals_ordered.value),
-    signal_windows.value_p50 = PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 50, 512, 0, 200, '2s'),
-    signal_windows.value_p90 = PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 90, 512, 0, 200, '2s'),
-    signal_windows.value_p99 = PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 99, 512, 0, 200, '2s'),
-    signal_windows.value_percentiles = [
-      PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 50, 512, 0, 200, '2s'),
-      PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 90, 512, 0, 200, '2s'),
-      PERCENTILE_LINEAR_HISTOGRAM(signals_ordered.value, 99, 512, 0, 200, '2s')
-    ];
+  BRANCHED BY by_asset_signal
+  TO signal_windows
+  SET site = FIRST(input.site),
+      line = FIRST(input.line),
+      asset_id = FIRST(input.asset_id),
+      sensor = FIRST(input.sensor),
+      sample_count = COUNT(input.value),
+      first_ts = FIRST(input.ts),
+      last_ts = LAST(input.ts),
+      first_value = FIRST(input.value),
+      last_value = LAST(input.value),
+      min_value = MIN(input.value),
+      max_value = MAX(input.value),
+      total_value = SUM(input.value),
+      value_p50 = PERCENTILE_LINEAR_HISTOGRAM(input.value, 50, 512, 0, 200, '2s'),
+      value_p90 = PERCENTILE_LINEAR_HISTOGRAM(input.value, 90, 512, 0, 200, '2s'),
+      value_p99 = PERCENTILE_LINEAR_HISTOGRAM(input.value, 99, 512, 0, 200, '2s'),
+      value_percentiles = [
+        PERCENTILE_LINEAR_HISTOGRAM(input.value, 50, 512, 0, 200, '2s'),
+        PERCENTILE_LINEAR_HISTOGRAM(input.value, 90, 512, 0, 200, '2s'),
+        PERCENTILE_LINEAR_HISTOGRAM(input.value, 99, 512, 0, 200, '2s')
+      ]
+  ON MESSAGE ERROR LOG;
 
 CREATE REINGESTOR site_critical_repartition
   FROM critical_signals
-  TO site_critical_signals FLUSH EACH 250ms MAX BATCH SIZE 32kb ON MESSAGE ERROR LOG
-  BRANCHED BY by_site_critical VALUES { site = site_critical_signals.site };
+  TO site_critical_signals
+    INHERIT ALL
+    BRANCHED BY by_site_critical SET site = message.site
+    FLUSH EACH 250ms MAX BATCH SIZE 32kb
+    ON MESSAGE ERROR LOG;
 
 CREATE EMITTER nats_signal_windows
   FROM signal_windows
   ENCODE USING signal_window_codec
   TO NATS nats_edge SUBJECT factory_signal_windows
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
 CREATE EMITTER nats_site_critical_signals
   FROM site_critical_signals
   ENCODE USING machine_signal_codec
   TO NATS nats_edge SUBJECT factory_site_critical_signals
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
 CREATE EMITTER nats_battery_alerts
   FROM battery_alerts
   ENCODE USING machine_signal_codec
   TO NATS nats_edge SUBJECT factory_battery_alerts
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
 START;
 

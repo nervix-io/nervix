@@ -1,8 +1,8 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    AvroType, AzureBlobConfigEntry, BranchEviction, BranchInitiatorSelection, BranchSelection,
-    BranchValueMapping, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
+    AssignmentTargetScope, AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction,
+    BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
     CodecEncodingRule, CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction,
     CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
@@ -13,34 +13,203 @@ use crate::{
     CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
     CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
-    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
+    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
     GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-    KinesisConfigEntry, KinesisIngestMode, MaterializedRelayState, MessageErrorPolicy, Model,
+    IngestTimestampSource, Inheritance, JsonType, KafkaConfigEntry, KafkaIngestMode,
+    KafkaOffsetMode, KinesisConfigEntry, KinesisIngestMode, Literal, MaterializedRelayState,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
     MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
     MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
-    ParseAsType, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
     RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, RetryPolicy, S3ConfigEntry, SchemaField, SqsConfigEntry, SqsIngestMode,
-    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry,
-    ZeroMqIngestMode,
+    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SqsConfigEntry,
+    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
+    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
-fn branch_values_to_nspl(values: &[BranchValueMapping]) -> String {
-    values
-        .iter()
-        .map(|value| {
-            format!(
-                "{} = {}.{}",
-                value.field.as_str(),
-                value.relay.as_str(),
-                value.relay_field.as_str()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
+    match expression {
+        Expression::Literal(Literal::I64(value)) => Ok(value.to_string()),
+        Expression::Literal(Literal::F64(value)) => Ok(value.value().to_string()),
+        Expression::Literal(Literal::Bool(value)) => Ok(value.to_string().to_ascii_uppercase()),
+        Expression::Literal(Literal::String(value)) => string_literal(value),
+        Expression::Literal(Literal::Null) => Ok("NULL".to_string()),
+        Expression::Field(reference) => {
+            let prefix = match &reference.scope {
+                FieldScope::Bare => None,
+                FieldScope::Message => Some("message".to_string()),
+                FieldScope::Input => Some("input".to_string()),
+                FieldScope::Output => Some("output".to_string()),
+                FieldScope::Branch => Some("branch".to_string()),
+                FieldScope::Left => Some("left".to_string()),
+                FieldScope::Right => Some("right".to_string()),
+                FieldScope::RelayState { relay } => Some(format!("relay_state.{}", relay.as_str())),
+                FieldScope::Metadata => Some("metadata".to_string()),
+                FieldScope::PartialOutput => Some("partial_output".to_string()),
+                FieldScope::Error => Some("error".to_string()),
+            };
+            Ok(prefix.map_or_else(
+                || reference.field.as_str().to_string(),
+                |prefix| format!("{prefix}.{}", reference.field.as_str()),
+            ))
+        }
+        Expression::Unary {
+            operator,
+            expression,
+        } => Ok(format!(
+            "{}({})",
+            match operator {
+                UnaryOperator::Negate => "-",
+                UnaryOperator::Not => "NOT ",
+            },
+            expression_to_nspl(expression)?
+        )),
+        Expression::Binary {
+            operator,
+            left,
+            right,
+        } => Ok(format!(
+            "({} {} {})",
+            expression_to_nspl(left)?,
+            match operator {
+                BinaryOperator::Add => "+",
+                BinaryOperator::Subtract => "-",
+                BinaryOperator::Multiply => "*",
+                BinaryOperator::Divide => "/",
+                BinaryOperator::Remainder => "%",
+                BinaryOperator::Equal => "=",
+                BinaryOperator::NotEqual => "!=",
+                BinaryOperator::GreaterThan => ">",
+                BinaryOperator::LessThan => "<",
+                BinaryOperator::GreaterThanOrEqual => ">=",
+                BinaryOperator::LessThanOrEqual => "<=",
+                BinaryOperator::And => "AND",
+                BinaryOperator::Or => "OR",
+            },
+            expression_to_nspl(right)?
+        )),
+        Expression::Cast { expression, target } => Ok(format!(
+            "({} AS {})",
+            expression_to_nspl(expression)?,
+            parse_as_to_keyword(target)
+        )),
+        Expression::Call {
+            function,
+            arguments,
+        } => Ok(format!(
+            "{}({})",
+            function.as_str(),
+            arguments
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        Expression::Array(items) => Ok(format!(
+            "[{}]",
+            items
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+    }
+}
+
+fn route_construction_to_nspl(
+    construction: &RouteConstruction,
+) -> Result<String, CanonicalNsplError> {
+    let mut clauses = Vec::new();
+    if let Some(inherit) = &construction.inherit {
+        let clause = match inherit {
+            Inheritance::All => "INHERIT ALL".to_string(),
+            Inheritance::AllExcept(fields) => format!(
+                "INHERIT ALL EXCEPT {}",
+                fields
+                    .iter()
+                    .map(Identifier::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Inheritance::Fields(fields) => format!(
+                "INHERIT {}",
+                fields
+                    .iter()
+                    .map(|field| format!(
+                        "{}{}",
+                        field.field.as_str(),
+                        if field.leak_sensitive {
+                            " LEAK SENSITIVE"
+                        } else {
+                            ""
+                        }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        clauses.push(clause);
+    }
+    if !construction.assignments.is_empty() {
+        clauses.push(format!(
+            "SET {}",
+            construction
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    let prefix = match assignment.target.scope {
+                        AssignmentTargetScope::Bare => "",
+                        AssignmentTargetScope::Message => "message.",
+                        AssignmentTargetScope::Output => "output.",
+                        AssignmentTargetScope::Branch => "branch.",
+                    };
+                    Ok(format!(
+                        "{prefix}{} = {}",
+                        assignment.target.field.as_str(),
+                        expression_to_nspl(&assignment.value)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                .join(", ")
+        ));
+    }
+    if let Some(where_clause) = &construction.where_clause {
+        clauses.push(format!("WHERE {}", expression_to_nspl(where_clause)?));
+    }
+    if !construction.invocations.is_empty() {
+        clauses.push(format!(
+            "INVOKE {}",
+            construction
+                .invocations
+                .iter()
+                .map(|invocation| Ok(format!(
+                    "{}({})",
+                    invocation.function.as_str(),
+                    invocation
+                        .arguments
+                        .iter()
+                        .map(expression_to_nspl)
+                        .collect::<Result<Vec<_>, _>>()?
+                        .join(", ")
+                )))
+                .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                .join(", ")
+        ));
+    }
+    Ok(clauses.join(" "))
+}
+
+fn route_construction_suffix(
+    construction: &RouteConstruction,
+) -> Result<String, CanonicalNsplError> {
+    let rendered = route_construction_to_nspl(construction)?;
+    Ok(if rendered.is_empty() {
+        String::new()
+    } else {
+        format!(" {rendered}")
+    })
 }
 
 fn value_mappings_to_nspl(values: &[ClickHouseValueMapping]) -> Result<String, CanonicalNsplError> {
@@ -50,7 +219,7 @@ fn value_mappings_to_nspl(values: &[ClickHouseValueMapping]) -> Result<String, C
             Ok(format!(
                 "{} = {}",
                 string_literal(&mapping.column)?,
-                mapping.expression
+                expression_to_nspl(&mapping.expression)?
             ))
         })
         .collect::<Result<Vec<_>, CanonicalNsplError>>()
@@ -66,16 +235,24 @@ fn branch_selection_to_nspl(branching: &BranchSelection) -> String {
     }
 }
 
-fn branch_initiator_selection_to_nspl(branching: &BranchInitiatorSelection) -> String {
+fn output_branch_to_nspl(branching: &OutputBranch) -> Result<String, CanonicalNsplError> {
     match branching {
-        BranchInitiatorSelection::BranchedBy { branch, values } => {
-            format!(
-                "BRANCHED BY {} VALUES {{{}}}",
-                branch.as_str(),
-                branch_values_to_nspl(values)
-            )
+        OutputBranch::BranchedBy {
+            branch,
+            assignments,
+        } => {
+            let mut rendered = format!("BRANCHED BY {}", branch.as_str());
+            if !assignments.is_empty() {
+                let construction = RouteConstruction {
+                    assignments: assignments.clone(),
+                    ..RouteConstruction::default()
+                };
+                rendered.push(' ');
+                rendered.push_str(&route_construction_to_nspl(&construction)?);
+            }
+            Ok(rendered)
         }
-        BranchInitiatorSelection::Unbranched => "UNBRANCHED".to_string(),
+        OutputBranch::Unbranched => Ok("UNBRANCHED".to_string()),
     }
 }
 
@@ -755,7 +932,6 @@ impl CreateBranch {
 
 impl CreateIngestor {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let branch = branch_initiator_selection_to_nspl(&self.branched_by);
         let timestamp = self
             .timestamp_source
             .as_ref()
@@ -768,14 +944,13 @@ impl CreateIngestor {
             .unwrap_or_default();
         let source = ingest_source_to_nspl(&self.source);
         Ok(format!(
-            "CREATE INGESTOR {}{}{} DECODE USING {} {}{} FROM {} {};",
+            "CREATE INGESTOR {} FROM {} DECODE USING {}{}{}{} {};",
             self.name.as_str(),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
-            self.decode_using_codec.as_str(),
-            branch,
-            timestamp,
             source,
+            self.decode_using_codec.as_str(),
+            timestamp,
+            filter_where_suffix(&self.filter_where)?,
+            processor_outputs_to_nspl(&self.output_routes)?,
             general_error_policy_to_nspl(&self.general_error_policy)
         ))
     }
@@ -784,14 +959,12 @@ impl CreateIngestor {
 impl CreateGenerator {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE GENERATOR {} TO {} {} EACH {} {} {} {};",
+            "CREATE GENERATOR {} USING MATERIALIZED STATE {} EACH {} {}{};",
             self.name.as_str(),
-            self.into_relay.as_str(),
-            branch_selection_to_nspl(&self.branched_by),
+            self.materialized_relay.as_str(),
             self.each,
-            flush_policy_to_nspl_with_max(&self.flush_each, self.max_batch_size.as_deref()),
-            self.set,
-            message_error_policy_to_nspl(&self.message_error_policy)
+            branch_selection_to_nspl(&self.branched_by),
+            processor_outputs_to_nspl(&self.output_routes)?
         ))
     }
 }
@@ -865,31 +1038,29 @@ fn commit_policy_to_nspl(policy: &str, max_size: &str) -> String {
     format!("COMMIT EACH {policy} MAX SIZE {max_size}")
 }
 
-fn error_policies_to_nspl(policies: &ErrorPolicies) -> String {
-    format!(
-        "{} {}",
-        message_error_policy_to_nspl(&policies.message),
-        general_error_policy_to_nspl(&policies.general)
-    )
-}
-
-fn message_error_policy_to_nspl(policy: &MessageErrorPolicy) -> String {
-    match policy {
+fn message_error_policy_to_nspl(policy: &MessageErrorPolicy) -> Result<String, CanonicalNsplError> {
+    Ok(match policy {
         MessageErrorPolicy::Ignore => "ON MESSAGE ERROR IGNORE".to_string(),
         MessageErrorPolicy::Log => "ON MESSAGE ERROR LOG".to_string(),
-        MessageErrorPolicy::Dlq { relay, mappings } => {
-            let mappings = mappings
+        MessageErrorPolicy::Dlq { relay, assignments } => {
+            let assignments = assignments
                 .iter()
-                .map(|mapping| format!("{} = {}", mapping.field.as_str(), mapping.value))
-                .collect::<Vec<_>>()
+                .map(|assignment| {
+                    Ok(format!(
+                        "{} = {}",
+                        assignment.target.field.as_str(),
+                        expression_to_nspl(&assignment.value)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, CanonicalNsplError>>()?
                 .join(", ");
             format!(
                 "ON MESSAGE ERROR SEND TO {} SET {}",
                 relay.as_str(),
-                mappings
+                assignments
             )
         }
-    }
+    })
 }
 
 fn general_error_policy_to_nspl(policy: &GeneralErrorPolicy) -> &'static str {
@@ -899,16 +1070,49 @@ fn general_error_policy_to_nspl(policy: &GeneralErrorPolicy) -> &'static str {
     }
 }
 
+fn materialized_state_dependencies_suffix(
+    dependencies: &[MaterializedStateDependency],
+) -> Result<String, CanonicalNsplError> {
+    dependencies
+        .iter()
+        .map(|dependency| {
+            let policy = match &dependency.policy {
+                MaterializedStatePolicy::RequiredSkip => "REQUIRED SKIP".to_string(),
+                MaterializedStatePolicy::RequiredWait => "REQUIRED WAIT".to_string(),
+                MaterializedStatePolicy::Default(assignments) => format!(
+                    "DEFAULT {{ {} }}",
+                    assignments
+                        .iter()
+                        .map(|assignment| {
+                            Ok(format!(
+                                "{} = {}",
+                                assignment.target.field.as_str(),
+                                expression_to_nspl(&assignment.value)?
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                        .join(", ")
+                ),
+            };
+            Ok(format!(
+                " USING MATERIALIZED STATE {} {policy}",
+                dependency.relay.as_str()
+            ))
+        })
+        .collect::<Result<String, CanonicalNsplError>>()
+}
+
 impl CreateJunction {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} JUNCTION {} FROM {}{}{} {};",
+            "CREATE {} JUNCTION {} FROM {}{} {}{}{};",
             self.mode.as_ref(),
             self.name.as_str(),
-            processor_inputs_to_nspl(&self.from),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
-            branch_selection_to_nspl(&self.branched_by)
+            processor_inputs_to_nspl(&self.from)?,
+            filter_where_suffix(&self.filter_where)?,
+            branch_selection_to_nspl(&self.branched_by),
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            processor_outputs_to_nspl(&self.output_routes)?
         ))
     }
 }
@@ -916,15 +1120,20 @@ impl CreateJunction {
 impl CreateDeduplicator {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} DEDUPLICATOR {} FROM {}{}{} {} DEDUPLICATE ON {} MAX TIME {};",
+            "CREATE {} DEDUPLICATOR {} FROM {}{} DEDUPLICATE ON {} MAX TIME {} {}{}{};",
             self.mode.as_ref(),
             self.name.as_str(),
-            processor_inputs_to_nspl(&self.from),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
+            processor_inputs_to_nspl(&self.from)?,
+            filter_where_suffix(&self.filter_where)?,
+            self.deduplicate_on
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", "),
+            self.max_time,
             branch_selection_to_nspl(&self.branched_by),
-            self.deduplicate_on,
-            self.max_time
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            processor_outputs_to_nspl(&self.output_routes)?
         ))
     }
 }
@@ -932,20 +1141,20 @@ impl CreateDeduplicator {
 impl CreateCorrelator {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} CORRELATOR {} {} {} CORRELATE {} MATCH {}{}{} {} MAX TIME {} ON \
-             CORRELATION TIMEOUT {}, {};",
+            "CREATE {} CORRELATOR {} {} {} CORRELATE WHERE {} MATCH {} MAX TIME {} ON CORRELATION \
+             TIMEOUT {}, {} {}{}{};",
             self.mode.as_ref(),
             self.name.as_str(),
-            prefixed_processor_inputs_to_nspl("LEFT", &self.left),
-            prefixed_processor_inputs_to_nspl("RIGHT", &self.right),
-            self.correlate_where,
+            prefixed_processor_inputs_to_nspl("LEFT", &self.left)?,
+            prefixed_processor_inputs_to_nspl("RIGHT", &self.right)?,
+            expression_to_nspl(&self.correlate_where)?,
             self.match_policy.as_ref(),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
-            branch_selection_to_nspl(&self.branched_by),
             self.max_time,
             correlation_timeout_action_to_nspl(&self.timeout_policy.left),
-            correlation_timeout_action_to_nspl(&self.timeout_policy.right)
+            correlation_timeout_action_to_nspl(&self.timeout_policy.right),
+            branch_selection_to_nspl(&self.branched_by),
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            processor_outputs_to_nspl(&self.output_routes)?
         ))
     }
 }
@@ -960,15 +1169,20 @@ fn correlation_timeout_action_to_nspl(action: &CorrelationTimeoutAction) -> Stri
 impl CreateReorderer {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} REORDERER {} FROM {}{}{} {} BY {} MAX TIME {};",
+            "CREATE {} REORDERER {} FROM {}{} BY {} MAX TIME {} {}{}{};",
             self.mode.as_ref(),
             self.name.as_str(),
-            processor_inputs_to_nspl(&self.from),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
+            processor_inputs_to_nspl(&self.from)?,
+            filter_where_suffix(&self.filter_where)?,
+            self.order_by
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", "),
+            self.max_time,
             branch_selection_to_nspl(&self.branched_by),
-            self.order_by,
-            self.max_time
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            processor_outputs_to_nspl(&self.output_routes)?
         ))
     }
 }
@@ -976,16 +1190,16 @@ impl CreateReorderer {
 impl CreateWindowProcessor {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} WINDOW PROCESSOR {} FROM {}{}{} {} WIDTH {} STEP {} AGGREGATE {};",
+            "CREATE {} WINDOW PROCESSOR {} FROM {}{} WIDTH {} STEP {} {}{}{};",
             self.mode.as_ref(),
             self.name.as_str(),
-            processor_inputs_to_nspl(&self.from),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
-            branch_selection_to_nspl(&self.branched_by),
+            processor_inputs_to_nspl(&self.from)?,
+            filter_where_suffix(&self.filter_where)?,
             window_bound_to_nspl(&self.width),
             window_bound_to_nspl(&self.step),
-            self.aggregate
+            branch_selection_to_nspl(&self.branched_by),
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            processor_outputs_to_nspl(&self.output_routes)?
         ))
     }
 }
@@ -1003,7 +1217,7 @@ impl CreateEmitter {
             .map(|(policy, max_size)| format!(" {}", commit_policy_to_nspl(policy, max_size)))
             .unwrap_or_default();
         Ok(format!(
-            "CREATE {} EMITTER {} FROM {}{} TO {}{} {}{}{};",
+            "CREATE {} EMITTER {} FROM {}{}{} TO {}{}{}{} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
@@ -1011,11 +1225,13 @@ impl CreateEmitter {
                 .as_ref()
                 .map(|codec| format!(" ENCODE USING {}", codec.as_str()))
                 .unwrap_or_default(),
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
             emit_sink_to_nspl(&self.sink)?,
-            filter_map_suffix(&self.filter_map),
-            error_policies_to_nspl(&self.error_policies),
+            route_construction_suffix(&self.construction)?,
             flush_policy,
-            commit_policy
+            commit_policy,
+            message_error_policy_to_nspl(&self.error_policies.message)?,
+            general_error_policy_to_nspl(&self.error_policies.general)
         ))
     }
 }
@@ -1034,13 +1250,13 @@ fn window_bound_to_nspl(bound: &WindowBound) -> String {
 impl CreateReingestor {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         Ok(format!(
-            "CREATE {} REINGESTOR {} FROM {}{}{} {};",
+            "CREATE {} REINGESTOR {} FROM {}{}{}{};",
             self.mode.as_ref(),
             self.name.as_str(),
-            processor_inputs_to_nspl(&self.from),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
-            branch_initiator_selection_to_nspl(&self.branched_by)
+            processor_inputs_to_nspl(&self.from)?,
+            filter_where_suffix(&self.filter_where)?,
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            processor_outputs_to_nspl(&self.output_routes)?
         ))
     }
 }
@@ -1052,19 +1268,20 @@ impl CreateInferencer {
             .map(|version| format!(" VERSION {version}"))
             .unwrap_or_default();
         Ok(format!(
-            "CREATE {} INFERENCER {} FROM {}{}{} {} USING RESOURCE {}{} FILE {} INPUTS {{ {} }} \
-             OUTPUT SCHEMA {{ {} }};",
+            "CREATE {} INFERENCER {} FROM {}{} USING RESOURCE {}{} FILE {} INPUTS {{ {} }} OUTPUT \
+             SCHEMA {{ {} }} {}{}{};",
             self.mode.as_ref(),
             self.name.as_str(),
-            processor_inputs_to_nspl(&self.from),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
-            branch_selection_to_nspl(&self.branched_by),
+            processor_inputs_to_nspl(&self.from)?,
+            filter_where_suffix(&self.filter_where)?,
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
             inference_mappings_to_nspl(&self.inputs)?,
-            inference_output_schema_to_nspl(&self.output_schema)?
+            inference_output_schema_to_nspl(&self.output_schema)?,
+            branch_selection_to_nspl(&self.branched_by),
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            processor_outputs_to_nspl(&self.output_routes)?
         ))
     }
 }
@@ -1076,16 +1293,17 @@ impl CreateWasmProcessor {
             .map(|version| format!(" VERSION {version}"))
             .unwrap_or_default();
         Ok(format!(
-            "CREATE {} WASM PROCESSOR {} USING RESOURCE {}{} FILE {} FROM {}{}{} {} {};",
+            "CREATE {} WASM PROCESSOR {} FROM {}{} USING RESOURCE {}{} FILE {} {}{}{} {};",
             self.mode.as_ref(),
             self.name.as_str(),
+            processor_inputs_to_nspl(&self.from)?,
+            filter_where_suffix(&self.filter_where)?,
             self.resource.as_str(),
             version,
             string_literal(&self.file)?,
-            processor_inputs_to_nspl(&self.from),
-            filter_where_suffix(&self.filter_where),
-            processor_outputs_to_nspl(&self.output_routes),
             branch_selection_to_nspl(&self.branched_by),
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            processor_outputs_to_nspl(&self.output_routes)?,
             general_error_policy_to_nspl(&self.global_error_policy).replace("GENERAL", "GLOBAL")
         ))
     }
@@ -1098,7 +1316,7 @@ fn inference_mappings_to_nspl(
         .iter()
         .map(|mapping| {
             Ok(format!(
-                "{} {} TENSOR<{}>[{}] = {}.{}",
+                "{} {} TENSOR<{}>[{}] = {}",
                 string_literal(&mapping.tensor)?,
                 mapping.schema.representation.as_ref(),
                 mapping.schema.element_type.as_ref(),
@@ -1113,8 +1331,7 @@ fn inference_mappings_to_nspl(
                     })
                     .collect::<Vec<_>>()
                     .join(", "),
-                mapping.relay.as_str(),
-                mapping.field.as_str()
+                expression_to_nspl(&mapping.expression)?
             ))
         })
         .collect::<Result<Vec<_>, CanonicalNsplError>>()
@@ -1149,64 +1366,55 @@ fn inference_output_schema_to_nspl(
         .map(|items| items.join(", "))
 }
 
-fn filter_map_suffix(filter_map: &Option<String>) -> String {
-    filter_map
-        .as_deref()
-        .map(|filter_map| format!(" {filter_map}"))
-        .unwrap_or_default()
-}
-
-fn filter_where_suffix(filter_where: &Option<String>) -> String {
+fn filter_where_suffix(filter_where: &Option<Expression>) -> Result<String, CanonicalNsplError> {
     filter_where
-        .as_deref()
-        .map(|where_program| {
-            let condition = where_program
-                .strip_prefix("WHERE ")
-                .unwrap_or(where_program);
-            format!(" FILTER WHERE {condition}")
-        })
-        .unwrap_or_default()
+        .as_ref()
+        .map(|condition| Ok(format!(" FILTER WHERE {}", expression_to_nspl(condition)?)))
+        .unwrap_or_else(|| Ok(String::new()))
 }
 
-fn from_relay_to_nspl(relay: &Identifier, from_where: &[ProcessorInputWhere]) -> String {
+fn from_relay_to_nspl(
+    relay: &Identifier,
+    from_where: &[ProcessorInputWhere],
+) -> Result<String, CanonicalNsplError> {
     let where_suffix = from_where
         .iter()
         .find(|item| item.relay == *relay)
         .map(|item| {
-            let condition = item
-                .where_clause
-                .strip_prefix("WHERE ")
-                .unwrap_or(&item.where_clause);
-            format!(" WHERE {condition}")
+            expression_to_nspl(&item.where_clause).map(|condition| format!(" WHERE {condition}"))
         })
+        .transpose()?
         .unwrap_or_default();
-    format!("{}{where_suffix}", relay.as_str())
+    Ok(format!("{}{where_suffix}", relay.as_str()))
 }
 
-fn processor_inputs_to_nspl(inputs: &ProcessorInputs) -> String {
+fn processor_inputs_to_nspl(inputs: &ProcessorInputs) -> Result<String, CanonicalNsplError> {
     inputs
         .from
         .iter()
         .map(|relay| from_relay_to_nspl(relay, &inputs.r#where))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Result<Vec<_>, _>>()
+        .map(|items| items.join(", "))
 }
 
-fn prefixed_processor_inputs_to_nspl(prefix: &str, inputs: &ProcessorInputs) -> String {
+fn prefixed_processor_inputs_to_nspl(
+    prefix: &str,
+    inputs: &ProcessorInputs,
+) -> Result<String, CanonicalNsplError> {
     inputs
         .from
         .iter()
         .map(|relay| {
-            format!(
+            Ok(format!(
                 "{prefix} FROM {}",
-                from_relay_to_nspl(relay, &inputs.r#where)
-            )
+                from_relay_to_nspl(relay, &inputs.r#where)?
+            ))
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect::<Result<Vec<_>, CanonicalNsplError>>()
+        .map(|items| items.join(" "))
 }
 
-fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> String {
+fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> Result<String, CanonicalNsplError> {
     outputs
         .routes
         .iter()
@@ -1224,15 +1432,29 @@ fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> String {
                     )
                 })
                 .unwrap_or_default();
-            format!(
-                " TO {}{}{} {}",
+            let construction = route_construction_to_nspl(&output.construction)?;
+            let construction = if construction.is_empty() {
+                String::new()
+            } else {
+                format!(" {construction}")
+            };
+            let branch = output
+                .branch
+                .as_ref()
+                .map(output_branch_to_nspl)
+                .transpose()?
+                .map(|branch| format!(" {branch}"))
+                .unwrap_or_default();
+            Ok(format!(
+                " TO {}{}{}{} {}",
                 output.relay.as_str(),
+                construction,
+                branch,
                 flush,
-                filter_map_suffix(&output.filter_map),
-                message_error_policy_to_nspl(&output.message_error_policy)
-            )
+                message_error_policy_to_nspl(&output.message_error_policy)?
+            ))
         })
-        .collect::<String>()
+        .collect::<Result<String, CanonicalNsplError>>()
 }
 
 fn schema_field_to_nspl(field: &SchemaField) -> Result<String, CanonicalNsplError> {
@@ -1983,56 +2205,90 @@ impl NativeTypeToNspl for AvroType {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AckMode, AvroType, BranchInitiatorSelection, BranchSelection, BranchValueMapping,
-        CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-        CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-        CorrelatorMatchPolicy, CreateClientHttp, CreateClientKafka, CreateClientKinesis,
-        CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq,
-        CreateClientRedis, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq,
-        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
-        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateVhost, CreateWindowProcessor, CreateWireSchema,
-        CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
+        AckMode, AvroType, BinaryOperator, BranchSelection, CodecEncoding, CodecEncodingRule,
+        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
+        CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+        CreateClientHttp, CreateClientKafka, CreateClientKinesis, CreateClientMqtt,
+        CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
+        CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
+        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
+        CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
+        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope,
         GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, Model, MongoDbConflictAction,
-        MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-        MySqlValueMapping, NatsIngestMode, ParseAsType, PostgresConflictAction,
-        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
-        RetryPolicy, SchemaField, SqsIngestMode, WebsocketsIngestMode, WindowBound,
-        WireSchemaField, ZeroMqIngestMode,
+        KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, Literal, MessageErrorPolicy, Model,
+        MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
+        PostgresConflictAction, PostgresValueMapping, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode,
+        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SqsIngestMode,
+        WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
         Identifier::try_from(raw).expect("valid identifier")
     }
 
-    fn flushed_output(relay: &str, filter_map: Option<String>) -> ProcessorOutput {
+    fn flushed_output(relay: &str, construction: Option<RouteConstruction>) -> ProcessorOutput {
         let mut output = ProcessorOutput::with_flush_policy(
             identifier(relay),
             "100ms".to_string(),
             Some("1MiB".to_string()),
         );
-        output.filter_map = filter_map;
+        output.construction = construction.unwrap_or_default();
         output
+    }
+
+    fn bare_field(name: &str) -> Expression {
+        Expression::Field(crate::FieldReference::bare(identifier(name)))
+    }
+
+    fn scoped_field(scope: FieldScope, name: &str) -> Expression {
+        Expression::Field(crate::FieldReference::scoped(scope, identifier(name)))
+    }
+
+    fn string_value(value: &str) -> Expression {
+        Expression::Literal(Literal::String(value.to_string()))
+    }
+
+    fn call(name: &str, arguments: Vec<Expression>) -> Expression {
+        Expression::Call {
+            function: identifier(name),
+            arguments,
+        }
+    }
+
+    fn equals(left: Expression, right: Expression) -> Expression {
+        Expression::Binary {
+            operator: BinaryOperator::Equal,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    fn route_where(predicate: Expression) -> RouteConstruction {
+        RouteConstruction {
+            where_clause: Some(predicate),
+            ..RouteConstruction::default()
+        }
+    }
+
+    fn route_set(field: &str, value: Expression) -> RouteConstruction {
+        RouteConstruction {
+            assignments: vec![crate::Assignment {
+                target: crate::AssignmentTarget::bare(identifier(field)),
+                value,
+            }],
+            ..RouteConstruction::default()
+        }
     }
 
     fn flushed_outputs(relay: &str) -> ProcessorOutputs {
         ProcessorOutputs::new(vec![flushed_output(relay, None)])
     }
 
-    fn branched_by(schema: &str, relay: &str, fields: &[&str]) -> BranchInitiatorSelection {
-        BranchInitiatorSelection::branched_by(
-            identifier(&format!("by_{schema}")),
-            fields
-                .iter()
-                .map(|field| BranchValueMapping {
-                    field: identifier(field),
-                    relay: identifier(relay),
-                    relay_field: identifier(field),
-                })
-                .collect(),
-        )
+    fn flushed_ingestor_outputs(relay: &str) -> ProcessorOutputs {
+        flushed_outputs(relay).with_branch(OutputBranch::Unbranched)
     }
 
     fn processor_branched_by(schema: &str) -> BranchSelection {
@@ -2044,14 +2300,6 @@ mod tests {
             key: key.to_string(),
             value: value.to_string(),
         }
-    }
-
-    fn with_general_error_policy(nspl: &str) -> String {
-        let nspl = nspl
-            .strip_suffix(';')
-            .expect("canonical fixture ends with semicolon")
-            .replacen(" DECODE USING", " ON MESSAGE ERROR LOG DECODE USING", 1);
-        format!("{nspl} ON GENERAL ERROR LOG;")
     }
 
     #[test]
@@ -2561,11 +2809,13 @@ mod tests {
             branched_by: processor_branched_by("tenant_branch"),
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         };
         assert_eq!(
             junction.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED JUNCTION orders_junction FROM orders_a, orders_b TO orders_all FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch;"
+            "CREATE ATTACHED JUNCTION orders_junction FROM orders_a, orders_b BRANCHED BY \
+             by_tenant_branch TO orders_all FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
+             LOG;"
         );
 
         let deduplicator = CreateDeduplicator {
@@ -2573,16 +2823,17 @@ mod tests {
             from: ProcessorInputs::single(identifier("orders_in")),
             output_routes: flushed_outputs("orders_out"),
             branched_by: processor_branched_by("tenant_branch"),
-            deduplicate_on: "ss1.transaction_id".to_string(),
+            deduplicate_on: vec![scoped_field(FieldScope::Input, "transaction_id")],
             max_time: "10m".to_string(),
             mode: AckMode::Detached,
             filter_where: None,
+            materialized_state: Vec::new(),
         };
         assert_eq!(
             deduplicator.to_canonical_nspl().expect("must render"),
-            "CREATE DETACHED DEDUPLICATOR orders_dedup FROM orders_in TO orders_out FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch \
-             DEDUPLICATE ON ss1.transaction_id MAX TIME 10m;"
+            "CREATE DETACHED DEDUPLICATOR orders_dedup FROM orders_in DEDUPLICATE ON \
+             input.transaction_id MAX TIME 10m BRANCHED BY by_tenant_branch TO orders_out FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"
         );
 
         let correlator = CreateCorrelator {
@@ -2591,10 +2842,19 @@ mod tests {
             right: ProcessorInputs::single(identifier("orders_right")),
             output_routes: ProcessorOutputs::new(vec![flushed_output(
                 "orders_matched",
-                Some("SET orders_matched.id = orders_left.id".to_string()),
+                Some(route_set(
+                    "id",
+                    Expression::Field(crate::FieldReference::scoped(
+                        FieldScope::Left,
+                        identifier("id"),
+                    )),
+                )),
             )]),
             branched_by: processor_branched_by("tenant_branch"),
-            correlate_where: "WHERE orders_left.id = orders_right.id".to_string(),
+            correlate_where: equals(
+                scoped_field(FieldScope::Left, "id"),
+                scoped_field(FieldScope::Right, "id"),
+            ),
             match_policy: CorrelatorMatchPolicy::Earliest,
             max_time: "5s".to_string(),
             timeout_policy: CorrelationTimeoutPolicy {
@@ -2603,20 +2863,39 @@ mod tests {
             },
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         };
         assert_eq!(
             correlator.to_canonical_nspl().expect("must render"),
             "CREATE ATTACHED CORRELATOR orders_correlator LEFT FROM orders_left RIGHT FROM \
-             orders_right CORRELATE WHERE orders_left.id = orders_right.id MATCH EARLIEST TO \
-             orders_matched FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET orders_matched.id = \
-             orders_left.id ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch MAX TIME 5s ON \
-             CORRELATION TIMEOUT DROP, DROP;"
+             orders_right CORRELATE WHERE (left.id = right.id) MATCH EARLIEST MAX TIME 5s ON \
+             CORRELATION TIMEOUT DROP, DROP BRANCHED BY by_tenant_branch TO orders_matched SET id \
+             = left.id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"
         );
 
         let window_processor = CreateWindowProcessor {
             name: identifier("latency_window"),
             from: ProcessorInputs::single(identifier("orders_in")),
-            output_routes: ProcessorOutputs::single(identifier("orders_p99")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                relay: identifier("orders_p99"),
+                construction: route_set(
+                    "latency_p99",
+                    Expression::Call {
+                        function: identifier("percentile_linear_histogram"),
+                        arguments: vec![
+                            scoped_field(FieldScope::Input, "latency"),
+                            Expression::Literal(Literal::I64(99)),
+                            Expression::Literal(Literal::I64(2048)),
+                            Expression::Literal(Literal::I64(0)),
+                            Expression::Literal(Literal::I64(10000)),
+                            string_value("2s"),
+                        ],
+                    },
+                ),
+                flush_policy: None,
+                message_error_policy: MessageErrorPolicy::Log,
+                branch: None,
+            }]),
             branched_by: processor_branched_by("tenant_branch"),
             width: WindowBound {
                 messages: Some(100),
@@ -2626,33 +2905,30 @@ mod tests {
                 messages: Some(10),
                 duration: Some("1s".to_string()),
             },
-            aggregate: "orders_p99.latency_p99 = PERCENTILE_LINEAR_HISTOGRAM(orders_in.latency, \
-                        99, 2048, 0, 10000, '2s')"
-                .to_string(),
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         };
         assert_eq!(
             window_processor.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED WINDOW PROCESSOR latency_window FROM orders_in TO orders_p99 ON \
-             MESSAGE ERROR LOG BRANCHED BY by_tenant_branch WIDTH 100 MESSAGES 10s DURATION STEP \
-             10 MESSAGES 1s DURATION AGGREGATE orders_p99.latency_p99 = \
-             PERCENTILE_LINEAR_HISTOGRAM(orders_in.latency, 99, 2048, 0, 10000, '2s');"
+            "CREATE ATTACHED WINDOW PROCESSOR latency_window FROM orders_in WIDTH 100 MESSAGES \
+             10s DURATION STEP 10 MESSAGES 1s DURATION BRANCHED BY by_tenant_branch TO orders_p99 \
+             SET latency_p99 = percentile_linear_histogram(input.latency, 99, 2048, 0, 10000, \
+             '2s') ON MESSAGE ERROR LOG;"
         );
 
         let reingestor = CreateReingestor {
             name: identifier("orders_repartition"),
             from: ProcessorInputs::single(identifier("orders_in")),
-            output_routes: flushed_outputs("orders_out"),
-            branched_by: branched_by("tenant_branch", "orders", &["tenant"]),
+            output_routes: flushed_outputs("orders_out").with_branch(OutputBranch::Unbranched),
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         };
         assert_eq!(
             reingestor.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED REINGESTOR orders_repartition FROM orders_in TO orders_out FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch \
-             VALUES {tenant = orders.tenant};"
+            "CREATE ATTACHED REINGESTOR orders_repartition FROM orders_in TO orders_out \
+             UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"
         );
 
         let route_reingestor = CreateReingestor {
@@ -2661,21 +2937,29 @@ mod tests {
             output_routes: ProcessorOutputs::new(vec![
                 flushed_output(
                     "orders_errors",
-                    Some(r#"WHERE level = "error""#.to_string()),
+                    Some(route_where(equals(
+                        bare_field("level"),
+                        string_value("error"),
+                    ))),
                 ),
                 flushed_output(
                     "orders_warn",
-                    Some(r#"SET severity = "warning" WHERE level = "warn""#.to_string()),
+                    Some(RouteConstruction {
+                        assignments: route_set("severity", string_value("warning")).assignments,
+                        where_clause: Some(equals(bare_field("level"), string_value("warn"))),
+                        ..RouteConstruction::default()
+                    }),
                 ),
                 flushed_output("orders_info", None),
-            ]),
-            branched_by: branched_by("tenant_branch", "orders", &["tenant"]),
+            ])
+            .with_branch(OutputBranch::Unbranched),
             mode: AckMode::Detached,
-            filter_where: Some("WHERE active".to_string()),
+            filter_where: Some(bare_field("active")),
+            materialized_state: Vec::new(),
         };
         assert_eq!(
             route_reingestor.to_canonical_nspl().expect("must render"),
-            r#"CREATE DETACHED REINGESTOR orders_splitter FROM orders_in FILTER WHERE active TO orders_errors FLUSH EACH 100ms MAX BATCH SIZE 1MiB WHERE level = "error" ON MESSAGE ERROR LOG TO orders_warn FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET severity = "warning" WHERE level = "warn" ON MESSAGE ERROR LOG TO orders_info FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch VALUES {tenant = orders.tenant};"#
+            r#"CREATE DETACHED REINGESTOR orders_splitter FROM orders_in FILTER WHERE active TO orders_errors WHERE (level = 'error') UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG TO orders_warn SET severity = 'warning' WHERE (level = 'warn') UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG TO orders_info UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#
         );
     }
 
@@ -2757,14 +3041,15 @@ mod tests {
                 mode: AckMode::Attached,
                 error_policies: ErrorPolicies::handled_by_log(),
 
-                filter_map: None,
+                construction: RouteConstruction::default(),
+                materialized_state: Vec::new(),
             };
             assert_eq!(
                 emitter.to_canonical_nspl().expect("must render"),
                 format!(
                     "CREATE ATTACHED EMITTER emit_orders FROM orders_stream ENCODE USING \
-                     orders_codec TO {rendered_sink} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG \
-                     FLUSH EACH 100ms MAX BATCH SIZE 1MiB;"
+                     orders_codec TO {rendered_sink} FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                     MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
                 )
             );
         }
@@ -2782,11 +3067,11 @@ mod tests {
                 values: vec![
                     PostgresValueMapping {
                         column: "postgres_user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: scoped_field(FieldScope::Input, "user_id"),
                     },
                     PostgresValueMapping {
                         column: "postgres_action".to_string(),
-                        expression: "LOWER ( notifications.action )".to_string(),
+                        expression: call("lower", vec![scoped_field(FieldScope::Input, "action")]),
                     },
                 ],
                 conflict_action: PostgresConflictAction::DoUpdate {
@@ -2800,16 +3085,17 @@ mod tests {
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
-            filter_map: None,
+            construction: RouteConstruction::default(),
+            materialized_state: Vec::new(),
         };
 
         assert_eq!(
             emitter.to_canonical_nspl().expect("must render"),
             "CREATE ATTACHED EMITTER emit_notifications FROM notifications TO POSTGRES \
              postgres_main INSERT TO TABLE notification_rows VALUES {'postgres_user_id' = \
-             notifications.user_id, 'postgres_action' = LOWER ( notifications.action )} ON \
-             CONFLICT ('postgres_user_id') DO UPDATE WITH MAX BATCH 500 ON MESSAGE ERROR LOG ON \
-             GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;"
+             input.user_id, 'postgres_action' = lower(input.action)} ON CONFLICT \
+             ('postgres_user_id') DO UPDATE WITH MAX BATCH 500 FLUSH EACH 10s MAX BATCH SIZE 1MiB \
+             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
     }
 
@@ -2825,11 +3111,11 @@ mod tests {
                 values: vec![
                     MySqlValueMapping {
                         column: "mysql_user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: scoped_field(FieldScope::Input, "user_id"),
                     },
                     MySqlValueMapping {
                         column: "mysql_action".to_string(),
-                        expression: "LOWER ( notifications.action )".to_string(),
+                        expression: call("lower", vec![scoped_field(FieldScope::Input, "action")]),
                     },
                 ],
                 conflict_action: MySqlConflictAction::DoNothing,
@@ -2841,16 +3127,16 @@ mod tests {
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
-            filter_map: None,
+            construction: RouteConstruction::default(),
+            materialized_state: Vec::new(),
         };
 
         assert_eq!(
             emitter.to_canonical_nspl().expect("must render"),
             "CREATE ATTACHED EMITTER emit_notifications FROM notifications TO MYSQL mysql_main \
-             INSERT TO TABLE notification_rows VALUES {'mysql_user_id' = notifications.user_id, \
-             'mysql_action' = LOWER ( notifications.action )} ON CONFLICT DO NOTHING WITH MAX \
-             BATCH 500 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE \
-             1MiB;"
+             INSERT TO TABLE notification_rows VALUES {'mysql_user_id' = input.user_id, \
+             'mysql_action' = lower(input.action)} ON CONFLICT DO NOTHING WITH MAX BATCH 500 \
+             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
     }
 
@@ -2866,11 +3152,11 @@ mod tests {
                 values: vec![
                     MongoDbValueMapping {
                         column: "mongodb_user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: scoped_field(FieldScope::Input, "user_id"),
                     },
                     MongoDbValueMapping {
                         column: "mongodb_action".to_string(),
-                        expression: "LOWER ( notifications.action )".to_string(),
+                        expression: call("lower", vec![scoped_field(FieldScope::Input, "action")]),
                     },
                 ],
                 conflict_action: MongoDbConflictAction::DoUpdate {
@@ -2884,16 +3170,17 @@ mod tests {
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
-            filter_map: None,
+            construction: RouteConstruction::default(),
+            materialized_state: Vec::new(),
         };
 
         assert_eq!(
             emitter.to_canonical_nspl().expect("must render"),
             "CREATE ATTACHED EMITTER emit_notifications FROM notifications TO MONGODB \
              mongodb_main INSERT TO COLLECTION notification_rows VALUES {'mongodb_user_id' = \
-             notifications.user_id, 'mongodb_action' = LOWER ( notifications.action )} ON \
-             CONFLICT ('mongodb_user_id') DO UPDATE WITH MAX BATCH 500 ON MESSAGE ERROR LOG ON \
-             GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;"
+             input.user_id, 'mongodb_action' = lower(input.action)} ON CONFLICT \
+             ('mongodb_user_id') DO UPDATE WITH MAX BATCH 500 FLUSH EACH 10s MAX BATCH SIZE 1MiB \
+             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
     }
 
@@ -2907,9 +3194,8 @@ mod tests {
             (
                 CreateIngestor {
                     name: identifier("http_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: branched_by("tenant_branch", "orders", &["tenant"]),
                     timestamp_source: None,
                     source: IngestSource::Http {
                         client: identifier("http_main"),
@@ -2921,16 +3207,15 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR http_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec BRANCHED BY by_tenant_branch VALUES {tenant = \
-                 orders.tenant} FROM HTTP http_main EVERY 30s;",
+                "CREATE INGESTOR http_ingestor FROM HTTP http_main EVERY 30s DECODE USING \
+                 orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("kinesis_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Kinesis {
                         client: identifier("kinesis_main"),
@@ -2947,21 +3232,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR kinesis_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM KINESIS kinesis_main RELAY \
-                 orders_stream INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 12s RETRY POLICY \
-                 BACKOFF 1s MAX 30s;",
+                "CREATE INGESTOR kinesis_ingestor FROM KINESIS kinesis_main RELAY orders_stream \
+                 INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 12s RETRY POLICY BACKOFF 1s MAX 30s \
+                 DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE \
+                 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("kafka_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: branched_by(
-                        "tenant_region_branch",
-                        "orders",
-                        &["tenant", "region"],
-                    ),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
                         client: identifier("kafka_main"),
@@ -2981,18 +3261,17 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR kafka_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec BRANCHED BY by_tenant_region_branch VALUES {tenant = \
-                 orders.tenant, region = orders.region} FROM KAFKA kafka_main TOPIC orders_topic \
-                 OFFSET BY CONSUMER GROUP orders_group INSTANCES 3 MODE ACK PARALLEL MAX 8 BATCH \
-                 TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s;",
+                "CREATE INGESTOR kafka_ingestor FROM KAFKA kafka_main TOPIC orders_topic OFFSET \
+                 BY CONSUMER GROUP orders_group INSTANCES 3 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT \
+                 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s DECODE USING orders_codec \
+                 TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
+                 ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("mqtt_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Mqtt {
                         client: identifier("mqtt_main"),
@@ -3009,16 +3288,15 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR mqtt_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM MQTT mqtt_main TOPIC orders_topic MODE \
-                 NO_ACK SEQUENTIAL;",
+                "CREATE INGESTOR mqtt_ingestor FROM MQTT mqtt_main TOPIC orders_topic MODE NO_ACK \
+                 SEQUENTIAL DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX \
+                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("nats_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Nats {
                         client: identifier("nats_main"),
@@ -3033,16 +3311,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR nats_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM NATS nats_main SUBJECT orders_subject \
-                 QUEUE GROUP orders_workers INSTANCES 2 MODE NO_ACK SEQUENTIAL;",
+                "CREATE INGESTOR nats_ingestor FROM NATS nats_main SUBJECT orders_subject QUEUE \
+                 GROUP orders_workers INSTANCES 2 MODE NO_ACK SEQUENTIAL DECODE USING \
+                 orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("rabbit_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::RabbitMq {
                         client: identifier("rmq_main"),
@@ -3059,16 +3337,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR rabbit_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM RABBITMQ rmq_main QUEUE orders_q \
-                 INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 1s MAX 30s;",
+                "CREATE INGESTOR rabbit_ingestor FROM RABBITMQ rmq_main QUEUE orders_q INSTANCES \
+                 2 MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 1s MAX 30s DECODE \
+                 USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("redis_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::RedisPubSub {
                         client: identifier("redis_main"),
@@ -3081,16 +3359,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR redis_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM REDIS PUBSUB redis_main CHANNEL \
-                 orders_channel MODE NO_ACK SEQUENTIAL;",
+                "CREATE INGESTOR redis_ingestor FROM REDIS PUBSUB redis_main CHANNEL \
+                 orders_channel MODE NO_ACK SEQUENTIAL DECODE USING orders_codec TO orders \
+                 UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
+                 ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("prom_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Prometheus {
                         client: identifier("prom_main"),
@@ -3103,16 +3381,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR prom_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM PROMETHEUS prom_main QUERY \
-                 'sum(rate(http_requests_total[5m]))' EVERY 15s;",
+                "CREATE INGESTOR prom_ingestor FROM PROMETHEUS prom_main QUERY \
+                 'sum(rate(http_requests_total[5m]))' EVERY 15s DECODE USING orders_codec TO \
+                 orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
+                 GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("zmq_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_main"),
@@ -3124,15 +3402,15 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR zmq_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM ZEROMQ zmq_main MODE NO_ACK SEQUENTIAL;",
+                "CREATE INGESTOR zmq_ingestor FROM ZEROMQ zmq_main MODE NO_ACK SEQUENTIAL DECODE \
+                 USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("sqs_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Sqs {
                         client: identifier("sqs_main"),
@@ -3149,16 +3427,16 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR sqs_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM SQS sqs_main QUEUE orders_queue MODE \
-                 ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s;",
+                "CREATE INGESTOR sqs_ingestor FROM SQS sqs_main QUEUE orders_queue MODE ACK \
+                 SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s DECODE USING \
+                 orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("endpoint_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Endpoint {
                         endpoint: identifier("orders_endpoint"),
@@ -3170,16 +3448,15 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR endpoint_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM ENDPOINT orders_endpoint MODE NO_ACK \
-                 SEQUENTIAL;",
+                "CREATE INGESTOR endpoint_ingestor FROM ENDPOINT orders_endpoint MODE NO_ACK \
+                 SEQUENTIAL DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX \
+                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
                     name: identifier("ws_ingestor"),
-                    output_routes: flushed_outputs("orders"),
+                    output_routes: flushed_ingestor_outputs("orders"),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Websockets {
                         client: identifier("ws_main"),
@@ -3191,14 +3468,14 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE INGESTOR ws_ingestor TO orders FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-                 DECODE USING orders_codec UNBRANCHED FROM WEBSOCKETS ws_main MODE NO_ACK \
-                 SEQUENTIAL;",
+                "CREATE INGESTOR ws_ingestor FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL \
+                 DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE \
+                 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
         ];
 
         for (actual, expected) in expectations {
-            assert_eq!(actual, with_general_error_policy(expected));
+            assert_eq!(actual, expected);
         }
     }
 

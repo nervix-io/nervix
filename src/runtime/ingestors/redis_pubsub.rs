@@ -54,14 +54,12 @@ impl RedisPubSubIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let branching = dependencies.branching;
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
         let task_domain = domain.clone();
         let task_ingestor = ingestor.name.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_branch_value_mappings = dependencies.branch_value_mappings.clone();
         let task_channel = channel.clone();
         let task_events = runtime.events.clone();
         let task_addr = addr.clone();
@@ -180,8 +178,6 @@ impl RedisPubSubIngestor {
                                                     domain: &task_domain,
                                                     ingestor: &task_ingestor,
                                                     timestamp_source: task_timestamp_source.as_ref(),
-                                                    branching: &branching,
-                                                    branch_value_mappings: Some(&task_branch_value_mappings),
                                                     output_routes: &mut output_routes,
                                                     filter_where: filter_where.as_ref(),
                                                     branched_senders:

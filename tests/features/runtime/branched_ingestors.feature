@@ -1,12 +1,12 @@
 Feature: Ingestor branch consistency
-  Scenario Outline: Ingestors targeting the same relay must use compatible branch schemas
+  Scenario Outline: Ingestors targeting the same relay must use its exact named branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "conflicting branch fields"
+    When these NSPL commands fail with "must use its exact declared branch"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -47,27 +47,26 @@ Feature: Ingestor branch consistency
         CONFIG {
           'addr' = 'redis://127.0.0.1:6379/'
         }; CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES {
-          tenant = notifications.tenant,
-          user_id = notifications.user_id
-        }
-
-        FROM MQTT mqtt_main
-        TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_branch TTL 5m; CREATE INGESTOR redis_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_redis_notifications VALUES {
-          user_id = notifications.user_id
-        }
-
-        FROM REDIS PUBSUB redis_main
-        CHANNEL notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_redis_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       """
 
     Examples:
@@ -83,7 +82,7 @@ Feature: Ingestor branch consistency
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "conflicting branch names"
+    When these NSPL commands fail with "must use its exact declared branch"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -123,26 +122,24 @@ Feature: Ingestor branch consistency
         };
 
       CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_branch TTL 5m; CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_main TOPIC notifications_a_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES {
-          tenant = notifications.tenant,
-          user_id = notifications.user_id
-        }
-
-        FROM MQTT mqtt_main
-        TOPIC notifications_a_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG; CREATE INGESTOR mqtt_notifications_secondary
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG; CREATE INGESTOR mqtt_notifications_secondary
+        FROM MQTT mqtt_secondary TOPIC notifications_b_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications_secondary VALUES {
-          tenant = notifications.tenant,
-          user_id = notifications.user_id
-        }
-
-        FROM MQTT mqtt_secondary
-        TOPIC notifications_b_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications_secondary
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       START;
       """

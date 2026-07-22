@@ -5,10 +5,10 @@ use chumsky::{
     prelude::*,
 };
 use nervix_models::{
-    AckMode, BranchInitiatorSelection, BranchSelection, BranchValueMapping, Domain,
-    ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, Identifier as ModelIdentifier,
-    MessageErrorPolicy, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs,
+    AckMode, AssignmentTargetScope, BranchSelection, Domain, Expression, GeneralErrorPolicy,
+    Identifier as ModelIdentifier, MaterializedStateDependency, MaterializedStatePolicy,
+    MessageErrorPolicy, OutputBranch, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, RouteConstruction,
 };
 use sorted_vec::SortedSet;
 
@@ -138,31 +138,6 @@ pub fn schema_ref<'src>()
     parse_identifier("ref:schema")
 }
 
-pub fn branch_value_mappings<'src>()
--> impl Parser<'src, &'src [Token], Vec<BranchValueMapping>, extra::Err<ParseError<'src>>> + Clone {
-    let ident = parse_identifier("field_name");
-    let source = parse_identifier("relay_ref")
-        .then_ignore(tok(Token::Dot))
-        .then(parse_identifier("field_name"))
-        .map(|(relay, relay_field)| (relay, relay_field));
-    let value =
-        ident
-            .then_ignore(tok(Token::Eq))
-            .then(source)
-            .map(|(field, (relay, relay_field))| BranchValueMapping {
-                field,
-                relay,
-                relay_field,
-            });
-    kw(Identifier::Values).ignore_then(
-        value
-            .separated_by(tok(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
-    )
-}
-
 pub fn branch_definition_header<'src>()
 -> impl Parser<'src, &'src [Token], (ModelIdentifier, String), extra::Err<ParseError<'src>>> + Clone
 {
@@ -182,16 +157,96 @@ pub fn branch_selection<'src>()
     choice((branched, unbranched))
 }
 
-pub fn branch_initiator_selection<'src>()
--> impl Parser<'src, &'src [Token], BranchInitiatorSelection, extra::Err<ParseError<'src>>> + Clone
-{
+pub fn output_branch<'src>()
+-> impl Parser<'src, &'src [Token], OutputBranch, extra::Err<ParseError<'src>>> + Clone {
     let branched = kw_phrase2(Identifier::Branched, Identifier::By)
         .ignore_then(branch_ref())
-        .then(branch_value_mappings())
-        .map(|(branch, values)| BranchInitiatorSelection::branched_by(branch, values));
-    let unbranched = kw(Identifier::Unbranched).to(BranchInitiatorSelection::unbranched());
+        .then(route_construction().or_not())
+        .try_map(|(branch, construction), span| {
+            let construction = construction.unwrap_or_default();
+            if construction.inherit.is_some()
+                || construction.where_clause.is_some()
+                || !construction.invocations.is_empty()
+                || construction.assignments.iter().any(|assignment| {
+                    !matches!(
+                        assignment.target.scope,
+                        AssignmentTargetScope::Bare | AssignmentTargetScope::Branch
+                    )
+                })
+            {
+                return Err(Rich::custom(
+                    span,
+                    "branch construction accepts SET assignments with bare or branch targets only",
+                ));
+            }
+            Ok(OutputBranch::BranchedBy {
+                branch,
+                assignments: construction.assignments,
+            })
+        });
+    let unbranched = kw(Identifier::Unbranched).to(OutputBranch::Unbranched);
 
     choice((branched, unbranched))
+}
+
+fn materialized_default_assignments<'src>()
+-> impl Parser<'src, &'src [Token], Vec<nervix_models::Assignment>, extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::Default)
+        .ignore_then(
+            any()
+                .filter(|token: &Token| !matches!(token, Token::RBrace))
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
+        )
+        .try_map(|tokens, span| {
+            let source = format!("SET {}", render_vm_program_tokens(&tokens));
+            let construction = crate::semantic_program::parse_route_construction(&source)
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))?;
+            if construction.inherit.is_some()
+                || construction.where_clause.is_some()
+                || !construction.invocations.is_empty()
+                || construction
+                    .assignments
+                    .iter()
+                    .any(|assignment| assignment.target.scope != AssignmentTargetScope::Bare)
+            {
+                return Err(Rich::custom(
+                    span,
+                    "materialized-state DEFAULT requires bare constant assignments",
+                ));
+            }
+            Ok(construction.assignments)
+        })
+}
+
+pub fn materialized_state_dependency<'src>()
+-> impl Parser<'src, &'src [Token], MaterializedStateDependency, extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::Using)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .then(choice((
+            kw(Identifier::Required)
+                .ignore_then(kw(Identifier::Skip))
+                .to(MaterializedStatePolicy::RequiredSkip),
+            kw(Identifier::Required)
+                .ignore_then(kw(Identifier::Wait))
+                .to(MaterializedStatePolicy::RequiredWait),
+            materialized_default_assignments().map(MaterializedStatePolicy::Default),
+        )))
+        .map(|(relay, policy)| MaterializedStateDependency { relay, policy })
+}
+
+pub fn materialized_state_dependencies<'src>()
+-> impl Parser<'src, &'src [Token], Vec<MaterializedStateDependency>, extra::Err<ParseError<'src>>>
++ Clone {
+    materialized_state_dependency()
+        .repeated()
+        .collect::<Vec<_>>()
 }
 
 pub fn domain_name<'src>()
@@ -540,24 +595,6 @@ pub fn flush_each<'src>()
     ))
 }
 
-fn error_value_ref<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    word_raw()
-        .separated_by(tok(Token::Dot))
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .map(|parts| parts.join("."))
-        .labelled("error_value")
-}
-
-fn error_field_mapping<'src>()
--> impl Parser<'src, &'src [Token], ErrorFieldMapping, extra::Err<ParseError<'src>>> + Clone {
-    field_ref()
-        .then_ignore(tok(Token::Eq))
-        .then(error_value_ref())
-        .map(|(field, value)| ErrorFieldMapping { field, value })
-}
-
 pub fn message_error_policy<'src>()
 -> impl Parser<'src, &'src [Token], MessageErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::On)
@@ -568,14 +605,26 @@ pub fn message_error_policy<'src>()
             kw(Identifier::Log).to(MessageErrorPolicy::Log),
             kw_phrase2(Identifier::Send, Identifier::To)
                 .ignore_then(message_error_relay_ref())
-                .then_ignore(kw(Identifier::Set))
-                .then(
-                    error_field_mapping()
-                        .separated_by(tok(Token::Comma))
-                        .at_least(1)
-                        .collect::<Vec<_>>(),
-                )
-                .map(|(relay, mappings)| MessageErrorPolicy::Dlq { relay, mappings }),
+                .then(route_construction())
+                .try_map(|(relay, construction), span| {
+                    if construction.inherit.is_some()
+                        || construction.where_clause.is_some()
+                        || !construction.invocations.is_empty()
+                        || construction.assignments.is_empty()
+                        || construction.assignments.iter().any(|assignment| {
+                            assignment.target.scope != AssignmentTargetScope::Bare
+                        })
+                    {
+                        return Err(Rich::custom(
+                            span,
+                            "ON MESSAGE ERROR SEND TO requires bare SET assignments only",
+                        ));
+                    }
+                    Ok(MessageErrorPolicy::Dlq {
+                        relay,
+                        assignments: construction.assignments,
+                    })
+                }),
         )))
 }
 
@@ -590,19 +639,12 @@ pub fn general_error_policy<'src>()
         )))
 }
 
-pub fn error_policies<'src>()
--> impl Parser<'src, &'src [Token], ErrorPolicies, extra::Err<ParseError<'src>>> + Clone {
-    message_error_policy()
-        .then(general_error_policy())
-        .map(|(message, general)| ErrorPolicies { message, general })
-}
-
-fn vm_program_head<'src>()
+fn route_construction_head<'src>()
 -> impl Parser<'src, &'src [Token], Identifier, extra::Err<ParseError<'src>>> + Clone {
     choice((
-        kw(Identifier::Where).to(Identifier::Where),
+        kw(Identifier::Inherit).to(Identifier::Inherit),
         kw(Identifier::Set).to(Identifier::Set),
-        kw(Identifier::Unset).to(Identifier::Unset),
+        kw(Identifier::Where).to(Identifier::Where),
         kw(Identifier::Invoke).to(Identifier::Invoke),
     ))
 }
@@ -625,8 +667,22 @@ fn processor_output_boundary_token(token: &Token) -> bool {
                     | Identifier::By
                     | Identifier::Width
                     | Identifier::Step
-                    | Identifier::Aggregate
                     | Identifier::Output,
+                ..
+            })
+    )
+}
+
+fn route_boundary_token(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Semicolon
+            | Token::Word(Word::KnownWord {
+                iden: Identifier::To
+                    | Identifier::Branched
+                    | Identifier::Unbranched
+                    | Identifier::Flush
+                    | Identifier::On,
                 ..
             })
     )
@@ -644,66 +700,63 @@ pub(crate) fn from_where_boundary_token(token: &Token) -> bool {
         )
 }
 
-fn validated_vm_program_with_head_until<'src>(
-    head: impl Parser<'src, &'src [Token], Identifier, extra::Err<ParseError<'src>>> + Clone,
-    stop: fn(&Token) -> bool,
-) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    head.then(
-        any()
-            .filter(move |token: &Token| !stop(token))
-            .repeated()
-            .collect::<Vec<_>>(),
-    )
-    .try_map(|(head, tail), span| {
-        let head: &'static str = head.into();
-        let tail = render_vm_program_tokens(&tail);
-        let source = if tail.is_empty() {
-            head.to_string()
-        } else {
-            format!("{head} {tail}")
-        };
-        crate::vm_program::parse_program(&source)
-            .map(|_| source)
-            .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
-    })
-}
-
-fn validated_vm_program_until<'src>(
-    stop: fn(&Token) -> bool,
-) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    validated_vm_program_with_head_until(vm_program_head(), stop)
-}
-
-pub fn filter_map_program<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    validated_vm_program_until(|token| {
-        matches!(
-            token,
-            Token::Semicolon
-                | Token::Word(Word::KnownWord {
-                    iden: Identifier::On,
-                    ..
-                })
+pub fn route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    route_construction_head()
+        .then(
+            any()
+                .filter(|token: &Token| !route_boundary_token(token))
+                .repeated()
+                .collect::<Vec<_>>(),
         )
-    })
+        .try_map(|(head, tail), span| {
+            let head: &'static str = head.into();
+            let tail = render_vm_program_tokens(&tail);
+            let source = if tail.is_empty() {
+                head.to_string()
+            } else {
+                format!("{head} {tail}")
+            };
+            crate::semantic_program::parse_route_construction(&source)
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
 }
 
-pub fn output_filter_map_program<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    validated_vm_program_until(processor_output_boundary_token)
-}
-
-fn explicit_output_filter_map_program<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    validated_vm_program_with_head_until(
-        kw(Identifier::Set).to(Identifier::Set),
-        processor_output_boundary_token,
-    )
+fn explicit_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Set)
+        .ignore_then(
+            any()
+                .filter(|token: &Token| !route_boundary_token(token))
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .try_map(|tokens, span| {
+            let source = format!("SET {}", render_vm_program_tokens(&tokens));
+            crate::semantic_program::parse_route_construction(&source)
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
+        .try_map(|construction, span| {
+            if construction.assignments.is_empty() {
+                Err(Rich::custom(
+                    span,
+                    "output route must contain SET assignments and may contain WHERE",
+                ))
+            } else if construction.inherit.is_some() || !construction.invocations.is_empty() {
+                Err(Rich::custom(
+                    span,
+                    "set-only output route may contain SET assignments and WHERE only",
+                ))
+            } else {
+                Ok(construction)
+            }
+        })
 }
 
 fn source_where_clause_with_boundary<'src>(
     boundary: fn(&Token) -> bool,
-) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Where)
         .ignore_then(
             any()
@@ -714,9 +767,7 @@ fn source_where_clause_with_boundary<'src>(
         )
         .try_map(|tokens, span| {
             let source = render_vm_program_tokens(&tokens);
-            let program = format!("WHERE {source}");
-            crate::vm_program::parse_program(&program)
-                .map(|_| program)
+            crate::parse_expression(&source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
 }
@@ -769,24 +820,8 @@ pub fn from_relay_clauses<'src>()
         })
 }
 
-fn ingestor_output_boundary_token(token: &Token) -> bool {
-    processor_output_boundary_token(token)
-        || matches!(
-            token,
-            Token::Word(Word::KnownWord {
-                iden: Identifier::Decode,
-                ..
-            })
-        )
-}
-
-fn ingestor_output_filter_map_program<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    validated_vm_program_until(ingestor_output_boundary_token)
-}
-
 pub fn filter_where_clause<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Filter)
         .ignore_then(kw(Identifier::Where))
         .ignore_then(
@@ -798,25 +833,24 @@ pub fn filter_where_clause<'src>()
         )
         .try_map(|tokens, span| {
             let source = render_vm_program_tokens(&tokens);
-            let program = format!("WHERE {source}");
-            crate::vm_program::parse_program(&program)
-                .map(|_| program)
+            crate::parse_expression(&source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
 }
 
-fn processor_output_route<'src>()
+fn explicit_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
         .ignore_then(relay_ref())
-        .then(output_filter_map_program().or_not())
+        .then(explicit_route_construction())
         .then(message_error_policy())
         .map(
-            |((relay, filter_map), message_error_policy)| ProcessorOutput {
+            |((relay, construction), message_error_policy)| ProcessorOutput {
                 relay,
-                filter_map,
+                construction,
                 flush_policy: None,
                 message_error_policy,
+                branch: None,
             },
         )
 }
@@ -825,19 +859,20 @@ fn flushed_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
         .ignore_then(relay_ref())
+        .then(route_construction().or_not())
         .then(flush_each())
-        .then(output_filter_map_program().or_not())
         .then(message_error_policy())
         .map(
-            |(((relay, (flush_each, max_batch_size)), filter_map), message_error_policy)| {
+            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
                 ProcessorOutput {
                     relay,
-                    filter_map,
+                    construction: construction.unwrap_or_default(),
                     flush_policy: Some(OutputFlushPolicy {
                         flush_each,
                         max_batch_size,
                     }),
                     message_error_policy,
+                    branch: None,
                 }
             },
         )
@@ -847,35 +882,20 @@ fn flushed_explicit_processor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
         .ignore_then(relay_ref())
+        .then(explicit_route_construction())
         .then(flush_each())
-        .then(
-            explicit_output_filter_map_program().try_map(|source, span| {
-                let parsed = crate::vm_program::parse_program(&source)
-                    .map_err(|error| Rich::custom(span, vm_program_error_message(error)))?;
-                if parsed.inner.set.is_empty()
-                    || !parsed.inner.branch_filters.is_empty()
-                    || !parsed.inner.unset.is_empty()
-                    || !parsed.inner.invoke.is_empty()
-                {
-                    return Err(Rich::custom(
-                        span,
-                        "output route must contain SET assignments and may contain WHERE",
-                    ));
-                }
-                Ok(source)
-            }),
-        )
         .then(message_error_policy())
         .map(
-            |(((relay, (flush_each, max_batch_size)), filter_map), message_error_policy)| {
+            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
                 ProcessorOutput {
                     relay,
-                    filter_map: Some(filter_map),
+                    construction,
                     flush_policy: Some(OutputFlushPolicy {
                         flush_each,
                         max_batch_size,
                     }),
                     message_error_policy,
+                    branch: None,
                 }
             },
         )
@@ -885,27 +905,32 @@ fn flushed_ingestor_output_route<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
         .ignore_then(relay_ref())
+        .then(route_construction().or_not())
+        .then(output_branch())
         .then(flush_each())
-        .then(ingestor_output_filter_map_program().or_not())
         .then(message_error_policy())
         .map(
-            |(((relay, (flush_each, max_batch_size)), filter_map), message_error_policy)| {
+            |(
+                (((relay, construction), branch), (flush_each, max_batch_size)),
+                message_error_policy,
+            )| {
                 ProcessorOutput {
                     relay,
-                    filter_map,
+                    construction: construction.unwrap_or_default(),
                     flush_policy: Some(OutputFlushPolicy {
                         flush_each,
                         max_batch_size,
                     }),
                     message_error_policy,
+                    branch: Some(branch),
                 }
             },
         )
 }
 
-pub fn processor_outputs<'src>()
+pub fn explicit_processor_outputs<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutputs, extra::Err<ParseError<'src>>> + Clone {
-    processor_output_route()
+    explicit_processor_output_route()
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()
@@ -937,28 +962,6 @@ pub fn flushed_ingestor_outputs<'src>()
         .at_least(1)
         .collect::<Vec<_>>()
         .map(ProcessorOutputs::new)
-}
-
-pub fn set_only_program<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    filter_map_program().try_map(
-        |source, span| match crate::vm_program::parse_program(&source) {
-            Ok(parsed)
-                if parsed.inner.filter.is_none()
-                    && parsed.inner.branch_filters.is_empty()
-                    && parsed.inner.unset.is_empty()
-                    && parsed.inner.invoke.is_empty()
-                    && !parsed.inner.set.is_empty() =>
-            {
-                Ok(source)
-            }
-            Ok(_) => Err(Rich::custom(
-                span,
-                "generator program must contain SET only".to_string(),
-            )),
-            Err(error) => Err(Rich::custom(span, vm_program_error_message(error))),
-        },
-    )
 }
 
 pub fn hostname_lit<'src>()

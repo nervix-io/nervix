@@ -44,8 +44,6 @@ pub(in crate::runtime) struct EmitterTask;
 pub(in crate::runtime) struct EmitterSinkContext {
     domain: Domain,
     emitter: Identifier,
-    from_relay: Identifier,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
     temp_dir: Arc<PathBuf>,
     events: broadcast::Sender<RuntimeEvent>,
 }
@@ -61,8 +59,10 @@ struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
     domain: &'a Domain,
     emitter: &'a Identifier,
+    input_relay: &'a Identifier,
     error_policies: &'a ErrorPolicies,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
+    materialized_state: &'a [nervix_models::MaterializedStateDependency],
     materialized_stream_owner_nodes: &'a HashMap<Identifier, Option<String>>,
     schema: Arc<CompiledSchema>,
 }
@@ -291,10 +291,8 @@ fn compile_sql_values_program(
     namespace: &'static str,
     domain: &Domain,
     emitter: &Identifier,
-    input_relay: &Identifier,
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     if values.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
@@ -308,27 +306,43 @@ fn compile_sql_values_program(
     let assignments = values
         .iter()
         .enumerate()
-        .map(|(index, mapping)| format!("{namespace}.c{index} = {}", mapping.expression))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source = format!("SET {assignments}");
-    let parsed = parse_program(&source).map_err(|error| RuntimeError::BuildDomainExecution {
+        .map(|(index, mapping)| {
+            Ok(nervix_models::Assignment {
+                target: nervix_models::AssignmentTarget::bare(
+                    Identifier::parse(&format!("c{index}")).map_err(|error| error.to_string())?,
+                ),
+                value: mapping.expression.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|reason| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!(
+                "{label} VALUES for '{}' is invalid: {reason}",
+                emitter.as_str()
+            ),
+        })?;
+    let parsed = lower_route_construction(
+        &nervix_models::RouteConstruction {
+            assignments,
+            ..nervix_models::RouteConstruction::default()
+        },
+        nervix_nspl::vm_program::SemanticNamespaces::new("input", namespace),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
         reason: format!(
-            "{label} VALUES parse failed for '{}': {}",
-            emitter.as_str(),
-            Runtime::vm_program_error(error)
+            "{label} VALUES for '{}' is invalid: {reason}",
+            emitter.as_str()
         ),
     })?;
     let empty_sink_schema =
         StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
-    let mut infer_bindings = vec![
+    let infer_bindings = vec![
         VmCompileBinding::writeonly(namespace, empty_sink_schema),
-        VmCompileBinding::readonly(input_relay.as_str(), input_schema.clone()),
+        VmCompileBinding::readonly("input", input_schema.clone()),
+        VmCompileBinding::readonly("message", input_schema.clone()),
     ];
-    if let Some(schema) = branch_schema.as_ref() {
-        infer_bindings.push(VmCompileBinding::readonly(BRANCH_NAMESPACE, schema.clone()));
-    }
     let inferred_fields =
         infer_vm_set_expr_types_for_bindings(&parsed, infer_bindings).map_err(|error| {
             RuntimeError::BuildDomainExecution {
@@ -348,13 +362,11 @@ fn compile_sql_values_program(
             })
             .collect::<Vec<_>>(),
     ));
-    let mut compile_bindings = vec![
+    let compile_bindings = vec![
         VmCompileBinding::writeonly(namespace, output_schema.clone()),
-        VmCompileBinding::readonly(input_relay.as_str(), input_schema),
+        VmCompileBinding::readonly("input", input_schema.clone()),
+        VmCompileBinding::readonly("message", input_schema),
     ];
-    if let Some(schema) = branch_schema {
-        compile_bindings.push(VmCompileBinding::readonly(BRANCH_NAMESPACE, schema));
-    }
     let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_schema.clone(),
@@ -362,7 +374,7 @@ fn compile_sql_values_program(
         compile_bindings,
         VmCompileOptions {
             output_mode: VmOutputMode::ExplicitOnly,
-            allow_sensitive_output: true,
+            allow_sensitive_output: false,
             ..VmCompileOptions::default()
         },
     )
@@ -383,101 +395,60 @@ fn compile_sql_values_program(
 fn compile_clickhouse_values_program(
     domain: &Domain,
     emitter: &Identifier,
-    input_relay: &Identifier,
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "ClickHouse",
         "clickhouse",
         domain,
         emitter,
-        input_relay,
         values,
         input_schema,
-        branch_schema,
     )
 }
 
 fn compile_postgres_values_program(
     domain: &Domain,
     emitter: &Identifier,
-    input_relay: &Identifier,
     values: &[PostgresValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "Postgres",
         "postgres",
         domain,
         emitter,
-        input_relay,
         values,
         input_schema,
-        branch_schema,
     )
 }
 
 fn compile_mysql_values_program(
     domain: &Domain,
     emitter: &Identifier,
-    input_relay: &Identifier,
     values: &[MySqlValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program(
-        "MySQL",
-        "mysql",
-        domain,
-        emitter,
-        input_relay,
-        values,
-        input_schema,
-        branch_schema,
-    )
+    compile_sql_values_program("MySQL", "mysql", domain, emitter, values, input_schema)
 }
 
 fn compile_mongodb_values_program(
     domain: &Domain,
     emitter: &Identifier,
-    input_relay: &Identifier,
     values: &[MongoDbValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program(
-        "MongoDB",
-        "mongodb",
-        domain,
-        emitter,
-        input_relay,
-        values,
-        input_schema,
-        branch_schema,
-    )
+    compile_sql_values_program("MongoDB", "mongodb", domain, emitter, values, input_schema)
 }
 
 fn compile_iceberg_values_program(
     domain: &Domain,
     emitter: &Identifier,
-    input_relay: &Identifier,
     values: &[IcebergValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
-    branch_schema: Option<StdArc<arrow_schema::Schema>>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program(
-        "Iceberg",
-        "iceberg",
-        domain,
-        emitter,
-        input_relay,
-        values,
-        input_schema,
-        branch_schema,
-    )
+    compile_sql_values_program("Iceberg", "iceberg", domain, emitter, values, input_schema)
 }
 
 async fn sql_mapped_batch_values(
@@ -1349,6 +1320,17 @@ fn emitter_publish_error_is_retryable(error: &Report<EmitterRuntimeError>) -> bo
     error.current_context().is_retryable_publish_failure()
 }
 
+fn emitter_message_error_operation(
+    error: &Report<EmitterRuntimeError>,
+    codec_route: bool,
+) -> MessageErrorOperation {
+    match (error.current_context(), codec_route) {
+        (EmitterRuntimeError::EncodeBatch, true) => MessageErrorOperation::Encode,
+        (EmitterRuntimeError::EncodeBatch, false) => MessageErrorOperation::Values,
+        _ => MessageErrorOperation::Publish,
+    }
+}
+
 trait EmitSinkLabel {
     fn label(&self) -> &'static str;
 }
@@ -1438,6 +1420,7 @@ impl EmitterTask {
         let task_flush_each = emitter.flush_each.clone();
         let task_max_batch_size = emitter.max_batch_size.clone();
         let task_error_policies = emitter.error_policies.clone();
+        let task_materialized_state = emitter.materialized_state.clone();
         let task_events = runtime.events.clone();
         let fault_injector = runtime.emitter_faults.clone();
         let runtime = runtime.clone();
@@ -1459,8 +1442,6 @@ impl EmitterTask {
             let context = EmitterSinkContext {
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
-                from_relay: task_from_relay.clone(),
-                branch_schema: input_branching_schema.clone(),
                 temp_dir: runtime.temp_dir.clone(),
                 events: task_events.clone(),
             };
@@ -1491,8 +1472,10 @@ impl EmitterTask {
                 runtime: &runtime,
                 domain: &task_domain,
                 emitter: &task_emitter,
+                input_relay: &task_from_relay,
                 error_policies: &task_error_policies,
                 filter_map: filter_map.as_ref(),
+                materialized_state: &task_materialized_state,
                 materialized_stream_owner_nodes: &materialized_stream_owner_nodes,
                 schema: output_compiled_schema.clone(),
             };
@@ -1586,8 +1569,10 @@ impl EmitterTask {
                                 );
                                 context.report_flush_error(task_sink.label(), &reason);
                                 let pending = emitter_buffer.drain_pending();
+                                let operation =
+                                    emitter_message_error_operation(&error, codec.is_some());
                                 batch_context
-                                    .handle_publish_error_batches(pending, reason)
+                                    .handle_publish_error_batches(pending, reason, operation)
                                     .await;
                             }
                         }
@@ -1648,7 +1633,10 @@ impl EmitterTask {
                                 &task_emitter,
                             );
                         }
-                        let publish_batch = match batch_context.process(batch).await {
+                        let publish_batch = match batch_context
+                            .process(batch, &mut shutdown_rx)
+                            .await
+                        {
                             Some(batch) => batch,
                             None => continue,
                         };
@@ -1826,13 +1814,29 @@ impl EmitterTask {
                                         );
                                         context.report_publish_error(task_sink.label(), &reason);
                                         if let Some(batch) = pending_batch.take() {
+                                            let operation = emitter_message_error_operation(
+                                                &error,
+                                                codec.is_some(),
+                                            );
                                             batch_context
-                                                .handle_publish_error_batch(batch, reason)
+                                                .handle_publish_error_batch(
+                                                    batch,
+                                                    reason,
+                                                    operation,
+                                                )
                                                 .await;
                                         } else {
                                             let pending = emitter_buffer.drain_pending();
+                                            let operation = emitter_message_error_operation(
+                                                &error,
+                                                codec.is_some(),
+                                            );
                                             batch_context
-                                                .handle_publish_error_batches(pending, reason)
+                                                .handle_publish_error_batches(
+                                                    pending,
+                                                    reason,
+                                                    operation,
+                                                )
                                                 .await;
                                         }
                                         break;
@@ -1964,13 +1968,20 @@ impl EmitterBatchContext<'_> {
         &self,
         batches: impl IntoIterator<Item = EmitterPublishBatch>,
         reason: String,
+        operation: MessageErrorOperation,
     ) {
         for batch in batches {
-            self.handle_publish_error_batch(batch, reason.clone()).await;
+            self.handle_publish_error_batch(batch, reason.clone(), operation)
+                .await;
         }
     }
 
-    async fn handle_publish_error_batch(&self, batch: EmitterPublishBatch, reason: String) {
+    async fn handle_publish_error_batch(
+        &self,
+        batch: EmitterPublishBatch,
+        reason: String,
+        operation: MessageErrorOperation,
+    ) {
         let messages = match batch.batch.try_into_messages() {
             Ok(messages) => messages,
             Err(error) => {
@@ -1988,19 +1999,62 @@ impl EmitterBatchContext<'_> {
         };
         for message in messages {
             self.runtime
-                .handle_message_error(
-                    self.domain,
-                    "emitter",
-                    self.emitter,
-                    self.error_policies,
+                .handle_structured_message_error(MessageErrorHandling {
+                    domain: self.domain,
+                    node_kind: "emitter",
+                    node: self.emitter,
+                    source_route: None,
+                    policy: &self.error_policies.message,
                     message,
-                    reason.clone(),
-                )
+                    error: structured_message_error(
+                        MessageErrorCode::External,
+                        reason.clone(),
+                        operation,
+                        None,
+                        std::iter::empty(),
+                    ),
+                    partial_output: None,
+                    materialized_state: HashMap::default(),
+                    ingest_metadata: None,
+                })
                 .await;
         }
     }
 
-    async fn process(&self, batch: RelayRecordBatch) -> Option<EmitterPublishBatch> {
+    async fn process(
+        &self,
+        batch: RelayRecordBatch,
+        shutdown_rx: &mut watch::Receiver<bool>,
+    ) -> Option<EmitterPublishBatch> {
+        let dependency_error_acks = batch.acks.clone();
+        let batch = match self
+            .runtime
+            .resolve_materialized_dependencies_for_batch(
+                self.domain,
+                self.input_relay,
+                self.materialized_state,
+                batch,
+                shutdown_rx,
+            )
+            .await
+        {
+            Ok(Some(batch)) => batch,
+            Ok(None) => return None,
+            Err(error) => {
+                self.runtime.handle_internal_processor_error_for_acks(
+                    self.domain,
+                    "emitter",
+                    self.emitter,
+                    self.error_policies,
+                    dependency_error_acks.iter(),
+                    format!(
+                        "emitter '{}' failed to resolve materialized dependencies: {error}",
+                        self.emitter.as_str()
+                    ),
+                );
+                return None;
+            }
+        };
         let Some(filter_map) = self.filter_map else {
             return Some(EmitterPublishBatch::from_batch(batch));
         };

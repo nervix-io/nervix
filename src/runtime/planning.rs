@@ -1,6 +1,6 @@
 use nervix_models::{
-    BranchInitiatorSelection, BranchValueMapping, CorrelationTimeoutAction, CreateBranch,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
+    Assignment, CorrelationTimeoutAction, CreateBranch, OutputBranch, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
     ProcessorOutputs as ModelProcessorOutputs,
 };
 
@@ -9,7 +9,7 @@ use super::*;
 fn branched_output(output: &ModelProcessorOutput) -> BranchedProcessorOutputSpec {
     BranchedProcessorOutputSpec {
         relay: output.relay.clone(),
-        filter_map: output.filter_map.clone(),
+        construction: output.construction.clone(),
         flush_each: output
             .flush_policy
             .as_ref()
@@ -31,7 +31,7 @@ fn branched_outputs(outputs: &ModelProcessorOutputs) -> BranchedProcessorOutputs
 
 fn processor_input_where_by_relay(
     from_where: &[ProcessorInputWhere],
-) -> HashMap<Identifier, String> {
+) -> HashMap<Identifier, nervix_models::Expression> {
     from_where
         .iter()
         .map(|source_filter| {
@@ -43,25 +43,27 @@ fn processor_input_where_by_relay(
         .collect()
 }
 
-fn processor_input_where_by_inputs(inputs: &ProcessorInputs) -> HashMap<Identifier, String> {
+fn processor_input_where_by_inputs(
+    inputs: &ProcessorInputs,
+) -> HashMap<Identifier, nervix_models::Expression> {
     processor_input_where_by_relay(inputs.where_clauses())
 }
 
 struct BranchEntrypoint {
     ttl: Option<String>,
     max_instances: Option<u64>,
-    values: Vec<BranchValueMapping>,
+    assignments: Vec<Assignment>,
 }
 
 fn branch_entrypoint(
-    branched_by: &BranchInitiatorSelection,
+    branch_action: &OutputBranch,
     branches: &HashMap<Identifier, CreateBranch>,
 ) -> BranchEntrypoint {
-    let Some(branch_ref) = branched_by.branch() else {
+    let Some(branch_ref) = branch_action.branch() else {
         return BranchEntrypoint {
             ttl: None,
             max_instances: None,
-            values: Vec::new(),
+            assignments: Vec::new(),
         };
     };
     let branch = branches
@@ -73,7 +75,7 @@ fn branch_entrypoint(
             .eviction
             .as_ref()
             .map(|eviction| eviction.max_instances()),
-        values: branched_by.values().to_vec(),
+        assignments: branch_action.assignments().to_vec(),
     }
 }
 
@@ -135,6 +137,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&deduplicator.from),
                     filter_where: deduplicator.filter_where.clone(),
+                    materialized_state: deduplicator.materialized_state.clone(),
                     operation: BranchedProcessorOperationSpec::Deduplicator {
                         output_routes: branched_outputs(&deduplicator.output_routes),
                         deduplicate_on: deduplicator.deduplicate_on.clone(),
@@ -160,6 +163,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&reorderer.from),
                     filter_where: reorderer.filter_where.clone(),
+                    materialized_state: reorderer.materialized_state.clone(),
                     operation: BranchedProcessorOperationSpec::Reorderer {
                         output_routes: branched_outputs(&reorderer.output_routes),
                         order_by: reorderer.order_by.clone(),
@@ -189,6 +193,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where,
                     filter_where: correlator.filter_where.clone(),
+                    materialized_state: correlator.materialized_state.clone(),
                     operation: BranchedProcessorOperationSpec::Correlator {
                         output_routes: branched_outputs(&correlator.output_routes),
                         left_relays: correlator.left.relays().to_vec(),
@@ -218,11 +223,11 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&window_processor.from),
                     filter_where: window_processor.filter_where.clone(),
+                    materialized_state: window_processor.materialized_state.clone(),
                     operation: BranchedProcessorOperationSpec::WindowProcessor {
                         output_routes: branched_outputs(&window_processor.output_routes),
                         width: window_processor.width.clone(),
                         step: window_processor.step.clone(),
-                        aggregate: window_processor.aggregate.clone(),
                     },
                 };
                 for from_relay in window_processor.from.relays() {
@@ -244,6 +249,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&junction.from),
                     filter_where: junction.filter_where.clone(),
+                    materialized_state: junction.materialized_state.clone(),
                     operation: BranchedProcessorOperationSpec::Junction {
                         output_routes: branched_outputs(&junction.output_routes),
                     },
@@ -267,6 +273,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&inferencer.from),
                     filter_where: inferencer.filter_where.clone(),
+                    materialized_state: inferencer.materialized_state.clone(),
                     operation: BranchedProcessorOperationSpec::Inferencer {
                         output_routes: branched_outputs(&inferencer.output_routes),
                         resource: inferencer.resource.clone(),
@@ -297,6 +304,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     ),
                     from_where: processor_input_where_by_inputs(&processor.from),
                     filter_where: processor.filter_where.clone(),
+                    materialized_state: processor.materialized_state.clone(),
                     operation: BranchedProcessorOperationSpec::WasmProcessor {
                         output_routes: branched_outputs(&processor.output_routes),
                         resource: processor.resource.clone(),
@@ -313,14 +321,18 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
             }
             Model::Ingestor(ingestor) => {
                 for output in ingestor.output_routes.outputs() {
-                    let entrypoint = branch_entrypoint(&ingestor.branched_by, &branches);
+                    let branch_action = output
+                        .branch
+                        .as_ref()
+                        .expect("validated ingestor route must declare branch behavior");
+                    let entrypoint = branch_entrypoint(branch_action, &branches);
                     ingestors.push((
                         kind,
                         identifier.clone(),
                         output.relay.clone(),
                         entrypoint.ttl,
                         entrypoint.max_instances,
-                        entrypoint.values,
+                        Vec::new(),
                         BranchInstanceAckBoundary::Preserve,
                         output
                             .flush_policy
@@ -341,14 +353,18 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
             }
             Model::Reingestor(reingestor) => {
                 for output in reingestor.output_routes.outputs() {
-                    let entrypoint = branch_entrypoint(&reingestor.branched_by, &branches);
+                    let branch_action = output
+                        .branch
+                        .as_ref()
+                        .expect("validated reingestor route must declare branch behavior");
+                    let entrypoint = branch_entrypoint(branch_action, &branches);
                     ingestors.push((
                         kind,
                         identifier.clone(),
                         output.relay.clone(),
                         entrypoint.ttl,
                         entrypoint.max_instances,
-                        entrypoint.values,
+                        entrypoint.assignments,
                         BranchInstanceAckBoundary::Reingestor(reingestor.mode),
                         output
                             .flush_policy
@@ -438,7 +454,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                 root_relay,
                 branch_ttl,
                 branch_max_instances,
-                entrypoint_branch_mappings,
+                entrypoint_branch_assignments,
                 entrypoint_ack_boundary,
                 entrypoint_flush_each,
                 entrypoint_max_batch_size,
@@ -450,7 +466,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     root_relay: root_relay.clone(),
                     branch_ttl,
                     branch_max_instances,
-                    entrypoint_branch_mappings,
+                    entrypoint_branch_assignments,
                     entrypoint_ack_boundary,
                     entrypoint_flush_each,
                     entrypoint_max_batch_size,
@@ -553,7 +569,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
     ) -> Result<RelayProcessorOutputTemplate, String> {
         Ok(RelayProcessorOutputTemplate {
             output_relay: output.relay.clone(),
-            filter_map: output.filter_map.clone(),
+            construction: output.construction.clone(),
             flush_policy: output
                 .flush_each
                 .as_deref()
@@ -636,6 +652,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                 error_policies: node.error_policies.clone(),
                 from_where: node.from_where.clone(),
                 filter_where: node.filter_where.clone(),
+                materialized_state: node.materialized_state.clone(),
                 operation: match &node.operation {
                     BranchedProcessorOperationSpec::Deduplicator {
                         output_routes,
@@ -657,35 +674,53 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                         output_routes,
                         width,
                         step,
-                        aggregate,
                     } => {
-                        let aggregate = parse_aggregate_program(aggregate)
-                            .map_err(|error| {
-                                format!(
-                                    "window processor '{}' aggregate parse failed: {}",
-                                    node.processor.as_str(),
-                                    Runtime::vm_program_error(error)
-                                )
-                            })?
-                            .inner;
-                        let output_relay = output_routes
+                        if output_routes.outputs().next().is_none() {
+                            return Err(format!(
+                                "window processor '{}' requires an output relay",
+                                node.processor.as_str()
+                            ));
+                        }
+                        let route_aggregates = output_routes
                             .outputs()
-                            .next()
-                            .map(|output| &output.relay)
-                            .ok_or_else(|| {
-                                format!(
-                                    "window processor '{}' requires an output relay",
-                                    node.processor.as_str()
-                                )
-                            })?;
-                        let compiled_aggregate = CompiledWindowAggregateProgram::compile(
-                            &aggregate,
-                            &node.input_relays,
-                            output_relay,
-                            relay_schemas,
-                        )?;
+                            .map(|output| {
+                                lower_window_assignments(&output.construction)
+                                    .map(|aggregate| aggregate.inner)
+                                    .map_err(|reason| {
+                                        format!(
+                                            "window processor '{}' output '{}' construction is \
+                                             invalid: {}",
+                                            node.processor.as_str(),
+                                            output.relay.as_str(),
+                                            reason
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let mut demand_offset = 0;
+                        let compiled_aggregates = output_routes
+                            .outputs()
+                            .zip(&route_aggregates)
+                            .map(|(output, aggregate)| {
+                                let compiled = CompiledWindowAggregateProgram::compile(
+                                    aggregate,
+                                    &node.input_relays,
+                                    &output.relay,
+                                    relay_schemas,
+                                )?
+                                .with_demand_offset(demand_offset);
+                                demand_offset += aggregate.demands().len();
+                                Ok(compiled)
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        let aggregate =
+                            WindowAggregateProgram::combine_route_programs(&route_aggregates);
+                        let mut materialized_outputs = materialize_outputs(output_routes)?;
+                        for output in &mut materialized_outputs.routes {
+                            output.construction.assignments.clear();
+                        }
                         RelayProcessorOperationTemplate::WindowProcessor {
-                            output_routes: materialize_outputs(output_routes)?,
+                            output_routes: materialized_outputs,
                             width_messages: width.messages.map(|messages| messages as usize),
                             step_messages: step.messages.map(|messages| messages as usize),
                             width_duration: parse_optional_window_duration(
@@ -699,7 +734,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
                                 step.duration.as_deref(),
                             )?,
                             aggregate,
-                            compiled_aggregate,
+                            compiled_aggregates,
                         }
                     }
                     BranchedProcessorOperationSpec::Reorderer {
@@ -881,24 +916,6 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
             })
         })
         .transpose()?;
-    let entrypoint_schema_relay = match model_index.get(&(spec.kind, spec.identifier.clone())) {
-        Some(Model::Reingestor(reingestor)) => reingestor.from.first().ok_or_else(|| {
-            format!(
-                "reingestor '{}' requires at least one input relay",
-                reingestor.name.as_str()
-            )
-        })?,
-        _ => &spec.root_relay,
-    };
-    let entrypoint_schema = relay_schemas
-        .get(entrypoint_schema_relay)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "missing branched ingestor entrypoint relay schema '{}'",
-                entrypoint_schema_relay.as_str()
-            )
-        })?;
     let processors = materialize_nodes(&spec.processors, relay_schemas)?
         .into_iter()
         .map(|processor| (processor.processor.clone(), processor))
@@ -922,8 +939,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
         root_relay: spec.root_relay.clone(),
         branch_ttl,
         branch_max_instances,
-        entrypoint_schema,
-        entrypoint_branch_mappings: spec.entrypoint_branch_mappings.clone(),
+        entrypoint_branch_assignments: spec.entrypoint_branch_assignments.clone(),
         entrypoint_ack_boundary: spec.entrypoint_ack_boundary,
         entrypoint_flush_each: parse_branch_flush_policy(
             spec.kind.as_str(),
@@ -939,6 +955,7 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
     })
 }
 
+#[cfg(test)]
 pub(in crate::runtime) fn resolve_concrete_branch(
     record: &RuntimeRecord,
     branched_by: &[Identifier],
@@ -963,35 +980,207 @@ pub(in crate::runtime) fn resolve_concrete_branch(
     BranchKey::from_fields(fields).map(ConcreteBranch::Key)
 }
 
-pub(in crate::runtime) fn resolve_concrete_branch_from_mappings(
-    record: &RuntimeRecord,
+pub(in crate::runtime) fn resolve_concrete_branch_from_assignments(
+    output: &RuntimeRecord,
+    input: Option<&RuntimeRecord>,
     branch_key: Option<&BranchKey>,
-    mappings: &[BranchValueMapping],
+    assignments: &[Assignment],
     owner: &Identifier,
 ) -> Result<ConcreteBranch, String> {
-    if mappings.is_empty() {
-        return Ok(ConcreteBranch::Root);
+    if assignments.is_empty() {
+        return Ok(branch_key
+            .cloned()
+            .map(ConcreteBranch::Key)
+            .unwrap_or(ConcreteBranch::Root));
     }
 
-    let mut fields = Vec::with_capacity(mappings.len());
-    for mapping in mappings {
-        let value = if mapping.relay.as_str() == super::BRANCH_NAMESPACE {
-            branch_key.and_then(|key| key.value(mapping.relay_field.as_str()))
+    let mut fields = Vec::<(Identifier, RuntimeValue)>::with_capacity(assignments.len());
+    let mut initialized = HashMap::<Identifier, RuntimeValue>::default();
+    for (index, assignment) in assignments.iter().enumerate() {
+        let value = evaluate_branch_expression(&assignment.value, output, input, &initialized)
+            .map_err(|reason| {
+                format!(
+                    "branch SET assignment {index} for '{}' failed: {reason}",
+                    owner.as_str()
+                )
+            })?;
+        if let Some((_, current)) = fields
+            .iter_mut()
+            .find(|(field, _)| field == &assignment.target.field)
+        {
+            *current = value.clone();
         } else {
-            record.value(mapping.relay_field.as_str())
-        };
-        let Some(value) = value else {
-            return Err(format!(
-                "branch source field '{}.{}' is missing for '{}'",
-                mapping.relay.as_str(),
-                mapping.relay_field.as_str(),
-                owner.as_str()
-            ));
-        };
-        fields.push((mapping.field.clone(), value.clone()));
+            fields.push((assignment.target.field.clone(), value.clone()));
+        }
+        initialized.insert(assignment.target.field.clone(), value);
     }
 
     BranchKey::from_fields(fields).map(ConcreteBranch::Key)
+}
+
+fn evaluate_branch_expression(
+    expression: &nervix_models::Expression,
+    output: &RuntimeRecord,
+    input: Option<&RuntimeRecord>,
+    initialized: &HashMap<Identifier, RuntimeValue>,
+) -> Result<RuntimeValue, String> {
+    use nervix_models::{Expression, FieldScope, Literal, ParseAsType, UnaryOperator};
+
+    match expression {
+        Expression::Literal(Literal::I64(value)) => Ok(RuntimeValue::I64(*value)),
+        Expression::Literal(Literal::F64(value)) => {
+            Ok(RuntimeValue::F64(OrderedFloat(value.value())))
+        }
+        Expression::Literal(Literal::Bool(value)) => Ok(RuntimeValue::Bool(*value)),
+        Expression::Literal(Literal::String(value)) => Ok(RuntimeValue::String(value.clone())),
+        Expression::Literal(Literal::Null) => {
+            Err("NULL cannot be used as a concrete branch-key value".to_string())
+        }
+        Expression::Field(reference) => match &reference.scope {
+            FieldScope::Bare | FieldScope::Branch => {
+                initialized.get(&reference.field).cloned().ok_or_else(|| {
+                    format!(
+                        "branch field '{}' has not been initialized",
+                        reference.field.as_str()
+                    )
+                })
+            }
+            FieldScope::Message | FieldScope::Output => output
+                .value(reference.field.as_str())
+                .cloned()
+                .ok_or_else(|| format!("field '{}' is missing", reference.field.as_str())),
+            FieldScope::Input => input
+                .unwrap_or(output)
+                .value(reference.field.as_str())
+                .cloned()
+                .ok_or_else(|| format!("input field '{}' is missing", reference.field.as_str())),
+            FieldScope::RelayState { relay } => output
+                .value(&format!(
+                    "relay_state.{}.{}",
+                    relay.as_str(),
+                    reference.field.as_str()
+                ))
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "materialized state field 'relay_state.{}.{}' is missing",
+                        relay.as_str(),
+                        reference.field.as_str()
+                    )
+                }),
+            scope => Err(format!(
+                "scope '{scope:?}' is unavailable during branch construction"
+            )),
+        },
+        Expression::Unary {
+            operator,
+            expression,
+        } => {
+            let value = evaluate_branch_expression(expression, output, input, initialized)?;
+            match operator {
+                UnaryOperator::Negate => negate_runtime_value(value),
+                UnaryOperator::Not => match value {
+                    RuntimeValue::Bool(value) => Ok(RuntimeValue::Bool(!value)),
+                    other => Err(format!(
+                        "NOT expects BOOL, found {}",
+                        runtime_value_type_name(&other)
+                    )),
+                },
+            }
+        }
+        Expression::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let left = evaluate_branch_expression(left, output, input, initialized)?;
+            let right = evaluate_branch_expression(right, output, input, initialized)?;
+            let operator = match operator {
+                nervix_models::BinaryOperator::Add => BinaryOp::Add,
+                nervix_models::BinaryOperator::Subtract => BinaryOp::Sub,
+                nervix_models::BinaryOperator::Multiply => BinaryOp::Mul,
+                nervix_models::BinaryOperator::Divide => BinaryOp::Div,
+                nervix_models::BinaryOperator::Remainder => BinaryOp::Rem,
+                nervix_models::BinaryOperator::Equal => BinaryOp::Eq,
+                nervix_models::BinaryOperator::NotEqual => BinaryOp::NotEq,
+                nervix_models::BinaryOperator::GreaterThan => BinaryOp::Gt,
+                nervix_models::BinaryOperator::LessThan => BinaryOp::Lt,
+                nervix_models::BinaryOperator::GreaterThanOrEqual => BinaryOp::GtEq,
+                nervix_models::BinaryOperator::LessThanOrEqual => BinaryOp::LtEq,
+                nervix_models::BinaryOperator::And => BinaryOp::And,
+                nervix_models::BinaryOperator::Or => BinaryOp::Or,
+            };
+            evaluate_runtime_binary(operator, left, right)
+        }
+        Expression::Cast { expression, target } => {
+            let value = evaluate_branch_expression(expression, output, input, initialized)?;
+            let target = match target {
+                ParseAsType::U8 => ArrowDataType::UInt8,
+                ParseAsType::I8 => ArrowDataType::Int8,
+                ParseAsType::U16 => ArrowDataType::UInt16,
+                ParseAsType::I16 => ArrowDataType::Int16,
+                ParseAsType::U32 => ArrowDataType::UInt32,
+                ParseAsType::I32 => ArrowDataType::Int32,
+                ParseAsType::U64 => ArrowDataType::UInt64,
+                ParseAsType::I64 => ArrowDataType::Int64,
+                ParseAsType::Bool => ArrowDataType::Boolean,
+                ParseAsType::String => ArrowDataType::Utf8,
+                ParseAsType::Datetime => ArrowDataType::Timestamp(
+                    arrow_schema::TimeUnit::Nanosecond,
+                    Some("+00:00".into()),
+                ),
+                ParseAsType::F32 => ArrowDataType::Float32,
+                ParseAsType::F64 => ArrowDataType::Float64,
+                other => return Err(format!("branch SET cannot cast to {other:?}")),
+            };
+            cast_runtime_value(value, &target)
+        }
+        Expression::Call {
+            function,
+            arguments,
+        } => {
+            let values = arguments
+                .iter()
+                .map(|argument| evaluate_branch_expression(argument, output, input, initialized))
+                .collect::<Result<Vec<_>, _>>()?;
+            match function.as_str().to_ascii_lowercase().as_str() {
+                "leak_sensitive" => values
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "leak_sensitive expects one argument".to_string()),
+                "lower" => unary_string_function(values, "lower", str::to_ascii_lowercase),
+                "upper" => unary_string_function(values, "upper", str::to_ascii_uppercase),
+                "trim" => unary_string_function(values, "trim", |value| value.trim().to_string()),
+                "abs" => values
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "abs expects one argument".to_string())
+                    .and_then(abs_runtime_value),
+                "length" => match values.as_slice() {
+                    [RuntimeValue::String(value)] => {
+                        Ok(RuntimeValue::I64(value.chars().count() as i64))
+                    }
+                    [other] => Err(format!(
+                        "length expects STRING, found {}",
+                        runtime_value_type_name(other)
+                    )),
+                    _ => Err("length expects one argument".to_string()),
+                },
+                "concat" => Ok(RuntimeValue::String(
+                    values
+                        .iter()
+                        .map(RuntimeValue::to_key_fragment)
+                        .collect::<String>(),
+                )),
+                other => Err(format!(
+                    "function '{other}' is unavailable during branch construction"
+                )),
+            }
+        }
+        Expression::Array(_) => {
+            Err("array expressions are unavailable during branch construction".to_string())
+        }
+    }
 }
 
 pub(in crate::runtime) fn format_branched_by(branched_by: &[Identifier]) -> String {

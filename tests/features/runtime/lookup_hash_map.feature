@@ -82,24 +82,29 @@ Feature: LOOKUP_HASH_MAP filter-map function
         TYPE HTTP;
 
       CREATE INGESTOR source_logs
-        TO incoming_logs FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO incoming_logs
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR enrich_titles
         FROM incoming_logs
-        FILTER WHERE incoming_logs.active
-        TO enriched_logs FLUSH IMMEDIATE
-          SET enriched_logs.title_key = lower(incoming_logs.title),
-              enriched_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name"),
-              enriched_logs.region = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "region_name")
-          UNSET incoming_logs.title, incoming_logs.legacy
-          WHERE NOT is_null(LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "city_name")) ON MESSAGE ERROR LOG
+        FILTER WHERE input.active
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
         UNBRANCHED
-        DEDUPLICATE ON incoming_logs.id
-        MAX TIME 10m;
+        TO enriched_logs
+          INHERIT ALL EXCEPT title, legacy
+          SET title_key = lower(input.title),
+              city = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), "city_name"),
+              region = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), "region_name")
+          WHERE NOT is_null(LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), "city_name"))
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
 
       CREATE SUBSCRIPTION enriched_logs_subscription TO enriched_logs;
 
@@ -216,13 +221,15 @@ Feature: LOOKUP_HASH_MAP filter-map function
       """
       CREATE DEDUPLICATOR enrich_titles
         FROM incoming_logs
-        TO enriched_logs FLUSH IMMEDIATE
-          SET enriched_logs.title_key = lower(incoming_logs.title),
-              enriched_logs.city = LOOKUP_HASH_MAP("titles_by_normalized", lower(incoming_logs.title), "missing_city")
-          UNSET incoming_logs.title ON MESSAGE ERROR LOG
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
         UNBRANCHED
-        DEDUPLICATE ON incoming_logs.id
-        MAX TIME 10m;
+        TO enriched_logs
+          INHERIT ALL EXCEPT title
+          SET title_key = lower(input.title),
+              city = LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), "missing_city")
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
       """
 
     Examples:

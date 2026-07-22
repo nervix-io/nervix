@@ -29,19 +29,11 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
 
-      CREATE EMITTER iceberg_notifications
-        FROM notifications
-        TO ICEBERG ON GCS gcs_main TABLE gcs_notifications_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 'gs://nervix-iceberg/tables/gcs_notifications_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON GCS gcs_main TABLE gcs_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'gs://nervix-iceberg/tables/gcs_notifications_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
+        COMMIT EACH 100ms MAX SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       SHOW CREATE EMITTER iceberg_notifications;
       """
@@ -85,19 +77,11 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
 
-      CREATE EMITTER iceberg_notifications
-        FROM notifications
-        TO ICEBERG ON AZURE_BLOB azure_main TABLE azure_notifications_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 'wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/azure_notifications_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON AZURE_BLOB azure_main TABLE azure_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'wasb://nervix-iceberg@input.input.input.input.net/tables/azure_notifications_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
+        COMMIT EACH 100ms MAX SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       SHOW CREATE EMITTER iceberg_notifications;
       """
@@ -150,13 +134,15 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC iceberg_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC iceberg_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -172,20 +158,11 @@ Feature: Iceberg emission
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE notifications_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action,
-          'created_at' = notifications.created_at
-        }
-        LOCATION 's3://nervix-iceberg/tables/notifications_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action, 'created_at' = input.created_at } LOCATION 's3://nervix-iceberg/tables/notifications_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
+        COMMIT EACH 100ms MAX SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "iceberg_notifications_in_{{test_id}}"
@@ -242,13 +219,15 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-missing-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC iceberg_missing_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC iceberg_missing_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -264,19 +243,11 @@ Feature: Iceberg emission
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE DETACHED EMITTER iceberg_notifications
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE missing_notifications_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 's3://nervix-iceberg/tables/missing_notifications_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE missing_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/missing_notifications_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
+        COMMIT EACH 100ms MAX SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "iceberg_missing_notifications_in_{{test_id}}"
@@ -347,13 +318,15 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-namespace-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC iceberg_namespace_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC iceberg_namespace_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -369,58 +342,26 @@ Feature: Iceberg emission
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications_a
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE namespace_notifications_a_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 's3://nervix-iceberg/tables/namespace_notifications_a_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        CREATE EMITTER iceberg_notifications_a FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_a_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_a_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
-        CREATE EMITTER iceberg_notifications_b
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE namespace_notifications_b_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 's3://nervix-iceberg/tables/namespace_notifications_b_{{test_id}}'
-        CATALOG iceberg_catalog
+        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER iceberg_notifications_b FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_b_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_b_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
-        CREATE EMITTER iceberg_notifications_c
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE namespace_notifications_c_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 's3://nervix-iceberg/tables/namespace_notifications_c_{{test_id}}'
-        CATALOG iceberg_catalog
+        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER iceberg_notifications_c FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_c_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_c_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
-        CREATE EMITTER iceberg_notifications_d
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE namespace_notifications_d_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 's3://nervix-iceberg/tables/namespace_notifications_d_{{test_id}}'
-        CATALOG iceberg_catalog
+        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER iceberg_notifications_d FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_d_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_d_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
+        COMMIT EACH 100ms MAX SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "iceberg_namespace_notifications_in_{{test_id}}"
@@ -485,13 +426,15 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-temp-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC iceberg_temp_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC iceberg_temp_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -507,19 +450,11 @@ Feature: Iceberg emission
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE temp_notifications_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 's3://nervix-iceberg/tables/temp_notifications_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE temp_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/temp_notifications_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 10s MAX SIZE 512MiB;
+        COMMIT EACH 10s MAX SIZE 512MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "iceberg_temp_notifications_in_{{test_id}}"
@@ -579,13 +514,15 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-shutdown-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC iceberg_shutdown_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC iceberg_shutdown_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -601,19 +538,11 @@ Feature: Iceberg emission
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE shutdown_notifications_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE shutdown_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 1h MAX SIZE 512MiB;
+        COMMIT EACH 1h MAX SIZE 512MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "iceberg_shutdown_notifications_in_{{test_id}}"
@@ -666,13 +595,15 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-init-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC iceberg_init_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC iceberg_init_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
@@ -688,19 +619,11 @@ Feature: Iceberg emission
           'uri' = 'http://127.0.0.1:8181',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE DETACHED EMITTER iceberg_notifications
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE init_notifications_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 'http://nervix-iceberg/tables/init_notifications_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE init_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'http://nervix-iceberg/tables/init_notifications_{{test_id}}' CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
+        COMMIT EACH 100ms MAX SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "iceberg_init_notifications_in_{{test_id}}"
@@ -771,27 +694,20 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC iceberg_ack_notifications_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC iceberg_ack_notifications_in_{{test_id}}
-        SESSION PERSISTENT QOS 1
-        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications
-        FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE ack_notifications_{{test_id}}
-        VALUES {
-          'user_id' = notifications.user_id,
-          'action' = notifications.action
-        }
-        LOCATION 's3://nervix-iceberg/tables/ack_notifications_{{test_id}}'
-        CATALOG iceberg_catalog
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB;
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE ack_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/ack_notifications_{{test_id}}' CATALOG iceberg_catalog
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        COMMIT EACH 100ms MAX SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

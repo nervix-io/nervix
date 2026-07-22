@@ -27,12 +27,16 @@ Feature: Relay metrics
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT relay_metrics_ingress ON edge PATH '/relay-metrics' TYPE HTTP;
         CREATE INGESTOR relay_metrics_source
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT relay_metrics_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_relay_metrics_source VALUES { user_id = notifications.user_id }
-
         TIMESTAMP AT occurred_at
-        FROM ENDPOINT relay_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_relay_metrics_source
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -154,20 +158,26 @@ Feature: Relay metrics
 
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
       CREATE ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer' TYPE HTTP; CREATE INGESTOR relay_buffer_source
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_relay_buffer_source VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT relay_buffer_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR relay_buffer_forwarder
-        FROM notifications
-        TO forwarded_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        TO notifications
+        INHERIT ALL
         BRANCHED BY by_relay_buffer_source
-        DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m;
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-      CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE notifications.user_id = 42;
+      CREATE DEDUPLICATOR relay_buffer_forwarder FROM notifications
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
+        BRANCHED BY by_relay_buffer_source
+        TO forwarded_notifications
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+
+      CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE user_id = 42;
       START;
       """
     And http payload is posted to host "http-{{test_id}}-buffer.example.com" path "/relay-buffer"
@@ -218,12 +228,16 @@ Feature: Relay metrics
         CREATE VHOST edge http-{{test_id}}-drain.example.com;
         CREATE ENDPOINT relay_metrics_drain_ingress ON edge PATH '/relay-metrics-drain' TYPE HTTP;
         CREATE INGESTOR relay_metrics_drain_source
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT relay_metrics_drain_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_relay_metrics_drain_source VALUES { user_id = notifications.user_id }
-
         TIMESTAMP AT occurred_at
-        FROM ENDPOINT relay_metrics_drain_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_relay_metrics_drain_source
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}-drain.example.com" path "/relay-metrics-drain"
@@ -288,12 +302,16 @@ Feature: Relay metrics
         CREATE VHOST edge http-{{test_id}}-restart.example.com;
         CREATE ENDPOINT relay_metrics_restart_ingress ON edge PATH '/relay-metrics-restart' TYPE HTTP;
         CREATE INGESTOR relay_metrics_restart_source
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT relay_metrics_restart_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_relay_metrics_restart_source VALUES { user_id = notifications.user_id }
-
         TIMESTAMP AT occurred_at
-        FROM ENDPOINT relay_metrics_restart_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_relay_metrics_restart_source
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}-restart.example.com" path "/relay-metrics-restart"

@@ -34,16 +34,20 @@ Feature: Server ingestor scheduling
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward
-        FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main
-        TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     Then node "node-1" eventually forwards http traffic for host "http-{{test_id}}.example.com" path "/ingest" to the observed broker
@@ -94,16 +98,20 @@ Feature: Server ingestor scheduling
         PATH '/ws'
         TYPE WEBSOCKETS;
         CREATE INGESTOR ws_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward
-        FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main
-        TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_ws_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     Then node "node-1" eventually forwards websocket traffic for host "ws-{{test_id}}.example.com" path "/ws" to the observed broker
@@ -154,16 +162,20 @@ Feature: Server ingestor scheduling
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward
-        FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main
-        TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     Then node "node-3" eventually forwards http traffic for host "http-{{test_id}}.example.com" path "/ingest" to the observed broker
@@ -218,16 +230,20 @@ Feature: Server ingestor scheduling
         PATH '/ws'
         TYPE WEBSOCKETS;
         CREATE INGESTOR ws_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward
-        FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main
-        TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_ws_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     Then node "node-3" eventually forwards websocket traffic for host "ws-{{test_id}}.example.com" path "/ws" to the observed broker

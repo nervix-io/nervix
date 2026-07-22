@@ -15,6 +15,7 @@ serde = { workspace = true }
 sorted-vec = { workspace = true, features = ["serde"] }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -26,15 +26,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP NOW
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -80,15 +81,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP NOW
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -141,15 +143,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP AT occurred_at
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -198,15 +201,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP AT occurred_at
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"
@@ -256,15 +260,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP NOW
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY DOMAIN
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -328,15 +333,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP NOW
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY DOMAIN
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -404,16 +410,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP NOW
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY DOMAIN
-        INSTANCES 2
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -485,16 +491,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP NOW
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY DOMAIN
-        INSTANCES 2
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -568,15 +574,16 @@ Feature: Kafka ingestor domain pacing
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP NOW
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY DOMAIN
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
     When Kafka message is published to topic "notifications_{{test_id}}"

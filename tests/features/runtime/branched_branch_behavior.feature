@@ -40,11 +40,15 @@ Feature: Branched branch behavior
         ON edge
         PATH '/notifications'
         TYPE HTTP; CREATE INGESTOR source_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_source_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_source_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
@@ -87,7 +91,6 @@ Feature: Branched branch behavior
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
@@ -97,15 +100,23 @@ Feature: Branched branch behavior
         PATH '/dedup'
         TYPE HTTP;
         CREATE INGESTOR source_txns
-        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING transaction_codec
-        BRANCHED BY by_source_txns VALUES { tenant = ss1.tenant }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE DEDUPLICATOR dedup_txns
-        FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
-        DEDUPLICATE ON ss1.transaction_id
-        MAX TIME 10m;
+        TO ss1
+        INHERIT ALL
+        BRANCHED BY by_source_txns
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR dedup_txns FROM ss1
+        DEDUPLICATE ON input.transaction_id
+        MAX TIME 10m
+        BRANCHED BY by_source_txns
+        TO ss2
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION ss2_subscription TO ss2;
         START;
       """
@@ -164,7 +175,6 @@ Feature: Branched branch behavior
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
@@ -174,20 +184,23 @@ Feature: Branched branch behavior
         PATH '/metrics'
         TYPE HTTP;
         CREATE INGESTOR metric_ingestor
-        TO metrics FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
-        BRANCHED BY by_metric_ingestor VALUES { tenant = metrics.tenant }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE WINDOW PROCESSOR latency_window
-        FROM metrics
-        TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_metric_ingestor
+        TO metrics
+        INHERIT ALL
+        BRANCHED BY by_metric_ingestor
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE WINDOW PROCESSOR latency_window FROM metrics
         WIDTH 2 MESSAGES
         STEP 2 MESSAGES
-        AGGREGATE
-          metric_summaries.tenant = FIRST(metrics.tenant),
-          metric_summaries.sample_count = COUNT(metrics.latency);
-        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE metric_summaries.tenant = 'acme';
+        BRANCHED BY by_metric_ingestor
+        TO metric_summaries
+        SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency)
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
@@ -237,8 +250,6 @@ Feature: Branched branch behavior
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_source_one SCHEMA tenant_branch TTL 5m;
         CREATE RELAY ss1 SCHEMA notification BRANCHED BY by_source_one;
         CREATE RELAY ss2 SCHEMA notification BRANCHED BY by_source_one;
@@ -253,21 +264,32 @@ Feature: Branched branch behavior
         PATH '/ingest-b'
         TYPE HTTP;
         CREATE INGESTOR source_one
-        TO ss1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_source_one VALUES { tenant = ss1.tenant }
-
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO ss1
+        INHERIT ALL
+        BRANCHED BY by_source_one
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE INGESTOR source_two
-        TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_source_one VALUES { tenant = ss2.tenant }
-
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE JUNCTION join_streams
-        FROM ss1, ss2
-        TO ss10 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_one;
-        CREATE SUBSCRIPTION ss10_subscription TO ss10 WHERE ss10.tenant = 'acme';
+        TO ss2
+        INHERIT ALL
+        BRANCHED BY by_source_one
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE JUNCTION join_streams FROM ss1, ss2
+        BRANCHED BY by_source_one
+        TO ss10
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION ss10_subscription TO ss10 WHERE tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest-a"
@@ -325,16 +347,23 @@ Feature: Branched branch behavior
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE REINGESTOR tenant_partition
-        FROM notifications
-        TO tenant_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant };
-        CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications WHERE tenant_notifications.tenant = 'acme';
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE REINGESTOR tenant_partition FROM notifications
+        TO tenant_notifications
+        INHERIT ALL
+        BRANCHED BY by_tenant_partition
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications WHERE tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"

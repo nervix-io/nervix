@@ -1,15 +1,23 @@
-#  Filter-Map Functions
+# Expression Functions
 
-These functions are available inside filter-map programs on ingestors, runtime nodes, and emitters:
+These functions are available in structured NSPL expressions on ingestors, processors, routes,
+and emitters:
 
 ```nspl
-[SET <relay>.<field> = <expr>, ...]
-[UNSET <relay>.<field>, ...]
+[INHERIT ...]
+[SET <field> = <expr>, ...]
 [WHERE <expr>]
 [INVOKE write_header(<name-expr>, <value-expr>), ...]
 ```
 
-The block order is significant: `SET`, then `UNSET`, then `WHERE`, then `INVOKE`. `INVOKE` and `write_header` are emitter-only; other functions are expressions and cannot be placed in `INVOKE`.
+`SET` assignments and `INVOKE` calls execute left to right. A transforming route begins empty and
+may initialize fields with `INHERIT` and `SET`; a set-only route begins empty and supports only
+`SET`. Route `WHERE` runs after output finalization. `INVOKE` and `write_header` are emitter-only;
+side-effect functions are invalid inside ordinary expressions.
+
+`ON MESSAGE ERROR SEND TO ... SET` uses this same scalar expression engine with its error-specific
+scopes. Aggregates are unavailable there. Header reads remain available when the failed operation
+belongs to a header-capable ingestor and the original source envelope was captured.
 
 General rules:
 
@@ -17,7 +25,8 @@ General rules:
 - there is no implicit cast insertion
 - argument and result types are validated when the statement is applied
 - sensitive values retain their sensitivity through expression evaluation; internal relay and node outputs may assign them to a non-sensitive field only with an explicit `leak_sensitive(...)`
-- emitter payload and header output is an external destination and may receive sensitive values without `leak_sensitive(...)`
+- every sensitive value crossing an emitter boundary requires `leak_sensitive(...)` or explicit
+  `INHERIT <field> LEAK SENSITIVE`
 - `NOW()` returns the execution-local domain time as `DATETIME`
 - `UUID_V7()` uses that same execution-local domain time when building the UUID
 
@@ -31,7 +40,9 @@ General rules:
 
 Header names may be dynamic `STRING` expressions. Header reads are available only on Endpoint (HTTP and WebSocket), HTTP client, Kafka, NATS, Pulsar, RabbitMQ, and SQS ingestors. Header writes are available only on Kafka, NATS, Pulsar, RabbitMQ, and SQS emitters. Unsupported connectors are rejected when the statement is validated.
 
-`write_header` arguments are evaluated after `SET`, and only selected rows are invoked. Multiple calls append in source order; the emitter connector maps the stored values to its native header or property behavior when the message is published.
+`write_header` arguments must be statically non-null `STRING` expressions. They are evaluated after
+payload construction and route filtering. Calls are staged in source order in a route-local
+envelope; if any call fails, no payload or partial header envelope is published.
 
 ## Context And Identity
 
@@ -126,13 +137,13 @@ Regular-expression functions take `STRING` arguments and use Rust regex syntax.
 ## Example
 
 ```nspl
-SET notifications.normalized = lower(trim(notifications.raw)),
-    notifications.observed_at = now(),
-    notifications.event_id = uuid_v7(),
-    notifications.prefix = left(trim(notifications.raw), 5),
-    notifications.digest = md5(trim(notifications.raw)),
-    notifications.magnitude = abs(notifications.amount),
-    notifications.rooted = sqrt(notifications.score)
-UNSET notifications.raw
-WHERE notifications.active AND regexp_like(lower(trim(notifications.raw)), 'warn|error');
+INHERIT ALL EXCEPT raw
+SET normalized = lower(trim(input.raw)),
+    observed_at = now(),
+    event_id = uuid_v7(),
+    prefix = left(trim(input.raw), 5),
+    digest = md5(trim(input.raw)),
+    magnitude = abs(input.amount),
+    rooted = sqrt(input.score)
+WHERE output.active AND regexp_like(lower(trim(input.raw)), 'warn|error')
 ```

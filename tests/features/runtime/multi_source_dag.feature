@@ -22,8 +22,6 @@ Feature: Multi-source DAG routing
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY kafka_ingress SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
@@ -47,53 +45,71 @@ Feature: Multi-source DAG routing
           'addr' = 'redis://127.0.0.1:6379/'
         };
         CREATE INGESTOR kafka_notifications
-        TO kafka_ingress FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC dag_kafka_{{test_id}} OFFSET BY CONSUMER GROUP dag_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = kafka_ingress.user_id }
-
-        FROM KAFKA kafka_main
-        TOPIC dag_kafka_{{test_id}}
-        OFFSET BY CONSUMER GROUP dag_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO kafka_ingress
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE INGESTOR rabbit_notifications
-        TO rabbit_ingress FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM RABBITMQ rabbit_main QUEUE dag_rabbit_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_rabbit_notifications VALUES { user_id = rabbit_ingress.user_id }
-
-        FROM RABBITMQ rabbit_main
-        QUEUE dag_rabbit_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
-        CREATE DEDUPLICATOR kafka_branch
-        FROM kafka_ingress
-        TO kafka_projected FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
-        DEDUPLICATE ON kafka_ingress.user_id
-        MAX TIME 10m;
-        CREATE REINGESTOR rabbit_branch
-        FROM rabbit_ingress
-        TO rabbit_projected FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
-        VALUES { user_id = rabbit_projected.user_id };
-        CREATE DEDUPLICATOR kafka_shared
-        FROM kafka_projected
-        TO shared_dispatch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
-        DEDUPLICATE ON kafka_projected.user_id
-        MAX TIME 10m;
-        CREATE DEDUPLICATOR rabbit_shared
-        FROM rabbit_projected
-        TO shared_dispatch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_kafka_notifications
-        DEDUPLICATE ON rabbit_projected.user_id
-        MAX TIME 10m;
-        CREATE EMITTER kafka_out
-        FROM kafka_projected
-        ENCODE USING notification_codec
-        TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        CREATE EMITTER rabbit_out
-        FROM rabbit_projected
-        ENCODE USING notification_codec
-        TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
-        CREATE EMITTER shared_out
-        FROM shared_dispatch
-        ENCODE USING notification_codec
-        TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        TO rabbit_ingress
+        INHERIT ALL
+        BRANCHED BY by_rabbit_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR kafka_branch FROM kafka_ingress
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
+        BRANCHED BY by_kafka_notifications
+        TO kafka_projected
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE REINGESTOR rabbit_branch FROM rabbit_ingress
+        TO rabbit_projected
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE DEDUPLICATOR kafka_shared FROM kafka_projected
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
+        BRANCHED BY by_kafka_notifications
+        TO shared_dispatch
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE DEDUPLICATOR rabbit_shared FROM rabbit_projected
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
+        BRANCHED BY by_kafka_notifications
+        TO shared_dispatch
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE EMITTER kafka_out FROM kafka_projected ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER rabbit_out FROM rabbit_projected ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER shared_out FROM shared_dispatch ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION kafka_projected_subscription TO kafka_projected;
         CREATE SUBSCRIPTION rabbit_projected_subscription TO rabbit_projected;
         CREATE SUBSCRIPTION shared_dispatch_subscription TO shared_dispatch;

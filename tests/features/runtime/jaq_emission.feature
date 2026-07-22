@@ -26,22 +26,25 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-        CREATE EMITTER kafka_notifications
-        FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER kafka_notifications FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "notifications_in_{{test_id}}"
@@ -86,22 +89,25 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
           'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
         };
-        CREATE EMITTER rabbit_notifications
-        FROM notifications
-        ENCODE USING notification_codec
-        TO RABBITMQ rabbit_main QUEUE notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER rabbit_notifications FROM notifications ENCODE USING notification_codec TO RABBITMQ rabbit_main QUEUE notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "notifications_in_{{test_id}}"
@@ -146,22 +152,25 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
           'addr' = 'redis://127.0.0.1:6379/'
         };
-        CREATE EMITTER redis_notifications
-        FROM notifications
-        ENCODE USING notification_codec
-        TO REDIS PUBSUB redis_main CHANNEL notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER redis_notifications FROM notifications ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "notifications_in_{{test_id}}"
@@ -206,23 +215,26 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
         };
-        CREATE EMITTER mqtt_notifications_out
-        FROM notifications
-        ENCODE USING notification_codec
-        TO MQTT mqtt_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER mqtt_notifications_out FROM notifications ENCODE USING notification_codec TO MQTT mqtt_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "notifications_in_{{test_id}}"
@@ -267,22 +279,25 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT nats_main
         TYPE NATS
         CONFIG {
           'addr' = 'nats://127.0.0.1:4222'
         };
-        CREATE EMITTER nats_notifications
-        FROM notifications
-        ENCODE USING notification_codec
-        TO NATS nats_main SUBJECT notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER nats_notifications FROM notifications ENCODE USING notification_codec TO NATS nats_main SUBJECT notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "notifications_in_{{test_id}}"
@@ -327,23 +342,26 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER zeromq_notifications
-        FROM notifications
-        ENCODE USING notification_codec
-        TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER zeromq_notifications FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_main
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "notifications_in_{{test_id}}"
@@ -388,23 +406,26 @@ Feature: JAQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT sqs_main
         TYPE SQS
         CONFIG {
           'endpoint' = 'http://127.0.0.1:9324',
           'region' = 'us-east-1'
         };
-        CREATE EMITTER sqs_notifications
-        FROM notifications
-        ENCODE USING notification_codec
-        TO SQS sqs_main QUEUE notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER sqs_notifications FROM notifications ENCODE USING notification_codec TO SQS sqs_main QUEUE notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And MQTT message is published to topic "notifications_in_{{test_id}}"

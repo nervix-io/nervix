@@ -4,13 +4,14 @@ use chumsky::{
     input::{Stream, ValueInput},
     prelude::*,
 };
+use nervix_models::{AssignmentTargetScope, Expression, RouteConstruction};
 use sorted_vec::SortedSet;
 
 pub use crate::vm_program::WindowAggregateFunction;
 use crate::vm_program::{
     Diagnostic, Expr, FieldRef, FunctionName, Literal, ParseError, ParseFromSourceError, Span,
     SpannedExpr, SpannedNode, SpannedToken, Token, WindowAggregateInvocation, expr_parser,
-    field_ref_parser, lex,
+    field_ref_parser, lex, lower_expression,
 };
 
 fn spanned<T>(inner: T, span: Span) -> SpannedNode<T> {
@@ -106,6 +107,129 @@ impl WindowAggregateProgram {
         }
         counts
     }
+
+    /// Combines route-local aggregate programs into the single accumulator plan used by a
+    /// window processor. Each route keeps its own compiled output program; this combined plan
+    /// owns the shared window state and therefore uses globally unique demand identifiers.
+    pub fn combine_route_programs(programs: &[Self]) -> Self {
+        let mut combined = Self {
+            assignments: Vec::new(),
+            demands: Vec::new(),
+        };
+        for program in programs {
+            let demand_offset = combined.demands.len();
+            combined
+                .assignments
+                .extend(program.assignments.iter().cloned().map(|mut assignment| {
+                    assignment
+                        .value
+                        .inner
+                        .offset_demand_references(demand_offset);
+                    assignment
+                }));
+            combined
+                .demands
+                .extend(program.demands.iter().cloned().map(|mut demand| {
+                    demand.id += demand_offset;
+                    demand
+                }));
+        }
+        combined
+    }
+}
+
+pub fn lower_window_assignments(
+    construction: &RouteConstruction,
+) -> Result<SpannedNode<WindowAggregateProgram>, String> {
+    if construction.inherit.is_some() {
+        return Err("window routes do not support INHERIT".to_string());
+    }
+    if !construction.invocations.is_empty() {
+        return Err("window routes do not support INVOKE".to_string());
+    }
+    let span: Span = (0..0).into();
+    let assignments = construction
+        .assignments
+        .iter()
+        .map(|assignment| {
+            if !matches!(
+                assignment.target.scope,
+                AssignmentTargetScope::Bare | AssignmentTargetScope::Output
+            ) {
+                return Err("window SET targets must be bare or output.<field>".to_string());
+            }
+            Ok(WindowAggregateAssignment {
+                target: FieldRef {
+                    relay: "output".to_string(),
+                    field: assignment.target.field.as_str().to_string(),
+                },
+                value: lower_window_expression(&assignment.value, span)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut program = WindowAggregateProgram {
+        assignments,
+        demands: Vec::new(),
+    };
+    assign_aggregate_demands(&mut program);
+    Ok(spanned(program, span))
+}
+
+fn lower_window_expression(
+    expression: &Expression,
+    span: Span,
+) -> Result<SpannedNode<WindowAggregateExpr>, String> {
+    match expression {
+        Expression::Array(items) => {
+            if items.is_empty() {
+                return Err("window array expressions must not be empty".to_string());
+            }
+            Ok(spanned(
+                WindowAggregateExpr::Array(
+                    items
+                        .iter()
+                        .map(|item| lower_window_expression(item, span))
+                        .collect::<Result<Vec<_>, String>>()?,
+                ),
+                span,
+            ))
+        }
+        _ => {
+            let expression = lower_expression(expression, "output")?;
+            validate_aggregate_expr(&expression).map_err(|error| format!("{error:?}"))?;
+            validate_window_input_scope(&expression.inner, false)?;
+            Ok(spanned(WindowAggregateExpr::Scalar(expression), span))
+        }
+    }
+}
+
+fn validate_window_input_scope(expression: &Expr, inside_aggregate: bool) -> Result<(), String> {
+    match expression {
+        Expr::FieldRef(field) if inside_aggregate && field.relay != "input" => Err(format!(
+            "window aggregate arguments may read only input fields, found '{}.{}'",
+            field.relay, field.field
+        )),
+        Expr::FieldRef(field) if field.relay == "input" && !inside_aggregate => Err(format!(
+            "input.{} is available only inside a window aggregate argument",
+            field.field
+        )),
+        Expr::FieldRef(_) | Expr::InternalFieldRef(_) | Expr::Literal(_) => Ok(()),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            validate_window_input_scope(&expr.inner, inside_aggregate)
+        }
+        Expr::Binary { left, right, .. } => {
+            validate_window_input_scope(&left.inner, inside_aggregate)?;
+            validate_window_input_scope(&right.inner, inside_aggregate)
+        }
+        Expr::Call { function, args } => {
+            let inside_aggregate =
+                inside_aggregate || WindowAggregateFunction::parse_name(function).is_some();
+            for argument in args {
+                validate_window_input_scope(&argument.inner, inside_aggregate)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 impl WindowAggregateExpr {
@@ -118,6 +242,39 @@ impl WindowAggregateExpr {
                 }
             }
         }
+    }
+
+    fn offset_demand_references(&mut self, offset: usize) {
+        match self {
+            Self::Scalar(expr) => offset_expr_demand_references(&mut expr.inner, offset),
+            Self::Array(items) => {
+                for item in items {
+                    item.inner.offset_demand_references(offset);
+                }
+            }
+        }
+    }
+}
+
+fn offset_expr_demand_references(expr: &mut Expr, offset: usize) {
+    match expr {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            offset_expr_demand_references(&mut expr.inner, offset);
+        }
+        Expr::Binary { left, right, .. } => {
+            offset_expr_demand_references(&mut left.inner, offset);
+            offset_expr_demand_references(&mut right.inner, offset);
+        }
+        Expr::Call { function, args } => {
+            if let FunctionName::WindowAggregate(invocation) = function {
+                invocation.demand_id += offset;
+                return;
+            }
+            for arg in args {
+                offset_expr_demand_references(&mut arg.inner, offset);
+            }
+        }
+        Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
     }
 }
 
@@ -593,6 +750,42 @@ mod tests {
     }
 
     #[test]
+    fn route_aggregate_arguments_reject_output_fields() {
+        let construction = crate::parse_route_construction("SET total = COUNT(output.total)")
+            .expect("route construction should parse");
+
+        let error = lower_window_assignments(&construction)
+            .expect_err("aggregate arguments must read the original input");
+
+        assert!(error.contains("window aggregate arguments may read only input fields"));
+    }
+
+    #[test]
+    fn route_array_values_preserve_ordered_aggregate_expressions() {
+        let construction = crate::parse_route_construction(
+            "SET percentiles = [MIN(input.value), MAX(input.value)]",
+        )
+        .expect("route array construction should parse");
+
+        let lowered = lower_window_assignments(&construction)
+            .expect("window array construction should lower");
+
+        assert_eq!(lowered.demands().len(), 1);
+        let WindowAggregateExpr::Array(items) = &lowered.assignments[0].value.inner else {
+            panic!("window array must remain structurally represented");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            aggregate_invocation(&items[0].inner).function,
+            WindowAggregateFunction::Min
+        );
+        assert_eq!(
+            aggregate_invocation(&items[1].inner).function,
+            WindowAggregateFunction::Max
+        );
+    }
+
+    #[test]
     fn deduplicates_demands_and_assigns_call_demand_ids() {
         let parsed = parse_aggregate_program(
             "s2.p50 = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 50, 2048, 0, 10000, '2s'), s2.p90 = \
@@ -726,6 +919,34 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].relay, "s1");
         assert_eq!(refs[0].field, "latency");
+    }
+
+    #[test]
+    fn combines_route_programs_with_globally_unique_demands() {
+        let first = parse_aggregate_program("output.count = COUNT(input.value)")
+            .expect("first route aggregate should parse");
+        let second = parse_aggregate_program(
+            "output.minimum = MIN(input.value), output.maximum = MAX(input.value)",
+        )
+        .expect("second route aggregate should parse");
+
+        let combined = WindowAggregateProgram::combine_route_programs(&[
+            first.inner.clone(),
+            second.inner.clone(),
+        ]);
+
+        assert_eq!(combined.demands().len(), 2);
+        assert_eq!(combined.demands()[0].id, 0);
+        assert_eq!(combined.demands()[1].id, 1);
+        assert_eq!(combined.demand_reference_counts(), vec![1, 2]);
+        assert_eq!(
+            aggregate_invocation(&combined.assignments[1].value.inner).demand_id,
+            1
+        );
+        assert_eq!(
+            aggregate_invocation(&combined.assignments[2].value.inner).demand_id,
+            1
+        );
     }
 
     fn aggregate_invocation(expr: &WindowAggregateExpr) -> &WindowAggregateInvocation {

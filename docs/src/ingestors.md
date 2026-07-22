@@ -9,16 +9,19 @@ CREATE BRANCH by_user
   SCHEMA user_branch TTL 5m;
 
 CREATE [IF NOT EXISTS] INGESTOR kafka_notifications
-  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-  ON MESSAGE ERROR LOG
-  DECODE USING notification_codec
-  BRANCHED BY by_user
-  TIMESTAMP NOW
   FROM KAFKA kafka_main
   TOPIC notifications
   OFFSET BY CONSUMER GROUP nervix_consumer
   INSTANCES 1
   MODE ACK SEQUENTIAL
+  DECODE USING notification_codec
+  TIMESTAMP NOW
+  TO notifications
+    INHERIT ALL
+    BRANCHED BY by_user
+    SET user_id = message.user_id
+    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
@@ -26,13 +29,13 @@ Every ingestor defines:
 
 - the destination relay or relays
 - the codec used for decoding
-- the explicit branch to use, or `UNBRANCHED`
+- a route-local outgoing branch declaration
 - a flush policy for every destination relay
 - a message error policy for every destination relay
 - the timestamp source
 - the transport-specific source
 - the delivery mode
-- optional node-level `FILTER WHERE` and per-route `SET` / `UNSET` / `WHERE` programs
+- optional node-level `FILTER WHERE` and route-local `INHERIT` / `SET` / `WHERE`
 
 `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required after every `TO <relay>`. Every route also requires its own `ON MESSAGE ERROR <policy>`. Each route buffers and handles message-specific construction failures independently. `ON GENERAL ERROR` remains node-level because it handles source or transport failures that are not tied to one message or output route.
 
@@ -46,13 +49,16 @@ At runtime, the ingestor:
 
 ## Branch Semantics
 
-Ingestors are where external mixed flows enter branch-isolated processing. The ingestor references an explicit branch and owns the record-to-key value mapping. The branch declaration owns the key schema, TTL, and optional LRU eviction policy:
+Ingestors are where external mixed flows enter branch-isolated processing. Every route independently
+constructs a concrete branch or becomes unbranched. The branch declaration owns the key schema,
+TTL, and optional LRU eviction policy:
 
 - `CREATE BRANCH <branch> SCHEMA <schema> TTL <duration>` declares the branch key schema and lifetime
-- `BRANCHED BY <branch> VALUES { field = relay.field, ... }` computes the group from direct values on the outgoing relay record
+- `BRANCHED BY <branch> SET field = expression, ...` constructs the route's key after output
+  finalization and route filtering
 - `MAX INSTANCES <n> EVICT LRU` may be added to cap active concrete branch instances and evict the least recently used branch when capacity is reached
-- `BRANCHED BY <branch>` tells the ingestor to use that explicit branch
-- `UNBRANCHED` uses the single root group without declaring or referencing a branch schema, and does not declare TTL
+- `UNBRANCHED` produces an absent branch key; it is not encoded as an empty string or synthetic
+  root identifier
 - the named branch defines both the branch identity and its key shape; downstream relays and branch-preserving processors must reference that same branch name
 - decoded rows are appended to matching destination relays inside that group's branch
 - downstream normal processors keep the same group until a `REINGESTOR` or `EMITTER` boundary
@@ -66,51 +72,57 @@ Batching follows that same rule:
 
 Client-backed ingestors can use resource-mounted client config values for TLS material and other file-based settings. See [Resources](resources.md#client-config-mounts).
 
-## Filter-Map Programs
+## Value Construction and Filters
 
-Ingestors may declare an optional arrival filter and per-route filter-map clauses:
+Ingestors may declare an optional arrival filter and per-route construction clauses:
 
 ```nspl
 CREATE BRANCH by_tenant
   SCHEMA tenant_branch TTL 5m;
 
 CREATE [IF NOT EXISTS] INGESTOR notifications_in
-  FILTER WHERE message.active
-  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-    SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
-    UNSET notifications.raw
-    WHERE message.tenant = 'acme'
-    ON MESSAGE ERROR LOG
-  DECODE USING notification_codec
-  BRANCHED BY by_tenant
   FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+  DECODE USING notification_codec
+  FILTER WHERE input.active
+  TO notifications
+    INHERIT ALL EXCEPT raw
+    SET amount = message.amount + 1,
+        normalized = lower(input.raw)
+    WHERE output.tenant = 'acme'
+    BRANCHED BY by_tenant SET tenant = message.tenant
+    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
-`FILTER WHERE` is evaluated after codec decoding and before the ingestor writes into any destination relay. Sources that naturally decode batches can evaluate the filter over the whole Arrow batch; sources that receive individual messages evaluate a single-row batch. Each `TO` route then applies its own `SET` / `UNSET` / `WHERE` program before writing to that destination.
+`FILTER WHERE` runs after codec decoding and before route processing. Each `TO` route starts with an
+empty output, applies `INHERIT` and ordered `SET`, finalizes the output, evaluates its `WHERE`, and
+then constructs its own branch key.
 
 Supported blocks:
 
-- `SET <destination_relay>.<field> = <expr>, ...`: rewrites existing fields or appends new fields on the emitted row shape
-- `UNSET <destination_relay>.<field>, ...`: removes fields from the emitted row shape
+- `INHERIT ALL`, `INHERIT ALL EXCEPT ...`, or explicit `INHERIT field, ...` copies compatible
+  same-named decoded fields
+- `SET <field> = <expr>, ...` initializes route output fields in order
 - `WHERE <expr>`: drops rows whose predicate is false or null
 
 General notes:
 
 - `SET` is a single clause with comma-separated assignments
 - assignments execute left to right; repeated destination fields are allowed and later expressions read the latest preceding value
-- `UNSET` is a single clause with comma-separated field names
-- if multiple filter-map blocks are present, they must appear in `SET`, `UNSET`, `WHERE` order
-- expressions are validated against the ingestor input scope; do not rely on `WHERE` to reference fields added by `SET`
-- `message.<field>` is the readonly decoded input record; the destination relay namespace is the writable output
-- `message` is reserved for the decoded input record and cannot be used as a relay name
+- later assignments may read earlier output values; repeated targets are valid
+- `message.field` reads the working route output with exact-compatible decoded-input fallback;
+  `input.field` always reads the original decoded row and `output.field` requires prior initialization
+- route `WHERE` sees finalized output through bare fields, `message`, or `output`, without fallback
+- relay-qualified fields and `UNSET` are invalid
 - all node expressions use explicit typing; there is no implicit cast insertion
 - nested predicates and nested/chained builtin calls are supported
-- leader-side validation checks that identifiers bind to the input schema and that the post-`SET` / post-`UNSET` schema matches the destination relay schema
-- the program source is stored as NSPL, not serialized bytecode
-- ingestor payload fields are referenced through `message.<field>`
+- leader-side validation requires every required output and branch field to be initialized
+- public Models store structured expressions; the runtime never reparses NSPL
 - source-specific transport metadata may be exposed through `metadata.<field>` when the ingestor supports it; Kafka currently provides `metadata.topic`, `metadata.partition`, and `metadata.offset`
-- supported sources expose transport headers through `read_header(name)` and `read_headers(name)`; header names may be any `STRING` expression, and these functions may be used in both top-level `FILTER WHERE` and per-route filter-map expressions
+- supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
+  header names may be any `STRING` expression, and these functions may be used in both top-level
+  `FILTER WHERE` and per-route expressions
 
 Useful built-ins include string, null-handling, numeric, regex, and contextual functions such as `lower`, `coalesce`, `abs`, `regexp_like`, `now`, and `uuid_v7`.
 
@@ -123,7 +135,7 @@ Common expression patterns include:
 - arithmetic expressions such as `(amount + fee) / divisor`
 - explicit casts such as `raw AS INT64`
 
-The filter-map type surface matches the full Nervix internal schema type set:
+The expression type surface matches the full Nervix internal schema type set:
 
 - `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
 - `F32`, `F64`
@@ -136,7 +148,8 @@ The filter-map type surface matches the full Nervix internal schema type set:
 Some ingestors receive additional source data alongside the decoded payload body. They expose it through two functions:
 
 - `read_header(name)` returns the first value as an optional `STRING`, or `NULL` when the header is absent
-- `read_headers(name)` returns every value in transport order as a non-null `VEC<STRING>`, or an empty vector when the header is absent
+- `read_headers(name)` returns every value in transport order as required `LIST<STRING>`, or an
+  empty list when the header is absent
 
 The `name` argument can be any expression that returns `STRING`. Both functions are available in top-level `FILTER WHERE` and in per-route `SET` / `WHERE` expressions for these sources:
 
@@ -148,14 +161,20 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 - RabbitMQ exposes AMQP message headers, converting typed AMQP values to strings
 - SQS exposes message attributes, converting string, number, and binary values to strings
 
-Header values are not part of `message`, and all values are exposed as strings. To route a header downstream, assign it explicitly, for example:
+The same captured source envelope remains available while a supported ingestor constructs an
+`ON MESSAGE ERROR SEND TO` record, so its error-route `SET` may also call `read_header` and
+`read_headers`.
+
+Header values are non-sensitive strings and do not propagate through relays unless explicitly
+assigned to schema-backed fields:
 
 ```nspl
-SET notifications.route = read_header(lower(message.route_header))
-WHERE read_header("tenant") = message.tenant
+SET route = read_header(lower(input.route_header))
+WHERE read_header("tenant") = output.tenant
 ```
 
-MQTT, Redis, Kinesis, Prometheus, and ZeroMQ ingestors do not support these functions. Leader-side validation rejects `read_header` or `read_headers` for a source without header support.
+Kinesis, MQTT, Redis Pub/Sub, Prometheus, ZeroMQ, and WebSockets client ingestors do not support
+header reads. Leader-side validation rejects these functions for a source without header support.
 
 ## TLS Client Configuration
 
@@ -283,7 +302,8 @@ MODE ACK SEQUENTIAL
 - Kinesis maps cleanly to the emitter-side "publish bytes to a named relay" model
 - `UNBRANCHED` always means the single root branch
 - transport keys such as the Kinesis partition key do not implicitly choose Nervix relay branches
-- if you want branching by transport-derived data, decode that data into record fields and reference those fields from the ingestor `BRANCHED BY ... VALUES { ... }` mapping
+- if branching depends on transport-derived data, first copy that data into a route output field and
+  reference the finalized output from `BRANCHED BY ... SET ...`
 - `INSTANCES` spreads open shards across local worker tasks on the assigned execution node
 - unlike Kafka, there is no broker-managed `CONSUMER GROUP` clause here
 - this first cut does not provide Kafka-style replicated durable checkpoints or rebalance scheduling; startup position is controlled on the `CLIENT` with `start_position = 'latest'|'trim_horizon'`

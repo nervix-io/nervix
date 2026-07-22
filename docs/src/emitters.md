@@ -9,9 +9,10 @@ CREATE [IF NOT EXISTS] EMITTER kafka_notifications
   FROM notifications
   ENCODE USING notification_codec
   TO KAFKA kafka_main TOPIC notifications_out
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  ON GENERAL ERROR LOG;
 ```
 
 An emitter defines:
@@ -21,7 +22,9 @@ An emitter defines:
 - the transport-specific sink
 - the flush policy used to collect a batch before publishing
 - whether the branch is `ATTACHED` or `DETACHED`
-- an optional filter-map program applied before encoding
+- route-local codec construction or a direct `VALUES` mapping
+- optional ordered header invocations on supported codec sinks
+- optional ordered materialized-state dependencies
 
 ## Branch Semantics
 
@@ -30,47 +33,71 @@ An emitter is the terminal consumer for its source relay.
 That means:
 
 - the emitter consumes from all concrete branches of its source relay
-- no new downstream branch is created after emitter; the branch is absorbed into the external sink
+- the current branch remains available internally for compatible materialized-state lookup
+- `branch.field` is unavailable to successful emitter expressions
+- branch identity collapses only after successful external publication
 
 All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`. `FLUSH` means Nervix collects an in-memory Arrow batch before handing it to the external sink. For most emitters the collected batch is encoded and published on the flush boundary. Iceberg additionally supports `COMMIT EACH <duration> MAX SIZE <bytes>`: flush writes local Arrow IPC staging files, and commit appends the staged data to object storage.
 
-## Filter-Map Programs
+## Codec-emitter construction
 
-Emitters may also end with an optional filter-map clause:
+Codec emitters are transforming routes. They begin with an empty codec-schema payload and use
+explicit inheritance and ordered assignment:
 
 ```nspl
 CREATE [IF NOT EXISTS] EMITTER kafka_notifications
   FROM notifications
   ENCODE USING notification_codec
   TO KAFKA kafka_main TOPIC notifications_out
-  SET message.normalized = lower(message.raw)
-  UNSET message.raw
-  WHERE message.active
-  INVOKE write_header("tenant", message.tenant),
-         write_header("route", message.normalized)
+  INHERIT ALL EXCEPT raw, secret
+  INHERIT secret LEAK SENSITIVE
+  SET normalized = lower(input.raw)
+  WHERE output.active
+  INVOKE write_header("tenant", input.tenant),
+         write_header("route", output.normalized)
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  ON GENERAL ERROR LOG;
 ```
 
-The filter-map runs before codec encoding and sink publication.
+`message.field` uses transforming working-output semantics, `input.field` always reads the source
+relay row, and `output.field` requires prior initialization. Relay-qualified fields are invalid.
+There is no implicit identity transformation and no `UNSET`; use `INHERIT ALL EXCEPT`.
 
-Supported blocks:
+External sensitivity is strict. Every sensitive payload value requires `leak_sensitive(...)` or an
+explicit `INHERIT field LEAK SENSITIVE`, even when the codec target field is also sensitive.
 
-- `SET message.<field> = <expr>, ...`
-- `UNSET message.<field>, ...`
-- `WHERE <expr>`
-- `INVOKE write_header(<name-expr>, <value-expr>), ...`
+## Direct-emitter values
 
-If more than one block is present, use `SET`, then `UNSET`, then `WHERE`, then `INVOKE`. `INVOKE` may also be the entire filter-map program, so an emitter that only adds headers does not need a `SET` block.
+Database and object-store direct emitters construct external name-keyed mappings:
 
-`message.<field>` addresses the encoded outbound payload and is checked against the emitter codec schema when `ENCODE USING` is present. `write_header` accepts two `STRING` expressions. Invocations execute after all `SET` assignments, so their arguments observe the final message values; they execute only for rows selected by `WHERE`. Repeated calls append values in source order. The connector translates that ordered list into native headers or properties when it publishes, using either repeated native values or the connector's overwrite behavior.
+```nspl
+VALUES {
+  "tenant" = input.tenant,
+  "normalized" = lower(input.action),
+  "secret" = leak_sensitive(input.secret)
+}
+WHERE input.active
+```
 
-`write_header` is a side-effect function. It returns no value, cannot appear in an expression or call chain, and is valid only as a top-level call in an emitter's final `INVOKE` block. Header output is supported for Kafka, Pulsar, RabbitMQ, NATS, and SQS emitters; Kafka, Pulsar, RabbitMQ, and NATS publish transport headers/properties, while SQS publishes string message attributes. Kinesis, MQTT, Redis, ZeroMQ, database, and Iceberg emitters reject `write_header` during leader-side validation.
+Entries are independent and do not create variables. Order does not affect evaluation, duplicate
+external keys are invalid, `output` is unavailable, and sensitive values require explicit leakage.
+Bare fields, `message.field`, and `input.field` read the source row. Direct emitters reject
+`INHERIT` and all current direct sinks reject `INVOKE`.
 
-As with other runtime nodes, the leader validates the program immediately and checks that the resulting message output schema is compatible with the emitted schema after `SET` and `UNSET`.
+## Header invocations
 
-Emitters use the same filter-map expression surface as other runtime nodes:
+`write_header` is a side-effect function. It accepts statically non-null `STRING` name and value
+expressions and is valid only as a top-level `INVOKE` call. Sensitive values require
+`leak_sensitive`. Calls execute left to right after payload finalization and route filtering. Header
+mutations are staged in a temporary route-local envelope; invocation failure prevents payload and
+partial-envelope publication.
+
+Header output is supported only on codec emitters for Kafka, NATS, Pulsar, RabbitMQ, and SQS.
+Kafka and NATS preserve ordered repeated values. Pulsar, RabbitMQ, and SQS use last-write-wins
+behavior. Kinesis, Redis, MQTT, ZeroMQ, direct database sinks, and Iceberg reject header writes.
+
+Emitter expressions use the same typed surface as other runtime nodes:
 
 - arithmetic: `+`, `-`, `*`, `/`, `%`
 - comparisons and boolean logic: `=`, `!=`, `>`, `<`, `>=`, `<=`, `AND`, `OR`, `NOT`
@@ -85,7 +112,8 @@ That expression surface applies to the full Nervix internal schema type set:
 - `F32`, `F64`
 - `BOOL`, `STRING`, `DATETIME`
 
-Nested conditions and chained calls such as `contains(lower(trim(notifications.raw)), 'warn')` are supported before encoding.
+Nested conditions and chained calls such as `contains(lower(trim(input.raw)), 'warn')` are supported
+before encoding.
 
 Client-backed emitters can use resource-mounted client config values for TLS material and other file-based settings. See [Resources](resources.md#client-config-mounts).
 
@@ -208,13 +236,13 @@ CREATE EMITTER to_ch
   FROM notifications
   TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
   VALUES {
-    "clickhouse_user_id" = notifications.user_id,
+    "clickhouse_user_id" = input.user_id,
     "clickhouse_now" = NOW(),
-    "clickhouse_action" = LOWER(notifications.action)
+    "clickhouse_action" = LOWER(input.action)
   }
+  FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
-  FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+  ON GENERAL ERROR LOG;
 ```
 
 ClickHouse clients use the HTTP endpoint:
@@ -239,14 +267,14 @@ CREATE EMITTER to_pg
   FROM notifications
   TO POSTGRES postgres_client INSERT TO TABLE my_table
   VALUES {
-    "postgres_user_id" = notifications.user_id,
+    "postgres_user_id" = input.user_id,
     "postgres_now" = NOW() AS STRING,
-    "postgres_action" = LOWER(notifications.action)
+    "postgres_action" = LOWER(input.action)
   }
   WITH MAX BATCH 500
+  FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
-  FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+  ON GENERAL ERROR LOG;
 ```
 
 Postgres emitters use `VALUES` expressions and insert batches with `INSERT ... SELECT ... FROM unnest(...)`. `WITH MAX BATCH <n>` is required and limits the number of buffered records in one insert command.
@@ -280,14 +308,14 @@ CREATE EMITTER to_mysql
   FROM notifications
   TO MYSQL mysql_client INSERT TO TABLE my_table
   VALUES {
-    "mysql_user_id" = notifications.user_id,
+    "mysql_user_id" = input.user_id,
     "mysql_now" = NOW() AS STRING,
-    "mysql_action" = LOWER(notifications.action)
+    "mysql_action" = LOWER(input.action)
   }
   WITH MAX BATCH 500
+  FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
-  FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+  ON GENERAL ERROR LOG;
 ```
 
 MySQL emitters use `VALUES` expressions and insert batches with a multi-row `INSERT ... VALUES (?, ...), ...` command. `WITH MAX BATCH <n>` is required and limits the number of buffered records in one insert command.
@@ -320,14 +348,14 @@ CREATE EMITTER to_mongodb
   FROM notifications
   TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
   VALUES {
-    "mongodb_user_id" = notifications.user_id,
+    "mongodb_user_id" = input.user_id,
     "mongodb_now" = NOW() AS STRING,
-    "mongodb_action" = LOWER(notifications.action)
+    "mongodb_action" = LOWER(input.action)
   }
   WITH MAX BATCH 500
+  FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
-  FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+  ON GENERAL ERROR LOG;
 ```
 
 MongoDB emitters use `VALUES` expressions and insert batches with `insert_many`. `WITH MAX BATCH <n>` is required and limits the number of buffered documents in one insert command.
@@ -378,15 +406,15 @@ CREATE EMITTER iceberg_notifications
   FROM notifications
   TO ICEBERG ON S3 s3_main TABLE notifications
   VALUES {
-    'user_id' = notifications.user_id,
-    'action' = notifications.action
+    'user_id' = input.user_id,
+    'action' = input.action
   }
   LOCATION 's3://nervix-iceberg/tables/notifications'
   CATALOG iceberg_catalog
-  ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
-  COMMIT EACH 1m MAX SIZE 512MiB;
+  COMMIT EACH 1m MAX SIZE 512MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
 Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
@@ -412,15 +440,15 @@ CREATE EMITTER iceberg_notifications
   FROM notifications
   TO ICEBERG ON GCS gcs_main TABLE notifications
   VALUES {
-    'user_id' = notifications.user_id,
-    'action' = notifications.action
+    'user_id' = input.user_id,
+    'action' = input.action
   }
   LOCATION 'gs://nervix-iceberg/tables/notifications'
   CATALOG iceberg_catalog
-  ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
-  COMMIT EACH 1m MAX SIZE 512MiB;
+  COMMIT EACH 1m MAX SIZE 512MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
 Azure Blob uses `TYPE AZURE_BLOB` and `wasbs://` locations. `wasb://` is also accepted for plain-HTTP local endpoints:
@@ -444,15 +472,15 @@ CREATE EMITTER iceberg_notifications
   FROM notifications
   TO ICEBERG ON AZURE_BLOB azure_main TABLE notifications
   VALUES {
-    'user_id' = notifications.user_id,
-    'action' = notifications.action
+    'user_id' = input.user_id,
+    'action' = input.action
   }
   LOCATION 'wasbs://nervix-iceberg@myaccount.blob.core.windows.net/tables/notifications'
   CATALOG iceberg_catalog
-  ON MESSAGE ERROR LOG
-  ON GENERAL ERROR LOG
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
-  COMMIT EACH 1m MAX SIZE 512MiB;
+  COMMIT EACH 1m MAX SIZE 512MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
 The REST catalog is the authority for namespace and table metadata. Nervix does not write a separate object-store catalog pointer file and does not provision catalog entries from the emitter runtime path.

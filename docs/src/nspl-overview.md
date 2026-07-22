@@ -101,20 +101,33 @@ COMMIT;
 require an active transaction. Client-local commands such as `USE` are not
 valid inside a transaction and must be sent separately.
 
-Ingestors, relay-consuming processors, and generated-output processors use optional node-level arrival filters and per-output route clauses. Relay-consuming processors may also attach a source-level filter to `FROM`. Emitters use the same row-level filter-map surface on their sink boundary:
+Ingestors, relay-consuming processors, and generated-output processors use optional node-level
+arrival filters and route-local construction. Relay-consuming processors may also attach a
+source-level filter to `FROM`:
 
 ```nspl
 FROM <relay> [WHERE <expr>], ...
 [FILTER WHERE <expr>]
-TO <relay> [SET <relay>.<field> = <expr>, ...] [UNSET <input>.<field>, ...] [WHERE <expr>]
+TO <relay>
+  [INHERIT ...]
+  [SET <field> = <expr>, ...]
+  [WHERE <expr>]
+  FLUSH ...
+  ON MESSAGE ERROR ...
 [TO <relay> ...]
 ```
 
-On relay-consuming processors, `FROM ... WHERE` is a source-level input filter and runs first. Most processors may declare multiple comma-separated `FROM` relays, and those relays must share the same schema. Correlators use repeated `LEFT FROM` and `RIGHT FROM` clauses instead; relays within each side must share that side's schema. `FILTER WHERE` runs after source filtering, before the node accepts rows into its buffer, state, or guest execution. `SET` and `UNSET` appear after `TO` because destination schema validation depends on the target relay. Each `TO` route may declare its own optional `WHERE` condition; routes without `WHERE` receive every row produced by the node.
+`FROM ... WHERE` runs first. `FILTER WHERE` runs next, before the node accepts rows into its state,
+buffer, inferencer, or guest. Every route then creates a new empty output, performs its own ordered
+construction, finalizes the declared schema, and evaluates its route `WHERE`. Required fields must
+be initialized; omitted optional fields become typed nulls. There is no implicit identity
+transformation and no global `SET` or `INHERIT`.
 
-Passthrough inheritance applies to processors that naturally map one input row to one output row, including inferencers. Inferencer routes inherit the inbound record and expose model values through `inner_input` and `inner_output`. Generated-output processors such as windows and WASM processors instead operate on the aggregate record or WASM guest output record.
-
-WASM output routes are generated-output routes with one additional input binding: `SET` may read guest output fields through the destination relay namespace and original source fields through `input.<field>`. WASM output routes support `SET` and `WHERE`; they do not support `UNSET`.
+Transforming routes—ingestors after decoding, reingestors, junctions, deduplicators, reorderers,
+and codec emitters—may use `INHERIT`. Generators, windows, inferencers, WASM processors,
+correlators, and direct emitters are set-only and reject `INHERIT`. Generated inferencer and WASM
+state is an immutable read source shared independently by every route; it is not an automatically
+initialized output and it is not exposed as `input` or `message`.
 
 This surface is available on:
 
@@ -127,13 +140,14 @@ This surface is available on:
 - `CREATE WINDOW PROCESSOR`
 - `CREATE EMITTER`
 
-The clause acts as a row-level filter-map program:
+Every `TO` destination on a flush-based node requires `FLUSH EACH <duration> MAX BATCH SIZE
+<bytes>` or `FLUSH IMMEDIATE`; there are no hidden defaults. Window processors use `WIDTH` and
+`STEP`, and WASM processors use guest-owned output cadence instead of `FLUSH`.
 
-Every `TO` destination on a flush-based multi-output node requires an explicit `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` clause. Destination buffers and deadlines are independent. Generators and emitters retain their single node-level flush policy; window processors use `WIDTH` and `STEP` instead.
-
-- `SET` overwrites existing fields or appends new fields
-- `UNSET` removes fields from the downstream row shape when passthrough inheritance is active
-- `WHERE` keeps only rows where the predicate is true
+`SET` assignments execute left to right and repeated targets are valid. A later assignment may read
+an earlier value through the bare field or `output.<field>`. `INHERIT ALL`, `INHERIT ALL EXCEPT
+...`, and explicit `INHERIT field, ...` copy compatible same-named input fields. `UNSET` is not part
+of NSPL.
 
 Supported expression surface:
 
@@ -169,14 +183,22 @@ Supported built-ins include string, null-handling, numeric, regex, and contextua
 
 See [Filter-Map Functions](filter-map-functions.md) for the full current function list, signatures, and aliases.
 
-General filter-map rules:
+General expression rules:
 
 - builtin calls may be nested or chained, for example `lower(trim(raw))`
 - arithmetic and predicate expressions may also be nested with parentheses
 - there is no implicit cast insertion; type mismatches must be resolved with explicit `AS ...`
-- ingestor filter-map programs read decoded payload fields as `message.<field>` and, for supported sources, read transport headers with `read_header(name)` or `read_headers(name)`; see [Ingestors](ingestors.md#header-context)
-- emitter filter-map programs write encoded payload fields through `message.<field>` and may append string headers with top-level `write_header(name, value)` calls in a final `INVOKE` block for Kafka, Pulsar, RabbitMQ, NATS, and SQS sinks; see [Emitters](emitters.md#filter-map-programs)
-- branch-local processors, reingestors, and emitters can read the current branch key as `branch.<key>` when the current relay is branched; `branch` is a reserved namespace and cannot be used as a relay name
+- relay names are graph references, never expression qualifiers
+- language scopes are `message`, `input`, `output`, `branch`, `left`, `right`,
+  `relay_state.<relay>`, `metadata`, `partial_output`, and `error`; availability depends on context
+- transforming construction uses `message.field` as the working output with exact-compatible input
+  fallback; `output.field` reads only an already initialized output field
+- generated routes allow bare reads from immutable generated state until the same-named output is
+  initialized; `message` and `input` are unavailable
+- `branch.field` must be explicit and is unavailable in successful emitter expressions
+- supported ingestors read headers with `read_header(name)` and `read_headers(name)`; Kafka also
+  exposes typed `metadata.topic`, `metadata.partition`, and `metadata.offset`
+- supported codec emitters stage ordered `write_header(name, value)` calls in `INVOKE`
 
 Example:
 
@@ -185,13 +207,17 @@ CREATE BRANCH by_tenant
   SCHEMA tenant_branch TTL 5m;
 
 CREATE INGESTOR notifications_in
-  FILTER WHERE message.active
-  TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-    SET notifications.amount = message.amount + 1, notifications.normalized = lower(message.raw)
-    UNSET notifications.raw ON MESSAGE ERROR LOG
+  FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
   DECODE USING notification_codec
-  BRANCHED BY by_tenant VALUES { tenant = notifications.tenant }
-  FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+  FILTER WHERE input.active
+  TO notifications
+    INHERIT ALL EXCEPT raw
+    SET amount = message.amount + 1,
+        normalized = lower(input.raw)
+    BRANCHED BY by_tenant SET tenant = message.tenant
+    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
 Another example showing nested conditions and chained calls:
@@ -201,31 +227,38 @@ CREATE EMITTER outbound
   FROM notifications
   ENCODE USING notification_codec
   TO KAFKA kafka_main TOPIC notifications_out
-  SET notifications.normalized = lower(trim(notifications.raw)), notifications.magnitude = abs(notifications.amount)
-  UNSET notifications.raw
-  WHERE (notifications.active AND notifications.amount > 5) OR contains(lower(trim(notifications.raw)), 'urgent')
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  INHERIT ALL EXCEPT raw
+  SET normalized = lower(trim(input.raw)), magnitude = abs(input.amount)
+  WHERE (output.active AND output.amount > 5) OR contains(lower(trim(input.raw)), 'urgent')
+  INVOKE write_header('tenant', input.tenant)
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 ```
 
-The leader parses and validates these programs immediately when the statement is applied, including output-schema checks after `SET` and `UNSET`.
+The leader parses and validates these structured expressions immediately when the statement is
+applied. Models never store raw executable NSPL, and runtime execution never reparses expressions.
 
 Generators use a narrower surface:
 
 ```nspl
 CREATE GENERATOR synth_notifications
-  TO generated_notifications
+  USING MATERIALIZED STATE notifications
   EACH 100ms
-  FLUSH EACH 1s MAX BATCH SIZE 1MiB
-  SET generated_notifications.user_id = notifications.user_id,
-      generated_notifications.amount = notifications.amount ON MESSAGE ERROR LOG;
+  BRANCHED BY by_tenant
+  TO generated_notifications
+    SET user_id = relay_state.notifications.user_id,
+        amount = relay_state.notifications.amount
+    FLUSH EACH 1s MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG;
 ```
 
 Generator-specific rules:
 
 - only `SET` is allowed
-- the destination relay is explicit with `TO <relay>`
-- generator expressions may read only from relays that declare materialized state
+- exactly one materialized relay is declared and is accessed as
+  `relay_state.<relay>.<field>`
+- every route sees the same immutable state snapshot for one tick
 - `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is mandatory and controls buffered emission
 - paced domains evaluate both generator cadence and flush cadence against the domain clock, while unpaced domains use wall clock time
 
@@ -234,7 +267,11 @@ Generator-specific rules:
 Every `TO` route on an ingestor or relay-consuming processor must declare its message error policy after that route's construction clauses:
 
 ```nspl
-ON MESSAGE ERROR IGNORE | LOG | SEND TO error_stream SET error_message = message_error.message
+ON MESSAGE ERROR IGNORE | LOG | SEND TO error_stream
+SET error_reference = error.reference,
+    error_code = error.code,
+    source_id = input.id,
+    attempted_total = partial_output.total
 ```
 
 An ingestor additionally declares its node-level general policy after the source configuration:
@@ -243,9 +280,16 @@ An ingestor additionally declares its node-level general policy after the source
 ON GENERAL ERROR IGNORE | LOG
 ```
 
-Emitters retain their message and general policies at node level because they have one external sink rather than relay `TO` routes. WASM processors keep `ON GLOBAL ERROR` at node level for guest failures that are not tied to a message.
+Emitters attach `ON MESSAGE ERROR` to their single external route and retain `ON GENERAL ERROR` at
+node level. WASM processors keep `ON GLOBAL ERROR` at node level for guest failures that are not
+tied to a message.
 
-`MESSAGE` errors are tied to one concrete message and one output construction, such as decode, transform, or route publication failures for that message. `GENERAL` and `GLOBAL` errors are not tied to a concrete message or `TO` route. `SEND TO` is therefore only valid for `ON MESSAGE ERROR`. Pure processors do not expose `ON GENERAL ERROR` because they do not own external transport/client failures.
+`MESSAGE` errors carry a stable UUIDv7 reference, code, operation, optional operation index, sorted
+affected field paths, timestamp, and a non-sensitive message. Error construction can read the
+eligible original input, the exact materialized-state snapshot, an all-optional `partial_output`,
+and the structured `error` scope. The error route preserves the branch in which the failure
+occurred. Error-record construction failures are logged and no-acked without recursively invoking
+the same policy.
 
 Client definitions are key-value based and may optionally mount a resource for file-backed settings such as TLS material:
 
@@ -312,7 +356,7 @@ If `VERSION <n>` is omitted from `WITH TLS`, the VHOST resolves the latest uploa
 Session-only commands:
 
 ```nspl
-CREATE SUBSCRIPTION <name> TO <relay> [BLOCKING|DROPPING] [BATCH SAMPLE RATE <rate>] [SET ...] [UNSET ...] [WHERE ...];
+CREATE SUBSCRIPTION <name> TO <relay> [BLOCKING|DROPPING] [BATCH SAMPLE RATE <rate>] [WHERE ...];
 DELETE SUBSCRIPTION <name>;
 DESCRIBE RELAY <relay> WHERE (...);
 DESCRIBE INGESTOR <ingestor>;

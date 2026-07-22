@@ -1,6 +1,7 @@
 #  Lookups
 
-Lookups are resource-backed reference data models that can be queried directly or used inside filter-map programs.
+Lookups are resource-backed reference data models that can be queried directly or used inside
+structured NSPL expressions.
 
 The current lookup model is a hash map:
 
@@ -53,7 +54,7 @@ LOOKUP <name> KEY '<key>';
 
 `DESCRIBE HASH MAP` reports the loaded resource version, path, codec, owner/replica placement, key field, and entry count. `LOOKUP` returns the matching decoded record when the key exists.
 
-Filter-map programs can call `LOOKUP_HASH_MAP`:
+Expressions can call `LOOKUP_HASH_MAP`:
 
 ```nspl
 LOOKUP_HASH_MAP("<hash_map>", <key_expr>, "<field>")
@@ -69,13 +70,16 @@ CREATE BRANCH by_zip
 
 CREATE DEDUPLICATOR enrich_zip
   FROM inbound
-  TO enriched FLUSH IMMEDIATE
-    SET enriched.city = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city"),
-        enriched.region = LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "region")
-    WHERE NOT is_null(LOOKUP_HASH_MAP("zip_codes_by_zip", inbound.zip, "city")) ON MESSAGE ERROR LOG
+  DEDUPLICATE ON input.zip
+  MAX TIME 10m
   BRANCHED BY by_zip
-  DEDUPLICATE ON inbound.zip
-  MAX TIME 10m;
+  TO enriched
+    INHERIT ALL
+    SET city = LOOKUP_HASH_MAP("zip_codes_by_zip", input.zip, "city"),
+        region = LOOKUP_HASH_MAP("zip_codes_by_zip", input.zip, "region")
+    WHERE NOT is_null(output.city)
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
 ```
 
 Lookup models are domain-owned. A hash map name must be unique within the active domain, and `CREATE IF NOT EXISTS HASH MAP ...` follows the same idempotent-create behavior as other model create statements.

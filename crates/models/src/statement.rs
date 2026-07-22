@@ -324,7 +324,8 @@ pub struct CreateSubscription {
     pub delivery_behavior: SubscriptionDeliveryBehavior,
     #[serde(default)]
     pub batch_sample_rate: Option<String>,
-    pub filter_map: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<crate::Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -667,8 +668,9 @@ pub struct CreateEmitter {
     pub error_policies: ErrorPolicies,
     #[serde(default)]
     pub mode: AckMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
+    #[serde(default)]
+    pub construction: crate::RouteConstruction,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
 impl CreateEmitter {
@@ -680,14 +682,10 @@ impl CreateEmitter {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateGenerator {
     pub name: Identifier,
-    pub into_relay: Identifier,
+    pub materialized_relay: Identifier,
     pub branched_by: BranchSelection,
     pub each: String,
-    pub flush_each: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_batch_size: Option<String>,
-    pub set: String,
-    pub message_error_policy: MessageErrorPolicy,
+    pub output_routes: ProcessorOutputs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -711,7 +709,7 @@ pub enum MessageErrorPolicy {
     Log,
     Dlq {
         relay: Identifier,
-        mappings: Vec<ErrorFieldMapping>,
+        assignments: Vec<crate::Assignment>,
     },
 }
 
@@ -719,12 +717,6 @@ pub enum MessageErrorPolicy {
 pub enum GeneralErrorPolicy {
     Ignore,
     Log,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ErrorFieldMapping {
-    pub field: Identifier,
-    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
@@ -914,7 +906,7 @@ impl EmitSink {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClickHouseValueMapping {
     pub column: String,
-    pub expression: String,
+    pub expression: crate::Expression,
 }
 
 pub type PostgresValueMapping = ClickHouseValueMapping;
@@ -1129,13 +1121,6 @@ pub type AzureBlobConfigEntry = ClientConfigEntry;
 pub type IcebergRestConfigEntry = ClientConfigEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BranchValueMapping {
-    pub field: Identifier,
-    pub relay: Identifier,
-    pub relay_field: Identifier,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateBranch {
     pub name: Identifier,
     pub schema: Identifier,
@@ -1188,66 +1173,26 @@ impl BranchSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BranchInitiatorSelection {
-    BranchedBy {
-        branch: Identifier,
-        values: Vec<BranchValueMapping>,
-    },
-    Unbranched,
-}
-
-impl BranchInitiatorSelection {
-    pub fn branched_by(branch: Identifier, values: Vec<BranchValueMapping>) -> Self {
-        Self::BranchedBy { branch, values }
-    }
-
-    pub fn unbranched() -> Self {
-        Self::Unbranched
-    }
-
-    pub fn branch(&self) -> Option<&Identifier> {
-        match self {
-            Self::BranchedBy { branch, .. } => Some(branch),
-            Self::Unbranched => None,
-        }
-    }
-
-    pub fn values(&self) -> &[BranchValueMapping] {
-        match self {
-            Self::BranchedBy { values, .. } => values,
-            Self::Unbranched => &[],
-        }
-    }
-
-    pub fn is_unbranched(&self) -> bool {
-        match self {
-            Self::BranchedBy { .. } => false,
-            Self::Unbranched => true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateIngestor {
     pub name: Identifier,
     pub output_routes: ProcessorOutputs,
     pub decode_using_codec: Identifier,
-    pub branched_by: BranchInitiatorSelection,
     pub timestamp_source: Option<IngestTimestampSource>,
     pub source: IngestSource,
     pub general_error_policy: GeneralErrorPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessorOutput {
     pub relay: Identifier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_map: Option<String>,
+    #[serde(default)]
+    pub construction: crate::RouteConstruction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flush_policy: Option<OutputFlushPolicy>,
     pub message_error_policy: MessageErrorPolicy,
+    pub branch: Option<crate::OutputBranch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1260,7 +1205,7 @@ pub struct OutputFlushPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessorInputWhere {
     pub relay: Identifier,
-    pub where_clause: String,
+    pub where_clause: crate::Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1304,9 +1249,10 @@ impl ProcessorOutput {
     pub fn new(relay: Identifier) -> Self {
         Self {
             relay,
-            filter_map: None,
+            construction: crate::RouteConstruction::default(),
             flush_policy: None,
             message_error_policy: MessageErrorPolicy::Log,
+            branch: None,
         }
     }
 
@@ -1317,13 +1263,19 @@ impl ProcessorOutput {
     ) -> Self {
         Self {
             relay,
-            filter_map: None,
+            construction: crate::RouteConstruction::default(),
             flush_policy: Some(OutputFlushPolicy {
                 flush_each,
                 max_batch_size,
             }),
             message_error_policy: MessageErrorPolicy::Log,
+            branch: None,
         }
+    }
+
+    pub fn with_branch(mut self, branch: crate::OutputBranch) -> Self {
+        self.branch = Some(branch);
+        self
     }
 }
 
@@ -1354,6 +1306,13 @@ impl ProcessorOutputs {
         self
     }
 
+    pub fn with_branch(mut self, branch: crate::OutputBranch) -> Self {
+        for output in &mut self.routes {
+            output.branch = Some(branch.clone());
+        }
+        self
+    }
+
     pub fn relays(&self) -> impl Iterator<Item = &Identifier> {
         self.outputs().map(|output| &output.relay)
     }
@@ -1378,10 +1337,10 @@ pub struct CreateReingestor {
     pub name: Identifier,
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
-    pub branched_by: BranchInitiatorSelection,
     pub mode: AckMode,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1399,7 +1358,8 @@ pub struct CreateInferencer {
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
 impl CreateInferencer {
@@ -1472,15 +1432,15 @@ pub struct CreateWasmProcessor {
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferencerTensorMapping {
     pub tensor: String,
     pub schema: InferencerTensorSchema,
-    pub relay: Identifier,
-    pub field: Identifier,
+    pub expression: crate::Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1583,7 +1543,7 @@ pub enum InferencerTensorDimension {
 
 impl InferencerTensorDimension {
     pub fn is_batch(&self) -> bool {
-        if let Self::Batch = self { true } else { false }
+        matches!(self, Self::Batch)
     }
 }
 
@@ -2109,7 +2069,8 @@ pub struct CreateJunction {
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2118,12 +2079,13 @@ pub struct CreateDeduplicator {
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
-    pub deduplicate_on: String,
+    pub deduplicate_on: Vec<crate::Expression>,
     pub max_time: String,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2133,14 +2095,15 @@ pub struct CreateCorrelator {
     pub right: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
-    pub correlate_where: String,
+    pub correlate_where: crate::Expression,
     pub match_policy: CorrelatorMatchPolicy,
     pub max_time: String,
     pub timeout_policy: CorrelationTimeoutPolicy,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
 #[derive(
@@ -2170,12 +2133,13 @@ pub struct CreateReorderer {
     pub from: ProcessorInputs,
     pub output_routes: ProcessorOutputs,
     pub branched_by: BranchSelection,
-    pub order_by: String,
+    pub order_by: Vec<crate::Expression>,
     pub max_time: String,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2186,11 +2150,11 @@ pub struct CreateWindowProcessor {
     pub branched_by: BranchSelection,
     pub width: WindowBound,
     pub step: WindowBound,
-    pub aggregate: String,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_where: Option<String>,
+    pub filter_where: Option<crate::Expression>,
+    pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2245,8 +2209,8 @@ pub enum AckMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        AckMode, BranchInitiatorSelection, BranchSelection, ClusterSchedule, CreateSchema,
-        DomainSchedule, GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
+        AckMode, BranchSelection, ClusterSchedule, CreateSchema, DomainSchedule,
+        GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
         InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule, Model,
         ModelKind, ScheduledNode,
     };
@@ -2468,6 +2432,7 @@ mod tests {
                 branched_by: BranchSelection::unbranched(),
                 mode: AckMode::Attached,
                 filter_where: None,
+                materialized_state: Vec::new(),
             })),
             effective_branching: None,
             effective_branching_schema: None,
@@ -2486,7 +2451,6 @@ mod tests {
                     Some("1MiB".to_string()),
                 )]),
                 decode_using_codec: identifier("codec"),
-                branched_by: BranchInitiatorSelection::unbranched(),
                 timestamp_source: None,
                 source: IngestSource::Endpoint {
                     endpoint: identifier("public_http"),

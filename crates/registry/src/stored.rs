@@ -1,20 +1,19 @@
 use error_stack::Report;
 use nervix_models::{
-    AckMode, AvroType, BranchEviction, BranchInitiatorSelection, BranchSelection,
-    BranchValueMapping, ClickHouseValueMapping, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
-    CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction,
-    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob,
-    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientKinesis, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSqs,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
-    CreateSignalingProtocol, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType,
-    ErrorFieldMapping, ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend,
-    Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    AckMode, AvroType, BranchEviction, BranchSelection, ClickHouseValueMapping, CodecEncoding,
+    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+    CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+    CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
+    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
+    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
+    EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog,
+    IcebergStorageBackend, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
     InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
     KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
@@ -434,11 +433,10 @@ pub struct StoredCreateIngestor {
     pub name: String,
     pub output_routes: StoredProcessorOutputs,
     pub decode_using_codec: String,
-    pub branched_by: StoredBranchInitiatorSelection,
     pub timestamp_source: Option<StoredIngestTimestampSource>,
     pub source: StoredIngestSource,
     pub general_error_policy: StoredGeneralErrorPolicy,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -457,13 +455,10 @@ pub enum StoredBranchEviction {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateGenerator {
     pub name: String,
-    pub into_relay: String,
+    pub materialized_relay: String,
     pub branched_by: StoredBranchSelection,
     pub each: String,
-    pub flush_each: String,
-    pub max_batch_size: Option<String>,
-    pub set: String,
-    pub message_error_policy: StoredMessageErrorPolicy,
+    pub output_routes: StoredProcessorOutputs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -478,7 +473,7 @@ pub enum StoredMessageErrorPolicy {
     Log,
     Dlq {
         relay: String,
-        mappings: Vec<StoredErrorFieldMapping>,
+        assignments: Vec<nervix_models::Assignment>,
     },
 }
 
@@ -486,12 +481,6 @@ pub enum StoredMessageErrorPolicy {
 pub enum StoredGeneralErrorPolicy {
     Ignore,
     Log,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredErrorFieldMapping {
-    pub field: String,
-    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -505,9 +494,9 @@ pub struct StoredCreateReingestor {
     pub name: String,
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
-    pub branched_by: StoredBranchInitiatorSelection,
     pub mode: AckMode,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -522,7 +511,8 @@ pub struct StoredCreateInferencer {
     pub inputs: Vec<StoredInferencerTensorMapping>,
     pub output_schema: Vec<StoredInferencerTensorDeclaration>,
     pub mode: AckMode,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -536,15 +526,15 @@ pub struct StoredCreateWasmProcessor {
     pub file: String,
     pub mode: AckMode,
     pub global_error_policy: StoredGeneralErrorPolicy,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredInferencerTensorMapping {
     pub tensor: String,
     pub schema: StoredInferencerTensorSchema,
-    pub relay: String,
-    pub field: String,
+    pub expression: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -782,33 +772,18 @@ pub enum StoredRelayBranching {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredBranchValueMapping {
-    pub field: String,
-    pub relay: String,
-    pub relay_field: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredBranchSelection {
     BranchedBy { branch: String },
     Unbranched,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredBranchInitiatorSelection {
-    BranchedBy {
-        branch: String,
-        values: Vec<StoredBranchValueMapping>,
-    },
-    Unbranched,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredProcessorOutput {
     pub relay: String,
-    pub filter_map: Option<String>,
+    pub construction: nervix_models::RouteConstruction,
     pub flush_policy: Option<StoredOutputFlushPolicy>,
     pub message_error_policy: StoredMessageErrorPolicy,
+    pub branch: Option<nervix_models::OutputBranch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -820,7 +795,7 @@ pub struct StoredOutputFlushPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredProcessorInputWhere {
     pub relay: String,
-    pub where_clause: String,
+    pub where_clause: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -855,7 +830,8 @@ pub struct StoredCreateJunction {
     pub output_routes: StoredProcessorOutputs,
     pub branched_by: StoredBranchSelection,
     pub mode: AckMode,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -864,10 +840,11 @@ pub struct StoredCreateDeduplicator {
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
     pub branched_by: StoredBranchSelection,
-    pub deduplicate_on: String,
+    pub deduplicate_on: Vec<Expression>,
     pub max_time: String,
     pub mode: AckMode,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -877,12 +854,13 @@ pub struct StoredCreateCorrelator {
     pub right: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
     pub branched_by: StoredBranchSelection,
-    pub correlate_where: String,
+    pub correlate_where: Expression,
     pub match_policy: StoredCorrelatorMatchPolicy,
     pub max_time: String,
     pub timeout_policy: StoredCorrelationTimeoutPolicy,
     pub mode: AckMode,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -909,10 +887,11 @@ pub struct StoredCreateReorderer {
     pub from: StoredProcessorInputs,
     pub output_routes: StoredProcessorOutputs,
     pub branched_by: StoredBranchSelection,
-    pub order_by: String,
+    pub order_by: Vec<Expression>,
     pub max_time: String,
     pub mode: AckMode,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -923,9 +902,9 @@ pub struct StoredCreateWindowProcessor {
     pub branched_by: StoredBranchSelection,
     pub width: StoredWindowBound,
     pub step: StoredWindowBound,
-    pub aggregate: String,
     pub mode: AckMode,
-    pub filter_where: Option<String>,
+    pub filter_where: Option<Expression>,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -944,7 +923,8 @@ pub struct StoredCreateEmitter {
     pub max_batch_size: Option<String>,
     pub mode: AckMode,
     pub error_policies: StoredErrorPolicies,
-    pub filter_map: Option<String>,
+    pub construction: nervix_models::RouteConstruction,
+    pub materialized_state: Vec<nervix_models::MaterializedStateDependency>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1043,7 +1023,7 @@ pub enum StoredIcebergStorageBackend {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredClickHouseValueMapping {
     pub column: String,
-    pub expression: String,
+    pub expression: nervix_models::Expression,
 }
 
 pub type StoredPostgresValueMapping = StoredClickHouseValueMapping;
@@ -2136,13 +2116,10 @@ impl From<CreateGenerator> for StoredCreateGenerator {
     fn from(value: CreateGenerator) -> Self {
         Self {
             name: value.name.to_string(),
-            into_relay: value.into_relay.to_string(),
+            materialized_relay: value.materialized_relay.to_string(),
             branched_by: value.branched_by.into(),
             each: value.each,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
-            set: value.set,
-            message_error_policy: value.message_error_policy.into(),
+            output_routes: value.output_routes.into(),
         }
     }
 }
@@ -2153,13 +2130,10 @@ impl TryFrom<StoredCreateGenerator> for CreateGenerator {
     fn try_from(value: StoredCreateGenerator) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
-            into_relay: Identifier::parse(&value.into_relay)?,
+            materialized_relay: Identifier::parse(&value.materialized_relay)?,
             branched_by: value.branched_by.try_into()?,
             each: value.each,
-            flush_each: value.flush_each,
-            max_batch_size: value.max_batch_size,
-            set: value.set,
-            message_error_policy: value.message_error_policy.try_into()?,
+            output_routes: value.output_routes.try_into()?,
         })
     }
 }
@@ -2189,9 +2163,9 @@ impl From<MessageErrorPolicy> for StoredMessageErrorPolicy {
         match value {
             MessageErrorPolicy::Ignore => Self::Ignore,
             MessageErrorPolicy::Log => Self::Log,
-            MessageErrorPolicy::Dlq { relay, mappings } => Self::Dlq {
+            MessageErrorPolicy::Dlq { relay, assignments } => Self::Dlq {
                 relay: relay.to_string(),
-                mappings: mappings.into_iter().map(Into::into).collect(),
+                assignments,
             },
         }
     }
@@ -2204,12 +2178,9 @@ impl TryFrom<StoredMessageErrorPolicy> for MessageErrorPolicy {
         match value {
             StoredMessageErrorPolicy::Ignore => Ok(Self::Ignore),
             StoredMessageErrorPolicy::Log => Ok(Self::Log),
-            StoredMessageErrorPolicy::Dlq { relay, mappings } => Ok(Self::Dlq {
+            StoredMessageErrorPolicy::Dlq { relay, assignments } => Ok(Self::Dlq {
                 relay: Identifier::parse(&relay)?,
-                mappings: mappings
-                    .into_iter()
-                    .map(TryInto::try_into)
-                    .collect::<Result<Vec<_>, _>>()?,
+                assignments,
             }),
         }
     }
@@ -2230,26 +2201,6 @@ impl From<StoredGeneralErrorPolicy> for GeneralErrorPolicy {
             StoredGeneralErrorPolicy::Ignore => Self::Ignore,
             StoredGeneralErrorPolicy::Log => Self::Log,
         }
-    }
-}
-
-impl From<ErrorFieldMapping> for StoredErrorFieldMapping {
-    fn from(value: ErrorFieldMapping) -> Self {
-        Self {
-            field: value.field.to_string(),
-            value: value.value,
-        }
-    }
-}
-
-impl TryFrom<StoredErrorFieldMapping> for ErrorFieldMapping {
-    type Error = Report<NameError>;
-
-    fn try_from(value: StoredErrorFieldMapping) -> Result<Self, Self::Error> {
-        Ok(Self {
-            field: Identifier::parse(&value.field)?,
-            value: value.value,
-        })
     }
 }
 
@@ -2453,34 +2404,11 @@ impl From<CreateIngestor> for StoredCreateIngestor {
             name: value.name.to_string(),
             output_routes: value.output_routes.into(),
             decode_using_codec: value.decode_using_codec.to_string(),
-            branched_by: value.branched_by.into(),
             timestamp_source: value.timestamp_source.map(Into::into),
             source: value.source.into(),
             general_error_policy: value.general_error_policy.into(),
             filter_where: value.filter_where,
         }
-    }
-}
-
-impl From<BranchValueMapping> for StoredBranchValueMapping {
-    fn from(value: BranchValueMapping) -> Self {
-        Self {
-            field: value.field.to_string(),
-            relay: value.relay.to_string(),
-            relay_field: value.relay_field.to_string(),
-        }
-    }
-}
-
-impl TryFrom<StoredBranchValueMapping> for BranchValueMapping {
-    type Error = Report<NameError>;
-
-    fn try_from(value: StoredBranchValueMapping) -> Result<Self, Self::Error> {
-        Ok(Self {
-            field: Identifier::parse(&value.field)?,
-            relay: Identifier::parse(&value.relay)?,
-            relay_field: Identifier::parse(&value.relay_field)?,
-        })
     }
 }
 
@@ -2548,42 +2476,14 @@ impl TryFrom<StoredBranchSelection> for BranchSelection {
     }
 }
 
-impl From<BranchInitiatorSelection> for StoredBranchInitiatorSelection {
-    fn from(value: BranchInitiatorSelection) -> Self {
-        match value {
-            BranchInitiatorSelection::BranchedBy { branch, values } => Self::BranchedBy {
-                branch: branch.to_string(),
-                values: values.into_iter().map(Into::into).collect(),
-            },
-            BranchInitiatorSelection::Unbranched => Self::Unbranched,
-        }
-    }
-}
-
-impl TryFrom<StoredBranchInitiatorSelection> for BranchInitiatorSelection {
-    type Error = Report<NameError>;
-
-    fn try_from(value: StoredBranchInitiatorSelection) -> Result<Self, Self::Error> {
-        match value {
-            StoredBranchInitiatorSelection::BranchedBy { branch, values } => Ok(Self::BranchedBy {
-                branch: Identifier::parse(&branch)?,
-                values: values
-                    .into_iter()
-                    .map(TryInto::try_into)
-                    .collect::<Result<Vec<_>, _>>()?,
-            }),
-            StoredBranchInitiatorSelection::Unbranched => Ok(Self::Unbranched),
-        }
-    }
-}
-
 impl From<ProcessorOutput> for StoredProcessorOutput {
     fn from(value: ProcessorOutput) -> Self {
         Self {
             relay: value.relay.to_string(),
-            filter_map: value.filter_map,
+            construction: value.construction,
             flush_policy: value.flush_policy.map(Into::into),
             message_error_policy: value.message_error_policy.into(),
+            branch: value.branch,
         }
     }
 }
@@ -2594,9 +2494,10 @@ impl TryFrom<StoredProcessorOutput> for ProcessorOutput {
     fn try_from(value: StoredProcessorOutput) -> Result<Self, Self::Error> {
         Ok(Self {
             relay: Identifier::parse(&value.relay)?,
-            filter_map: value.filter_map,
+            construction: value.construction,
             flush_policy: value.flush_policy.map(Into::into),
             message_error_policy: value.message_error_policy.try_into()?,
+            branch: value.branch,
         })
     }
 }
@@ -2701,7 +2602,6 @@ impl TryFrom<StoredCreateIngestor> for CreateIngestor {
             name: Identifier::parse(&value.name)?,
             output_routes: value.output_routes.try_into()?,
             decode_using_codec: Identifier::parse(&value.decode_using_codec)?,
-            branched_by: value.branched_by.try_into()?,
             timestamp_source: value.timestamp_source.map(TryInto::try_into).transpose()?,
             source: value.source.try_into()?,
             general_error_policy: value.general_error_policy.into(),
@@ -2736,9 +2636,9 @@ impl From<CreateReingestor> for StoredCreateReingestor {
             name: value.name.to_string(),
             from: value.from.into(),
             output_routes: value.output_routes.into(),
-            branched_by: value.branched_by.into(),
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -2751,9 +2651,9 @@ impl TryFrom<StoredCreateReingestor> for CreateReingestor {
             name: Identifier::parse(&value.name)?,
             from: value.from.try_into()?,
             output_routes: value.output_routes.try_into()?,
-            branched_by: value.branched_by.try_into()?,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -2772,6 +2672,7 @@ impl From<CreateInferencer> for StoredCreateInferencer {
             output_schema: value.output_schema.into_iter().map(Into::into).collect(),
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -2800,6 +2701,7 @@ impl TryFrom<StoredCreateInferencer> for CreateInferencer {
                 .collect::<Result<Vec<_>, _>>()?,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -2817,6 +2719,7 @@ impl From<CreateWasmProcessor> for StoredCreateWasmProcessor {
             mode: value.mode,
             global_error_policy: value.global_error_policy.into(),
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -2836,6 +2739,7 @@ impl TryFrom<StoredCreateWasmProcessor> for CreateWasmProcessor {
             mode: value.mode,
             global_error_policy: value.global_error_policy.into(),
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -2845,8 +2749,7 @@ impl From<InferencerTensorMapping> for StoredInferencerTensorMapping {
         Self {
             tensor: value.tensor,
             schema: value.schema.into(),
-            relay: value.relay.to_string(),
-            field: value.field.to_string(),
+            expression: value.expression,
         }
     }
 }
@@ -2858,8 +2761,7 @@ impl TryFrom<StoredInferencerTensorMapping> for InferencerTensorMapping {
         Ok(Self {
             tensor: value.tensor,
             schema: value.schema.into(),
-            relay: Identifier::parse(&value.relay)?,
-            field: Identifier::parse(&value.field)?,
+            expression: value.expression,
         })
     }
 }
@@ -3672,6 +3574,7 @@ impl From<CreateDeduplicator> for StoredCreateDeduplicator {
             max_time: value.max_time,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -3689,6 +3592,7 @@ impl TryFrom<StoredCreateDeduplicator> for CreateDeduplicator {
             max_time: value.max_time,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -3707,6 +3611,7 @@ impl From<CreateCorrelator> for StoredCreateCorrelator {
             timeout_policy: value.timeout_policy.into(),
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -3727,6 +3632,7 @@ impl TryFrom<StoredCreateCorrelator> for CreateCorrelator {
             timeout_policy: value.timeout_policy.try_into()?,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -3804,6 +3710,7 @@ impl From<CreateReorderer> for StoredCreateReorderer {
             max_time: value.max_time,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -3821,6 +3728,7 @@ impl TryFrom<StoredCreateReorderer> for CreateReorderer {
             max_time: value.max_time,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -3834,9 +3742,9 @@ impl From<CreateWindowProcessor> for StoredCreateWindowProcessor {
             branched_by: value.branched_by.into(),
             width: value.width.into(),
             step: value.step.into(),
-            aggregate: value.aggregate,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -3852,9 +3760,9 @@ impl TryFrom<StoredCreateWindowProcessor> for CreateWindowProcessor {
             branched_by: value.branched_by.try_into()?,
             width: value.width.into(),
             step: value.step.into(),
-            aggregate: value.aggregate,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -3886,6 +3794,7 @@ impl From<CreateJunction> for StoredCreateJunction {
             branched_by: value.branched_by.into(),
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -3901,6 +3810,7 @@ impl TryFrom<StoredCreateJunction> for CreateJunction {
             branched_by: value.branched_by.try_into()?,
             mode: value.mode,
             filter_where: value.filter_where,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -3916,7 +3826,8 @@ impl From<CreateEmitter> for StoredCreateEmitter {
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             error_policies: value.error_policies.into(),
-            filter_map: value.filter_map,
+            construction: value.construction,
+            materialized_state: value.materialized_state,
         }
     }
 }
@@ -3937,7 +3848,8 @@ impl TryFrom<StoredCreateEmitter> for CreateEmitter {
             max_batch_size: value.max_batch_size,
             mode: value.mode,
             error_policies: value.error_policies.try_into()?,
-            filter_map: value.filter_map,
+            construction: value.construction,
+            materialized_state: value.materialized_state,
         })
     }
 }
@@ -4313,20 +4225,6 @@ mod tests {
         Identifier::parse(raw).expect("valid identifier")
     }
 
-    fn branched_by(schema: &str, relay: &str, fields: &[&str]) -> BranchInitiatorSelection {
-        BranchInitiatorSelection::branched_by(
-            identifier(&format!("by_{schema}")),
-            fields
-                .iter()
-                .map(|field| BranchValueMapping {
-                    field: identifier(field),
-                    relay: identifier(relay),
-                    relay_field: identifier(field),
-                })
-                .collect(),
-        )
-    }
-
     fn processor_branched_by(schema: &str) -> BranchSelection {
         BranchSelection::branched_by(identifier(&format!("by_{schema}")))
     }
@@ -4383,7 +4281,6 @@ mod tests {
                 output_routes: (ProcessorOutputs::single(identifier("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 decode_using_codec: identifier("events_codec"),
-                branched_by: branched_by("events", "events_stream", &["tenant"]),
                 timestamp_source: None,
                 source: IngestSource::Http {
                     client: identifier("http_client"),
@@ -4404,6 +4301,7 @@ mod tests {
                 branched_by: processor_branched_by("events"),
                 mode: AckMode::Attached,
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             Model::Reingestor(CreateReingestor {
                 name: identifier("events_splitter"),
@@ -4411,39 +4309,56 @@ mod tests {
                 output_routes: (ProcessorOutputs::new(vec![
                     ProcessorOutput {
                         relay: identifier("events_errors"),
-                        filter_map: Some(
-                            r#"SET severity = lower(level) WHERE level = "error""#.to_string(),
-                        ),
+                        construction: nervix_nspl::parse_route_construction(
+                            r#"SET severity = lower(input.level) WHERE output.level = "error""#,
+                        )
+                        .expect("route construction must parse"),
                         flush_policy: None,
                         message_error_policy: MessageErrorPolicy::Log,
+                        branch: None,
                     },
                     ProcessorOutput::new(identifier("events_other")),
                 ]))
                 .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                branched_by: branched_by("events", "events_stream", &["tenant"]),
                 mode: AckMode::Attached,
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             Model::Reingestor(CreateReingestor {
                 name: identifier("events_forwarder"),
                 from: ProcessorInputs::single(identifier("events_stream")),
                 output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: identifier("events_projected"),
-                    filter_map: Some(
-                        "SET normalized = lower(raw) UNSET raw WHERE active".to_string(),
-                    ),
+                    construction: nervix_nspl::parse_route_construction(
+                        "INHERIT ALL EXCEPT raw SET normalized = lower(input.raw) WHERE \
+                         output.active",
+                    )
+                    .expect("route construction must parse"),
                     flush_policy: None,
                     message_error_policy: MessageErrorPolicy::Log,
+                    branch: None,
                 }]))
                 .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                branched_by: branched_by("events", "events_stream", &["tenant"]),
                 mode: AckMode::Detached,
-                filter_where: Some("WHERE tenant = \"acme\"".to_string()),
+                filter_where: Some(
+                    nervix_nspl::parse_expression("input.tenant = \"acme\"")
+                        .expect("filter expression must parse"),
+                ),
+                materialized_state: Vec::new(),
             }),
             Model::WindowProcessor(CreateWindowProcessor {
                 name: identifier("events_window"),
                 from: ProcessorInputs::single(identifier("events_stream")),
-                output_routes: ProcessorOutputs::single(identifier("events_summary")),
+                output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                    relay: identifier("events_summary"),
+                    construction: nervix_nspl::parse_route_construction(
+                        "SET count = COUNT(input.id)",
+                    )
+                    .expect("window construction must parse"),
+                    flush_policy: None,
+                    message_error_policy: MessageErrorPolicy::Log,
+                    branch: None,
+                }]),
                 branched_by: processor_branched_by("events"),
                 width: WindowBound {
                     messages: Some(100),
@@ -4453,9 +4368,9 @@ mod tests {
                     messages: Some(10),
                     duration: Some("1s".to_string()),
                 },
-                aggregate: "events_summary.count = COUNT(events_stream.id)".to_string(),
                 mode: AckMode::Attached,
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             Model::Emitter(CreateEmitter {
                 name: identifier("events_emitter"),
@@ -4470,7 +4385,8 @@ mod tests {
                 mode: AckMode::Detached,
                 error_policies: ErrorPolicies::handled_by_log(),
 
-                filter_map: None,
+                construction: nervix_models::RouteConstruction::default(),
+                materialized_state: Vec::new(),
             }),
         ];
 
@@ -4543,7 +4459,8 @@ mod tests {
                 message: StoredMessageErrorPolicy::Log,
                 general: StoredGeneralErrorPolicy::Log,
             },
-            filter_map: None,
+            construction: nervix_models::RouteConstruction::default(),
+            materialized_state: Vec::new(),
         }))
         .expect_err("invalid identifiers must fail");
 

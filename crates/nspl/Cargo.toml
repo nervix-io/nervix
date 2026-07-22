@@ -13,6 +13,7 @@ default = ["client", "server"]
 server = []
 
 [dependencies]
+ahash-compile-time = { workspace = true }
 arrow-schema = { workspace = true }
 chumsky = { workspace = true }
 humantime = { workspace = true }

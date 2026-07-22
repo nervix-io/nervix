@@ -22,8 +22,6 @@ Feature: Reorderer
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
@@ -33,17 +31,25 @@ Feature: Reorderer
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO incoming_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { tenant = incoming_notifications.tenant }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO incoming_notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications FLUSH EACH 2s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_http_notifications
-        BY incoming_notifications.sequence
-        MAX TIME 10s;
-        CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
+        BY input.sequence
+        MAX TIME 10s
+        BRANCHED BY by_http_notifications
+        TO ordered_notifications
+        INHERIT ALL
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
@@ -105,8 +111,6 @@ Feature: Reorderer
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
@@ -116,17 +120,25 @@ Feature: Reorderer
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO incoming_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { tenant = incoming_notifications.tenant }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO incoming_notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications FLUSH EACH 2s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_http_notifications
-        BY lower(trim(incoming_notifications.category)), abs(incoming_notifications.priority)
-        MAX TIME 10s;
-        CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE ordered_notifications.tenant = 'acme';
+        BY lower(trim(input.category)), abs(input.priority)
+        MAX TIME 10s
+        BRANCHED BY by_http_notifications
+        TO ordered_notifications
+        INHERIT ALL
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
@@ -177,22 +189,25 @@ Feature: Reorderer
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "expected ; | end of input, found ON"
+    When these NSPL commands fail with "expected TO | ; | end of input, found ON"
       """
       CREATE SCHEMA notification (
         tenant STRING,
         sequence I64
       );
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_order_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_order_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_order_notifications;
         CREATE REORDERER order_notifications
         FROM incoming_notifications
-        TO ordered_notifications FLUSH EACH 2s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_order_notifications
-        BY incoming_notifications.sequence
+        BY input.sequence
         MAX TIME 10s
+        BRANCHED BY by_order_notifications
+        TO ordered_notifications
+        INHERIT ALL
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
 
         ON GENERAL ERROR LOG;
       """

@@ -6,8 +6,9 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
         duration_lit, filter_where_clause, flushed_processor_outputs, from_relay_clauses,
-        if_not_exists_clause, into_parse_error, kw, lex_input, reorderer_name,
-        suggestions_from_errors, tok,
+        if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
+        render_vm_program_tokens, reorderer_name, suggestions_from_errors, tok,
+        vm_program_error_message,
     },
 };
 
@@ -22,62 +23,8 @@ fn boundary_token(token: &Token) -> bool {
     )
 }
 
-fn token_to_source(token: &Token) -> String {
-    match token {
-        Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
-        Token::Word(Word::UnknownWord(raw)) => raw.clone(),
-        Token::StringLiteral(value) => {
-            format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
-        }
-        Token::NumberLiteral(value) => value.clone(),
-        Token::LBrace => "{".to_string(),
-        Token::RBrace => "}".to_string(),
-        Token::LBracket => "[".to_string(),
-        Token::RBracket => "]".to_string(),
-        Token::LParen => "(".to_string(),
-        Token::RParen => ")".to_string(),
-        Token::Comma => ",".to_string(),
-        Token::Semicolon => ";".to_string(),
-        Token::Colon => ":".to_string(),
-        Token::Dot => ".".to_string(),
-        Token::Hyphen => "-".to_string(),
-        Token::Eq => "=".to_string(),
-        Token::NotEq => "!=".to_string(),
-        Token::Gt => ">".to_string(),
-        Token::Lt => "<".to_string(),
-        Token::GtEq => ">=".to_string(),
-        Token::LtEq => "<=".to_string(),
-        Token::Plus => "+".to_string(),
-        Token::Star => "*".to_string(),
-        Token::Slash => "/".to_string(),
-        Token::Percent => "%".to_string(),
-    }
-}
-
-fn render_tokens(tokens: &[Token]) -> String {
-    let mut rendered = String::new();
-    for (index, token) in tokens.iter().enumerate() {
-        let needs_space = if index == 0 {
-            false
-        } else {
-            let previous = &tokens[index - 1];
-            let previous_blocks_space =
-                matches!(previous, Token::Dot | Token::LParen | Token::LBracket);
-            let token_blocks_space = matches!(
-                token,
-                Token::Dot | Token::Comma | Token::RParen | Token::RBracket
-            );
-            !previous_blocks_space && !token_blocks_space
-        };
-        if needs_space {
-            rendered.push(' ');
-        }
-        rendered.push_str(&token_to_source(token));
-    }
-    rendered
-}
-
-fn by_exprs<'src>() -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone
+fn by_exprs<'src>()
+-> impl Parser<'src, &'src [Token], Vec<nervix_models::Expression>, extra::Err<ParseError<'src>>> + Clone
 {
     kw(Identifier::By)
         .ignore_then(
@@ -87,7 +34,10 @@ fn by_exprs<'src>() -> impl Parser<'src, &'src [Token], String, extra::Err<Parse
                 .at_least(1)
                 .collect::<Vec<_>>(),
         )
-        .map(|tokens| render_tokens(&tokens))
+        .try_map(|tokens, span| {
+            crate::parse_expression_list(&render_vm_program_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
         .labelled("reorder_by")
 }
 
@@ -102,23 +52,27 @@ pub fn create_reorderer_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
-        .then(flushed_processor_outputs())
-        .then(branch_selection())
         .then(by_exprs())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
         .then(duration_lit())
+        .then(branch_selection())
+        .then(materialized_state_dependencies())
+        .then(flushed_processor_outputs())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |(
                 (
                     (
-                        (((((if_not_exists, mode), name), from_input), filter_where), outputs),
+                        (
+                            (((((if_not_exists, mode), name), from_input), filter_where), order_by),
+                            max_time,
+                        ),
                         branched_by,
                     ),
-                    order_by,
+                    materialized_state,
                 ),
-                max_time,
+                outputs,
             )| {
                 CreateStatement::new(
                     CreateReorderer {
@@ -130,6 +84,7 @@ pub fn create_reorderer_parser<'src>()
                         max_time,
                         mode: mode.unwrap_or(AckMode::Attached),
                         filter_where,
+                        materialized_state,
                     },
                     if_not_exists,
                 )
@@ -191,18 +146,16 @@ mod tests {
     #[test]
     fn parses_create_reorderer() {
         let tokens = to_tokens(
-            "CREATE REORDERER order_notifications FROM s1 TO s2 FLUSH EACH 100ms MAX BATCH SIZE \
-             1MiB SET s2.id = trim(s1.id) WHERE s1.active ON MESSAGE ERROR LOG BRANCHED BY tenant \
-             BY s1.tenant, concat(lower(s1.id), '-', trim(s1.kind)) MAX TIME 10s;",
+            "CREATE REORDERER order_notifications FROM s1 BY input.tenant, \
+             concat(lower(input.id), '-', trim(input.kind)) MAX TIME 10s BRANCHED BY tenant TO s2 \
+             SET id = trim(input.id) WHERE output.id != '' FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
+             ON MESSAGE ERROR LOG;",
         );
         let parsed = parse_create_reorderer_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "order_notifications");
         assert_eq!(parsed.from.from[0].as_str(), "s1");
         assert_eq!(parsed.output_routes.routes[0].relay.as_str(), "s2");
-        assert_eq!(
-            parsed.order_by,
-            "s1.tenant, concat (lower (s1.id), '-', trim (s1.kind))"
-        );
+        assert_eq!(parsed.order_by.len(), 2);
         assert_eq!(parsed.max_time, "10s");
         assert_eq!(
             parsed.output_routes.routes[0]
@@ -212,29 +165,30 @@ mod tests {
                 .flush_each,
             "100ms"
         );
-        let filter_map = parsed
+        let construction = parsed
             .output_routes
             .routes
             .first()
-            .and_then(|output| output.filter_map.as_deref())
-            .expect("filter-map should parse");
-        assert!(filter_map.contains("WHERE"));
-        assert!(filter_map.contains("SET"));
+            .map(|output| &output.construction)
+            .expect("route construction should parse");
+        assert!(construction.where_clause.is_some());
+        assert!(!construction.assignments.is_empty());
     }
 
     #[test]
     fn rejects_reorderer_global_error_policy() {
         let tokens = to_tokens(
-            "CREATE REORDERER order_notifications FROM s1 TO s2 FLUSH EACH 100ms MAX BATCH SIZE \
-             1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant BY s1.id MAX TIME 10s ON GENERAL ERROR \
-             LOG;",
+            "CREATE REORDERER order_notifications FROM s1 BY input.id MAX TIME 10s BRANCHED BY \
+             tenant TO s2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
+             ON GENERAL ERROR LOG;",
         );
         assert!(parse_create_reorderer_tokens(&tokens).is_err());
     }
 
     #[test]
     fn suggests_flush_on_output_without_cross_branch_leakage() {
-        let input = "CREATE REORDERER order_notifications FROM s1 TO s2 FL";
+        let input = "CREATE REORDERER order_notifications FROM s1 BY input.id MAX TIME 10s \
+                     UNBRANCHED TO s2 FL";
         let suggestions = suggest_create_reorderer(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(suggestions.contains(&"FLUSH IMMEDIATE".to_string()));

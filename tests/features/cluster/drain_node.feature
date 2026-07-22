@@ -39,16 +39,24 @@ Feature: Drain node
         TYPE HTTP;
 
       CREATE INGESTOR source_txns
-        TO inbound FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING transaction_codec
-        BRANCHED BY by_source_txns VALUES { transaction_id = inbound.transaction_id }
+        TO inbound
+        INHERIT ALL
+        BRANCHED BY by_source_txns
+        SET transaction_id = message.transaction_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM inbound TO deduped FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
-        DEDUPLICATE ON inbound.transaction_id
-        MAX TIME 10m;
+      CREATE DEDUPLICATOR dedup_txns FROM inbound
+        DEDUPLICATE ON input.transaction_id
+        MAX TIME 10m
+        BRANCHED BY by_source_txns
+        TO deduped
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
 
       DESCRIBE DEDUPLICATOR dedup_txns;
       """
@@ -88,34 +96,34 @@ Feature: Drain node
         };
 
       CREATE INGESTOR kafka_a
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_a_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_a_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
-
-        FROM KAFKA kafka_main
-        TOPIC notifications_a_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_a_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE INGESTOR kafka_b
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_b_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_b_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
-
-        FROM KAFKA kafka_main
-        TOPIC notifications_b_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_b_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE INGESTOR kafka_c
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_c_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_c_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
-
-        FROM KAFKA kafka_main
-        TOPIC notifications_c_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_c_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       DRAIN NODE node-2;
       """

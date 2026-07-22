@@ -28,7 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request = SubscriptionRequest::new("sampled_orders", "orders")
         .dropping()
         .with_batch_sample_rate("0.1")
-        .with_filter_map("SET orders.normalized = lower(orders.tenant) UNSET orders.raw WHERE orders.tenant = \"acme\"");
+        .with_where_clause(
+            nervix_nspl::parse_expression("input.tenant = \"acme\"")?
+        );
     client.subscribe(&request).await?;
 
     let event = client.next_subscription().await?;

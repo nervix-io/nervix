@@ -25,11 +25,15 @@ Feature: JAQ transformation
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -75,14 +79,15 @@ Feature: JAQ transformation
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { user_id = notifications.user_id }
-
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -130,13 +135,15 @@ Feature: JAQ transformation
           'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
         };
         CREATE INGESTOR rabbit_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM RABBITMQ rabbit_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_rabbit_notifications VALUES { user_id = notifications.user_id }
-
-        FROM RABBITMQ rabbit_main
-        QUEUE notifications_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_rabbit_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -183,13 +190,15 @@ Feature: JAQ transformation
           'addr' = 'redis://127.0.0.1:6379/'
         };
         CREATE INGESTOR redis_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_redis_notifications VALUES { user_id = notifications.user_id }
-
-        FROM REDIS PUBSUB redis_main
-        CHANNEL notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_redis_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -236,13 +245,15 @@ Feature: JAQ transformation
           'client_id' = 'nervix-cucumber-jaq-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_main
-        TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -288,15 +299,15 @@ Feature: JAQ transformation
           'addr' = 'nats://127.0.0.1:4222'
         };
         CREATE INGESTOR nats_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM NATS nats_main SUBJECT notifications_{{test_id}} QUEUE GROUP nats_notifications_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_nats_notifications VALUES { user_id = notifications.user_id }
-
-        FROM NATS nats_main
-        SUBJECT notifications_{{test_id}}
-        QUEUE GROUP nats_notifications_group_{{test_id}}
-        INSTANCES 1
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_nats_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -343,12 +354,15 @@ Feature: JAQ transformation
           'bind' = 'true'
         };
         CREATE INGESTOR zeromq_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ZEROMQ zeromq_main MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_zeromq_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ZEROMQ zeromq_main
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_zeromq_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -396,13 +410,15 @@ Feature: JAQ transformation
           'region' = 'us-east-1'
         };
         CREATE INGESTOR sqs_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM SQS sqs_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
-        BRANCHED BY by_sqs_notifications VALUES { user_id = notifications.user_id }
-
-        FROM SQS sqs_main
-        QUEUE notifications_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_sqs_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -448,11 +464,15 @@ Feature: JAQ transformation
         PATH '/ws'
         TYPE WEBSOCKETS;
         CREATE INGESTOR ws_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_ws_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -500,11 +520,15 @@ Feature: JAQ transformation
           'timeout_ms' = 5000
         };
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM HTTP http_main EVERY 1s
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM HTTP http_main EVERY 1s ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -546,11 +570,15 @@ Feature: JAQ transformation
           'endpoint' = 'ws://127.0.0.1:18080/ws/{{test_id}}'
         };
         CREATE INGESTOR ws_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
-
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_ws_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -594,13 +622,15 @@ Feature: JAQ transformation
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples
-        TO samples FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM PROMETHEUS prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
         DECODE USING sample_codec
-        BRANCHED BY by_prom_samples VALUES { source = samples.source }
-
-        FROM PROMETHEUS prom_main
-        QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
-        EVERY 1s ON GENERAL ERROR LOG;
+        TO samples
+        INHERIT ALL
+        BRANCHED BY by_prom_samples
+        SET source = message.source
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION samples_subscription TO samples;
         START;
       """

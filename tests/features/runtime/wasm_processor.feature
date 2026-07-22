@@ -44,17 +44,23 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge wasm-reference-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR event_source
-        TO raw_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING event_codec
-        BRANCHED BY by_tenant VALUES { tenant = raw_events.tenant }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR enrich_even_rows
+        TO raw_events
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR enrich_even_rows FROM raw_events
         USING RESOURCE wasm_reference_enricher VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_events
-        TO enriched_events ON MESSAGE ERROR LOG
-        BRANCHED BY by_tenant ON GLOBAL ERROR LOG;
+        BRANCHED BY by_tenant
+        TO enriched_events
+        SET value = value, tenant = tenant, message = message, occurred_at = occurred_at, bucket = bucket
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION enriched_events_subscription TO enriched_events;
       START;
       """
@@ -119,18 +125,25 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge wasm-uninitialized-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR wasm_input_source
-        TO wasm_input_events FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING wasm_input_codec
+        TO wasm_input_events
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR emit_uninitialized_optional
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR emit_uninitialized_optional FROM wasm_input_events
         USING RESOURCE wasm_uninitialized_guest VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM wasm_input_events
+        UNBRANCHED
         TO wasm_output_events
-          SET wasm_output_events.note = coalesce(wasm_output_events.note, "fallback") ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        SET value = value,
+            note = note,
+            untouched = untouched,
+            note = coalesce(note, "fallback")
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION wasm_output_events_subscription TO wasm_output_events;
       START;
       """
@@ -182,17 +195,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge wasm-required-uninitialized-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR required_source
-        TO required_input FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING required_event_codec
+        TO required_input
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR emit_uninitialized_required
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR emit_uninitialized_required FROM required_input
         USING RESOURCE wasm_uninitialized_required_guest VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM required_input
-        TO required_output ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO required_output
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION required_output_subscription TO required_output;
       START;
       """
@@ -251,18 +269,23 @@ Feature: WASM processor runtime behavior
         TYPE HTTP;
 
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE WASM PROCESSOR filter_even_rows
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
 
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
@@ -365,19 +388,27 @@ Feature: WASM processor runtime behavior
         TYPE HTTP;
 
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
-        BRANCHED BY by_tenant VALUES { tenant = raw_metrics.tenant }
+        TO raw_metrics
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE WASM PROCESSOR filter_even_rows
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_route_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO enriched_metrics ON MESSAGE ERROR LOG
-        TO audited_metrics ON MESSAGE ERROR LOG
-        BRANCHED BY by_tenant ON GLOBAL ERROR LOG;
+        BRANCHED BY by_tenant
+        TO enriched_metrics
+        SET value = value, tenant = tenant, bucket = bucket
+        ON MESSAGE ERROR LOG
+        TO audited_metrics
+        SET value = value, tenant = tenant, classification = classification
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
 
       CREATE SUBSCRIPTION enriched_metrics_subscription TO enriched_metrics;
       CREATE SUBSCRIPTION audited_metrics_subscription TO audited_metrics;
@@ -456,21 +487,29 @@ Feature: WASM processor runtime behavior
         TYPE HTTP;
 
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE WASM PROCESSOR filter_even_rows
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics FILTER WHERE input.value != 10 AS I32
         USING RESOURCE wasm_route_timing_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics FILTER WHERE raw_metrics.value != 10 AS I32
-        TO selected_metrics ON MESSAGE ERROR LOG
+        UNBRANCHED
+        TO selected_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
         TO routed_metrics
-          SET routed_metrics.bucket = lower(routed_metrics.bucket)
-          WHERE routed_metrics.value != 4 AS I32 ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        SET value = value,
+            bucket = bucket,
+            bucket = lower(bucket)
+        WHERE value != 4 AS I32
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
 
       CREATE SUBSCRIPTION routed_metrics_subscription TO routed_metrics;
       START;
@@ -570,18 +609,23 @@ Feature: WASM processor runtime behavior
         TYPE HTTP;
 
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE WASM PROCESSOR filter_even_rows
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter_restart VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
 
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
@@ -636,17 +680,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_timeout_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
@@ -692,17 +741,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_go_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
@@ -751,23 +805,30 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR rust_filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR rust_filter_even_rows FROM raw_metrics
         USING RESOURCE rust_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_rust_guest.wasm'
-        FROM raw_metrics
-        TO rust_filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
-      CREATE WASM PROCESSOR go_filter_even_rows
+        UNBRANCHED
+        TO rust_filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE WASM PROCESSOR go_filter_even_rows FROM rust_filtered_metrics
         USING RESOURCE go_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_go_guest.wasm'
-        FROM rust_filtered_metrics
-        TO go_filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO go_filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION rust_filtered_metrics_subscription TO rust_filtered_metrics;
       CREATE SUBSCRIPTION go_filtered_metrics_subscription TO go_filtered_metrics;
       START;
@@ -834,23 +895,30 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR rust_filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR rust_filter_even_rows FROM raw_metrics
         USING RESOURCE rust_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_rust_guest.wasm'
-        FROM raw_metrics
-        TO rust_filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
-      CREATE WASM PROCESSOR go_filter_even_rows
+        UNBRANCHED
+        TO rust_filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE WASM PROCESSOR go_filter_even_rows FROM rust_filtered_metrics
         USING RESOURCE go_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_go_guest.wasm'
-        FROM rust_filtered_metrics
-        TO go_filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO go_filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION go_filtered_metrics_subscription TO go_filtered_metrics;
       START;
       """
@@ -905,17 +973,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH EACH 2s MAX BATCH SIZE 100kb ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR rust_filter_even_rows
+        FLUSH EACH 2s MAX BATCH SIZE 100kb
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR rust_filter_even_rows FROM raw_metrics
         USING RESOURCE rust_wasm_filter VERSION 1
         FILE 'nervix_wasm_processor_rust_guest.wasm'
-        FROM raw_metrics
-        TO rust_filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO rust_filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION rust_filtered_metrics_subscription TO rust_filtered_metrics;
       START;
       """
@@ -948,9 +1021,11 @@ Feature: WASM processor runtime behavior
       """
       CREATE SCHEMA metric ( value I32 );
       CREATE SCHEMA error_record (
+        error_reference STRING,
+        error_code STRING,
         error_message STRING,
-        failed_node STRING,
-        failed_record STRING
+        operation STRING,
+        source_value I32
       );
       CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
@@ -960,18 +1035,27 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_even_rows
+        FROM raw_metrics
         USING RESOURCE wasm_filter_message_error VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics
-        ON MESSAGE ERROR SEND TO error_stream SET error_message = message_error.message, failed_node = message_error.node, failed_record = message_error.record
         UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR SEND TO error_stream
+        SET error_reference = error.reference,
+            error_code = error.code,
+            error_message = error.message,
+            operation = error.operation,
+            source_value = input.value
         ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION error_stream_subscription TO error_stream;
       START;
@@ -986,11 +1070,7 @@ Feature: WASM processor runtime behavior
       """
     And the last relay subscription payload contains
       """
-      "failed_node":"filter_even_rows"
-      """
-    And the last relay subscription payload contains
-      """
-      "failed_record":"{\"value\":-100}"
+      "operation":"wasm","source_value":-100
       """
 
     Examples:
@@ -1021,17 +1101,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter_global_error VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
@@ -1073,17 +1158,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter_error_state VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
@@ -1125,17 +1215,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_trapping_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
@@ -1178,17 +1273,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_invalid_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
@@ -1222,17 +1322,22 @@ Feature: WASM processor runtime behavior
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
       CREATE INGESTOR metric_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_even_rows
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_malformed_filter VERSION 1
         FILE 'processors/filter_even.wasm'
-        FROM raw_metrics
-        TO filtered_metrics ON MESSAGE ERROR LOG
-        UNBRANCHED ON GLOBAL ERROR LOG;
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """

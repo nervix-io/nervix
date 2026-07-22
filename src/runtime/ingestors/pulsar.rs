@@ -78,7 +78,6 @@ impl PulsarIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let branching = dependencies.branching;
         let resolved_client = runtime
             .resolve_client_config(client.mount.as_ref(), &client.config)
             .map_err(|reason| RuntimeError::StartIngestor {
@@ -129,8 +128,6 @@ impl PulsarIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
-            let task_branching = branching.clone();
-            let task_branch_value_mappings = dependencies.branch_value_mappings.clone();
             let task_branched_senders = branched_runtime.senders.clone();
             let task_ack_mode = ack_mode.clone();
             let task_ack_timeout = ack_timeout;
@@ -218,9 +215,6 @@ impl PulsarIngestor {
                                                             ingestor: &task_ingestor,
                                                             timestamp_source: task_timestamp_source
                                                                 .as_ref(),
-                                                            branching:
-                                                                &task_branching,
-                                                            branch_value_mappings: Some(&task_branch_value_mappings),
                                                             output_routes: &mut output_routes,
                                                             filter_where: task_filter_where.as_ref(),
                                                             branched_senders:
@@ -335,9 +329,6 @@ impl PulsarIngestor {
                                                         ingestor: &task_ingestor,
                                                         timestamp_source: task_timestamp_source
                                                             .as_ref(),
-                                                        branching:
-                                                            &task_branching,
-                                                        branch_value_mappings: Some(&task_branch_value_mappings),
                                                         output_routes: &mut output_routes,
                                                         filter_where: task_filter_where.as_ref(),
                                                         branched_senders:
@@ -556,11 +547,6 @@ impl PulsarIngestor {
                                                 let selected_rows = match task_runtime
                                                     .select_ingested_batch_rows(IngestBatchSelection {
                                                         domain: &task_domain,
-                                                        ingestor: &task_ingestor,
-                                                        branching: &task_branching,
-                                                        branch_value_mappings: Some(
-                                                            &task_branch_value_mappings,
-                                                        ),
                                                         filter_where: task_filter_where.as_ref(),
                                                         records: &runtime_records,
                                                         filter_map_metadata: Some(
@@ -592,9 +578,6 @@ impl PulsarIngestor {
                                                             ingestor: &task_ingestor,
                                                             timestamp_source: task_timestamp_source
                                                                 .as_ref(),
-                                                            branching:
-                                                                &task_branching,
-                                                            branch_value_mappings: Some(&task_branch_value_mappings),
                                                             output_routes: &mut output_routes,
                                                             filter_where: None,
                                                             branched_senders:

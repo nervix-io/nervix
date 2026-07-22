@@ -4,9 +4,9 @@ use nervix_models::{CreateGenerator, CreateStatement};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, branch_selection, current_word_prefix, flush_each,
-        generator_name, if_not_exists_clause, into_parse_error, kw, lex_input,
-        message_error_policy, relay_ref, set_only_program, suggestions_from_errors, tok,
+        ParseError, ParseFromSourceError, branch_selection, current_word_prefix,
+        flushed_explicit_processor_outputs, generator_name, if_not_exists_clause, into_parse_error,
+        kw, kw_phrase3, lex_input, relay_ref, suggestions_from_errors, tok,
     },
 };
 
@@ -17,31 +17,29 @@ pub fn create_generator_parser<'src>()
         .ignore_then(if_not_exists_clause())
         .then_ignore(kw(Identifier::Generator))
         .then(generator_name())
-        .then_ignore(kw(Identifier::To))
+        .then_ignore(kw_phrase3(
+            Identifier::Using,
+            Identifier::Materialized,
+            Identifier::State,
+        ))
         .then(relay_ref())
-        .then(branch_selection())
         .then_ignore(kw(Identifier::Each))
         .then(crate::parser_support::duration_lit())
-        .then(flush_each())
-        .then(set_only_program())
-        .then(message_error_policy())
+        .then(branch_selection())
+        .then(flushed_explicit_processor_outputs())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |(
-                ((((((if_not_exists, name), into_relay), branched_by), each), flush_each), set),
-                message_error_policy,
+                ((((if_not_exists, name), materialized_relay), each), branched_by),
+                output_routes,
             )| {
-                let (flush_each, max_batch_size) = flush_each;
                 CreateStatement::new(
                     CreateGenerator {
                         name,
-                        into_relay,
+                        materialized_relay,
                         branched_by,
                         each,
-                        flush_each,
-                        max_batch_size,
-                        set,
-                        message_error_policy,
+                        output_routes,
                     },
                     if_not_exists,
                 )
@@ -107,23 +105,31 @@ mod tests {
     fn parses_create_generator() {
         let input = r#"
             CREATE GENERATOR synth
-                TO alerts
-                BRANCHED BY tenant
+                USING MATERIALIZED STATE notifications
                 EACH 100ms
+                BRANCHED BY tenant
+                TO alerts
+                SET user_id = relay_state.notifications.user_id,
+                    topic = relay_state.notifications.topic
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-                SET alerts.user_id = notifications.user_id, alerts.topic = notifications.topic ON MESSAGE ERROR LOG;
+                ON MESSAGE ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
         let parsed = parse_create_generator_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), "synth");
-        assert_eq!(parsed.into_relay.as_str(), "alerts");
+        assert_eq!(parsed.materialized_relay.as_str(), "notifications");
         assert_eq!(parsed.each, "100ms");
-        assert_eq!(parsed.flush_each, "100ms");
+        let route = &parsed.output_routes.routes[0];
+        assert_eq!(route.relay.as_str(), "alerts");
+        assert_eq!(route.construction.assignments.len(), 2);
         assert_eq!(
-            parsed.set,
-            "SET alerts.user_id = notifications.user_id , alerts.topic = notifications.topic"
+            route
+                .flush_policy
+                .as_ref()
+                .map(|policy| policy.flush_each.as_str()),
+            Some("100ms")
         );
     }
 
@@ -131,45 +137,63 @@ mod tests {
     fn parses_create_generator_with_flush_each() {
         let input = r#"
             CREATE GENERATOR synth
-                TO alerts
-                BRANCHED BY tenant
+                USING MATERIALIZED STATE notifications
                 EACH 100ms
+                BRANCHED BY tenant
+                TO alerts
+                SET user_id = relay_state.notifications.user_id
                 FLUSH EACH 1s MAX BATCH SIZE 1MiB
-                SET alerts.user_id = notifications.user_id ON MESSAGE ERROR LOG;
+                ON MESSAGE ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
         let parsed = parse_create_generator_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.flush_each, "1s");
+        assert_eq!(
+            parsed.output_routes.routes[0]
+                .flush_policy
+                .as_ref()
+                .map(|policy| policy.flush_each.as_str()),
+            Some("1s")
+        );
     }
 
     #[test]
     fn parses_create_generator_with_flush_immediate() {
         let input = r#"
             CREATE GENERATOR synth
-                TO alerts
-                BRANCHED BY tenant
+                USING MATERIALIZED STATE notifications
                 EACH 100ms
+                BRANCHED BY tenant
+                TO alerts
+                SET user_id = relay_state.notifications.user_id
                 FLUSH IMMEDIATE
-                SET alerts.user_id = notifications.user_id ON MESSAGE ERROR LOG;
+                ON MESSAGE ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
         let parsed = parse_create_generator_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.flush_each, "IMMEDIATE");
+        assert_eq!(
+            parsed.output_routes.routes[0]
+                .flush_policy
+                .as_ref()
+                .map(|policy| policy.flush_each.as_str()),
+            Some("IMMEDIATE")
+        );
     }
 
     #[test]
     fn parses_create_generator_unbranched() {
         let input = r#"
             CREATE GENERATOR synth
-                TO alerts
-                UNBRANCHED
+                USING MATERIALIZED STATE notifications
                 EACH 100ms
+                UNBRANCHED
+                TO alerts
+                SET user_id = relay_state.notifications.user_id
                 FLUSH IMMEDIATE
-                SET alerts.user_id = notifications.user_id ON MESSAGE ERROR LOG;
+                ON MESSAGE ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -182,45 +206,52 @@ mod tests {
     }
 
     #[test]
-    fn rejects_generator_without_flush_each() {
+    fn rejects_generator_route_without_set() {
         let tokens = to_tokens(
-            "CREATE GENERATOR synth TO alerts BRANCHED BY tenant EACH 100ms SET alerts.user_id = \
-             notifications.user_id ON MESSAGE ERROR LOG;",
+            "CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms BRANCHED BY \
+             tenant TO alerts FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
         );
         assert!(parse_create_generator_tokens(&tokens).is_err());
     }
 
     #[test]
-    fn rejects_generator_where_clause() {
+    fn parses_generator_where_clause_after_set() {
         let tokens = to_tokens(
-            "CREATE GENERATOR synth TO alerts BRANCHED BY tenant EACH 100ms WHERE alerts.keep ON \
-             MESSAGE ERROR LOG;",
+            "CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms BRANCHED BY \
+             tenant TO alerts SET keep = relay_state.notifications.keep WHERE output.keep FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
         );
-        assert!(parse_create_generator_tokens(&tokens).is_err());
+        let parsed = parse_create_generator_tokens(&tokens).expect("parse should succeed");
+        assert!(
+            parsed.output_routes.routes[0]
+                .construction
+                .where_clause
+                .is_some()
+        );
     }
 
     #[test]
-    fn suggests_to_after_generator_name_without_cross_branch_leakage() {
+    fn suggests_materialized_state_after_generator_name_without_cross_branch_leakage() {
         let input = "CREATE GENERATOR synth ";
         let suggestions = suggest_create_generator(input, input.len());
-        assert!(suggestions.contains(&"TO".to_string()));
+        assert!(suggestions.contains(&"USING MATERIALIZED STATE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
 
     #[test]
-    fn suggests_flush_or_set_after_each_duration() {
-        let input = "CREATE GENERATOR synth TO alerts BRANCHED BY tenant EACH 100ms ";
-        let suggestions = suggest_create_generator(input, input.len());
-        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
-    }
-
-    #[test]
-    fn suggests_branching_after_generator_relay_without_cross_branch_leakage() {
-        let input = "CREATE GENERATOR synth TO alerts ";
+    fn suggests_branching_after_each_duration() {
+        let input = "CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms ";
         let suggestions = suggest_create_generator(input, input.len());
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
         assert!(suggestions.contains(&"UNBRANCHED".to_string()));
+    }
+
+    #[test]
+    fn suggests_each_after_materialized_relay_without_cross_branch_leakage() {
+        let input = "CREATE GENERATOR synth USING MATERIALIZED STATE notifications ";
+        let suggestions = suggest_create_generator(input, input.len());
+        assert!(suggestions.contains(&"EACH".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
     }
 }

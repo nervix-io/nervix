@@ -31,18 +31,22 @@ Feature: Reingestor repartitioning
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES {
-          tenant = notifications.tenant,
-          user_id = notifications.user_id
-        }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE REINGESTOR tenant_partition
-        FROM notifications
-        TO tenant_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant };
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE REINGESTOR tenant_partition FROM notifications
+        TO tenant_notifications
+        INHERIT ALL
+        BRANCHED BY by_tenant_partition
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications;
         START;
       """
@@ -98,17 +102,21 @@ Feature: Reingestor repartitioning
 
       CREATE VHOST edge http-{{test_id}}-fan-in.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES {
-          tenant = notifications.tenant,
-          user_id = notifications.user_id
-        }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG; CREATE REINGESTOR tenant_partition
-        FROM notifications
-        TO tenant_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant };
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG; CREATE REINGESTOR tenant_partition FROM notifications
+        TO tenant_notifications
+        INHERIT ALL
+        BRANCHED BY by_tenant_partition
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
 
       CREATE CLIENT zeromq_main
         TYPE ZEROMQ
@@ -117,13 +125,14 @@ Feature: Reingestor repartitioning
           'bind' = 'false'
         };
 
-      CREATE EMITTER source_notifications_out
-        FROM notifications
-        ENCODE USING notification_codec
-        TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+      CREATE EMITTER source_notifications_out FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_main
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-      CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE notifications.user_id = 1;
-      CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications WHERE tenant_notifications.user_id = 2;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications WHERE user_id = 1;
+      CREATE SUBSCRIPTION tenant_notifications_subscription TO tenant_notifications WHERE user_id = 2;
       START;
       """
     And http payload is posted to host "http-{{test_id}}-fan-in.example.com" path "/ingest"
@@ -186,16 +195,21 @@ Feature: Reingestor repartitioning
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
 
       CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE REINGESTOR copy_notifications
-        FROM notifications
-        TO copied_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        UNBRANCHED;
+      CREATE REINGESTOR copy_notifications FROM notifications
+        TO copied_notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
 
       CREATE CLIENT zeromq_main
         TYPE ZEROMQ
@@ -204,10 +218,11 @@ Feature: Reingestor repartitioning
           'bind' = 'false'
         };
 
-      CREATE EMITTER source_notifications_out
-        FROM notifications
-        ENCODE USING notification_codec
-        TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+      CREATE EMITTER source_notifications_out FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_main
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION copied_notifications_subscription TO copied_notifications;
       START;
@@ -262,22 +277,27 @@ Feature: Reingestor repartitioning
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
-        CREATE REINGESTOR tenant_partition
-        FROM notifications
-        TO tenant_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant };
-        CREATE EMITTER kafka_forward
-        FROM tenant_notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE REINGESTOR tenant_partition FROM notifications
+        TO tenant_notifications
+        INHERIT ALL
+        BRANCHED BY by_tenant_partition
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE EMITTER kafka_forward FROM tenant_notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -333,22 +353,27 @@ Feature: Reingestor repartitioning
           'bootstrap.servers' = '127.0.0.1:9092'
         };
         CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-
-        FROM KAFKA kafka_main
-        TOPIC notifications_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}}
-        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms ON GENERAL ERROR LOG;
-        CREATE DETACHED REINGESTOR tenant_partition
-        FROM notifications
-        TO tenant_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        BRANCHED BY by_tenant_partition VALUES { tenant = tenant_notifications.tenant };
-        CREATE EMITTER kafka_forward
-        FROM tenant_notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DETACHED REINGESTOR tenant_partition FROM notifications
+        TO tenant_notifications
+        INHERIT ALL
+        BRANCHED BY by_tenant_partition
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+        CREATE EMITTER kafka_forward FROM tenant_notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

@@ -92,86 +92,101 @@ CREATE CLIENT redis_alerts
   };
 
 CREATE INGESTOR mqtt_telemetry
-  TO telemetry_by_site FLUSH EACH 250ms MAX BATCH SIZE 10kb
-    SET telemetry_by_site.status = lower(trim(message.status)),
-        telemetry_by_site.sensor = lower(trim(message.sensor)),
-        telemetry_by_site.unit = lower(trim(message.unit)) ON MESSAGE ERROR LOG
-  DECODE USING iot_telemetry_codec
-  BRANCHED BY by_site VALUES { site = telemetry_by_site.site }
-
-  TIMESTAMP AT ts
   FROM MQTT mqtt_edge
   TOPIC factory_telemetry
   INSTANCES 4
-  MODE NO_ACK PARALLEL MAX 1024 ON GENERAL ERROR LOG;
+  MODE NO_ACK PARALLEL MAX 1024
+  DECODE USING iot_telemetry_codec
+  TIMESTAMP AT ts
+  TO telemetry_by_site
+    INHERIT ALL
+    SET status = lower(trim(message.status)),
+        sensor = lower(trim(message.sensor)),
+        unit = lower(trim(message.unit))
+    BRANCHED BY by_site SET site = message.site
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
 CREATE DEDUPLICATOR quality_gate
   FROM telemetry_by_site
-  TO telemetry_rejected FLUSH EACH 250ms MAX BATCH SIZE 10kb WHERE telemetry_by_site.device_id = "" OR telemetry_by_site.sensor = "" OR telemetry_by_site.status = "offline" ON MESSAGE ERROR LOG
-  TO battery_alerts FLUSH EACH 250ms MAX BATCH SIZE 10kb WHERE telemetry_by_site.battery_pct < 15.0 ON MESSAGE ERROR LOG
-  TO telemetry_clean FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
+  DEDUPLICATE ON input.site, input.device_id, input.sensor, input.ts, input.seq
+  MAX TIME 5m
   BRANCHED BY by_site
-  DEDUPLICATE ON telemetry_by_site.site, telemetry_by_site.device_id, telemetry_by_site.sensor, telemetry_by_site.ts, telemetry_by_site.seq
-  MAX TIME 5m;
+  TO telemetry_rejected INHERIT ALL
+    WHERE device_id = "" OR sensor = "" OR status = "offline"
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
+  TO battery_alerts INHERIT ALL WHERE battery_pct < 15.0
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
+  TO telemetry_clean INHERIT ALL FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG;
 
 CREATE REINGESTOR device_repartition
   FROM telemetry_clean
-  TO telemetry_by_device FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
-  BRANCHED BY by_device VALUES {
-    site = telemetry_by_device.site,
-    line = telemetry_by_device.line,
-    device_id = telemetry_by_device.device_id
-  };
+  TO telemetry_by_device
+    INHERIT ALL
+    BRANCHED BY by_device SET site = message.site, line = message.line, device_id = message.device_id
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
 
 CREATE REORDERER device_event_reorderer
   FROM telemetry_by_device
-  TO telemetry_ordered FLUSH EACH 500ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
+  BY input.ts, input.seq
+  MAX TIME 5s
   BRANCHED BY by_device
-  BY telemetry_by_device.ts, telemetry_by_device.seq
-  MAX TIME 5s;
+  TO telemetry_ordered INHERIT ALL FLUSH EACH 500ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG;
 
 CREATE DEDUPLICATOR anomaly_splitter
   FROM telemetry_ordered
-  TO critical_alerts FLUSH EACH 250ms MAX BATCH SIZE 10kb WHERE telemetry_ordered.status = "fault" OR telemetry_ordered.value >= telemetry_ordered.critical_high ON MESSAGE ERROR LOG
-  TO thermal_alerts FLUSH EACH 250ms MAX BATCH SIZE 10kb WHERE telemetry_ordered.sensor = "temperature" AND telemetry_ordered.value >= 80.0 ON MESSAGE ERROR LOG
-  TO maintenance_alerts FLUSH EACH 250ms MAX BATCH SIZE 10kb WHERE telemetry_ordered.value >= telemetry_ordered.warn_high ON MESSAGE ERROR LOG
-  TO normal_telemetry FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
+  DEDUPLICATE ON input.site, input.line, input.device_id, input.sensor, input.ts, input.seq
+  MAX TIME 5m
   BRANCHED BY by_device
-  DEDUPLICATE ON telemetry_ordered.site, telemetry_ordered.line, telemetry_ordered.device_id, telemetry_ordered.sensor, telemetry_ordered.ts, telemetry_ordered.seq
-  MAX TIME 5m;
+  TO critical_alerts INHERIT ALL WHERE status = "fault" OR value >= critical_high
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
+  TO thermal_alerts INHERIT ALL WHERE sensor = "temperature" AND value >= 80.0
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
+  TO maintenance_alerts INHERIT ALL WHERE value >= warn_high
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
+  TO normal_telemetry INHERIT ALL FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG;
 
 CREATE REINGESTOR site_alert_repartition
   FROM critical_alerts
-  TO site_critical_alerts FLUSH EACH 250ms MAX BATCH SIZE 10kb ON MESSAGE ERROR LOG
-  BRANCHED BY by_site_critical VALUES { site = site_critical_alerts.site };
+  TO site_critical_alerts
+    INHERIT ALL
+    BRANCHED BY by_site_critical SET site = message.site
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
 
 CREATE EMITTER redis_site_critical_alerts
   FROM site_critical_alerts
   ENCODE USING iot_telemetry_codec
   TO REDIS PUBSUB redis_alerts CHANNEL iot_site_critical_alerts
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE EMITTER redis_battery_alerts
   FROM battery_alerts
   ENCODE USING iot_telemetry_codec
   TO REDIS PUBSUB redis_alerts CHANNEL iot_battery_alerts
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE EMITTER redis_thermal_alerts
   FROM thermal_alerts
   ENCODE USING iot_telemetry_codec
   TO REDIS PUBSUB redis_alerts CHANNEL iot_thermal_alerts
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 CREATE EMITTER redis_maintenance_alerts
   FROM maintenance_alerts
   ENCODE USING iot_telemetry_codec
   TO REDIS PUBSUB redis_alerts CHANNEL iot_maintenance_alerts
-  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-  FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
 START;
 

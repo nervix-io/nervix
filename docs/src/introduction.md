@@ -27,7 +27,11 @@ Current built-in transport integrations include Kafka, Pulsar, HTTP, Prometheus,
 
 The connections between nodes are expressed through `RELAY`s.
 
-Input data often mixes tenants, users, devices, accounts, or other business groups in the same external feed. Nervix uses explicit `CREATE BRANCH` declarations to process those groups independently. A branch names the key schema, such as `CREATE BRANCH by_tenant_user SCHEMA tenant_user_branch TTL 5m`; ingestors and reingestors attach concrete key mappings with `BRANCHED BY by_tenant_user VALUES { ... }`.
+Input data often mixes tenants, users, devices, accounts, or other business groups in the same
+external feed. Nervix uses explicit `CREATE BRANCH` declarations to process those groups
+independently. A branch names the key schema, such as `CREATE BRANCH by_tenant_user SCHEMA
+tenant_user_branch TTL 5m`; ingestor and reingestor routes construct concrete keys with `BRANCHED
+BY by_tenant_user SET ...`.
 
 `RELAY`s name the connections between runtime nodes. Relays are declared as `BRANCHED BY <branch>` or `UNBRANCHED`; only ingestors and reingestors carry the `VALUES { ... }` key mapping that materializes concrete branch instances. When a group appears, Nervix runs that part of the graph as a branch instance for the group. The branch contains runtime relay instances and processing node state for that group, so batches, deduplicator history, window state, and downstream routing for one group do not interfere with other groups. An emitter drains records out of the graph. A reingestor can compute a new group and start downstream branches under that grouping.
 

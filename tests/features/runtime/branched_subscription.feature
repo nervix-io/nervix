@@ -29,13 +29,18 @@ Feature: Branched session subscriptions
           'client_id' = 'nervix-cucumber-branched-subscription-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id, tenant = notifications.tenant }
-
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL
+        DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          BRANCHED BY by_mqtt_notifications
+          SET user_id = message.user_id,
+              tenant = message.tenant
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -59,7 +64,7 @@ Feature: Branched session subscriptions
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Session subscriptions filter-map collected branched records
+  Scenario Outline: Session subscriptions filter collected branched records without transforming them
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -95,17 +100,20 @@ Feature: Branched session subscriptions
           'client_id' = 'nervix-cucumber-branched-subscription-filter-map-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id, tenant = notifications.tenant }
-
         FROM MQTT mqtt_main
         TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL
+        DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          BRANCHED BY by_mqtt_notifications
+          SET user_id = message.user_id,
+              tenant = message.tenant
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications
-        SET notifications.normalized = lower(trim(notifications.raw))
-        UNSET notifications.raw, notifications.active, notifications.user_id
-        WHERE notifications.tenant = 'acme' AND notifications.active;
+        WHERE tenant = 'acme' AND active;
         START;
       """
     When MQTT message is published to topic "notifications_{{test_id}}"
@@ -122,11 +130,8 @@ Feature: Branched session subscriptions
       """
     Then the relay subscription receives a payload
       """
-      "normalized":"hello","tenant":"acme"
+      "active":true,"raw":"  HELLO  ","tenant":"acme","user_id":42
       """
-    And the last relay subscription payload does not contain "raw\""
-    And the last relay subscription payload does not contain "active\""
-    And the last relay subscription payload does not contain "user_id\""
 
     Examples:
       | cluster_size | replica_count |

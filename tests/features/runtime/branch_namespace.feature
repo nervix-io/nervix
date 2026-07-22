@@ -44,27 +44,34 @@ Feature: Branch namespace
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-branch-namespace-{{test_id}}'
-        }; CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { tenant = notifications.tenant }
-
+        };
+      CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main
         TOPIC branch_namespace_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL
+        DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          BRANCHED BY by_mqtt_notifications
+          SET tenant = message.tenant
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE DEDUPLICATOR project_notifications
         FROM notifications
-        TO projected_notifications FLUSH IMMEDIATE
-          SET projected_notifications.branch_tenant = branch.tenant,
-              projected_notifications.amount = notifications.amount + 1
-          UNSET notifications.active
-          WHERE branch.tenant = notifications.tenant ON MESSAGE ERROR LOG
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
         BRANCHED BY by_mqtt_notifications
-        DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m;
+        TO projected_notifications
+          INHERIT ALL EXCEPT active
+          SET branch_tenant = branch.tenant,
+              amount = input.amount + 1
+          WHERE branch.tenant = input.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
 
-      CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications WHERE projected_notifications.tenant = 'acme';
+      CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications WHERE tenant = 'acme';
       START;
       """
     When MQTT message is published to topic "branch_namespace_{{test_id}}"
@@ -125,14 +132,21 @@ Feature: Branch namespace
         ON edge
         PATH '/ingest'
         TYPE HTTP; CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG; CREATE REINGESTOR copy_notifications
-        FROM notifications
-        TO copied_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        BRANCHED BY by_copy_notifications VALUES { tenant = branch.tenant };
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG; CREATE REINGESTOR copy_notifications FROM notifications
+        TO copied_notifications
+        INHERIT ALL
+        BRANCHED BY by_copy_notifications
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
 
       CREATE SUBSCRIPTION copied_notifications_subscription TO copied_notifications;
       START;

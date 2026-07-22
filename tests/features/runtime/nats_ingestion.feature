@@ -26,15 +26,15 @@ Feature: NATS ingestion
           'addr' = 'nats://127.0.0.1:4222'
         };
         CREATE INGESTOR nats_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM NATS nats_main SUBJECT notifications_{{test_id}} QUEUE GROUP nats_notifications_group_{{test_id}} INSTANCES <instances> MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_nats_notifications VALUES { user_id = notifications.user_id }
-
-        FROM NATS nats_main
-        SUBJECT notifications_{{test_id}}
-        QUEUE GROUP nats_notifications_group_{{test_id}}
-        INSTANCES <instances>
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_nats_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -86,15 +86,15 @@ Feature: NATS ingestion
           'addr' = 'nats://127.0.0.1:4222'
         };
         CREATE INGESTOR nats_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM NATS nats_main SUBJECT notifications_reconnect_{{test_id}} QUEUE GROUP nats_notifications_reconnect_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_nats_notifications VALUES { user_id = notifications.user_id }
-
-        FROM NATS nats_main
-        SUBJECT notifications_reconnect_{{test_id}}
-        QUEUE GROUP nats_notifications_reconnect_group_{{test_id}}
-        INSTANCES 1
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_nats_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

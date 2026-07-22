@@ -161,6 +161,7 @@ typed-builder = { workspace = true }
 ubyte = { workspace = true }
 upon = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
 webpki-roots = { workspace = true }
 zeromq = { workspace = true }
 
@@ -171,7 +172,6 @@ nervix-client-core = { workspace = true }
 playwright-rs = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
-uuid = { workspace = true, features = ["v7"] }
 
 [[test]]
 harness = false
@@ -205,6 +205,10 @@ disallowed-types = "deny"
 
 [workspace.dependencies]
 ahash = "0.8"
+ahash-compile-time = { package = "ahash", version = "0.8", default-features = false, features = [
+  "compile-time-rng",
+  "std",
+] }
 anyhow = "1"
 apache-avro = "0.21.0"
 arc-swap = "1.9.1"

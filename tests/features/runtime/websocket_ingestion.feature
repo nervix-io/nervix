@@ -26,11 +26,15 @@ Feature: Websocket endpoint ingestion
         PATH '/ws'
         TYPE WEBSOCKETS;
         CREATE INGESTOR ws_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_ws_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -86,12 +90,14 @@ Feature: Websocket endpoint ingestion
         PATH '/ws'
         TYPE WEBSOCKETS;
       CREATE INGESTOR ws_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_ws_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT ws_notifications_endpoint
-        MODE NO_ACK SEQUENTIAL
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_ws_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
@@ -149,12 +155,13 @@ Feature: Websocket endpoint ingestion
         TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_style_subscribe;
 
       CREATE INGESTOR ws_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT ws_notifications_endpoint
-        MODE NO_ACK SEQUENTIAL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION notifications_subscription TO notifications;

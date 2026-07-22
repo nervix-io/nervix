@@ -5,10 +5,9 @@ use apache_avro::{
     Schema as AvroSchema, from_avro_datum, to_avro_datum, types::Value as AvroValue,
 };
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Datum, FixedSizeListArray, Float32Array, Float64Array,
-    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, RecordBatchOptions,
-    Scalar, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
-    UInt64Array,
+    Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
+    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, RecordBatchOptions, StringArray,
+    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     builder::{
         ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
         Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
@@ -17,7 +16,6 @@ use arrow_array::{
     },
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
-use arrow_ord::cmp::eq as arrow_eq;
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
     Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
@@ -338,113 +336,6 @@ impl CompiledSchema {
         })
     }
 
-    pub(crate) fn arrow_eq_predicate(
-        &self,
-        batch: &RuntimeRecordBatch,
-        field_name: &str,
-        value: &RuntimeValue,
-    ) -> Result<BooleanArray, String> {
-        if batch.schema.as_ref() != self.arrow_schema.as_ref() {
-            return Err(
-                "arrow equality predicate schema does not match compiled schema".to_string(),
-            );
-        }
-        let column_index = self
-            .arrow_schema
-            .index_of(field_name)
-            .map_err(|error| error.to_string())?;
-        let column = batch.batch.column(column_index).as_ref();
-        let Some(field) = self.fields.iter().find(|field| field.name == field_name) else {
-            return Err(format!("field '{field_name}' is not declared in schema"));
-        };
-        let context = format!("field '{field_name}' equality predicate");
-
-        match (&field.ty, value) {
-            (ParseAsType::U8, RuntimeValue::U8(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(UInt8Array::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::I8, RuntimeValue::I8(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(Int8Array::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::U16, RuntimeValue::U16(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(UInt16Array::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::I16, RuntimeValue::I16(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(Int16Array::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::U32, RuntimeValue::U32(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(UInt32Array::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::I32, RuntimeValue::I32(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(Int32Array::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::U64, RuntimeValue::U64(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(UInt64Array::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::I64, RuntimeValue::I64(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(Int64Array::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::Bool, RuntimeValue::Bool(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(BooleanArray::from(vec![Some(*value)])),
-                &context,
-            ),
-            (ParseAsType::String, RuntimeValue::String(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(StringArray::from(vec![Some(value.as_str())])),
-                &context,
-            ),
-            (ParseAsType::Datetime, RuntimeValue::Datetime(value)) => {
-                let Some(value) = value.timestamp_nanos_opt() else {
-                    return Err(format!(
-                        "field '{field_name}' datetime is out of nanosecond range"
-                    ));
-                };
-                arrow_eq_scalar(
-                    column,
-                    Scalar::new(
-                        TimestampNanosecondArray::from(vec![Some(value)]).with_timezone_utc(),
-                    ),
-                    &context,
-                )
-            }
-            (ParseAsType::F32, RuntimeValue::F32(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(Float32Array::from(vec![Some(value.into_inner())])),
-                &context,
-            ),
-            (ParseAsType::F64, RuntimeValue::F64(value)) => arrow_eq_scalar(
-                column,
-                Scalar::new(Float64Array::from(vec![Some(value.into_inner())])),
-                &context,
-            ),
-            (ParseAsType::Array { .. } | ParseAsType::Vec { .. }, _) => Err(format!(
-                "field '{field_name}' cannot be used for Arrow branch equality because \
-                 list-valued branch fields are not supported"
-            )),
-            (expected, actual) => Err(format!(
-                "field '{field_name}' has declared type {expected:?}, but branch value is \
-                 {actual:?}"
-            )),
-        }
-    }
-
     pub fn decoded_records_from_arrow_batch(
         &self,
         batch: &RuntimeRecordBatch,
@@ -578,16 +469,6 @@ impl CompiledSchema {
             }
         }
     }
-}
-
-fn arrow_eq_scalar<A: Array>(
-    column: &dyn Array,
-    scalar: Scalar<A>,
-    context: &str,
-) -> Result<BooleanArray, String> {
-    let left = &column as &dyn Datum;
-    let right = &scalar as &dyn Datum;
-    arrow_eq(left, right).map_err(|error| format!("{context} failed: {error}"))
 }
 
 impl CompiledCodec {
@@ -2696,7 +2577,7 @@ fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {
     }
 }
 
-fn runtime_value_from_arrow_array(
+pub(crate) fn runtime_value_from_arrow_array(
     array: &dyn Array,
     ty: &ParseAsType,
     optional: bool,

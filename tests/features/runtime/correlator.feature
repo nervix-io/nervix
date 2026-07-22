@@ -46,14 +46,6 @@ Feature: Relay correlation
         FROM WIRE JSON SCHEMA right_profile_wire
         TO SCHEMA right_profile;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_left_profile_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY left_profiles SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
         CREATE RELAY left_profile_aliases SCHEMA left_profile BRANCHED BY by_left_profile_ingestor;
@@ -79,52 +71,70 @@ Feature: Relay correlation
         PATH '/right-alias'
         TYPE HTTP;
         CREATE INGESTOR left_profile_ingestor
-        TO left_profiles FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING left_profile_codec
-        BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profiles.tenant }
-
-        FROM ENDPOINT left_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE INGESTOR left_profile_alias_ingestor
-        TO left_profile_aliases FLUSH IMMEDIATE ON MESSAGE ERROR LOG
-        DECODE USING left_profile_codec
-        BRANCHED BY by_left_profile_ingestor VALUES { tenant = left_profile_aliases.tenant }
-
-        FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE INGESTOR right_profile_ingestor
-        TO right_profiles FLUSH IMMEDIATE ON MESSAGE ERROR LOG
-        DECODE USING right_profile_codec
-        BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profiles.tenant }
-
-        FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE INGESTOR right_profile_alias_ingestor
-        TO right_profile_aliases FLUSH IMMEDIATE ON MESSAGE ERROR LOG
-        DECODE USING right_profile_codec
-        BRANCHED BY by_left_profile_ingestor VALUES { tenant = right_profile_aliases.tenant }
-
-        FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE CORRELATOR correlate_profiles
-        LEFT FROM left_profiles WHERE left_profiles.marker > 0
-        LEFT FROM left_profile_aliases WHERE left_profile_aliases.marker > 0
-        RIGHT FROM right_profiles WHERE right_profiles.tenant = 'acme'
-        RIGHT FROM right_profile_aliases WHERE right_profile_aliases.tenant = 'acme'
-        CORRELATE WHERE lower(left_profile_aliases.first_name) = lower(right_profile_aliases.first_name)
-        MATCH <match_policy>
-        TO correlated_profiles FLUSH IMMEDIATE
-        SET correlated_profiles.tenant = left_profile_aliases.tenant,
-          correlated_profiles.normalized_name = lower(left_profile_aliases.first_name),
-          correlated_profiles.left_marker = left_profile_aliases.marker,
-          correlated_profiles.surname = upper(right_profile_aliases.surname),
-          correlated_profiles.memo = NULL
-        ON MESSAGE ERROR LOG
-        TO correlation_audits FLUSH IMMEDIATE
-        SET correlation_audits.tenant = right_profile_aliases.tenant,
-          correlation_audits.audit_name = concat(upper(left_profile_aliases.first_name), ' ', upper(right_profile_aliases.surname))
-        ON MESSAGE ERROR LOG
+        TO left_profiles
+        INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE INGESTOR left_profile_alias_ingestor
+        FROM ENDPOINT left_alias_ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING left_profile_codec
+        TO left_profile_aliases
+        INHERIT ALL
+        BRANCHED BY by_left_profile_ingestor
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE INGESTOR right_profile_ingestor
+        FROM ENDPOINT right_ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING right_profile_codec
+        TO right_profiles
+        INHERIT ALL
+        BRANCHED BY by_left_profile_ingestor
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE INGESTOR right_profile_alias_ingestor
+        FROM ENDPOINT right_alias_ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING right_profile_codec
+        TO right_profile_aliases
+        INHERIT ALL
+        BRANCHED BY by_left_profile_ingestor
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE CORRELATOR correlate_profiles
+        LEFT FROM left_profiles WHERE left.marker > 0,
+                  left_profile_aliases WHERE left.marker > 0
+        RIGHT FROM right_profiles WHERE right.tenant = 'acme',
+                   right_profile_aliases WHERE right.tenant = 'acme'
+        CORRELATE WHERE lower(left.first_name) = lower(right.first_name)
+        MATCH <match_policy>
         MAX TIME 5s
-        ON CORRELATION TIMEOUT DROP, DROP;
-        CREATE SUBSCRIPTION correlated_profiles_subscription TO correlated_profiles WHERE correlated_profiles.tenant = 'acme';
-        CREATE SUBSCRIPTION correlation_audits_subscription TO correlation_audits WHERE correlation_audits.tenant = 'acme';
+        ON CORRELATION TIMEOUT DROP, DROP
+        BRANCHED BY by_left_profile_ingestor
+        TO correlated_profiles
+        SET tenant = left.tenant,
+          normalized_name = lower(left.first_name),
+          left_marker = left.marker,
+          surname = upper(right.surname),
+          memo = NULL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        TO correlation_audits
+        SET tenant = right.tenant,
+          audit_name = concat(upper(left.first_name), ' ', upper(right.surname))
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG;
+        CREATE SUBSCRIPTION correlated_profiles_subscription TO correlated_profiles WHERE tenant = 'acme';
+        CREATE SUBSCRIPTION correlation_audits_subscription TO correlation_audits WHERE tenant = 'acme';
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"

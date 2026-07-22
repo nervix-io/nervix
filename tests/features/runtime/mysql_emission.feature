@@ -30,30 +30,24 @@ Feature: MySQL emission
           'client_id' = 'nervix-cucumber-mysql-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC mysql_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC mysql_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT mysql_client
         TYPE MYSQL
         CONFIG {
           'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
         };
-        CREATE EMITTER to_mysql
-        FROM notifications
-        TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}}
-        VALUES {
-          "mysql_user_id" = notifications.user_id,
-          "mysql_now" = NOW() AS STRING,
-          "mysql_action" = LOWER(notifications.action)
-        }
-        WITH MAX BATCH 2
+        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } WITH MAX BATCH 2
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -113,31 +107,24 @@ Feature: MySQL emission
           'client_id' = 'nervix-cucumber-mysql-conflict-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC mysql_conflict_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC mysql_conflict_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT mysql_client
         TYPE MYSQL
         CONFIG {
           'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
         };
-        CREATE EMITTER to_mysql
-        FROM notifications
-        TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_conflict_{{test_id}}
-        VALUES {
-          "mysql_user_id" = notifications.user_id,
-          "mysql_now" = NOW() AS STRING,
-          "mysql_action" = LOWER(notifications.action)
-        }
-        ON CONFLICT <conflict_action>
-        WITH MAX BATCH 2
+        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_conflict_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } ON CONFLICT <conflict_action> WITH MAX BATCH 2
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
