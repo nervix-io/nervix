@@ -232,11 +232,20 @@ language or interface changes.
 
 ### Repository commands and documentation
 
+- `.agents/skills/nspl/SKILL.md` is the canonical, vendor-neutral, user-facing skill for configuring
+  Nervix with NSPL. Use it when helping users author, explain, review, or troubleshoot NSPL;
+  agents without automatic skill discovery must read it directly. Do not turn it into a workflow
+  for extending the parser, Models, compiler, or runtime.
 - Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
+- Use `just validate-skill` to validate the public NSPL skill against the Agent Skills publication
+  checks. CI runs this validation but does not create GitHub releases; the public default branch is
+  the install source.
 - Use `just test` for the full suite so repository-required environment is configured.
 - Use the repository's scenario task for targeted cucumber runs. Add a focused task when a needed
   invocation is not already represented instead of bypassing the configured test environment.
-- Regenerate public documentation whenever the public interface or NSPL surface changes.
+- Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
+  user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
+  accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.
 - Keep parser tests near the grammar they protect.
 - Final implementation reports must name the cucumber scenario added or updated. If none was added,
   state the explicit user-approved reason.

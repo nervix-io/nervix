@@ -2,6 +2,10 @@
 
 NSPL is the language used to define the Nervix graph.
 
+AI coding agents can use the portable [NSPL Agent Skill](nspl-agent-skill.md) to design, explain,
+review, and troubleshoot Nervix configurations. The guide explains installation without cloning
+this repository, skill invocation, useful request details, expected output, and updates.
+
 The current top-level surface includes:
 
 - domain lifecycle statements

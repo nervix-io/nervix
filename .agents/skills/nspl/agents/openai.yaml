@@ -1,0 +1,4 @@
+interface:
+  display_name: "NSPL"
+  short_description: "Configure Nervix with valid NSPL"
+  default_prompt: "Use $nspl to design a complete Nervix configuration for my streaming requirements."
