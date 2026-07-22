@@ -2,7 +2,7 @@ name: Check
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, synchronize, reopened]
 
 env:
   TINYGO_VERSION: "0.41.1"
