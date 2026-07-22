@@ -231,39 +231,24 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 mod tests {
     use bolero::check;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchInitiatorSelection,
-        BranchSelection, BranchValueMapping, CodecWireFormat, CordonNode, CreateClientAzureBlob,
-        CreateClientGcs, CreateClientIcebergRest, CreateClientKafka, CreateClientMqtt,
-        CreateClientNats, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-        CreateClientRedis, CreateClientS3, CreateClientSqs, CreateClientZeroMq, CreateCodec,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor,
-        CreateJunction, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateWireSchema,
-        CreateWireSchemaStmt, DescribeRelay, DrainNode, DropModel, DropNode, EmitSink,
-        EndpointIngestMode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
-        Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
-        KafkaOffsetMode, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
-        MqttSession, NatsIngestMode, ParseAsType, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
-        SchemaField, SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
-        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
+        AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchSelection, CodecWireFormat,
+        CordonNode, CreateClientAzureBlob, CreateClientGcs, CreateClientIcebergRest,
+        CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientPrometheus,
+        CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+        CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
+        CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
+        CreateSignalingProtocol, CreateWireSchema, CreateWireSchemaStmt, DescribeRelay, DrainNode,
+        DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
+        GeneralErrorPolicy, Identifier as ModelIdentifier, IngestSource, JsonType,
+        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, MqttIngestMode,
+        MqttQos, MqttSession, NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingProtocolOnConnect, SqsIngestMode,
+        Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode, WireSchemaField,
+        ZeroMqIngestMode,
     };
 
     use super::*;
-
-    fn branched_by(
-        branch: ModelIdentifier,
-        fields: Vec<ModelIdentifier>,
-    ) -> BranchInitiatorSelection {
-        let values = fields
-            .into_iter()
-            .map(|field| BranchValueMapping {
-                relay: branch.clone(),
-                relay_field: field.clone(),
-                field,
-            })
-            .collect();
-        BranchInitiatorSelection::branched_by(branch, values)
-    }
 
     fn processor_branched_by(schema: ModelIdentifier) -> BranchSelection {
         BranchSelection::branched_by(schema)
@@ -275,12 +260,23 @@ mod tests {
             "100ms".to_string(),
             Some("1MiB".to_string()),
         );
-        output.filter_map = filter_map;
+        output.construction = filter_map
+            .map(|source| {
+                crate::semantic_program::parse_route_construction(&source)
+                    .expect("test route construction must parse")
+            })
+            .unwrap_or_default();
         output
     }
 
     fn flushed_outputs(relay: ModelIdentifier) -> ProcessorOutputs {
         ProcessorOutputs::new(vec![flushed_output(relay, None)])
+    }
+
+    fn flushed_ingestor_outputs(relay: ModelIdentifier) -> ProcessorOutputs {
+        ProcessorOutputs::new(vec![
+            flushed_output(relay, None).with_branch(OutputBranch::Unbranched),
+        ])
     }
 
     struct ByteGen<'a> {
@@ -392,20 +388,24 @@ mod tests {
                     fields,
                 })
             }
-            25 => Model::Generator(CreateGenerator {
-                name: g.ident(),
-                into_relay: g.ident(),
-                branched_by: processor_branched_by(g.ident()),
-                each: format!("{}ms", g.bounded_u64(1, 5000)),
-                flush_each: format!("{}ms", g.bounded_u64(1, 5000)),
-                max_batch_size: Some("1MiB".to_string()),
-                set: format!(
-                    "SET {}.value = {}.value",
-                    g.ident().as_str(),
-                    g.ident().as_str()
-                ),
-                message_error_policy: MessageErrorPolicy::Log,
-            }),
+            25 => {
+                let materialized_relay = g.ident();
+                let output_relay = g.ident();
+                let output = flushed_output(
+                    output_relay,
+                    Some(format!(
+                        "SET value = relay_state.{}.value",
+                        materialized_relay.as_str()
+                    )),
+                );
+                Model::Generator(CreateGenerator {
+                    name: g.ident(),
+                    materialized_relay,
+                    branched_by: processor_branched_by(g.ident()),
+                    each: format!("{}ms", g.bounded_u64(1, 5000)),
+                    output_routes: ProcessorOutputs::new(vec![output]),
+                })
+            }
             1 => {
                 let is_json = g.bool();
                 let field_count = (g.next_u8() as usize % 5) + 1;
@@ -502,13 +502,6 @@ mod tests {
                 }
             }
             4 => {
-                let param_count = (g.next_u8() as usize % 4) + 1;
-                let mut params = Vec::with_capacity(param_count);
-                for _ in 0..param_count {
-                    params.push(g.ident());
-                }
-                let params = branched_by(g.ident(), params);
-
                 if g.bool() {
                     let mode = match g.next_u8() % 3 {
                         0 => KafkaIngestMode::AckParallel {
@@ -535,9 +528,8 @@ mod tests {
                     if g.bool() {
                         Model::Ingestor(CreateIngestor {
                             name: g.ident(),
-                            output_routes: flushed_outputs(g.ident()),
+                            output_routes: flushed_ingestor_outputs(g.ident()),
                             decode_using_codec: g.ident(),
-                            branched_by: params,
                             timestamp_source: None,
                             source: IngestSource::Kafka {
                                 client: g.ident(),
@@ -552,9 +544,8 @@ mod tests {
                     } else {
                         Model::Ingestor(CreateIngestor {
                             name: g.ident(),
-                            output_routes: flushed_outputs(g.ident()),
+                            output_routes: flushed_ingestor_outputs(g.ident()),
                             decode_using_codec: g.ident(),
-                            branched_by: params,
                             timestamp_source: None,
                             source: IngestSource::Pulsar {
                                 client: g.ident(),
@@ -592,9 +583,8 @@ mod tests {
                 } else {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        output_routes: flushed_outputs(g.ident()),
+                        output_routes: flushed_ingestor_outputs(g.ident()),
                         decode_using_codec: g.ident(),
-                        branched_by: params,
                         timestamp_source: None,
                         source: IngestSource::RabbitMq {
                             client: g.ident(),
@@ -655,13 +645,16 @@ mod tests {
                     AckMode::Detached
                 },
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             10 => Model::Deduplicator(CreateDeduplicator {
                 name: g.ident(),
                 from: ProcessorInputs::single(g.ident()),
                 output_routes: flushed_outputs(g.ident()),
                 branched_by: processor_branched_by(g.ident()),
-                deduplicate_on: g.ident().to_string(),
+                deduplicate_on: vec![nervix_models::Expression::Field(
+                    nervix_models::FieldReference::bare(g.ident()),
+                )],
                 max_time: "10m".to_string(),
                 mode: if g.bool() {
                     AckMode::Attached
@@ -669,6 +662,7 @@ mod tests {
                     AckMode::Detached
                 },
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             11 => Model::ClientPrometheus(CreateClientPrometheus {
                 name: g.ident(),
@@ -678,36 +672,25 @@ mod tests {
                     value: "http://127.0.0.1:9090".to_string(),
                 }],
             }),
-            12 => {
-                let param_count = (g.next_u8() as usize % 4) + 1;
-                let mut params = Vec::with_capacity(param_count);
-                for _ in 0..param_count {
-                    params.push(g.ident());
-                }
-                let params = branched_by(g.ident(), params);
-
-                Model::Ingestor(CreateIngestor {
-                    name: g.ident(),
-                    output_routes: flushed_outputs(g.ident()),
-                    decode_using_codec: g.ident(),
-                    branched_by: params,
-                    timestamp_source: None,
-                    source: IngestSource::RedisPubSub {
-                        client: g.ident(),
-                        channel: g.ident(),
-                        mode: RedisPubSubIngestMode::NoAckSequential,
-                    },
-                    general_error_policy: GeneralErrorPolicy::Log,
-                    filter_where: None,
-                })
-            }
+            12 => Model::Ingestor(CreateIngestor {
+                name: g.ident(),
+                output_routes: flushed_ingestor_outputs(g.ident()),
+                decode_using_codec: g.ident(),
+                timestamp_source: None,
+                source: IngestSource::RedisPubSub {
+                    client: g.ident(),
+                    channel: g.ident(),
+                    mode: RedisPubSubIngestMode::NoAckSequential,
+                },
+                general_error_policy: GeneralErrorPolicy::Log,
+                filter_where: None,
+            }),
             13 => {
                 if g.bool() {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        output_routes: flushed_outputs(g.ident()),
+                        output_routes: flushed_ingestor_outputs(g.ident()),
                         decode_using_codec: g.ident(),
-                        branched_by: branched_by(g.ident(), vec![g.ident()]),
                         timestamp_source: None,
                         source: IngestSource::Mqtt {
                             client: g.ident(),
@@ -724,9 +707,8 @@ mod tests {
                 } else if g.bool() {
                     Model::Ingestor(CreateIngestor {
                         name: g.ident(),
-                        output_routes: flushed_outputs(g.ident()),
+                        output_routes: flushed_ingestor_outputs(g.ident()),
                         decode_using_codec: g.ident(),
-                        branched_by: branched_by(g.ident(), vec![g.ident()]),
                         timestamp_source: None,
                         source: IngestSource::Prometheus {
                             client: g.ident(),
@@ -766,7 +748,8 @@ mod tests {
                             AckMode::Detached
                         },
                         error_policies: ErrorPolicies::handled_by_log(),
-                        filter_map: None,
+                        construction: nervix_models::RouteConstruction::default(),
+                        materialized_state: Vec::new(),
                     })
                 }
             }
@@ -826,13 +809,13 @@ mod tests {
                     AckMode::Detached
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
-                filter_map: None,
+                construction: nervix_models::RouteConstruction::default(),
+                materialized_state: Vec::new(),
             }),
             19 => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                output_routes: flushed_outputs(g.ident()),
+                output_routes: flushed_ingestor_outputs(g.ident()),
                 decode_using_codec: g.ident(),
-                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 timestamp_source: None,
                 source: IngestSource::ZeroMq {
                     client: g.ident(),
@@ -857,13 +840,13 @@ mod tests {
                     AckMode::Detached
                 },
                 error_policies: ErrorPolicies::handled_by_log(),
-                filter_map: None,
+                construction: nervix_models::RouteConstruction::default(),
+                materialized_state: Vec::new(),
             }),
             21 => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                output_routes: flushed_outputs(g.ident()),
+                output_routes: flushed_ingestor_outputs(g.ident()),
                 decode_using_codec: g.ident(),
-                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 timestamp_source: None,
                 source: IngestSource::Nats {
                     client: g.ident(),
@@ -877,23 +860,25 @@ mod tests {
             }),
             22 => {
                 let from_relay = ModelIdentifier::try_from("source").expect("valid identifier");
-                let error_condition = format!(r#"{}.level = "error""#, from_relay.as_str());
-                let warn_condition = format!(r#"{}.level = "warn""#, from_relay.as_str());
+                let error_condition = r#"input.level = "error""#;
+                let warn_condition = r#"input.level = "warn""#;
                 Model::Reingestor(nervix_models::CreateReingestor {
                     name: g.ident(),
                     from: ProcessorInputs::single(from_relay),
                     output_routes: ProcessorOutputs::new(vec![
-                        flushed_output(g.ident(), Some(format!("WHERE {error_condition}"))),
-                        flushed_output(g.ident(), Some(format!("WHERE {warn_condition}"))),
-                        flushed_output(g.ident(), None),
+                        flushed_output(g.ident(), Some(format!("WHERE {error_condition}")))
+                            .with_branch(OutputBranch::Unbranched),
+                        flushed_output(g.ident(), Some(format!("WHERE {warn_condition}")))
+                            .with_branch(OutputBranch::Unbranched),
+                        flushed_output(g.ident(), None).with_branch(OutputBranch::Unbranched),
                     ]),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     mode: if g.bool() {
                         AckMode::Attached
                     } else {
                         AckMode::Detached
                     },
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 })
             }
             23 => Model::ClientS3(CreateClientS3 {
@@ -962,9 +947,8 @@ mod tests {
             }),
             _ => Model::Ingestor(CreateIngestor {
                 name: g.ident(),
-                output_routes: flushed_outputs(g.ident()),
+                output_routes: flushed_ingestor_outputs(g.ident()),
                 decode_using_codec: g.ident(),
-                branched_by: branched_by(g.ident(), vec![g.ident()]),
                 timestamp_source: None,
                 source: if g.bool() {
                     IngestSource::Endpoint {
@@ -1030,10 +1014,7 @@ mod tests {
 
     #[test]
     fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
-        let input = "CREATE INGESTOR i TO s FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-                     LOG DECODE USING sch
-                     BRANCHED BY u_branch VALUES { u = s.u }  FROM KAFKA t TOPIC top OFFSET BY \
-                     CONSUMER GROUP g MODE ";
+        let input = "CREATE INGESTOR i FROM KAFKA t TOPIC top OFFSET BY CONSUMER GROUP g MODE ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO_ACK".to_string()));
@@ -1043,7 +1024,8 @@ mod tests {
 
     #[test]
     fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
-        let input = "CREATE INGESTOR i TO s FLUSH IMMEDIATE ON MESSAGE ERROR LOG DECODE USING sch ";
+        let input =
+            "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL DECODE USING sch TO s ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"UNBRANCHED".to_string()));
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
@@ -1117,8 +1099,7 @@ mod tests {
 
     #[test]
     fn deduplicator_context_suggestions_do_not_leak_schema_keywords() {
-        let input = "CREATE DEDUPLICATOR dedup FROM ss1 TO ss2 FLUSH IMMEDIATE ON MESSAGE ERROR \
-                     LOG BRANCHED BY tenant DEDUPLICATE ON ss1.transaction_id MAX ";
+        let input = "CREATE DEDUPLICATOR dedup FROM ss1 DEDUPLICATE ON input.transaction_id MAX ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"TIME".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1130,7 +1111,7 @@ mod tests {
         let input = "CREATE DEDUPLICATOR dedup FROM ss1 ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"WHERE".to_string()));
-        assert!(suggestions.contains(&"TO".to_string()));
+        assert!(suggestions.contains(&"DEDUPLICATE ON".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
@@ -1139,7 +1120,8 @@ mod tests {
     fn junction_context_suggestions_do_not_leak_schema_keywords() {
         let input = "CREATE JUNCTION merge FROM orders_a, orders_b ";
         let suggestions = suggest_statement(input, input.len());
-        assert!(suggestions.contains(&"TO".to_string()));
+        assert!(suggestions.contains(&"BRANCHED BY".to_string()));
+        assert!(suggestions.contains(&"UNBRANCHED".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
@@ -1459,9 +1441,9 @@ mod tests {
     #[test]
     fn parses_junction_statement_with_implicit_attached_mode() {
         let parsed = parse_statement(
-            "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
-             merged_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
-             BRANCHED BY tenant;",
+            "CREATE JUNCTION join_streams FROM notifications_a, notifications_b BRANCHED BY \
+             tenant TO merged_notifications INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+             MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1478,9 +1460,9 @@ mod tests {
     #[test]
     fn parses_deduplicator_statement_with_implicit_attached_mode() {
         let parsed = parse_statement(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-             ON MESSAGE ERROR LOG BRANCHED BY tenant DEDUPLICATE ON ss1.transaction_id MAX TIME \
-             10m;",
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON input.transaction_id MAX TIME \
+             10m BRANCHED BY tenant TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+             MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1497,7 +1479,7 @@ mod tests {
     #[test]
     fn parses_inferencer_statement() {
         let parsed = parse_statement(
-            r#"CREATE INFERENCER score_model FROM features TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] };"#,
+            r#"CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
@@ -1523,18 +1505,16 @@ mod tests {
         let canonical = processor
             .to_canonical_nspl()
             .expect("inferencer should render canonically");
-        assert!(
-            canonical.contains("TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score")
-        );
+        assert!(canonical.contains("TO scored SET score = score FLUSH IMMEDIATE"));
         assert!(canonical.contains("OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }"));
     }
 
     #[test]
     fn parses_reingestor_statement_with_flush_each() {
         let parsed = parse_statement(
-            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant_branch VALUES { \
-             tenant = tenant_notifications.tenant };",
+            "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications BRANCHED BY \
+             tenant_branch SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+             MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1557,7 +1537,7 @@ mod tests {
     #[test]
     fn parses_reingestor_statement_with_multiple_output_routes() {
         let parsed = parse_statement(
-            r#"CREATE REINGESTOR log_splitter FROM incoming_logs FILTER WHERE incoming_logs.active TO errors_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET errors_ss.severity = lower(incoming_logs.level) WHERE incoming_logs.level = "error" ON MESSAGE ERROR LOG TO warnings_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB WHERE incoming_logs.level = "warn" ON MESSAGE ERROR LOG TO info_ss FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant_branch VALUES { tenant = errors_ss.tenant };"#,
+            r#"CREATE REINGESTOR log_splitter FROM incoming_logs FILTER WHERE input.active TO errors_ss SET severity = lower(input.level) WHERE output.severity = "error" BRANCHED BY tenant_branch SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG TO warnings_ss WHERE input.level = "warn" BRANCHED BY tenant_branch SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG TO info_ss INHERIT ALL BRANCHED BY tenant_branch SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
@@ -1586,17 +1566,17 @@ mod tests {
             "100ms"
         );
         assert_eq!(
-            reingestor.filter_where.as_deref(),
-            Some("WHERE incoming_logs.active")
+            reingestor.filter_where,
+            Some(crate::parse_expression("input.active").expect("valid expression"))
         );
     }
 
     #[test]
     fn parses_single_reingestor_output_route_with_filter_map() {
         let parsed = parse_statement(
-            "CREATE REINGESTOR fw1 FROM ss1 TO ss3 FLUSH EACH 100ms MAX BATCH SIZE 1MiB SET \
-             ss3.normalized = lower(ss1.raw) UNSET ss3.raw WHERE ss1.active ON MESSAGE ERROR LOG \
-             BRANCHED BY tenant_branch VALUES { tenant = ss3.tenant };",
+            "CREATE REINGESTOR fw1 FROM ss1 TO ss3 SET normalized = lower(input.raw) WHERE \
+             output.normalized != '' BRANCHED BY tenant_branch SET tenant = message.tenant FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1623,18 +1603,16 @@ mod tests {
                 .flush_each,
             "100ms"
         );
-        assert_eq!(
-            output.filter_map.as_deref(),
-            Some("SET ss3.normalized = lower ( ss1.raw ) UNSET ss3.raw WHERE ss1.active")
-        );
+        assert!(!output.construction.assignments.is_empty());
+        assert!(output.construction.where_clause.is_some());
     }
 
     #[test]
     fn parses_emitter_statement_with_implicit_attached_mode() {
         let parsed = parse_statement(
             "CREATE EMITTER emit FROM notifications ENCODE USING notification_codec TO KAFKA \
-             kafka_main TOPIC notifications_out ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB;",
+             kafka_main TOPIC notifications_out FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
+             ERROR LOG ON GENERAL ERROR LOG;",
         )
         .expect("parse should succeed");
 
@@ -1652,17 +1630,18 @@ mod tests {
         let external_cases = [
             (
                 "ingestor",
-                "CREATE INGESTOR http_notifications TO notifications FLUSH EACH 100ms MAX BATCH \
-                 SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec BRANCHED BY \
-                 user_id_branch VALUES { user_id = notifications.user_id }  FROM ENDPOINT \
-                 http_notifications_endpoint MODE NO_ACK SEQUENTIAL",
+                "CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint \
+                 MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications BRANCHED \
+                 BY user_id_branch SET user_id = message.user_id FLUSH EACH 100ms MAX BATCH SIZE \
+                 1MiB ON MESSAGE ERROR LOG",
                 " ON GENERAL ERROR LOG;",
             ),
             (
                 "emitter",
                 "CREATE EMITTER kafka_emit FROM notifications ENCODE USING notification_codec TO \
-                 KAFKA kafka_main TOPIC notifications_out ON MESSAGE ERROR LOG",
-                " ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;",
+                 KAFKA kafka_main TOPIC notifications_out FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG",
+                " ON GENERAL ERROR LOG;",
             ),
         ];
 
@@ -1688,37 +1667,38 @@ mod tests {
         let processor_cases = [
             (
                 "reingestor",
-                "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications FLUSH \
-                 EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant_branch \
-                 VALUES { tenant = tenant_notifications.tenant }",
+                "CREATE REINGESTOR repartition FROM notifications TO tenant_notifications \
+                 BRANCHED BY tenant_branch SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH \
+                 SIZE 1MiB ON MESSAGE ERROR LOG",
             ),
             (
                 "junction",
-                "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
-                 notifications_all FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
-                 BRANCHED BY tenant_branch",
+                "CREATE JUNCTION join_streams FROM notifications_a, notifications_b BRANCHED BY \
+                 tenant_branch TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE \
+                 1MiB ON MESSAGE ERROR LOG",
             ),
             (
                 "deduplicator",
-                "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped FLUSH EACH 100ms MAX \
-                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY tenant_branch DEDUPLICATE ON \
-                 inbound.transaction_id MAX TIME 10m",
+                "CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id \
+                 MAX TIME 10m BRANCHED BY tenant_branch TO deduped INHERIT ALL FLUSH EACH 100ms \
+                 MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
             ),
             (
                 "window processor",
-                "CREATE WINDOW PROCESSOR latency_window FROM metrics TO metric_summaries ON \
-                 MESSAGE ERROR LOG BRANCHED BY tenant_branch WIDTH 10s DURATION STEP 5s DURATION \
-                 AGGREGATE metric_summaries.total_latency = SUM(metrics.latency)",
+                "CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s \
+                 DURATION BRANCHED BY tenant_branch TO metric_summaries SET total_latency = \
+                 SUM(input.latency) ON MESSAGE ERROR LOG",
             ),
             (
                 "generator",
-                "CREATE GENERATOR synth TO alerts BRANCHED BY tenant_branch EACH 100ms FLUSH EACH \
-                 100ms MAX BATCH SIZE 1MiB SET alerts.user_id = notifications.user_id ON MESSAGE \
-                 ERROR LOG",
+                "CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms \
+                 BRANCHED BY tenant_branch TO alerts SET user_id = \
+                 relay_state.notifications.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+                 MESSAGE ERROR LOG",
             ),
             (
                 "inferencer",
-                r#"CREATE INFERENCER score_model FROM features TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }"#,
+                r#"CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG"#,
             ),
         ];
 
@@ -1746,27 +1726,27 @@ mod tests {
     #[test]
     fn message_error_policy_accepts_send_to_and_rejects_legacy_dlq() {
         let parsed = parse_statement(
-            "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications FLUSH \
-             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR SEND TO error_stream SET \
-             error_message = message_error.message BRANCHED BY tenant_branch VALUES { tenant = \
-             forwarded_notifications.tenant };",
+            "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications \
+             BRANCHED BY tenant_branch SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH \
+             SIZE 1MiB ON MESSAGE ERROR SEND TO error_stream SET error_message = error.message;",
         )
         .expect("message error SEND TO policy should parse");
         let Statement::Create(parsed) = parsed else {
             panic!("expected create statement");
         };
         let canonical = parsed.to_canonical_nspl().expect("policy should render");
-        assert!(canonical.contains(
-            "ON MESSAGE ERROR SEND TO error_stream SET error_message = message_error.message"
-        ));
+        assert!(
+            canonical.contains(
+                "ON MESSAGE ERROR SEND TO error_stream SET error_message = error.message"
+            )
+        );
         assert!(!canonical.contains("ON MESSAGE ERROR DLQ"));
 
         assert!(
             parse_statement(
                 "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications \
-                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR DLQ error_stream SET \
-                 error_message = message_error.message BRANCHED BY tenant_branch VALUES { tenant \
-                 = forwarded_notifications.tenant };",
+                 BRANCHED BY tenant_branch SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH \
+                 SIZE 1MiB ON MESSAGE ERROR DLQ error_stream SET error_message = error.message;",
             )
             .is_err(),
             "legacy DLQ syntax must be rejected"
@@ -1776,7 +1756,7 @@ mod tests {
     #[test]
     fn message_error_policy_completion_suggests_send_to_without_branch_leakage() {
         let input = "CREATE REINGESTOR pass_through FROM notifications TO forwarded_notifications \
-                     FLUSH IMMEDIATE ON MESSAGE ERROR ";
+                     UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR ";
         let suggestions = suggest_statement(input, input.len());
 
         assert!(suggestions.contains(&"SEND TO".to_string()));
@@ -1789,24 +1769,22 @@ mod tests {
     fn branch_preserving_processors_accept_unbranched() {
         for statement in [
             "CREATE RELAY raw SCHEMA metric UNBRANCHED;",
-            "CREATE DEDUPLICATOR dedup FROM raw TO projected FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-             ON MESSAGE ERROR LOG
-             UNBRANCHED DEDUPLICATE ON raw.value MAX TIME 10m;",
-            "CREATE REORDERER reorder FROM raw TO projected FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-             ON MESSAGE ERROR LOG
-             UNBRANCHED BY raw.value MAX TIME 10s;",
-            "CREATE JUNCTION join_streams FROM left, right TO joined FLUSH EACH 100ms MAX BATCH \
-             SIZE 1MiB ON MESSAGE ERROR LOG UNBRANCHED;",
-            "CREATE WINDOW PROCESSOR window_metrics FROM raw TO projected ON MESSAGE ERROR LOG \
-             UNBRANCHED WIDTH 2 MESSAGES STEP 2 MESSAGES AGGREGATE projected.value = \
-             COUNT(raw.value);",
-            "CREATE INFERENCER score FROM features TO scored FLUSH IMMEDIATE SET scored.score = \
-             inner_output.score ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE fraud_model \
-             VERSION 1 FILE 'models/simple_score.onnx' INPUTS { \"features\" DENSE TENSOR<F32>[2] \
-             = features.vector } OUTPUT SCHEMA { \"score\" DENSE TENSOR<F32>[1] };",
-            "CREATE WASM PROCESSOR filter_even USING RESOURCE wasm_filter VERSION 1 FILE \
-             'processors/filter_even.wasm' FROM raw TO projected ON MESSAGE ERROR LOG UNBRANCHED \
-             ON GLOBAL ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup FROM raw DEDUPLICATE ON input.value MAX TIME 10m \
+             UNBRANCHED TO projected INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
+             ERROR LOG;",
+            "CREATE REORDERER reorder FROM raw BY input.value MAX TIME 10s UNBRANCHED TO \
+             projected INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM left, right UNBRANCHED TO joined INHERIT ALL FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
+            "CREATE WINDOW PROCESSOR window_metrics FROM raw WIDTH 2 MESSAGES STEP 2 MESSAGES \
+             UNBRANCHED TO projected SET value = COUNT(input.value) ON MESSAGE ERROR LOG;",
+            "CREATE INFERENCER score FROM features USING RESOURCE fraud_model VERSION 1 FILE \
+             'models/simple_score.onnx' INPUTS { \"features\" DENSE TENSOR<F32>[2] = input.vector \
+             } OUTPUT SCHEMA { \"score\" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = \
+             score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE WASM PROCESSOR filter_even FROM raw USING RESOURCE wasm_filter VERSION 1 FILE \
+             'processors/filter_even.wasm' UNBRANCHED TO projected ON MESSAGE ERROR LOG ON GLOBAL \
+             ERROR LOG;",
         ] {
             parse_statement(statement).unwrap_or_else(|error| {
                 panic!("statement should parse: {statement}\n{error:?}");
@@ -2069,16 +2047,18 @@ mod tests {
     fn canonical_roundtrip_ingestor() {
         let input = r#"
             CREATE INGESTOR kafka_notifications
-                TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-                ON MESSAGE ERROR LOG DECODE USING notification_kafka_message
-                BRANCHED BY user_id_kind_branch
-                VALUES { user_id = notifications.user_id, kind = notifications.kind }
-
                 FROM
                     KAFKA kafka_main
                     TOPIC notifications
                     OFFSET BY CONSUMER GROUP nervix_consumer
-                    MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON GENERAL ERROR LOG;
+                    MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+                DECODE USING notification_kafka_message
+                TO notifications
+                    BRANCHED BY user_id_kind_branch
+                    SET user_id = message.user_id, kind = message.kind
+                    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                    ON MESSAGE ERROR LOG
+                ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2094,14 +2074,15 @@ mod tests {
     fn canonical_roundtrip_prometheus_ingestor() {
         let input = r#"
             CREATE INGESTOR prom_samples
-                TO samples FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-                ON MESSAGE ERROR LOG DECODE USING sample_codec
-                BRANCHED BY source_branch
-                VALUES { source = samples.source }
-
                 FROM PROMETHEUS prom_main
                 QUERY 'label_replace(vector(42.5), "source", "local", "", "")'
-                EVERY 15s ON GENERAL ERROR LOG;
+                EVERY 15s
+                DECODE USING sample_codec
+                TO samples
+                    BRANCHED BY source_branch SET source = message.source
+                    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                    ON MESSAGE ERROR LOG
+                ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2133,8 +2114,9 @@ mod tests {
         let input = r#"
             CREATE JUNCTION join_streams
                 FROM ss1, ss2, ss3
-                TO ss10 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-                BRANCHED BY tenant;
+                BRANCHED BY tenant
+                TO ss10 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2150,10 +2132,12 @@ mod tests {
     fn canonical_roundtrip_deduplicator() {
         let input = r#"
             CREATE DEDUPLICATOR dedup_txns
-                FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+                FROM ss1
+                DEDUPLICATE ON input.transaction_id
+                MAX TIME 10m
                 BRANCHED BY tenant
-                DEDUPLICATE ON ss1.transaction_id
-                MAX TIME 10m;
+                TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2171,7 +2155,8 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO KAFKA broker1 TOPIC topic ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO KAFKA broker1 TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2189,7 +2174,8 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO PULSAR pulsar_main TOPIC topic ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO PULSAR pulsar_main TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2207,7 +2193,8 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO RABBITMQ broker1 QUEUE outbox ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO RABBITMQ broker1 QUEUE outbox FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2225,7 +2212,8 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO REDIS PUBSUB broker1 CHANNEL outbox ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO REDIS PUBSUB broker1 CHANNEL outbox FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");

@@ -28,23 +28,26 @@ Feature: ZeroMQ emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER zeromq_notifications
-        FROM notifications
-        ENCODE USING notification_codec
-        TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER zeromq_notifications FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_main
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And emitter "zeromq_notifications" enters stall mode
@@ -94,13 +97,11 @@ Feature: ZeroMQ emission
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_state_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY state_notifications
         SCHEMA notification BRANCHED BY by_state_source
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-        CREATE IF NOT EXISTS BRANCH by_notifications_source SCHEMA user_id_branch TTL 5m;
-        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_notifications_source;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_state_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT state_ingress
         ON edge
@@ -111,17 +112,25 @@ Feature: ZeroMQ emission
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR state_source
-        TO state_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_state_source VALUES { user_id = state_notifications.user_id }
-
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO state_notifications
+        INHERIT ALL
+        BRANCHED BY by_state_source
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE INGESTOR notifications_source
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT notifications_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_notifications_source VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT notifications_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_state_source
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {
@@ -131,8 +140,13 @@ Feature: ZeroMQ emission
         CREATE EMITTER zeromq_notifications
         FROM notifications
         ENCODE USING notification_codec
+        USING MATERIALIZED STATE state_notifications REQUIRED WAIT
         TO ZEROMQ zeromq_main
-        SET notifications.source = state_notifications.source ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        INHERIT ALL EXCEPT source
+        SET source = relay_state.state_notifications.source
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/state"

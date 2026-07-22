@@ -49,16 +49,24 @@ Feature: Graceful shutdown
         TYPE HTTP;
 
       CREATE INGESTOR source_txns
-        TO inbound FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
         DECODE USING transaction_codec
-        BRANCHED BY by_source_txns VALUES { transaction_id = inbound.transaction_id }
+        TO inbound
+        INHERIT ALL
+        BRANCHED BY by_source_txns
+        SET transaction_id = message.transaction_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR dedup_txns
-        FROM inbound TO deduped FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_source_txns
-        DEDUPLICATE ON inbound.transaction_id
-        MAX TIME 10m;
+      CREATE DEDUPLICATOR dedup_txns FROM inbound
+        DEDUPLICATE ON input.transaction_id
+        MAX TIME 10m
+        BRANCHED BY by_source_txns
+        TO deduped
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
       """
     When all nodes are gracefully stopped
     Then the last cluster operation completes within "5s"

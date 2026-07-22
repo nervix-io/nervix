@@ -1,7 +1,7 @@
 Feature: Schema type strictness
   Scenario Outline: Branching values must exactly match branch schema field types
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "BY value field 'tenant' type mismatch"
+    When these NSPL commands fail with "branch SET compile failed: SET field 'tenant' has expression type Utf8, expected declared output type UInt32"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( tenant STRING );
@@ -12,11 +12,15 @@ Feature: Schema type strictness
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE INGESTOR kafka_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP strict_types MODE NO_ACK PARALLEL MAX 10
         DECODE USING notification_codec
-        BRANCHED BY by_kafka_notifications VALUES { tenant = notifications.tenant }
-
-        FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP strict_types MODE NO_ACK PARALLEL MAX 10 ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_kafka_notifications
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       """
 
     Examples:
@@ -55,7 +59,7 @@ Feature: Schema type strictness
       | 1            |
       | 3            |
 
-  Scenario Outline: Filter-map projections must explicitly drop source-only fields
+  Scenario Outline: Route-local projections validate explicit output targets
     Given a <cluster_size> node nervix cluster is started
     When these NSPL commands are executed
       """
@@ -68,41 +72,32 @@ Feature: Schema type strictness
         id STRING
       );
       CREATE RELAY inbound_events SCHEMA inbound_event UNBRANCHED;
-      CREATE RELAY missing_unset_events SCHEMA projected_event UNBRANCHED;
       CREATE RELAY unknown_set_events SCHEMA projected_event UNBRANCHED;
       CREATE RELAY valid_projected_events SCHEMA projected_event UNBRANCHED;
       """
-    When these NSPL commands fail with "source field 'inbound_events.legacy' is not declared in the output schema and must be listed in UNSET"
-      """
-      CREATE DEDUPLICATOR missing_unset_projection
-        FROM inbound_events
-        TO missing_unset_events FLUSH IMMEDIATE
-          SET missing_unset_events.id = inbound_events.id ON MESSAGE ERROR LOG
-        UNBRANCHED
-        DEDUPLICATE ON inbound_events.id
-        MAX TIME 10m;
-      """
-    When these NSPL commands fail with "SET field 'extra' is not declared in the output schema"
+    When these NSPL commands fail with "SET targets unknown output field 'extra'"
       """
       CREATE DEDUPLICATOR unknown_set_projection
         FROM inbound_events
-        TO unknown_set_events FLUSH IMMEDIATE
-          SET unknown_set_events.extra = "x"
-          UNSET inbound_events.legacy ON MESSAGE ERROR LOG
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
         UNBRANCHED
-        DEDUPLICATE ON inbound_events.id
-        MAX TIME 10m;
+        TO unknown_set_events
+          SET extra = "x"
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
       """
     When these NSPL commands are executed
       """
       CREATE DEDUPLICATOR valid_projection
         FROM inbound_events
-        TO valid_projected_events FLUSH IMMEDIATE
-          SET valid_projected_events.id = inbound_events.id
-          UNSET inbound_events.legacy ON MESSAGE ERROR LOG
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
         UNBRANCHED
-        DEDUPLICATE ON inbound_events.id
-        MAX TIME 10m;
+        TO valid_projected_events
+          SET id = input.id
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
       """
 
     Examples:
@@ -135,23 +130,27 @@ Feature: Schema type strictness
       """
       CREATE DEDUPLICATOR null_required_projection
         FROM nullable_inbound_events
-        TO required_projected_events FLUSH IMMEDIATE
-          SET required_projected_events.memo = NULL
-          UNSET nullable_inbound_events.legacy ON MESSAGE ERROR LOG
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
         UNBRANCHED
-        DEDUPLICATE ON nullable_inbound_events.id
-        MAX TIME 10m;
+        TO required_projected_events
+          SET id = input.id,
+              memo = NULL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
       """
     When these NSPL commands are executed
       """
       CREATE DEDUPLICATOR null_optional_projection
         FROM nullable_inbound_events
-        TO nullable_projected_events FLUSH IMMEDIATE
-          SET nullable_projected_events.memo = NULL
-          UNSET nullable_inbound_events.legacy ON MESSAGE ERROR LOG
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
         UNBRANCHED
-        DEDUPLICATE ON nullable_inbound_events.id
-        MAX TIME 10m;
+        TO nullable_projected_events
+          SET id = input.id,
+              memo = NULL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
       """
 
     Examples:

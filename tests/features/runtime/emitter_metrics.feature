@@ -25,21 +25,26 @@ Feature: Emitter metrics
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics' TYPE HTTP;
         CREATE INGESTOR emitter_metrics_source
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT emitter_metrics_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_emitter_metrics_source VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT emitter_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_emitter_metrics_source
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER emitter_metrics_node
-        FROM notifications
-        ENCODE USING notification_codec
-        TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER emitter_metrics_node FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_main
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/emitter-metrics"

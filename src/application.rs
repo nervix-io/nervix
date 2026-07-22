@@ -76,20 +76,20 @@ use nervix_interconnect::{
     TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    BranchInitiatorSelection, BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain,
-    CreateEmitter, CreateEndpoint, CreateInferencer, CreateIngestor, CreateLookup,
-    CreateReingestor, CreateReorderer, CreateResource, CreateStatement, CreateUser,
-    CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
-    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeLookup, DescribeReingestor,
-    DescribeRelay, DescribeReorderer, DescribeResource, DescribeWasmProcessor,
-    DescribeWindowProcessor, Domain, DomainConfig, DomainPace, DomainStartPoint, DomainState,
-    DomainStatus, DomainTick, EmitSink, IcebergCatalog, Identifier, InferencerTensorDimension,
-    InferencerTensorMapping, InferencerTensorSchema, IngestSource, IngestTimestampSource,
-    KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind, MongoDbConflictAction,
-    MySqlConflictAction, ParseAsType, PostgresConflictAction, ProcessorInputs, ProcessorOutputs,
-    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ScheduledNode,
-    ShowRelayMaterializedState, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp, UploadResource, VhostTlsResource,
+    BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter,
+    CreateEndpoint, CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor,
+    CreateReorderer, CreateResource, CreateStatement, CreateUser, CreateWindowProcessor,
+    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
+    DescribeIngestor, DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig,
+    DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog,
+    Identifier, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
+    IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind,
+    MongoDbConflictAction, MySqlConflictAction, ParseAsType, PostgresConflictAction,
+    ProcessorInputs, ProcessorOutputs, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
+    UploadResource, VhostTlsResource, expression_to_nspl,
 };
 use nervix_nspl::{
     Token, Word,
@@ -100,7 +100,7 @@ use nervix_nspl::{
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
     window_processor::aggregate::{
-        WindowAggregateDemand, WindowAggregateProgram, parse_aggregate_program,
+        WindowAggregateDemand, WindowAggregateProgram, lower_window_assignments,
     },
 };
 use opentelemetry::trace::TracerProvider as _;
@@ -3683,7 +3683,6 @@ impl SessionServiceImpl {
 
     async fn validate_inferencer_binding(
         &self,
-        domain: &Domain,
         processor: &CreateInferencer,
     ) -> Result<(), String> {
         processor.execution_mode().map_err(|error| {
@@ -3707,14 +3706,13 @@ impl SessionServiceImpl {
                 processor.file
             ));
         }
-        self.validate_inferencer_model_metadata(domain, processor, &path)
+        self.validate_inferencer_model_metadata(processor, &path)
             .await?;
         Ok(())
     }
 
     async fn validate_inferencer_model_metadata(
         &self,
-        domain: &Domain,
         processor: &CreateInferencer,
         path: &std::path::Path,
     ) -> Result<(), String> {
@@ -3762,30 +3760,16 @@ impl SessionServiceImpl {
         model_metadata.validate_binding_names(processor)?;
 
         for mapping in &processor.inputs {
-            if !processor.from.relays().contains(&mapping.relay) {
-                let declared_sources = processor_input_names(&processor.from);
-                return Err(format!(
-                    "inferencer '{}' INPUTS tensor '{}' must map from one of [{}], got '{}'",
-                    processor.name.as_str(),
-                    mapping.tensor,
-                    declared_sources,
-                    mapping.relay.as_str()
-                ));
-            }
             let model_type = model_metadata
                 .inputs
                 .get(&mapping.tensor)
                 .expect("validated ONNX input binding must exist");
-            let field_type = self
-                .relay_field_type(domain, &mapping.relay, &mapping.field)
-                .await?;
             model_type.validate_declared_schema(
                 processor,
                 "input",
                 &mapping.tensor,
                 &mapping.schema,
             )?;
-            validate_inferencer_field_type(processor, "input", mapping, &field_type)?;
         }
 
         for declaration in &processor.output_schema {
@@ -3849,30 +3833,6 @@ impl SessionServiceImpl {
             inputs: model_inputs,
             outputs: model_outputs,
         })
-    }
-
-    async fn relay_field_type(
-        &self,
-        domain: &Domain,
-        relay: &Identifier,
-        field: &Identifier,
-    ) -> Result<ParseAsType, String> {
-        let schema = self
-            .subscription_stream_schema(domain, relay)
-            .await?
-            .ok_or_else(|| format!("stream '{}' does not exist", relay.as_str()))?;
-        schema
-            .fields
-            .iter()
-            .find(|candidate| candidate.name == *field)
-            .map(|field| field.ty.clone())
-            .ok_or_else(|| {
-                format!(
-                    "field '{}.{}' does not exist",
-                    relay.as_str(),
-                    field.as_str()
-                )
-            })
     }
 
     async fn refresh_http_tls_server_config(&self) -> Result<(), String> {
@@ -5432,11 +5392,24 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         };
-        let aggregate = match parse_aggregate_program(&processor.aggregate) {
-            Ok(program) => program.inner,
+        let aggregate = match processor
+            .output_routes
+            .routes
+            .iter()
+            .map(|output| {
+                lower_window_assignments(&output.construction).map(|program| program.inner)
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(programs) if !programs.is_empty() => {
+                WindowAggregateProgram::combine_route_programs(&programs)
+            }
+            Ok(_) => {
+                return command_error("window processor has no output routes".to_string());
+            }
             Err(error) => {
                 return command_error(format!(
-                    "failed to parse aggregate definition for window processor '{}': {error:?}",
+                    "failed to lower aggregate outputs for window processor '{}': {error}",
                     describe.name.as_str()
                 ));
             }
@@ -6161,7 +6134,7 @@ impl SessionServiceImpl {
                 ));
             }
             if let Model::Inferencer(processor) = model.as_ref()
-                && let Err(error) = self.validate_inferencer_binding(&domain, processor).await
+                && let Err(error) = self.validate_inferencer_binding(processor).await
             {
                 return command_error(format!(
                     "invalid INFERENCER '{}': {error}",
@@ -6410,7 +6383,7 @@ impl SessionServiceImpl {
                     ));
                 }
                 if let Model::Inferencer(processor) = model.as_ref()
-                    && let Err(error) = self.validate_inferencer_binding(domain, processor).await
+                    && let Err(error) = self.validate_inferencer_binding(processor).await
                 {
                     return command_error(format!(
                         "invalid INFERENCER '{}': {error}",
@@ -9234,8 +9207,7 @@ impl SessionServiceImpl {
                 let filter_map = match compile_session_filter_map_program(
                     domain,
                     &subscription.relay,
-                    std::slice::from_ref(&subscription.relay),
-                    subscription.filter_map.as_deref(),
+                    subscription.where_clause.as_ref(),
                     schema.arrow_schema(),
                     input_sensitivity.clone(),
                     RuntimeVmCompileContext {
@@ -9579,10 +9551,6 @@ fn format_ingestor_describe_output(
             format_timestamp_source(ingestor.timestamp_source.as_ref())
         ),
         format!(
-            "branch: {}",
-            format_branch_initiator_selection(&ingestor.branched_by)
-        ),
-        format!(
             "status: {}",
             if summary.running {
                 "running"
@@ -9682,11 +9650,12 @@ fn format_branch_selection(branched_by: &BranchSelection) -> &str {
         .unwrap_or("UNBRANCHED")
 }
 
-fn format_branch_initiator_selection(branched_by: &BranchInitiatorSelection) -> &str {
-    branched_by
-        .branch()
-        .map(Identifier::as_str)
-        .unwrap_or("UNBRANCHED")
+fn format_output_branch(branch: Option<&nervix_models::OutputBranch>) -> &str {
+    match branch {
+        Some(nervix_models::OutputBranch::BranchedBy { branch, .. }) => branch.as_str(),
+        Some(nervix_models::OutputBranch::Unbranched) => "UNBRANCHED",
+        None => "NODE-WIDE",
+    }
 }
 
 fn append_metrics_lines(mut output: String, metrics: Vec<String>) -> String {
@@ -9787,13 +9756,14 @@ fn format_processor_output_lines(outputs: &ProcessorOutputs) -> Vec<String> {
             })
             .unwrap_or_else(|| "none".to_string());
         lines.push(format!(
-            "output {index}: into={} filter-map={} flush={flush}",
+            "output {index}: into={} construction={} branch={} flush={flush}",
             output.relay.as_str(),
-            if output.filter_map.is_some() {
+            if !output.construction.is_empty() {
                 "present"
             } else {
                 "none"
-            }
+            },
+            format_output_branch(output.branch.as_ref())
         ));
     }
 
@@ -9833,6 +9803,16 @@ fn format_lookup_describe_output(
     lines.join("\n")
 }
 
+fn format_expression_list(expressions: &[nervix_models::Expression]) -> String {
+    expressions
+        .iter()
+        .map(|expression| {
+            expression_to_nspl(expression).unwrap_or_else(|error| format!("<invalid: {error}>"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn format_deduplicator_describe_output(
     name: &Identifier,
     deduplicator: &CreateDeduplicator,
@@ -9846,7 +9826,10 @@ fn format_deduplicator_describe_output(
     lines.extend([
         format!("from: {}", processor_input_names(&deduplicator.from)),
         format!("mode: {}", deduplicator.mode.as_ref()),
-        format!("deduplicate on: {}", deduplicator.deduplicate_on),
+        format!(
+            "deduplicate on: {}",
+            format_expression_list(&deduplicator.deduplicate_on)
+        ),
         format!("max time: {}", deduplicator.max_time),
         format!(
             "filter-where: {}",
@@ -9863,7 +9846,10 @@ fn format_deduplicator_describe_output(
         "structure 0:".to_string(),
         "  function: DEDUPLICATE_ON".to_string(),
         "  storage: recent_key_set".to_string(),
-        format!("  key expressions: {}", deduplicator.deduplicate_on),
+        format!(
+            "  key expressions: {}",
+            format_expression_list(&deduplicator.deduplicate_on)
+        ),
         format!("  max time: {}", deduplicator.max_time),
     ]);
     lines.extend(format_processor_output_lines(&deduplicator.output_routes));
@@ -9882,10 +9868,6 @@ fn format_reingestor_describe_output(
     lines.extend(format_schedule_placement_lines(scheduled_node));
     lines.extend([
         format!("from: {}", processor_input_names(&reingestor.from)),
-        format!(
-            "branch: {}",
-            format_branch_initiator_selection(&reingestor.branched_by)
-        ),
         format!("mode: {}", reingestor.mode.as_ref()),
         format!(
             "filter-where: {}",
@@ -9919,7 +9901,11 @@ fn format_correlator_describe_output(
         ),
         format!("mode: {}", correlator.mode.as_ref()),
         format!("match: {}", correlator.match_policy.as_ref()),
-        format!("correlate where: {}", correlator.correlate_where),
+        format!(
+            "correlate where: {}",
+            expression_to_nspl(&correlator.correlate_where)
+                .unwrap_or_else(|error| format!("<invalid: {error}>"))
+        ),
         format!("max time: {}", correlator.max_time),
         format!(
             "filter-where: {}",
@@ -9967,7 +9953,7 @@ fn format_reorderer_describe_output(
     lines.extend([
         format!("from: {}", processor_input_names(&reorderer.from)),
         format!("mode: {}", reorderer.mode.as_ref()),
-        format!("order by: {}", reorderer.order_by),
+        format!("order by: {}", format_expression_list(&reorderer.order_by)),
         format!("max time: {}", reorderer.max_time),
         format!(
             "filter-where: {}",
@@ -10028,7 +10014,7 @@ fn format_emitter_describe_output(
         format!("sink: {}", format_emit_sink(&emitter.sink)),
         format!(
             "filter-map: {}",
-            if emitter.filter_map.is_some() {
+            if !emitter.construction.is_empty() {
                 "present"
             } else {
                 "none"
@@ -11272,51 +11258,6 @@ fn resolve_resource_version(
     }
 
     resolve_latest_resource_version(resources, identifier)
-}
-
-fn inferencer_parse_as_label(ty: &ParseAsType) -> String {
-    match ty {
-        ParseAsType::U8 => "U8".to_string(),
-        ParseAsType::I8 => "I8".to_string(),
-        ParseAsType::U16 => "U16".to_string(),
-        ParseAsType::I16 => "I16".to_string(),
-        ParseAsType::U32 => "U32".to_string(),
-        ParseAsType::I32 => "I32".to_string(),
-        ParseAsType::U64 => "U64".to_string(),
-        ParseAsType::I64 => "I64".to_string(),
-        ParseAsType::Bool => "BOOL".to_string(),
-        ParseAsType::String => "STRING".to_string(),
-        ParseAsType::Datetime => "DATETIME".to_string(),
-        ParseAsType::F32 => "F32".to_string(),
-        ParseAsType::F64 => "F64".to_string(),
-        ParseAsType::Array { element, len } => {
-            format!("ARRAY<{}, {}>", inferencer_parse_as_label(element), len)
-        }
-        ParseAsType::Vec { element } => format!("VEC<{}>", inferencer_parse_as_label(element)),
-    }
-}
-
-fn validate_inferencer_field_type(
-    processor: &CreateInferencer,
-    direction: &str,
-    mapping: &InferencerTensorMapping,
-    field_type: &ParseAsType,
-) -> Result<(), String> {
-    if !mapping.schema.is_compatible_with_field_type(field_type) {
-        return Err(format!(
-            "inferencer '{}' {} tensor '{}' field '{}.{}' has incompatible element type or shape: \
-             declared tensor dimensions {:?} require one matching ARRAY axis per fixed dimension \
-             and one VEC axis per DYNAMIC dimension; internal field is {}",
-            processor.name.as_str(),
-            direction,
-            mapping.tensor,
-            mapping.relay.as_str(),
-            mapping.field.as_str(),
-            mapping.schema.dimensions,
-            inferencer_parse_as_label(field_type)
-        ));
-    }
-    Ok(())
 }
 
 async fn load_vhost_tls_materials(
@@ -15170,16 +15111,16 @@ mod tests {
             "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
-            "CREATE INGESTOR notifications_ingestor TO notifications FLUSH EACH 100ms MAX BATCH \
-             SIZE 1MiB ON MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  TIMESTAMP \
-             NOW FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP \
-             notifications_group MODE NO_ACK PARALLEL MAX 1 ON GENERAL ERROR LOG;",
-            "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications TO \
-             forwarded_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
-             UNBRANCHED DEDUPLICATE ON notifications.user_id MAX TIME 10m;",
+            "CREATE INGESTOR notifications_ingestor FROM KAFKA kafka_main TOPIC notifications \
+             OFFSET BY CONSUMER GROUP notifications_group MODE NO_ACK PARALLEL MAX 1 DECODE USING \
+             notification_codec TIMESTAMP NOW TO notifications INHERIT ALL UNBRANCHED FLUSH EACH \
+             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications DEDUPLICATE ON \
+             input.user_id MAX TIME 10m UNBRANCHED TO forwarded_notifications INHERIT ALL FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
             "CREATE DETACHED EMITTER kafka_forward FROM notifications ENCODE USING \
-             notification_codec TO KAFKA kafka_main TOPIC notifications_out ON MESSAGE ERROR LOG \
-             ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;",
+             notification_codec TO KAFKA kafka_main TOPIC notifications_out INHERIT ALL FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         ];
 
         for command in commands {
@@ -15344,17 +15285,17 @@ mod tests {
             "CREATE RELAY notifications_all SCHEMA notification UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
-            "CREATE INGESTOR ingest_a TO notifications_a FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-             MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  TIMESTAMP NOW FROM \
-             KAFKA kafka_main TOPIC notifications_a OFFSET BY CONSUMER GROUP \
-             notifications_a_group MODE NO_ACK PARALLEL MAX 1 ON GENERAL ERROR LOG;",
-            "CREATE INGESTOR ingest_b TO notifications_b FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-             MESSAGE ERROR LOG DECODE USING notification_codec UNBRANCHED  TIMESTAMP NOW FROM \
-             KAFKA kafka_main TOPIC notifications_b OFFSET BY CONSUMER GROUP \
-             notifications_b_group MODE NO_ACK PARALLEL MAX 1 ON GENERAL ERROR LOG;",
-            "CREATE JUNCTION join_streams FROM notifications_a, notifications_b TO \
-             notifications_all FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG \
-             UNBRANCHED;",
+            "CREATE INGESTOR ingest_a FROM KAFKA kafka_main TOPIC notifications_a OFFSET BY \
+             CONSUMER GROUP notifications_a_group MODE NO_ACK PARALLEL MAX 1 DECODE USING \
+             notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            "CREATE INGESTOR ingest_b FROM KAFKA kafka_main TOPIC notifications_b OFFSET BY \
+             CONSUMER GROUP notifications_b_group MODE NO_ACK PARALLEL MAX 1 DECODE USING \
+             notification_codec TIMESTAMP NOW TO notifications_b INHERIT ALL UNBRANCHED FLUSH \
+             EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            "CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO \
+             notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
+             LOG;",
         ] {
             let result = service
                 .process_command(
@@ -15513,13 +15454,13 @@ mod tests {
             "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
              };",
-            "CREATE INGESTOR inbound_ingestor TO inbound FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-             MESSAGE ERROR LOG DECODE USING transaction_codec UNBRANCHED  TIMESTAMP NOW FROM \
-             KAFKA kafka_main TOPIC inbound OFFSET BY CONSUMER GROUP inbound_group MODE NO_ACK \
-             PARALLEL MAX 1 ON GENERAL ERROR LOG;",
-            "CREATE DEDUPLICATOR dedup_txns FROM inbound TO deduped FLUSH EACH 100ms MAX BATCH \
-             SIZE 1MiB ON MESSAGE ERROR LOG UNBRANCHED DEDUPLICATE ON inbound.transaction_id MAX \
-             TIME 10m;",
+            "CREATE INGESTOR inbound_ingestor FROM KAFKA kafka_main TOPIC inbound OFFSET BY \
+             CONSUMER GROUP inbound_group MODE NO_ACK PARALLEL MAX 1 DECODE USING \
+             transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms \
+             MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            "CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX \
+             TIME 10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
+             MESSAGE ERROR LOG;",
         ] {
             let result = service
                 .process_command(
@@ -15566,7 +15507,10 @@ mod tests {
                 .as_str(),
             "deduped"
         );
-        assert_eq!(deduplicator.deduplicate_on, "inbound.transaction_id");
+        assert_eq!(
+            deduplicator.deduplicate_on,
+            vec![nervix_nspl::parse_expression("input.transaction_id").expect("valid expression")]
+        );
         assert_eq!(deduplicator.max_time, "10m");
         assert_eq!(deduplicator.mode, nervix_models::AckMode::Attached);
 
@@ -15816,8 +15760,8 @@ mod tests {
     #[test]
     fn parse_server_statement_accepts_junction_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE JUNCTION join_streams FROM ss1, ss2 TO ss10 FLUSH EACH 100ms MAX BATCH SIZE \
-             1MiB ON MESSAGE ERROR LOG UNBRANCHED;",
+            "CREATE JUNCTION join_streams FROM ss1, ss2 UNBRANCHED TO ss10 INHERIT ALL FLUSH EACH \
+             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
         )
         .expect("junction statement should parse");
         let Statement::Create(model) = parsed else {
@@ -15829,8 +15773,9 @@ mod tests {
     #[test]
     fn parse_server_statement_accepts_deduplicator_from_application_crate() {
         let parsed = nervix_nspl::server_statement::parse_server_statement(
-            "CREATE DEDUPLICATOR dedup_txns FROM ss1 TO ss2 FLUSH EACH 100ms MAX BATCH SIZE 1MiB \
-             ON MESSAGE ERROR LOG UNBRANCHED DEDUPLICATE ON ss1.transaction_id MAX TIME 10m;",
+            "CREATE DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON input.transaction_id MAX TIME \
+             10m UNBRANCHED TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
+             ERROR LOG;",
         )
         .expect("deduplicator statement should parse");
         let Statement::Create(model) = parsed else {

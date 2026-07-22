@@ -26,11 +26,15 @@ Feature: HTTP endpoint ingestion
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -81,11 +85,14 @@ Feature: HTTP endpoint ingestion
         TYPE HTTP;
 
       CREATE INGESTOR raw_metrics_source
-        TO raw_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION raw_metrics_subscription TO raw_metrics;
       START;
@@ -156,11 +163,15 @@ Feature: HTTP endpoint ingestion
         PATH '/ingest'
         TYPE HTTP;
       CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """

@@ -52,7 +52,6 @@ impl NatsIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let branching = dependencies.branching;
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -62,7 +61,6 @@ impl NatsIngestor {
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
             let task_timestamp_source = ingestor.timestamp_source.clone();
-            let task_branch_value_mappings = dependencies.branch_value_mappings.clone();
             let task_subject = subject.clone();
             let task_queue_group = queue_group.clone();
             let task_events = runtime.events.clone();
@@ -71,7 +69,6 @@ impl NatsIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
-            let task_branching = branching.clone();
             let task_branched_senders = branched_senders.clone();
             let task = tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
@@ -201,8 +198,6 @@ impl NatsIngestor {
                                                         domain: &task_domain,
                                                         ingestor: &task_ingestor,
                                                         timestamp_source: task_timestamp_source.as_ref(),
-                                                        branching: &task_branching,
-                                                        branch_value_mappings: Some(&task_branch_value_mappings),
                                                         output_routes: &mut output_routes,
                                                         filter_where: task_filter_where.as_ref(),
                                                         branched_senders:

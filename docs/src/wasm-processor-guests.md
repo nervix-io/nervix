@@ -49,7 +49,13 @@ The host enforces a maximum guest buffer size. A guest should still validate siz
 
 ## Init Payload
 
-`nervix_init` receives the `BranchInit` variant of the size-prefixed FlatBuffers `Message` union. `output_schemas` contains one schema per declared `TO` relay. A guest output envelope must name one of those relays and provide one destination-aligned column descriptor per field before Nervix applies the route-level `SET` and `WHERE` clauses. `UNSET` is not valid on WASM output routes. The authoritative cross-language schema is [`crates/nervix-wasm-protocol/schema/nervix_wasm.fbs`](https://github.com/nervix-io/nervix/blob/main/crates/nervix-wasm-protocol/schema/nervix_wasm.fbs).
+`nervix_init` receives the `BranchInit` variant of the size-prefixed FlatBuffers `Message` union.
+`output_schemas` contains one schema per declared `TO` relay. A guest output envelope must name one
+of those relays and provide one destination-aligned column descriptor per field before Nervix
+applies the route-level `SET` and `WHERE` clauses. WASM routes are set-only: they reject `INHERIT`
+and `UNSET`, and construction does not expose `message` or `input`. Guest-generated columns form an
+immutable base independently visible to every route. The authoritative cross-language schema is
+[`crates/nervix-wasm-protocol/schema/nervix_wasm.fbs`](https://github.com/nervix-io/nervix/blob/main/crates/nervix-wasm-protocol/schema/nervix_wasm.fbs).
 
 ```text
 {

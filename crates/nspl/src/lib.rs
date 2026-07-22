@@ -32,6 +32,8 @@ pub mod lookup;
 pub mod lookup_query;
 pub mod node_control;
 mod parser_support;
+mod semantic_program;
+pub use semantic_program::{parse_expression, parse_expression_list, parse_route_construction};
 pub mod reingestor;
 pub mod relay;
 pub mod reorderer;

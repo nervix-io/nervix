@@ -69,12 +69,16 @@ Feature: Relay capacity
 
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity' TYPE HTTP; CREATE INGESTOR relay_capacity_source
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT relay_capacity_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_relay_capacity_source VALUES { tenant = notifications.tenant }
-
         TIMESTAMP NOW
-        FROM ENDPOINT relay_capacity_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_relay_capacity_source
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
@@ -160,16 +164,20 @@ Feature: Relay capacity
       CREATE ENDPOINT relay_capacity_shrink_ingress ON edge PATH '/relay-capacity-shrink' TYPE HTTP;
 
       CREATE INGESTOR relay_capacity_shrink_source
-        TO notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT relay_capacity_shrink_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT relay_capacity_shrink_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE EMITTER zeromq_capacity_shrink_out
-        FROM notifications
-        ENCODE USING notification_codec
-        TO ZEROMQ zeromq_capacity_shrink ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH IMMEDIATE;
+      CREATE EMITTER zeromq_capacity_shrink_out FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_capacity_shrink
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       START;
       """

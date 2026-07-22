@@ -105,7 +105,7 @@ pub struct SubscriptionRequest {
     pub relay: String,
     pub delivery_behavior: SubscriptionDeliveryBehavior,
     pub batch_sample_rate: Option<String>,
-    pub filter_map: Option<String>,
+    pub where_clause: Option<nervix_models::Expression>,
 }
 
 #[derive(Debug, Error)]
@@ -984,7 +984,7 @@ impl SubscriptionRequest {
             relay: relay.into(),
             delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
             batch_sample_rate: None,
-            filter_map: None,
+            where_clause: None,
         }
     }
 
@@ -1003,8 +1003,8 @@ impl SubscriptionRequest {
         self
     }
 
-    pub fn with_filter_map(mut self, filter_map: impl Into<String>) -> Self {
-        self.filter_map = Some(filter_map.into());
+    pub fn with_where_clause(mut self, where_clause: nervix_models::Expression) -> Self {
+        self.where_clause = Some(where_clause);
         self
     }
 
@@ -1014,7 +1014,7 @@ impl SubscriptionRequest {
             &self.relay,
             self.delivery_behavior,
             self.batch_sample_rate.as_deref(),
-            self.filter_map.as_deref(),
+            self.where_clause.as_ref(),
         )
     }
 }
@@ -1175,22 +1175,17 @@ mod tests {
             "CREATE SUBSCRIPTION live_orders TO orders;"
         );
 
-        let filtered = SubscriptionRequest::new("acme_orders", "orders")
-            .with_filter_map("SET seen = true UNSET raw WHERE tenant = \"acme\"");
-        assert_eq!(
-            filtered.to_query(),
-            "CREATE SUBSCRIPTION acme_orders TO orders SET seen = true UNSET raw WHERE tenant = \
-             \"acme\";"
-        );
-
         let sampled = SubscriptionRequest::new("sampled_orders", "orders")
             .dropping()
             .with_batch_sample_rate("0.1")
-            .with_filter_map("WHERE tenant = \"acme\"");
+            .with_where_clause(
+                nervix_nspl::parse_expression("input.tenant = \"acme\"")
+                    .expect("valid subscription expression"),
+            );
         assert_eq!(
             sampled.to_query(),
             "CREATE SUBSCRIPTION sampled_orders TO orders DROPPING BATCH SAMPLE RATE 0.1 WHERE \
-             tenant = \"acme\";"
+             (input.tenant = 'acme');"
         );
 
         assert_eq!(

@@ -1,10 +1,10 @@
-use std::{sync::Arc as StdArc, time::Duration};
+use std::{collections::VecDeque, sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use nervix_models::{
-    AckMode, BranchValueMapping, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-    CorrelatorMatchPolicy, ErrorPolicies, Identifier, InferencerTensorDeclaration,
-    InferencerTensorMapping, MessageErrorPolicy, ModelKind, Timestamp, WindowBound,
+    AckMode, Assignment, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+    ErrorPolicies, Identifier, InferencerTensorDeclaration, InferencerTensorMapping,
+    MessageErrorPolicy, ModelKind, StructuredMessageError, Timestamp, WindowBound,
 };
 use nervix_nspl::{
     vm_program::{FieldRef, Program as VmProgram, SpannedNode},
@@ -29,7 +29,9 @@ use super::{
 };
 use crate::{
     runtime_ack::AckSet,
-    runtime_schema::{CompiledSchema, RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata},
+    runtime_schema::{
+        CompiledSchema, RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
+    },
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
@@ -50,7 +52,7 @@ pub(super) struct BranchedIngestorSpec {
     pub(super) root_relay: Identifier,
     pub(super) branch_ttl: Option<String>,
     pub(super) branch_max_instances: Option<u64>,
-    pub(super) entrypoint_branch_mappings: Vec<BranchValueMapping>,
+    pub(super) entrypoint_branch_assignments: Vec<Assignment>,
     pub(super) entrypoint_ack_boundary: BranchInstanceAckBoundary,
     pub(super) entrypoint_flush_each: String,
     pub(super) entrypoint_max_batch_size: Option<String>,
@@ -72,8 +74,9 @@ pub(super) struct BranchedProcessorSpec {
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) from_where: HashMap<Identifier, String>,
-    pub(super) filter_where: Option<String>,
+    pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
+    pub(super) filter_where: Option<nervix_models::Expression>,
+    pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
     pub(super) operation: BranchedProcessorOperationSpec,
 }
 
@@ -81,25 +84,24 @@ pub(super) struct BranchedProcessorSpec {
 pub(super) enum BranchedProcessorOperationSpec {
     Deduplicator {
         output_routes: BranchedProcessorOutputsSpec,
-        deduplicate_on: String,
+        deduplicate_on: Vec<nervix_models::Expression>,
         max_time: String,
     },
     WindowProcessor {
         output_routes: BranchedProcessorOutputsSpec,
         width: WindowBound,
         step: WindowBound,
-        aggregate: String,
     },
     Reorderer {
         output_routes: BranchedProcessorOutputsSpec,
-        order_by: String,
+        order_by: Vec<nervix_models::Expression>,
         max_time: String,
     },
     Correlator {
         output_routes: BranchedProcessorOutputsSpec,
         left_relays: Vec<Identifier>,
         right_relays: Vec<Identifier>,
-        correlate_where: String,
+        correlate_where: nervix_models::Expression,
         match_policy: CorrelatorMatchPolicy,
         max_time: String,
         timeout_policy: CorrelationTimeoutPolicy,
@@ -141,7 +143,7 @@ impl BranchedProcessorOutputsSpec {
 #[derive(Debug, Clone)]
 pub(super) struct BranchedProcessorOutputSpec {
     pub(super) relay: Identifier,
-    pub(super) filter_map: Option<String>,
+    pub(super) construction: nervix_models::RouteConstruction,
     pub(super) flush_each: Option<String>,
     pub(super) max_batch_size: Option<String>,
     pub(super) message_error_policy: MessageErrorPolicy,
@@ -224,8 +226,7 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) root_relay: Identifier,
     pub(super) branch_ttl: Option<Duration>,
     pub(super) branch_max_instances: Option<usize>,
-    pub(super) entrypoint_schema: Arc<CompiledSchema>,
-    pub(super) entrypoint_branch_mappings: Vec<BranchValueMapping>,
+    pub(super) entrypoint_branch_assignments: Vec<Assignment>,
     pub(super) entrypoint_ack_boundary: BranchInstanceAckBoundary,
     pub(super) entrypoint_flush_each: RuntimeFlushPolicy,
     pub(super) error_policies: ErrorPolicies,
@@ -248,8 +249,9 @@ pub(super) struct RelayProcessorTemplate {
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) from_where: HashMap<Identifier, String>,
-    pub(super) filter_where: Option<String>,
+    pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
+    pub(super) filter_where: Option<nervix_models::Expression>,
+    pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
     pub(super) operation: RelayProcessorOperationTemplate,
 }
 
@@ -257,7 +259,7 @@ pub(super) struct RelayProcessorTemplate {
 pub(super) enum RelayProcessorOperationTemplate {
     Deduplicator {
         output_routes: RelayProcessorOutputsTemplate,
-        deduplicate_on: String,
+        deduplicate_on: Vec<nervix_models::Expression>,
         max_time: Duration,
     },
     WindowProcessor {
@@ -267,18 +269,18 @@ pub(super) enum RelayProcessorOperationTemplate {
         width_duration: Option<Duration>,
         step_duration: Option<Duration>,
         aggregate: WindowAggregateProgram,
-        compiled_aggregate: CompiledWindowAggregateProgram,
+        compiled_aggregates: Vec<CompiledWindowAggregateProgram>,
     },
     Reorderer {
         output_routes: RelayProcessorOutputsTemplate,
-        order_by: String,
+        order_by: Vec<nervix_models::Expression>,
         max_time: Duration,
     },
     Correlator {
         output_routes: RelayProcessorOutputsTemplate,
         left_relays: Vec<Identifier>,
         right_relays: Vec<Identifier>,
-        correlate_where: String,
+        correlate_where: nervix_models::Expression,
         match_policy: CorrelatorMatchPolicy,
         max_time: Duration,
         timeout_policy: CorrelationTimeoutPolicy,
@@ -311,7 +313,7 @@ pub(super) struct RelayProcessorOutputsTemplate {
 #[derive(Debug, Clone)]
 pub(super) struct RelayProcessorOutputTemplate {
     pub(super) output_relay: Identifier,
-    pub(super) filter_map: Option<String>,
+    pub(super) construction: nervix_models::RouteConstruction,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
     pub(super) message_error_policy: MessageErrorPolicy,
 }
@@ -323,9 +325,11 @@ pub(super) struct RelayProcessorNode {
     pub(super) input_relays: Vec<Identifier>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) from_where: HashMap<Identifier, String>,
+    pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
     pub(super) compiled_from_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
-    pub(super) filter_where: Option<String>,
+    pub(super) filter_where: Option<nervix_models::Expression>,
+    pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
+    pub(super) pending_materialized: VecDeque<(Identifier, RelayRecordBatch)>,
     pub(super) compiled_filter_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
     pub(super) last_graph: Option<StdArc<ActiveGraph>>,
@@ -336,7 +340,7 @@ pub(super) struct RelayProcessorNode {
 pub(super) enum RelayProcessorOperationNode {
     Deduplicator {
         output_routes: RelayProcessorOutputsNode,
-        deduplicate_on: String,
+        deduplicate_on: Vec<nervix_models::Expression>,
         max_time: Duration,
         compiled_key_program: Option<Box<CompiledDeduplicatorKeyProgram>>,
         state: Arc<ReplicatedDeduplicatorState>,
@@ -348,13 +352,13 @@ pub(super) enum RelayProcessorOperationNode {
         width_duration: Option<Duration>,
         step_duration: Option<Duration>,
         aggregate: WindowAggregateProgram,
-        compiled_aggregate: CompiledWindowAggregateProgram,
+        compiled_aggregates: Vec<CompiledWindowAggregateProgram>,
         state: WindowProcessorState,
         replicated_state: Arc<ReplicatedWindowProcessorState>,
     },
     Reorderer {
         output_routes: RelayProcessorOutputsNode,
-        order_by: String,
+        order_by: Vec<nervix_models::Expression>,
         max_time: Duration,
         compiled_program: Option<Box<CompiledReordererProgram>>,
         output_buffers: Vec<ReordererOutputBuffer>,
@@ -364,7 +368,7 @@ pub(super) enum RelayProcessorOperationNode {
         output_routes: RelayProcessorOutputsNode,
         left_relays: Vec<Identifier>,
         right_relays: Vec<Identifier>,
-        correlate_where: String,
+        correlate_where: nervix_models::Expression,
         match_policy: CorrelatorMatchPolicy,
         max_time: Duration,
         timeout_policy: CorrelationTimeoutPolicy,
@@ -429,6 +433,7 @@ impl RelayProcessorOperationNode {
 pub(super) struct CompiledWindowAggregateProgram {
     pub(super) assignments: Vec<CompiledWindowAggregateAssignment>,
     pub(super) demand_types: Vec<arrow_schema::DataType>,
+    pub(super) demand_offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -459,21 +464,19 @@ impl CompiledWindowAggregateProgram {
                 output_relay.as_str()
             )
         })?;
-        let bindings = input_relays
-            .iter()
-            .map(|relay| {
-                let schema = relay_schemas.get(relay).ok_or_else(|| {
-                    format!(
-                        "window aggregate input relay '{}' has no runtime schema",
-                        relay.as_str()
-                    )
-                })?;
-                Ok(
-                    VmCompileBinding::readonly(relay.as_str(), schema.arrow_schema())
-                        .with_sensitivity(schema.vm_sensitivity()),
-                )
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let input_relay = input_relays
+            .first()
+            .ok_or_else(|| "window aggregate requires at least one input relay".to_string())?;
+        let input_schema = relay_schemas.get(input_relay).ok_or_else(|| {
+            format!(
+                "window aggregate input relay '{}' has no runtime schema",
+                input_relay.as_str()
+            )
+        })?;
+        let bindings = vec![
+            VmCompileBinding::readonly("input", input_schema.arrow_schema())
+                .with_sensitivity(input_schema.vm_sensitivity()),
+        ];
         let assignments = aggregate
             .assignments
             .iter()
@@ -519,7 +522,13 @@ impl CompiledWindowAggregateProgram {
         Ok(Self {
             assignments,
             demand_types,
+            demand_offset: 0,
         })
+    }
+
+    pub(super) fn with_demand_offset(mut self, demand_offset: usize) -> Self {
+        self.demand_offset = demand_offset;
+        self
     }
 
     fn compile_expr(
@@ -552,7 +561,6 @@ impl CompiledWindowAggregateProgram {
                         filter: None,
                         branch_filters: Vec::new(),
                         set: vec![(target.clone(), expr.clone())],
-                        unset: Vec::new(),
                         invoke: Vec::new(),
                     },
                     span: expr.span,
@@ -666,7 +674,8 @@ impl RelayProcessorOutputsNode {
 #[derive(Debug, Clone)]
 pub(super) struct RelayProcessorOutputNode {
     pub(super) relay: Identifier,
-    pub(super) filter_map: Option<String>,
+    pub(super) construction: nervix_models::RouteConstruction,
+    pub(super) branch: Option<nervix_models::OutputBranch>,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
     pub(super) message_error_policy: MessageErrorPolicy,
     pub(super) pending: Vec<RelayRecordBatch>,
@@ -752,7 +761,7 @@ pub(super) struct CompiledCorrelatorWhereProgram {
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledCorrelatorOutputProgram {
-    pub(super) program: VmCompiledProgram,
+    pub(super) program: CompiledProgramWithMaterializedInterest,
 }
 
 #[derive(Debug)]
@@ -906,7 +915,9 @@ impl std::fmt::Debug for WasmCompiledBranchProcessor {
 
 pub(super) struct PlannedMessageError {
     pub(super) message: RelayMessage,
-    pub(super) reason: String,
+    pub(super) error: StructuredMessageError,
+    pub(super) partial_output: Option<RuntimeRecord>,
+    pub(super) materialized_state: HashMap<String, RuntimeValue>,
 }
 
 pub(super) struct PlannedGeneralError {

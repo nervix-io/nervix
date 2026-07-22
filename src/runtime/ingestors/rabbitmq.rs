@@ -55,7 +55,6 @@ impl RabbitMqIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let branching = dependencies.branching;
         let ack_timeout = match &ack_mode {
             RabbitMqIngestMode::AckSequential { timeout, .. } => {
                 Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?
@@ -78,8 +77,6 @@ impl RabbitMqIngestor {
             let task_output_routes = output_routes.clone();
             let task_filter_where = filter_where.clone();
             let task_codec = codec.clone();
-            let task_branching = branching.clone();
-            let task_branch_value_mappings = dependencies.branch_value_mappings.clone();
             let task_branched_senders = branched_runtime.senders.clone();
             let task_ack_mode = ack_mode.clone();
             let task_config = resolved_client.entries.clone();
@@ -232,9 +229,6 @@ impl RabbitMqIngestor {
                                                                 ingestor: &task_ingestor,
                                                                 timestamp_source: task_timestamp_source
                                                                     .as_ref(),
-                                                                branching:
-                                                                    &task_branching,
-                                                                branch_value_mappings: Some(&task_branch_value_mappings),
                                                                 output_routes: &mut output_routes,
                                                                 filter_where: task_filter_where.as_ref(),
                                                                 branched_senders:

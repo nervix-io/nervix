@@ -22,33 +22,40 @@ Feature: Domain metrics
         FROM WIRE JSON SCHEMA transaction_wire
         TO SCHEMA transaction;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_domain_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY domain_metrics_raw SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE RELAY domain_metrics_deduped SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics' TYPE HTTP;
         CREATE INGESTOR domain_metrics_source
-        TO domain_metrics_raw FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT domain_metrics_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING transaction_codec
-        BRANCHED BY by_domain_metrics_source VALUES { tenant = domain_metrics_raw.tenant }
-
-        FROM ENDPOINT domain_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE DEDUPLICATOR domain_metrics_dedup
-        FROM domain_metrics_raw TO domain_metrics_deduped FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_domain_metrics_source
-        DEDUPLICATE ON domain_metrics_raw.transaction_id
-        MAX TIME 10m;
+        TO domain_metrics_raw
+        INHERIT ALL
+        BRANCHED BY by_domain_metrics_source
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR domain_metrics_dedup FROM domain_metrics_raw
+        DEDUPLICATE ON input.transaction_id
+        MAX TIME 10m
+        BRANCHED BY by_domain_metrics_source
+        TO domain_metrics_deduped
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
         CREATE CLIENT zeromq_main
         TYPE ZEROMQ
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER domain_metrics_sink
-        FROM domain_metrics_deduped
-        ENCODE USING transaction_codec
-        TO ZEROMQ zeromq_main ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        CREATE EMITTER domain_metrics_sink FROM domain_metrics_deduped ENCODE USING transaction_codec TO ZEROMQ zeromq_main
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/domain-metrics"

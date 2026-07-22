@@ -21,21 +21,24 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterRelay, AlterRelayOperation, AvroType, BranchInitiatorSelection, BranchSelection,
+    AlterRelay, AlterRelayOperation, Assignment, AssignmentTarget, AvroType, BranchSelection,
     CodecEncoding, CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
     CreateCodec, CreateCorrelator, CreateDeduplicator, CreateGenerator, CreateInferencer,
-    CreateIngestor, CreateLookup, CreateMaterializer, CreateReingestor, CreateSchema,
-    CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchemaStmt, Domain, DomainSchedule,
-    DropModel, EmitSink, EndpointType, Identifier, IngestSource, IngestTimestampSource, JsonType,
-    MessageErrorPolicy, Model, ModelKind, ParseAsType, ProcessorOutput, ProcessorOutputs,
-    ScheduledNode, SchemaField,
+    CreateIngestor, CreateLookup, CreateMaterializer, CreateSchema, CreateSignalingProtocol,
+    CreateWindowProcessor, CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink,
+    EndpointType, Expression, Identifier, IngestSource, IngestTimestampSource, JsonType,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind,
+    OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RouteConstruction, ScheduledNode,
+    SchemaField,
 };
 use nervix_nspl::{
     vm_program::{
         Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
-        SpannedExpr, SpannedNode, parse_program,
+        SemanticNamespaces, SpannedExpr, lower_branch_construction, lower_finalized_output_filter,
+        lower_generated_route, lower_route_construction, lower_set_only_route,
+        lower_transforming_route,
     },
-    window_processor::aggregate::{parse_aggregate_program, referenced_field_refs},
+    window_processor::aggregate::{lower_window_assignments, referenced_field_refs},
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity,
@@ -54,9 +57,7 @@ use triomphe::Arc;
 
 const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
-const INNER_INPUT_NAMESPACE: &str = "inner_input";
 const INNER_OUTPUT_NAMESPACE: &str = "inner_output";
-const WASM_INPUT_NAMESPACE: &str = "input";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RegistryError {
@@ -801,6 +802,44 @@ impl DomainState {
                     graph.add_edge(branch, source, EdgeKind::RequiredBy);
                 }
             }
+            match model {
+                Model::Ingestor(ingestor) => add_output_branch_dependency_edges(
+                    domain,
+                    identifier,
+                    models,
+                    &indices,
+                    &mut graph,
+                    source,
+                    &ingestor.output_routes,
+                )?,
+                Model::Reingestor(reingestor) => add_output_branch_dependency_edges(
+                    domain,
+                    identifier,
+                    models,
+                    &indices,
+                    &mut graph,
+                    source,
+                    &reingestor.output_routes,
+                )?,
+                _ => {}
+            }
+
+            let materialized_state = model_materialized_state_dependencies(model);
+            add_materialized_state_dependency_edges(
+                domain,
+                identifier,
+                models,
+                &indices,
+                &mut graph,
+                source,
+                materialized_state,
+            )?;
+            validate_declared_materialized_state_references(
+                domain,
+                identifier,
+                model,
+                materialized_state,
+            )?;
 
             match model {
                 Model::Schema(schema) => {
@@ -859,60 +898,47 @@ impl DomainState {
                     ensure_signaling_protocol_is_valid(domain, identifier, protocol)?;
                 }
                 Model::Generator(generator) => {
-                    let output = expect_kind(
+                    ensure_processor_output_flush_policies(
                         domain,
                         identifier,
-                        models,
-                        &indices,
-                        &generator.into_relay,
-                        ModelKind::Relay,
+                        &generator.output_routes,
                     )?;
-                    graph.add_edge(output, source, EdgeKind::RequiredBy);
-                    graph.add_edge(source, output, EdgeKind::SendsTo);
-
-                    let input_relays =
-                        generator_program_materialized_relays(domain, identifier, generator)?;
-                    if input_relays.is_empty() {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: "generator must reference at least one materialized relay"
-                                .to_string(),
-                        }));
-                    }
-                    for input_relay in &input_relays {
-                        let input = expect_kind(
-                            domain,
-                            identifier,
-                            models,
-                            &indices,
-                            input_relay,
-                            ModelKind::Relay,
-                        )?;
-                        graph.add_edge(input, source, EdgeKind::RequiredBy);
-                        graph.add_edge(input, source, EdgeKind::SendsTo);
-                        ensure_stream_is_materialized(domain, identifier, models, input_relay)?;
-                    }
-
-                    let consumer_schema =
-                        schema_for_ack_model(domain, identifier, models, &generator.into_relay)?;
-                    let generated_schema =
-                        effective_generator_schema(domain, identifier, models, generator)?;
-                    ensure_equal_internal_schema(
-                        domain,
-                        identifier,
-                        &generated_schema,
-                        consumer_schema,
-                        "generator output",
-                    )?;
-                    add_message_error_policy_edges(
+                    add_processor_output_edges(
                         domain,
                         identifier,
                         models,
                         &indices,
                         &mut graph,
                         source,
-                        &generator.message_error_policy,
+                        &generator.output_routes,
+                    )?;
+                    let input = expect_kind(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &generator.materialized_relay,
+                        ModelKind::Relay,
+                    )?;
+                    graph.add_edge(input, source, EdgeKind::RequiredBy);
+                    graph.add_edge(input, source, EdgeKind::SendsTo);
+                    ensure_stream_is_materialized(
+                        domain,
+                        identifier,
+                        models,
+                        &generator.materialized_relay,
+                    )?;
+                    for output in generator.output_routes.outputs() {
+                        validate_generator_output(domain, identifier, models, generator, output)?;
+                    }
+                    add_output_message_error_policy_edges(
+                        domain,
+                        identifier,
+                        models,
+                        &indices,
+                        &mut graph,
+                        source,
+                        &generator.output_routes,
                     )?;
                 }
                 Model::Inferencer(processor) => {
@@ -974,7 +1000,7 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        processor.filter_where.as_deref(),
+                        processor.filter_where.as_ref(),
                     )?;
                     ensure_inferencer_input_mappings(
                         domain,
@@ -989,7 +1015,6 @@ impl DomainState {
                             domain,
                             identifier,
                             models,
-                            &input_schemas,
                             output,
                             consumer_schema,
                             branch_schema,
@@ -1052,7 +1077,7 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        processor.filter_where.as_deref(),
+                        processor.filter_where.as_ref(),
                     )?;
                     ensure_wasm_processor_output_schemas(
                         domain,
@@ -1198,7 +1223,7 @@ impl DomainState {
                         models,
                         &[(&message_namespace, producer_schema)],
                         None,
-                        ingestor.filter_where.as_deref(),
+                        ingestor.filter_where.as_ref(),
                         &ingestor.source,
                     )?;
                     for output in ingestor.output_routes.outputs() {
@@ -1220,13 +1245,14 @@ impl DomainState {
                             consumer_schema,
                             "ingestor output",
                         )?;
-                        ensure_ingestor_output_branching_source(
+                        ensure_output_branch(
                             domain,
                             identifier,
                             models,
-                            ingestor,
+                            output,
+                            producer_schema,
                             &effective_schema,
-                            &output.relay,
+                            None,
                         )?;
                     }
                     ensure_ingestor_timestamp_source(
@@ -1330,7 +1356,7 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        reingestor.filter_where.as_deref(),
+                        reingestor.filter_where.as_ref(),
                     )?;
                     for output in reingestor.output_routes.outputs() {
                         let consumer_schema =
@@ -1351,14 +1377,16 @@ impl DomainState {
                             consumer_schema,
                             "reingestor flow",
                         )?;
-                        ensure_reingestor_branching_target(
+                        let incoming_branch =
+                            relay_declared_branch(domain, identifier, models, first_input_relay)?;
+                        ensure_output_branch(
                             domain,
                             identifier,
                             models,
-                            reingestor,
+                            output,
+                            input_schemas[0].1,
                             &effective_schema,
-                            &output.relay,
-                            branch_schema,
+                            incoming_branch,
                         )?;
                     }
                     add_output_message_error_policy_edges(
@@ -1491,7 +1519,7 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        deduplicator.filter_where.as_deref(),
+                        deduplicator.filter_where.as_ref(),
                     )?;
                     ensure_processor_output_schemas(
                         domain,
@@ -1583,28 +1611,35 @@ impl DomainState {
                     };
                     let branch_schema =
                         relay_declared_branch_schema(domain, identifier, models, left_relay)?;
+                    validate_scoped_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &left_schemas,
+                        branch_schema,
+                        correlator.left.where_clauses(),
+                        "left",
+                    )?;
+                    validate_scoped_from_where_for_internal_schemas(
+                        domain,
+                        identifier,
+                        models,
+                        &right_schemas,
+                        branch_schema,
+                        correlator.right.where_clauses(),
+                        "right",
+                    )?;
                     let mut input_schemas =
                         Vec::with_capacity(left_schemas.len() + right_schemas.len());
                     input_schemas.extend(left_schemas.iter().copied());
                     input_schemas.extend(right_schemas.iter().copied());
-                    let mut from_where = Vec::new();
-                    from_where.extend_from_slice(correlator.left.where_clauses());
-                    from_where.extend_from_slice(correlator.right.where_clauses());
-                    validate_from_where_for_internal_schemas(
-                        domain,
-                        identifier,
-                        models,
-                        &input_schemas,
-                        branch_schema,
-                        &from_where,
-                    )?;
                     validate_filter_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
                         &input_schemas,
                         branch_schema,
-                        correlator.filter_where.as_deref(),
+                        correlator.filter_where.as_ref(),
                     )?;
                     validate_correlator(
                         domain,
@@ -1620,10 +1655,12 @@ impl DomainState {
                         validate_correlator_output(
                             domain,
                             identifier,
+                            models,
                             &left_schemas,
                             &right_schemas,
                             output,
                             output_schema,
+                            branch_schema,
                         )?;
                     }
                     add_output_message_error_policy_edges(
@@ -1699,7 +1736,7 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        reorderer.filter_where.as_deref(),
+                        reorderer.filter_where.as_ref(),
                     )?;
                     ensure_processor_output_schemas(
                         domain,
@@ -1773,7 +1810,7 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        junction.filter_where.as_deref(),
+                        junction.filter_where.as_ref(),
                     )?;
                     ensure_processor_output_schemas(
                         domain,
@@ -1854,7 +1891,7 @@ impl DomainState {
                         models,
                         &input_schemas,
                         branch_schema,
-                        window_processor.filter_where.as_deref(),
+                        window_processor.filter_where.as_ref(),
                     )?;
                     ensure_window_processor_output_schemas(
                         domain,
@@ -1938,12 +1975,6 @@ impl DomainState {
                         emitter,
                         producer_schema,
                         output_schema,
-                        relay_declared_branch_schema(
-                            domain,
-                            identifier,
-                            models,
-                            &emitter.from_relay,
-                        )?,
                     )?;
                     if let Some(codec_name) = &emitter.encode_using_codec {
                         let consumer_schema =
@@ -1968,6 +1999,7 @@ impl DomainState {
                     )?;
                 }
             }
+            validate_model_message_error_policies(domain, identifier, models, model)?;
         }
 
         if has_required_by_cycle(&graph) {
@@ -2764,10 +2796,6 @@ fn parse_window_bound_duration(
         })
 }
 
-fn processor_base_output(outputs: &ProcessorOutputs) -> Option<&ProcessorOutput> {
-    outputs.routes.first()
-}
-
 fn processor_input_schemas<'inputs, 'models>(
     domain: &Domain,
     identifier: &Identifier,
@@ -2876,40 +2904,18 @@ fn ensure_window_processor_output_schemas(
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_processor_outputs_declared(domain, identifier, &window_processor.output_routes)?;
-    let Some(base_output) = processor_base_output(&window_processor.output_routes) else {
-        unreachable!("ensure_processor_outputs_declared rejects empty output routes");
-    };
-    let base_output_schema = schema_for_ack_model(domain, identifier, models, &base_output.relay)?;
-
-    validate_window_processor_aggregate(
-        domain,
-        identifier,
-        window_processor,
-        input_schemas,
-        &base_output.relay,
-        base_output_schema,
-    )?;
-
     for output in window_processor.output_routes.outputs() {
         let output_schema = schema_for_ack_model(domain, identifier, models, &output.relay)?;
-        let effective_schema = effective_processor_output_filter_map_schema(
+        validate_window_processor_output(
             domain,
             identifier,
             models,
-            &[(&base_output.relay, base_output_schema)],
             output,
             output_schema,
+            input_schemas,
             branch_schema,
         )?;
-        ProcessorOutputSchemaCompatibility::Compatible.ensure(
-            domain,
-            identifier,
-            &effective_schema,
-            output_schema,
-            "window processor flow",
-        )?;
     }
-
     Ok(())
 }
 
@@ -2965,15 +2971,17 @@ fn effective_wasm_output_filter_map_schema(
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
 ) -> Result<CreateSchema, Report<RegistryError>> {
-    let Some(filter_map) = output.filter_map.as_deref() else {
-        return Ok(output_schema.clone());
-    };
-
-    let parsed = parse_program(filter_map).map_err(|error| {
+    let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
+    let parsed = lower_generated_route(
+        &output.construction,
+        output_arrow_schema.as_ref(),
+        output_arrow_schema.as_ref(),
+    )
+    .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP parse failed: {}", first_vm_program_error(error)),
+            reason: format!("WASM output route is invalid: {reason}"),
         })
     })?;
     if !parsed.inner.branch_filters.is_empty() {
@@ -2983,45 +2991,28 @@ fn effective_wasm_output_filter_map_schema(
             reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
         }));
     }
-    if !parsed.inner.unset.is_empty() || !parsed.inner.invoke.is_empty() {
+    if !parsed.inner.invoke.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "WASM processor TO clauses may use SET and WHERE, but not UNSET or INVOKE"
-                .to_string(),
+            reason: "WASM processor TO clauses may use SET and WHERE, but not INVOKE".to_string(),
         }));
     }
 
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
-    let mut bindings = vec![writable_binding_for_internal_schema(
-        output.relay.as_str(),
-        output_schema,
-    )];
-    for (input_relay, input_schema) in input_schemas {
-        if *input_relay != &output.relay {
-            bindings.push(readonly_binding_for_internal_schema(
-                input_relay.as_str(),
-                input_schema,
-            ));
-        }
-    }
-    let Some((first_input_relay, first_input_schema)) = input_schemas.first() else {
+    let Some((_first_input_relay, _first_input_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: "wasm processor input requires at least one input relay".to_string(),
         }));
     };
-    if first_input_relay.as_str() != WASM_INPUT_NAMESPACE
-        && output.relay.as_str() != WASM_INPUT_NAMESPACE
-    {
-        bindings.push(readonly_binding_for_internal_schema(
-            WASM_INPUT_NAMESPACE,
-            first_input_schema,
-        ));
-    }
+    let mut bindings = vec![
+        readonly_binding_for_internal_schema("generated", output_schema),
+        writable_binding_for_internal_schema("output", output_schema),
+    ];
     if let Some(branch_schema) = branch_schema {
         bindings.push(readonly_binding_for_internal_schema(
             BRANCH_NAMESPACE,
@@ -3029,13 +3020,8 @@ fn effective_wasm_output_filter_map_schema(
         ));
     }
     let mut local_namespaces = HashSet::new();
-    local_namespaces.extend(
-        input_schemas
-            .iter()
-            .map(|(input_relay, _schema)| input_relay.as_str().to_string()),
-    );
-    local_namespaces.insert(output.relay.as_str().to_string());
-    local_namespaces.insert(WASM_INPUT_NAMESPACE.to_string());
+    local_namespaces.insert("generated".to_string());
+    local_namespaces.insert("output".to_string());
     local_namespaces.insert(BRANCH_NAMESPACE.to_string());
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
@@ -3047,11 +3033,15 @@ fn effective_wasm_output_filter_map_schema(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    compile_program_for_bindings_with_sensitivity(
+    compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
-        arrow_schema_for_internal_schema(output_schema),
+        output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
+        CompileOptions {
+            output_mode: OutputMode::ExplicitOnly,
+            ..CompileOptions::default()
+        },
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -3064,122 +3054,169 @@ fn effective_wasm_output_filter_map_schema(
     Ok(output_schema.clone())
 }
 
-fn validate_window_processor_aggregate(
+fn validate_window_processor_output(
     domain: &Domain,
     identifier: &Identifier,
-    window_processor: &CreateWindowProcessor,
+    models: &HashMap<RegistryKey, Model>,
+    output: &ProcessorOutput,
+    output_schema: &CreateSchema,
     input_schemas: &[(&Identifier, &CreateSchema)],
-    base_output_relay: &Identifier,
-    base_output_schema: &CreateSchema,
+    branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
-    let aggregate = parse_aggregate_program(&window_processor.aggregate).map_err(|error| {
+    let aggregate = lower_window_assignments(&output.construction).map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "invalid window aggregate program: {}",
-                nspl_parse_error_message(error)
-            ),
+            reason: format!("window output '{}' is invalid: {reason}", output.relay),
         })
     })?;
-
-    if aggregate
-        .assignments
-        .iter()
-        .any(|assignment| assignment.target.relay != base_output_relay.as_str())
-    {
+    if aggregate.inner.demands().is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "window aggregate targets must write to output relay '{}'",
-                base_output_relay.as_str()
+                "window output '{}' must contain at least one aggregate function",
+                output.relay
             ),
         }));
     }
-
-    let demands = aggregate.demands();
-    if demands.is_empty() {
+    let Some((_input_relay, input_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "window aggregate program must contain at least one aggregate function"
-                .to_string(),
+            reason: "window processor requires at least one input relay".to_string(),
         }));
-    }
-
-    let input_relays = input_schemas
-        .iter()
-        .map(|(relay, _schema)| relay.as_str())
-        .collect::<HashSet<_>>();
-    for assignment in &aggregate.assignments {
+    };
+    for assignment in &aggregate.inner.assignments {
         for field_ref in referenced_field_refs(&assignment.value.inner) {
-            if !input_relays.contains(field_ref.relay.as_str()) {
+            if field_ref.relay == "input"
+                && !input_schema
+                    .fields
+                    .iter()
+                    .any(|field| field.name.as_str() == field_ref.field)
+            {
                 return Err(Report::new(RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
                     reason: format!(
-                        "window aggregate input field '{}.{}' must read from one of the input \
-                         relays",
+                        "window aggregate references unknown input field '{}.{}'",
                         field_ref.relay, field_ref.field
                     ),
                 }));
             }
         }
     }
-
     let assigned_fields = aggregate
+        .inner
         .assignments
         .iter()
-        .map(|assignment| assignment.target.field.as_str().to_string())
+        .map(|assignment| assignment.target.field.as_str())
         .collect::<HashSet<_>>();
-    for assignment in &aggregate.assignments {
-        if base_output_schema
+    for assignment in &aggregate.inner.assignments {
+        if output_schema
             .fields
             .iter()
             .any(|field| field.name.as_str() == assignment.target.field)
         {
             continue;
         }
-
         return Err(Report::new(RegistryError::IncompatibleSchema {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "window aggregate target field '{}.{}' is not declared in output schema '{}'",
-                base_output_relay.as_str(),
-                assignment.target.field,
-                base_output_schema.name.as_str()
+                output.relay, assignment.target.field, output_schema.name
             ),
         }));
     }
-    for field in &base_output_schema.fields {
-        if assigned_fields.contains(field.name.as_str()) {
+    for field in &output_schema.fields {
+        if field.optional || assigned_fields.contains(field.name.as_str()) {
             continue;
         }
-
         return Err(Report::new(RegistryError::IncompatibleSchema {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "window aggregate must assign output field '{}.{}'",
-                base_output_relay.as_str(),
-                field.name.as_str()
+                "window aggregate must assign required output field '{}.{}'",
+                output.relay, field.name
             ),
         }));
     }
-
+    validate_window_route_where(
+        domain,
+        identifier,
+        models,
+        output,
+        output_schema,
+        branch_schema,
+    )?;
     Ok(())
 }
 
-fn nspl_parse_error_message(error: nervix_nspl::vm_program::ParseFromSourceError) -> String {
-    match error {
-        nervix_nspl::vm_program::ParseFromSourceError::Lex { diagnostics, .. }
-        | nervix_nspl::vm_program::ParseFromSourceError::Parse { diagnostics, .. } => diagnostics
-            .first()
-            .map(|diagnostic| diagnostic.message.clone())
-            .unwrap_or_else(|| "unknown parse error".to_string()),
+fn validate_window_route_where(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    output: &ProcessorOutput,
+    output_schema: &CreateSchema,
+    branch_schema: Option<&CreateSchema>,
+) -> Result<(), Report<RegistryError>> {
+    let Some(where_clause) = output.construction.where_clause.as_ref() else {
+        return Ok(());
+    };
+    let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
+    let parsed = lower_finalized_output_filter(where_clause, output_arrow_schema.as_ref())
+        .map_err(|reason| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "window output '{}' WHERE is invalid: {reason}",
+                    output.relay
+                ),
+            })
+        })?;
+    let original_parsed = parsed.clone();
+    let (parsed, lookup_fields) =
+        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let mut bindings = vec![writable_binding_for_internal_schema(
+        "output",
+        output_schema,
+    )];
+    if let Some(branch_schema) = branch_schema {
+        bindings.push(readonly_binding_for_internal_schema(
+            BRANCH_NAMESPACE,
+            branch_schema,
+        ));
     }
+    let local_namespaces = HashSet::from_iter(["output".to_string(), BRANCH_NAMESPACE.to_string()]);
+    bindings.extend(referenced_materialized_stream_bindings(
+        domain,
+        identifier,
+        models,
+        &original_parsed,
+        &local_namespaces,
+        "window route WHERE",
+    )?);
+    bindings.extend(lookup_hash_map_bindings(lookup_fields));
+    compile_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        output_arrow_schema,
+        schema_sensitivity_for_internal_schema(output_schema),
+        bindings,
+        CompileOptions::default(),
+    )
+    .map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "window output '{}' WHERE compile failed: {}",
+                output.relay, error.message
+            ),
+        })
+    })?;
+    Ok(())
 }
 
 fn locality_affinity_scores(
@@ -3585,6 +3622,710 @@ fn add_message_error_policy_edges(
     Ok(())
 }
 
+#[derive(Clone, Copy, Default)]
+struct MessageErrorSchemas<'a> {
+    input: Option<&'a CreateSchema>,
+    left: Option<&'a CreateSchema>,
+    right: Option<&'a CreateSchema>,
+    partial_output: Option<&'a CreateSchema>,
+    allow_header_reads: bool,
+}
+
+fn validate_model_message_error_policies(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    model: &Model,
+) -> Result<(), Report<RegistryError>> {
+    let validate_outputs = |outputs: &ProcessorOutputs,
+                            schemas: MessageErrorSchemas<'_>,
+                            expected_branch: Option<&Identifier>| {
+        for output in outputs.outputs() {
+            let partial_output = schema_for_ack_model(domain, identifier, models, &output.relay)?;
+            validate_message_error_policy(
+                domain,
+                identifier,
+                models,
+                &output.message_error_policy,
+                MessageErrorSchemas {
+                    partial_output: Some(partial_output),
+                    ..schemas
+                },
+                expected_branch,
+            )?;
+        }
+        Ok::<(), Report<RegistryError>>(())
+    };
+
+    match model {
+        Model::Ingestor(node) => {
+            let input =
+                schema_for_codec_model(domain, identifier, models, &node.decode_using_codec)?;
+            validate_outputs(
+                &node.output_routes,
+                MessageErrorSchemas {
+                    input: Some(input),
+                    allow_header_reads: ingest_source_supports_headers(&node.source),
+                    ..MessageErrorSchemas::default()
+                },
+                None,
+            )
+        }
+        Model::Reingestor(node) => {
+            let relay = processor_first_input_relay(
+                domain,
+                identifier,
+                &node.from,
+                "reingestor error input",
+            )?;
+            let input = schema_for_ack_model(domain, identifier, models, relay)?;
+            let branch = relay_declared_branch(domain, identifier, models, relay)?;
+            validate_outputs(
+                &node.output_routes,
+                MessageErrorSchemas {
+                    input: Some(input),
+                    ..MessageErrorSchemas::default()
+                },
+                branch,
+            )
+        }
+        Model::Generator(node) => validate_outputs(
+            &node.output_routes,
+            MessageErrorSchemas::default(),
+            node.branched_by.branch(),
+        ),
+        Model::Inferencer(node) => {
+            let relay = processor_first_input_relay(
+                domain,
+                identifier,
+                &node.from,
+                "inferencer error input",
+            )?;
+            let input = schema_for_ack_model(domain, identifier, models, relay)?;
+            validate_outputs(
+                &node.output_routes,
+                MessageErrorSchemas {
+                    input: Some(input),
+                    ..MessageErrorSchemas::default()
+                },
+                node.branched_by.branch(),
+            )
+        }
+        Model::WasmProcessor(node) => {
+            let relay = processor_first_input_relay(
+                domain,
+                identifier,
+                &node.from,
+                "WASM processor error input",
+            )?;
+            let input = schema_for_ack_model(domain, identifier, models, relay)?;
+            validate_outputs(
+                &node.output_routes,
+                MessageErrorSchemas {
+                    input: Some(input),
+                    ..MessageErrorSchemas::default()
+                },
+                node.branched_by.branch(),
+            )
+        }
+        Model::Junction(node) => validate_transforming_processor_message_errors(
+            domain,
+            identifier,
+            models,
+            &node.from,
+            &node.output_routes,
+            &node.branched_by,
+            "junction error input",
+        ),
+        Model::Deduplicator(node) => validate_transforming_processor_message_errors(
+            domain,
+            identifier,
+            models,
+            &node.from,
+            &node.output_routes,
+            &node.branched_by,
+            "deduplicator error input",
+        ),
+        Model::Reorderer(node) => validate_transforming_processor_message_errors(
+            domain,
+            identifier,
+            models,
+            &node.from,
+            &node.output_routes,
+            &node.branched_by,
+            "reorderer error input",
+        ),
+        Model::WindowProcessor(node) => validate_outputs(
+            &node.output_routes,
+            MessageErrorSchemas::default(),
+            node.branched_by.branch(),
+        ),
+        Model::Correlator(node) => {
+            let left_relay = processor_first_input_relay(
+                domain,
+                identifier,
+                &node.left,
+                "correlator left error input",
+            )?;
+            let right_relay = processor_first_input_relay(
+                domain,
+                identifier,
+                &node.right,
+                "correlator right error input",
+            )?;
+            validate_outputs(
+                &node.output_routes,
+                MessageErrorSchemas {
+                    left: Some(schema_for_ack_model(
+                        domain, identifier, models, left_relay,
+                    )?),
+                    right: Some(schema_for_ack_model(
+                        domain,
+                        identifier,
+                        models,
+                        right_relay,
+                    )?),
+                    ..MessageErrorSchemas::default()
+                },
+                node.branched_by.branch(),
+            )
+        }
+        Model::Emitter(node) => {
+            let input = schema_for_ack_model(domain, identifier, models, &node.from_relay)?;
+            let partial_output = node
+                .encode_using_codec
+                .as_ref()
+                .map(|codec| schema_for_codec_model(domain, identifier, models, codec))
+                .transpose()?;
+            let branch = relay_declared_branch(domain, identifier, models, &node.from_relay)?;
+            validate_message_error_policy(
+                domain,
+                identifier,
+                models,
+                &node.error_policies.message,
+                MessageErrorSchemas {
+                    input: Some(input),
+                    partial_output,
+                    ..MessageErrorSchemas::default()
+                },
+                branch,
+            )
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_transforming_processor_message_errors(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    inputs: &nervix_models::ProcessorInputs,
+    outputs: &ProcessorOutputs,
+    branch: &BranchSelection,
+    input_label: &str,
+) -> Result<(), Report<RegistryError>> {
+    let relay = processor_first_input_relay(domain, identifier, inputs, input_label)?;
+    let input = schema_for_ack_model(domain, identifier, models, relay)?;
+    for output in outputs.outputs() {
+        validate_message_error_policy(
+            domain,
+            identifier,
+            models,
+            &output.message_error_policy,
+            MessageErrorSchemas {
+                input: Some(input),
+                partial_output: Some(schema_for_ack_model(
+                    domain,
+                    identifier,
+                    models,
+                    &output.relay,
+                )?),
+                ..MessageErrorSchemas::default()
+            },
+            branch.branch(),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_message_error_policy(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    policy: &MessageErrorPolicy,
+    schemas: MessageErrorSchemas<'_>,
+    expected_branch: Option<&Identifier>,
+) -> Result<(), Report<RegistryError>> {
+    let MessageErrorPolicy::Dlq { relay, assignments } = policy else {
+        return Ok(());
+    };
+    let actual_branch = relay_declared_branch(domain, identifier, models, relay)?;
+    if actual_branch != expected_branch {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "message-error relay '{}' uses branch {}, expected {}",
+                relay,
+                actual_branch.map_or("UNBRANCHED", Identifier::as_str),
+                expected_branch.map_or("UNBRANCHED", Identifier::as_str),
+            ),
+        }));
+    }
+
+    let error_output = schema_for_ack_model(domain, identifier, models, relay)?;
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            assignments: assignments.clone(),
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new("error_output", "error_output"),
+    )
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("message-error SET is invalid: {reason}"),
+        })
+    })?;
+    let mut bindings = vec![compile_binding_with_internal_schema(
+        CompileBinding::writable(
+            "error_output",
+            arrow_schema_for_internal_schema(error_output),
+        ),
+        error_output,
+    )];
+    if let Some(input) = schemas.input {
+        bindings.push(readonly_binding_for_internal_schema("input", input));
+    }
+    if let Some(left) = schemas.left {
+        bindings.push(readonly_binding_for_internal_schema("left", left));
+    }
+    if let Some(right) = schemas.right {
+        bindings.push(readonly_binding_for_internal_schema("right", right));
+    }
+    if let Some(partial_output) = schemas.partial_output {
+        bindings.push(all_optional_binding_for_internal_schema(
+            "partial_output",
+            partial_output,
+        ));
+    }
+    bindings.push(CompileBinding::readonly(
+        "error",
+        structured_message_error_arrow_schema(),
+    ));
+    let local_namespaces = HashSet::from_iter([
+        "error_output".to_string(),
+        "input".to_string(),
+        "left".to_string(),
+        "right".to_string(),
+        "partial_output".to_string(),
+        "error".to_string(),
+    ]);
+    bindings.extend(referenced_materialized_stream_bindings(
+        domain,
+        identifier,
+        models,
+        &parsed,
+        &local_namespaces,
+        "message-error SET",
+    )?);
+    compile_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        arrow_schema_for_internal_schema(error_output),
+        schema_sensitivity_for_internal_schema(error_output),
+        bindings,
+        CompileOptions {
+            output_mode: OutputMode::ExplicitOnly,
+            allow_header_reads: schemas.allow_header_reads,
+            ..CompileOptions::default()
+        },
+    )
+    .map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("message-error SET compile failed: {}", error.message),
+        })
+    })?;
+    Ok(())
+}
+
+fn all_optional_binding_for_internal_schema(
+    namespace: impl Into<String>,
+    schema: &CreateSchema,
+) -> CompileBinding {
+    CompileBinding::readonly(
+        namespace,
+        StdArc::new(ArrowSchema::new(
+            schema
+                .fields
+                .iter()
+                .map(|field| {
+                    ArrowField::new(
+                        field.name.as_str(),
+                        arrow_data_type_for_parse_as(&field.ty),
+                        true,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )),
+    )
+    .with_sensitivity(schema_sensitivity_for_internal_schema(schema))
+}
+
+fn structured_message_error_arrow_schema() -> StdArc<ArrowSchema> {
+    StdArc::new(ArrowSchema::new(vec![
+        ArrowField::new("reference", ArrowDataType::Utf8, false),
+        ArrowField::new("code", ArrowDataType::Utf8, false),
+        ArrowField::new("message", ArrowDataType::Utf8, false),
+        ArrowField::new("operation", ArrowDataType::Utf8, false),
+        ArrowField::new("operation_index", ArrowDataType::UInt32, true),
+        ArrowField::new(
+            "fields",
+            ArrowDataType::List(StdArc::new(ArrowField::new(
+                "item",
+                ArrowDataType::Utf8,
+                false,
+            ))),
+            false,
+        ),
+        ArrowField::new(
+            "occurred_at",
+            ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into())),
+            false,
+        ),
+    ]))
+}
+
+fn model_materialized_state_dependencies(model: &Model) -> &[MaterializedStateDependency] {
+    match model {
+        Model::Reingestor(model) => &model.materialized_state,
+        Model::Inferencer(model) => &model.materialized_state,
+        Model::WasmProcessor(model) => &model.materialized_state,
+        Model::Junction(model) => &model.materialized_state,
+        Model::Deduplicator(model) => &model.materialized_state,
+        Model::Correlator(model) => &model.materialized_state,
+        Model::Reorderer(model) => &model.materialized_state,
+        Model::WindowProcessor(model) => &model.materialized_state,
+        Model::Emitter(model) => &model.materialized_state,
+        _ => &[],
+    }
+}
+
+fn add_materialized_state_dependency_edges(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    indices: &HashMap<RegistryKey, NodeIndex>,
+    graph: &mut DiGraph<ActiveNode, EdgeKind>,
+    source: NodeIndex,
+    dependencies: &[MaterializedStateDependency],
+) -> Result<(), Report<RegistryError>> {
+    let mut declared = HashSet::default();
+    for dependency in dependencies {
+        if !declared.insert(dependency.relay.clone()) {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "materialized-state relay '{}' is declared more than once",
+                    dependency.relay
+                ),
+            }));
+        }
+        let relay = expect_kind(
+            domain,
+            identifier,
+            models,
+            indices,
+            &dependency.relay,
+            ModelKind::Relay,
+        )?;
+        ensure_stream_is_materialized(domain, identifier, models, &dependency.relay)?;
+        validate_materialized_state_default(domain, identifier, models, dependency)?;
+        graph.add_edge(relay, source, EdgeKind::RequiredBy);
+    }
+    Ok(())
+}
+
+fn validate_materialized_state_default(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    dependency: &MaterializedStateDependency,
+) -> Result<(), Report<RegistryError>> {
+    let MaterializedStatePolicy::Default(assignments) = &dependency.policy else {
+        return Ok(());
+    };
+    let mut targets = HashSet::default();
+    for assignment in assignments {
+        if !targets.insert(assignment.target.field.clone()) {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "materialized-state DEFAULT for '{}' assigns field '{}' more than once",
+                    dependency.relay, assignment.target.field
+                ),
+            }));
+        }
+        let mut field_reference = None;
+        assignment
+            .value
+            .visit_fields(&mut |field| field_reference = Some(field.clone()));
+        if let Some(field) = field_reference {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "materialized-state DEFAULT for '{}' must be constant; field reference \
+                     '{field:?}' is not allowed",
+                    dependency.relay
+                ),
+            }));
+        }
+        if expression_contains_nondeterministic_or_side_effect_call(&assignment.value) {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "materialized-state DEFAULT for '{}' must use deterministic side-effect-free \
+                     expressions",
+                    dependency.relay
+                ),
+            }));
+        }
+    }
+
+    let schema = schema_for_ack_model(domain, identifier, models, &dependency.relay)?;
+    let output_schema = arrow_schema_for_internal_schema(schema);
+    let construction = RouteConstruction {
+        assignments: assignments.clone(),
+        ..RouteConstruction::default()
+    };
+    let parsed = lower_set_only_route(&construction, output_schema.as_ref()).map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "materialized-state DEFAULT for '{}' is invalid: {reason}",
+                dependency.relay
+            ),
+        })
+    })?;
+    compile_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        output_schema,
+        schema_sensitivity_for_internal_schema(schema),
+        vec![writable_binding_for_internal_schema("output", schema)],
+        CompileOptions {
+            output_mode: OutputMode::ExplicitOnly,
+            ..CompileOptions::default()
+        },
+    )
+    .map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "materialized-state DEFAULT for '{}' is invalid: {}",
+                dependency.relay, error.message
+            ),
+        })
+    })?;
+    Ok(())
+}
+
+fn expression_contains_nondeterministic_or_side_effect_call(expression: &Expression) -> bool {
+    match expression {
+        Expression::Literal(_) | Expression::Field(_) => false,
+        Expression::Unary { expression, .. } | Expression::Cast { expression, .. } => {
+            expression_contains_nondeterministic_or_side_effect_call(expression)
+        }
+        Expression::Binary { left, right, .. } => {
+            expression_contains_nondeterministic_or_side_effect_call(left)
+                || expression_contains_nondeterministic_or_side_effect_call(right)
+        }
+        Expression::Call {
+            function,
+            arguments,
+        } => {
+            matches!(
+                function.as_str().to_ascii_lowercase().as_str(),
+                "now" | "uuid_v4" | "uuid_v7" | "write_header"
+            ) || arguments
+                .iter()
+                .any(expression_contains_nondeterministic_or_side_effect_call)
+        }
+        Expression::Array(items) => items
+            .iter()
+            .any(expression_contains_nondeterministic_or_side_effect_call),
+    }
+}
+
+fn validate_declared_materialized_state_references(
+    domain: &Domain,
+    identifier: &Identifier,
+    model: &Model,
+    dependencies: &[MaterializedStateDependency],
+) -> Result<(), Report<RegistryError>> {
+    let declared = if let Model::Generator(generator) = model {
+        HashSet::from_iter([generator.materialized_relay.clone()])
+    } else {
+        dependencies
+            .iter()
+            .map(|dependency| dependency.relay.clone())
+            .collect()
+    };
+    let mut referenced = HashSet::default();
+    visit_model_expressions(model, &mut |expression| {
+        expression.visit_fields(&mut |field| {
+            if let nervix_models::FieldScope::RelayState { relay } = &field.scope {
+                referenced.insert(relay.clone());
+            }
+        });
+    });
+    for relay in referenced {
+        if !declared.contains(&relay) {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "materialized-state reference 'relay_state.{relay}' has no matching USING \
+                     MATERIALIZED STATE declaration"
+                ),
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn visit_model_expressions(model: &Model, visitor: &mut impl FnMut(&Expression)) {
+    fn visit_inputs(
+        inputs: &nervix_models::ProcessorInputs,
+        visitor: &mut impl FnMut(&Expression),
+    ) {
+        for source_filter in inputs.where_clauses() {
+            visitor(&source_filter.where_clause);
+        }
+    }
+    fn visit_error_policy(policy: &MessageErrorPolicy, visitor: &mut impl FnMut(&Expression)) {
+        if let MessageErrorPolicy::Dlq { assignments, .. } = policy {
+            for assignment in assignments {
+                visitor(&assignment.value);
+            }
+        }
+    }
+    fn visit_outputs(outputs: &ProcessorOutputs, visitor: &mut impl FnMut(&Expression)) {
+        for output in outputs.outputs() {
+            for assignment in &output.construction.assignments {
+                visitor(&assignment.value);
+            }
+            if let Some(where_clause) = &output.construction.where_clause {
+                visitor(where_clause);
+            }
+            for invocation in &output.construction.invocations {
+                for argument in &invocation.arguments {
+                    visitor(argument);
+                }
+            }
+            visit_error_policy(&output.message_error_policy, visitor);
+        }
+    }
+    fn visit_filter(filter: &Option<Expression>, visitor: &mut impl FnMut(&Expression)) {
+        if let Some(filter) = filter {
+            visitor(filter);
+        }
+    }
+
+    match model {
+        Model::Ingestor(model) => {
+            visit_filter(&model.filter_where, visitor);
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::Reingestor(model) => {
+            visit_inputs(&model.from, visitor);
+            visit_filter(&model.filter_where, visitor);
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::Generator(model) => visit_outputs(&model.output_routes, visitor),
+        Model::Inferencer(model) => {
+            visit_inputs(&model.from, visitor);
+            visit_filter(&model.filter_where, visitor);
+            for mapping in &model.inputs {
+                visitor(&mapping.expression);
+            }
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::WasmProcessor(model) => {
+            visit_inputs(&model.from, visitor);
+            visit_filter(&model.filter_where, visitor);
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::Junction(model) => {
+            visit_inputs(&model.from, visitor);
+            visit_filter(&model.filter_where, visitor);
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::Deduplicator(model) => {
+            visit_inputs(&model.from, visitor);
+            visit_filter(&model.filter_where, visitor);
+            for expression in &model.deduplicate_on {
+                visitor(expression);
+            }
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::Correlator(model) => {
+            visit_inputs(&model.left, visitor);
+            visit_inputs(&model.right, visitor);
+            visitor(&model.correlate_where);
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::Reorderer(model) => {
+            visit_inputs(&model.from, visitor);
+            visit_filter(&model.filter_where, visitor);
+            for expression in &model.order_by {
+                visitor(expression);
+            }
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::WindowProcessor(model) => {
+            visit_inputs(&model.from, visitor);
+            visit_filter(&model.filter_where, visitor);
+            visit_outputs(&model.output_routes, visitor);
+        }
+        Model::Emitter(model) => {
+            for assignment in &model.construction.assignments {
+                visitor(&assignment.value);
+            }
+            if let Some(where_clause) = &model.construction.where_clause {
+                visitor(where_clause);
+            }
+            for invocation in &model.construction.invocations {
+                for argument in &invocation.arguments {
+                    visitor(argument);
+                }
+            }
+            let values = match &model.sink {
+                EmitSink::ClickHouse { values, .. }
+                | EmitSink::Postgres { values, .. }
+                | EmitSink::MySql { values, .. }
+                | EmitSink::MongoDb { values, .. }
+                | EmitSink::Iceberg { values, .. } => Some(values.as_slice()),
+                _ => None,
+            };
+            if let Some(values) = values {
+                for value in values {
+                    visitor(&value.expression);
+                }
+            }
+            visit_error_policy(&model.error_policies.message, visitor);
+        }
+        _ => {}
+    }
+}
+
 fn add_output_message_error_policy_edges(
     domain: &Domain,
     identifier: &Identifier,
@@ -3855,23 +4596,6 @@ fn ensure_processor_outputs_declared(
         }));
     }
 
-    for route in outputs.outputs() {
-        let Some(filter_map) = route.filter_map.as_deref() else {
-            continue;
-        };
-        parse_program(filter_map).map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "explicit TO output route '{}' FILTER-MAP parse failed: {}",
-                    route.relay.as_str(),
-                    first_vm_program_error(error)
-                ),
-            })
-        })?;
-    }
-
     Ok(())
 }
 
@@ -3965,13 +4689,39 @@ fn add_processor_output_edges(
     Ok(())
 }
 
+fn add_output_branch_dependency_edges(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    indices: &HashMap<RegistryKey, NodeIndex>,
+    graph: &mut DiGraph<ActiveNode, EdgeKind>,
+    source: NodeIndex,
+    outputs: &ProcessorOutputs,
+) -> Result<(), Report<RegistryError>> {
+    for output in outputs.outputs() {
+        let Some(branch_ref) = output.branch.as_ref().and_then(OutputBranch::branch) else {
+            continue;
+        };
+        let branch = expect_kind(
+            domain,
+            identifier,
+            models,
+            indices,
+            branch_ref,
+            ModelKind::Branch,
+        )?;
+        graph.add_edge(branch, source, EdgeKind::RequiredBy);
+    }
+    Ok(())
+}
+
 fn validate_filter_where_for_internal_schemas(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
     input_schemas: &[(&Identifier, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
-    filter_where: Option<&str>,
+    filter_where: Option<&Expression>,
 ) -> Result<(), Report<RegistryError>> {
     let Some(filter_where) = filter_where else {
         return Ok(());
@@ -3994,20 +4744,24 @@ fn validate_ingestor_filter_where_for_internal_schemas(
     models: &HashMap<RegistryKey, Model>,
     input_schemas: &[(&Identifier, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
-    filter_where: Option<&str>,
+    filter_where: Option<&Expression>,
     source: &IngestSource,
 ) -> Result<(), Report<RegistryError>> {
     let Some(filter_where) = filter_where else {
         return Ok(());
     };
-    let parsed = parse_program(filter_where).map_err(|error| {
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            where_clause: Some(filter_where.clone()),
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new("input", "__invalid_filter_target"),
+    )
+    .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "FILTER WHERE parse failed: {}",
-                first_vm_program_error(error)
-            ),
+            reason: format!("FILTER WHERE is invalid: {reason}"),
         })
     })?;
     if program_uses_header_reads(&parsed.inner) && !ingest_source_supports_headers(source) {
@@ -4043,6 +4797,26 @@ fn validate_from_where_for_internal_schemas(
     branch_schema: Option<&CreateSchema>,
     from_where: &[nervix_models::ProcessorInputWhere],
 ) -> Result<(), Report<RegistryError>> {
+    validate_scoped_from_where_for_internal_schemas(
+        domain,
+        identifier,
+        models,
+        input_schemas,
+        branch_schema,
+        from_where,
+        "input",
+    )
+}
+
+fn validate_scoped_from_where_for_internal_schemas(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    input_schemas: &[(&Identifier, &CreateSchema)],
+    branch_schema: Option<&CreateSchema>,
+    from_where: &[nervix_models::ProcessorInputWhere],
+    input_namespace: &'static str,
+) -> Result<(), Report<RegistryError>> {
     let mut seen_relays = HashSet::new();
     for source_filter in from_where {
         if !seen_relays.insert(source_filter.relay.clone()) {
@@ -4069,7 +4843,7 @@ fn validate_from_where_for_internal_schemas(
                 ),
             }));
         };
-        validate_where_program_for_internal_schemas(
+        validate_where_program_for_scoped_internal_schemas(
             domain,
             identifier,
             models,
@@ -4078,6 +4852,7 @@ fn validate_from_where_for_internal_schemas(
             &source_filter.where_clause,
             "FROM WHERE",
             CompileOptions::default(),
+            input_namespace,
         )?;
     }
     Ok(())
@@ -4089,58 +4864,77 @@ fn validate_where_program_for_internal_schemas(
     models: &HashMap<RegistryKey, Model>,
     input_schemas: &[(&Identifier, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
-    where_program: &str,
+    where_program: &Expression,
     clause_name: &str,
     compile_options: CompileOptions,
 ) -> Result<(), Report<RegistryError>> {
-    let parsed = parse_program(where_program).map_err(|error| {
+    validate_where_program_for_scoped_internal_schemas(
+        domain,
+        identifier,
+        models,
+        input_schemas,
+        branch_schema,
+        where_program,
+        clause_name,
+        compile_options,
+        "input",
+    )
+}
+
+fn validate_where_program_for_scoped_internal_schemas(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    input_schemas: &[(&Identifier, &CreateSchema)],
+    branch_schema: Option<&CreateSchema>,
+    where_program: &Expression,
+    clause_name: &str,
+    compile_options: CompileOptions,
+    input_namespace: &'static str,
+) -> Result<(), Report<RegistryError>> {
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            where_clause: Some(where_program.clone()),
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new(input_namespace, "__invalid_filter_target"),
+    )
+    .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "{clause_name} parse failed: {}",
-                first_vm_program_error(error)
-            ),
+            reason: format!("{clause_name} is invalid: {reason}"),
         })
     })?;
-    if parsed.inner.filter.is_none()
-        || !parsed.inner.set.is_empty()
-        || !parsed.inner.unset.is_empty()
-        || !parsed.inner.branch_filters.is_empty()
-        || !parsed.inner.invoke.is_empty()
-    {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("{clause_name} must contain exactly one WHERE clause"),
-        }));
-    }
 
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
-    let mut bindings = input_schemas
-        .iter()
-        .enumerate()
-        .map(|(index, (relay, schema))| {
-            if index == 0 {
-                CompileBinding::writable(relay.as_str(), arrow_schema_for_internal_schema(schema))
-                    .with_sensitivity(schema_sensitivity_for_internal_schema(schema))
-            } else {
-                readonly_binding_for_internal_schema(relay.as_str(), schema)
-            }
-        })
-        .collect::<Vec<_>>();
+    let Some((_first_relay, first_schema)) = input_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("{clause_name} requires at least one input relay"),
+        }));
+    };
+    let mut bindings = vec![
+        CompileBinding::writable(
+            input_namespace,
+            arrow_schema_for_internal_schema(first_schema),
+        )
+        .with_sensitivity(schema_sensitivity_for_internal_schema(first_schema)),
+    ];
     if let Some(branch_schema) = branch_schema {
         bindings.push(readonly_binding_for_internal_schema(
             BRANCH_NAMESPACE,
             branch_schema,
         ));
     }
-    let input_relay_names = input_schemas
+    let mut input_relay_names = input_schemas
         .iter()
         .map(|(relay, _schema)| relay.as_str().to_string())
         .collect::<HashSet<_>>();
+    input_relay_names.insert(input_namespace.to_string());
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
@@ -4151,13 +4945,6 @@ fn validate_where_program_for_internal_schemas(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    let Some((_first_relay, first_schema)) = input_schemas.first() else {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("{clause_name} requires at least one input relay"),
-        }));
-    };
     compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         arrow_schema_for_internal_schema(first_schema),
@@ -4185,22 +4972,25 @@ fn effective_processor_output_filter_map_schema(
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
 ) -> Result<CreateSchema, Report<RegistryError>> {
-    let Some(filter_map) = output.filter_map.as_deref() else {
-        let Some((_first_relay, first_schema)) = input_schemas.first() else {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "processor output requires at least one input relay".to_string(),
-            }));
-        };
-        return Ok((*first_schema).clone());
+    let Some((_first_relay, first_schema)) = input_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "processor output requires at least one input relay".to_string(),
+        }));
     };
-
-    let mut parsed = parse_program(filter_map).map_err(|error| {
+    let input_arrow_schema = arrow_schema_for_internal_schema(first_schema);
+    let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
+    let parsed = lower_transforming_route(
+        &output.construction,
+        input_arrow_schema.as_ref(),
+        output_arrow_schema.as_ref(),
+    )
+    .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP parse failed: {}", first_vm_program_error(error)),
+            reason: format!("output route is invalid: {reason}"),
         })
     })?;
     if !parsed.inner.branch_filters.is_empty() {
@@ -4210,32 +5000,25 @@ fn effective_processor_output_filter_map_schema(
             reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
         }));
     }
-    let input_relay_names = input_schemas
-        .iter()
-        .map(|(relay, _schema)| relay.as_str().to_string())
-        .collect::<Vec<_>>();
-    parsed
-        .inner
-        .rewrite_unset_sources_to_destination(&input_relay_names, output.relay.as_str());
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
 
-    let mut bindings = input_schemas
-        .iter()
-        .map(|(relay, schema)| readonly_binding_for_internal_schema(relay.as_str(), schema))
-        .collect::<Vec<_>>();
-    bindings.push(writeonly_binding_for_internal_schema(
-        output.relay.as_str(),
-        output_schema,
-    ));
+    let mut bindings = vec![
+        readonly_binding_for_internal_schema("input", first_schema),
+        writable_binding_for_internal_schema("output", output_schema),
+    ];
     if let Some(branch_schema) = branch_schema {
         bindings.push(readonly_binding_for_internal_schema(
             BRANCH_NAMESPACE,
             branch_schema,
         ));
     }
-    let input_relay_names = input_relay_names.into_iter().collect::<HashSet<_>>();
+    let input_relay_names = HashSet::from_iter([
+        "input".to_string(),
+        "output".to_string(),
+        BRANCH_NAMESPACE.to_string(),
+    ]);
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
@@ -4246,11 +5029,15 @@ fn effective_processor_output_filter_map_schema(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    compile_program_for_bindings_with_sensitivity(
+    compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         arrow_schema_for_internal_schema(output_schema),
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
+        CompileOptions {
+            output_mode: OutputMode::ExplicitOnly,
+            ..CompileOptions::default()
+        },
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -4303,26 +5090,43 @@ fn effective_emitter_filter_map_schema(
     emitter: &nervix_models::CreateEmitter,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-    branch_schema: Option<&CreateSchema>,
 ) -> Result<CreateSchema, Report<RegistryError>> {
-    let Some(filter_map) = emitter.filter_map.as_deref() else {
-        return Ok(input_schema.clone());
-    };
-
-    let parsed = parse_program(filter_map).map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP parse failed: {}", first_vm_program_error(error)),
-        })
-    })?;
-    if !parsed.inner.branch_filters.is_empty() {
+    let codec_route = emitter.encode_using_codec.is_some();
+    if !codec_route
+        && (emitter.construction.inherit.is_some()
+            || !emitter.construction.assignments.is_empty()
+            || !emitter.construction.invocations.is_empty())
+    {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
+            reason: "direct emitter routes support VALUES and WHERE only".to_string(),
         }));
     }
+    if emitter.construction.is_empty() && !codec_route {
+        return Ok(input_schema.clone());
+    }
+    let input_arrow_schema = arrow_schema_for_internal_schema(input_schema);
+    let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
+    let parsed = if codec_route {
+        lower_transforming_route(
+            &emitter.construction,
+            input_arrow_schema.as_ref(),
+            output_arrow_schema.as_ref(),
+        )
+    } else {
+        lower_route_construction(
+            &emitter.construction,
+            SemanticNamespaces::new("input", "__invalid_direct_emitter_output"),
+        )
+    }
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("emitter route is invalid: {reason}"),
+        })
+    })?;
     let invokes_write_header = parsed
         .inner
         .invoke
@@ -4342,29 +5146,43 @@ fn effective_emitter_filter_map_schema(
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
-    let mut body_bindings = emitter_filter_map_message_bindings(&emitter.from_relay, input_schema);
-    if let Some(branch_schema) = branch_schema {
-        body_bindings.push(readonly_binding_for_internal_schema(
-            BRANCH_NAMESPACE,
-            branch_schema,
-        ));
-    }
+    let mut body_bindings = if codec_route {
+        vec![
+            readonly_binding_for_internal_schema("input", input_schema),
+            writable_binding_for_internal_schema("output", output_schema),
+        ]
+    } else {
+        vec![
+            writable_binding_for_internal_schema("input", input_schema),
+            readonly_binding_for_internal_schema("message", input_schema),
+        ]
+    };
+    let local_namespaces = HashSet::from_iter([
+        "input".to_string(),
+        "message".to_string(),
+        "output".to_string(),
+    ]);
     body_bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
         models,
         &original_parsed,
-        &emitter_filter_map_local_namespaces(&emitter.from_relay),
-        "FILTER-MAP",
+        &local_namespaces,
+        "emitter route",
     )?);
     body_bindings.extend(lookup_hash_map_bindings(lookup_fields));
     compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
-        arrow_schema_for_internal_schema(output_schema),
+        output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         body_bindings,
         CompileOptions {
-            allow_sensitive_output: true,
+            output_mode: if codec_route {
+                OutputMode::ExplicitOnly
+            } else {
+                OutputMode::PassthroughByName
+            },
+            allow_sensitive_output: false,
             allow_header_writes: true,
             ..CompileOptions::default()
         },
@@ -4451,7 +5269,6 @@ fn rewrite_lookup_hash_map_program(
                 .iter()
                 .map(|(field, expr)| rewrite(expr).map(|expr| (field.clone(), expr)))
                 .collect::<Result<Vec<_>, _>>()?,
-            unset: parsed.inner.unset.clone(),
             invoke: parsed
                 .inner
                 .invoke
@@ -4685,87 +5502,6 @@ fn collect_program_field_refs(program: &nervix_nspl::vm_program::Program) -> Vec
     refs
 }
 
-fn schema_field_optionality(schema: &CreateSchema, field_name: &str) -> bool {
-    schema
-        .fields
-        .iter()
-        .find(|field| field.name.as_str() == field_name)
-        .is_some_and(|field| field.optional)
-}
-
-fn infer_expr_optionality(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    local_schemas: &HashMap<String, CreateSchema>,
-    lookup_hash_map_schema: Option<&CreateSchema>,
-    expr: &SpannedExpr,
-) -> Result<bool, Report<RegistryError>> {
-    match &expr.inner {
-        Expr::Literal(Literal::Null) => Ok(true),
-        Expr::Literal(_) => Ok(false),
-        Expr::FieldRef(field_ref) => {
-            if let Some(schema) = local_schemas.get(&field_ref.relay) {
-                return Ok(schema_field_optionality(schema, &field_ref.field));
-            }
-
-            let Ok(stream) = Identifier::parse(&field_ref.relay) else {
-                return Ok(false);
-            };
-            let schema = schema_for_ack_model(domain, identifier, models, &stream)?;
-            Ok(schema_field_optionality(schema, &field_ref.field))
-        }
-        Expr::InternalFieldRef(field_ref) => match field_ref.namespace {
-            InternalFieldNamespace::LookupHashMap => Ok(lookup_hash_map_schema
-                .is_some_and(|schema| schema_field_optionality(schema, &field_ref.field))),
-        },
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => infer_expr_optionality(
-            domain,
-            identifier,
-            models,
-            local_schemas,
-            lookup_hash_map_schema,
-            expr,
-        ),
-        Expr::Binary { left, right, .. } => Ok(infer_expr_optionality(
-            domain,
-            identifier,
-            models,
-            local_schemas,
-            lookup_hash_map_schema,
-            left,
-        )? || infer_expr_optionality(
-            domain,
-            identifier,
-            models,
-            local_schemas,
-            lookup_hash_map_schema,
-            right,
-        )?),
-        Expr::Call { function, args } => {
-            if let FunctionName::ReadHeader = function {
-                return Ok(true);
-            }
-            if let FunctionName::ReadHeaders = function {
-                return Ok(false);
-            }
-            for arg in args {
-                if infer_expr_optionality(
-                    domain,
-                    identifier,
-                    models,
-                    local_schemas,
-                    lookup_hash_map_schema,
-                    arg,
-                )? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-    }
-}
-
 fn referenced_materialized_stream_bindings(
     domain: &Domain,
     identifier: &Identifier,
@@ -4780,13 +5516,25 @@ fn referenced_materialized_stream_bindings(
         {
             continue;
         }
-        let Ok(relay) = Identifier::parse(&relay) else {
+        let Some(relay_name) = relay.strip_prefix("relay_state.") else {
             continue;
         };
+        let relay = Identifier::parse(relay_name).map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("invalid materialized-state relay '{relay_name}': {error}"),
+            })
+        })?;
         let Some(Model::Relay(ack_model)) =
             models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
         else {
-            continue;
+            return Err(Report::new(RegistryError::MissingReference {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                expected_kind: ModelKind::Relay.as_str(),
+                reference: relay.as_str().to_string(),
+            }));
         };
         if ack_model.materialized_state.is_none() {
             return Err(Report::new(RegistryError::InvalidModel {
@@ -4820,7 +5568,7 @@ fn referenced_materialized_stream_bindings(
         );
         bindings.push(
             CompileBinding::readonly(
-                relay.as_str(),
+                format!("relay_state.{}", relay.as_str()),
                 StdArc::new(ArrowSchema::new(projected_fields)),
             )
             .with_sensitivity(projected_sensitivity),
@@ -4828,31 +5576,6 @@ fn referenced_materialized_stream_bindings(
     }
 
     Ok(bindings)
-}
-
-fn emitter_filter_map_local_namespaces(from_relay: &Identifier) -> HashSet<String> {
-    HashSet::from_iter([
-        "message".to_string(),
-        BRANCH_NAMESPACE.to_string(),
-        from_relay.as_str().to_string(),
-    ])
-}
-
-fn emitter_filter_map_message_bindings(
-    from_relay: &Identifier,
-    input_schema: &CreateSchema,
-) -> Vec<CompileBinding> {
-    let mut bindings = vec![writable_binding_for_internal_schema(
-        "message",
-        input_schema,
-    )];
-    if from_relay.as_str() != "message" {
-        bindings.push(writable_binding_for_internal_schema(
-            from_relay.as_str(),
-            input_schema,
-        ));
-    }
-    bindings
 }
 
 fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
@@ -4866,87 +5589,6 @@ fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
     } else {
         false
     }
-}
-
-fn parse_generator_program(
-    domain: &Domain,
-    identifier: &Identifier,
-    generator: &CreateGenerator,
-) -> Result<
-    nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-    Report<RegistryError>,
-> {
-    let parsed = parse_program(&generator.set).map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "GENERATOR SET parse failed: {}",
-                first_vm_program_error(error)
-            ),
-        })
-    })?;
-    if parsed.inner.filter.is_some()
-        || !parsed.inner.branch_filters.is_empty()
-        || !parsed.inner.unset.is_empty()
-        || !parsed.inner.invoke.is_empty()
-        || parsed.inner.set.is_empty()
-    {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "GENERATOR program must contain SET only".to_string(),
-        }));
-    }
-    Ok(parsed)
-}
-
-fn collect_generator_expr_streams(expr: &SpannedExpr, relays: &mut HashSet<String>) {
-    match &expr.inner {
-        Expr::Literal(_) | Expr::InternalFieldRef(_) => {}
-        Expr::FieldRef(field_ref) => {
-            relays.insert(field_ref.relay.clone());
-        }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
-            collect_generator_expr_streams(expr, relays);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_generator_expr_streams(left, relays);
-            collect_generator_expr_streams(right, relays);
-        }
-        Expr::Call { args, .. } => {
-            for arg in args {
-                collect_generator_expr_streams(arg, relays);
-            }
-        }
-    }
-}
-
-fn generator_program_materialized_relays(
-    domain: &Domain,
-    identifier: &Identifier,
-    generator: &CreateGenerator,
-) -> Result<Vec<Identifier>, Report<RegistryError>> {
-    let parsed = parse_generator_program(domain, identifier, generator)?;
-    let mut relay_names = HashSet::default();
-    for (_field_ref, expr) in &parsed.inner.set {
-        collect_generator_expr_streams(expr, &mut relay_names);
-    }
-    relay_names.remove(generator.into_relay.as_str());
-    let mut relay_names = relay_names.into_iter().collect::<Vec<_>>();
-    relay_names.sort();
-    relay_names
-        .into_iter()
-        .map(|stream| {
-            Identifier::parse(&stream).map_err(|_| {
-                Report::new(RegistryError::InvalidModel {
-                    domain: domain.as_str().to_string(),
-                    identifier: identifier.as_str().to_string(),
-                    reason: format!("invalid generator namespace '{stream}'"),
-                })
-            })
-        })
-        .collect()
 }
 
 fn ensure_stream_is_materialized(
@@ -4977,80 +5619,74 @@ fn ensure_stream_is_materialized(
     Ok(())
 }
 
-fn effective_generator_schema(
+fn validate_generator_output(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
     generator: &CreateGenerator,
-) -> Result<CreateSchema, Report<RegistryError>> {
-    let parsed = parse_generator_program(domain, identifier, generator)?;
-    let output_schema = schema_for_ack_model(domain, identifier, models, &generator.into_relay)?;
-    let source_streams = generator_program_materialized_relays(domain, identifier, generator)?;
-
-    let mut bindings = vec![CompileBinding::writable(
-        generator.into_relay.as_str(),
-        StdArc::new(ArrowSchema::new(Vec::<ArrowField>::new())),
-    )];
-    let mut local_schemas = HashMap::new();
-    for source_stream in &source_streams {
-        let source_schema = schema_for_ack_model(domain, identifier, models, source_stream)?;
-        local_schemas.insert(source_stream.as_str().to_string(), source_schema.clone());
-        bindings.push(readonly_binding_for_internal_schema(
-            source_stream.as_str(),
-            source_schema,
-        ));
+    output: &ProcessorOutput,
+) -> Result<(), Report<RegistryError>> {
+    let output_schema = schema_for_ack_model(domain, identifier, models, &output.relay)?;
+    let source_schema =
+        schema_for_ack_model(domain, identifier, models, &generator.materialized_relay)?;
+    let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
+    let parsed = lower_set_only_route(&output.construction, output_arrow_schema.as_ref()).map_err(
+        |reason| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("generator output '{}' is invalid: {reason}", output.relay),
+            })
+        },
+    )?;
+    let allowed_state_namespace = format!("relay_state.{}", generator.materialized_relay);
+    for (namespace, _field) in collect_program_field_refs(&parsed.inner) {
+        if namespace.starts_with("relay_state.") && namespace != allowed_state_namespace {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "generator output '{}' references materialized state namespace '{namespace}', \
+                     but only '{}' is declared",
+                    output.relay, allowed_state_namespace
+                ),
+            }));
+        }
     }
 
-    let compiled = compile_program_for_bindings_with_sensitivity(
+    let mut bindings = vec![
+        writable_binding_for_internal_schema("output", output_schema),
+        readonly_binding_for_internal_schema(&allowed_state_namespace, source_schema),
+    ];
+    if let Some(branch_schema) =
+        relay_declared_branch_schema(domain, identifier, models, &generator.materialized_relay)?
+    {
+        bindings.push(readonly_binding_for_internal_schema(
+            BRANCH_NAMESPACE,
+            branch_schema,
+        ));
+    }
+    compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
-        arrow_schema_for_internal_schema(output_schema),
+        output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
+        CompileOptions {
+            output_mode: OutputMode::ExplicitOnly,
+            ..CompileOptions::default()
+        },
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("GENERATOR SET compile failed: {}", error.message),
+            reason: format!(
+                "generator output '{}' compile failed: {}",
+                output.relay, error.message
+            ),
         })
     })?;
-
-    let set_optionality = parsed
-        .inner
-        .set
-        .iter()
-        .map(|(name, expr)| {
-            infer_expr_optionality(domain, identifier, models, &local_schemas, None, expr)
-                .map(|optional| (name.field.clone(), optional))
-        })
-        .collect::<Result<HashMap<_, _>, _>>()?;
-
-    Ok(CreateSchema {
-        name: output_schema.name.clone(),
-        fields: compiled
-            .output_schema
-            .fields()
-            .iter()
-            .map(|field| {
-                Ok::<SchemaField, Report<RegistryError>>(SchemaField {
-                    name: Identifier::parse(field.name()).map_err(|_| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: format!("invalid GENERATOR output field '{}'", field.name()),
-                        })
-                    })?,
-                    ty: parse_as_type_for_output(domain, identifier, field.data_type())?,
-                    optional: set_optionality.get(field.name()).copied().unwrap_or(false),
-                    sensitive: output_schema
-                        .fields
-                        .iter()
-                        .find(|target| target.name.as_str() == field.name())
-                        .is_some_and(|target| target.sensitive),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    })
+    Ok(())
 }
 
 fn effective_ingestor_output_filter_map_schema(
@@ -5062,15 +5698,18 @@ fn effective_ingestor_output_filter_map_schema(
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
 ) -> Result<CreateSchema, Report<RegistryError>> {
-    let Some(filter_map) = output.filter_map.as_deref() else {
-        return Ok(input_schema.clone());
-    };
-
-    let parsed = parse_program(filter_map).map_err(|error| {
+    let input_arrow_schema = arrow_schema_for_internal_schema(input_schema);
+    let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
+    let parsed = lower_transforming_route(
+        &output.construction,
+        input_arrow_schema.as_ref(),
+        output_arrow_schema.as_ref(),
+    )
+    .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP parse failed: {}", first_vm_program_error(error)),
+            reason: format!("ingestor output route is invalid: {reason}"),
         })
     })?;
     if !parsed.inner.branch_filters.is_empty() {
@@ -5096,8 +5735,8 @@ fn effective_ingestor_output_filter_map_schema(
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
 
     let mut bindings = vec![
-        readonly_binding_for_internal_schema(INGEST_MESSAGE_NAMESPACE, input_schema),
-        writeonly_binding_for_internal_schema(output.relay.as_str(), output_schema),
+        readonly_binding_for_internal_schema("input", input_schema),
+        writable_binding_for_internal_schema("output", output_schema),
     ];
     if let Some(metadata_schema) = ingestor_filter_map_metadata_schema(&ingestor.source) {
         bindings.push(CompileBinding::readonly(
@@ -5106,9 +5745,9 @@ fn effective_ingestor_output_filter_map_schema(
         ));
     }
     let local_namespaces = HashSet::from_iter([
-        INGEST_MESSAGE_NAMESPACE.to_string(),
+        "input".to_string(),
+        "output".to_string(),
         "metadata".to_string(),
-        output.relay.as_str().to_string(),
     ]);
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
@@ -5126,6 +5765,7 @@ fn effective_ingestor_output_filter_map_schema(
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
         CompileOptions {
+            output_mode: OutputMode::ExplicitOnly,
             allow_header_reads: true,
             ..CompileOptions::default()
         },
@@ -5164,34 +5804,24 @@ fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSc
                 SchemaField {
                     name: Identifier::parse("topic").expect("valid metadata field"),
                     ty: ParseAsType::String,
-                    optional: false,
+                    optional: true,
                     sensitive: false,
                 },
                 SchemaField {
                     name: Identifier::parse("partition").expect("valid metadata field"),
                     ty: ParseAsType::I32,
-                    optional: false,
+                    optional: true,
                     sensitive: false,
                 },
                 SchemaField {
                     name: Identifier::parse("offset").expect("valid metadata field"),
                     ty: ParseAsType::I64,
-                    optional: false,
+                    optional: true,
                     sensitive: false,
                 },
             ],
         }),
         _ => None,
-    }
-}
-
-fn first_vm_program_error(error: nervix_nspl::vm_program::ParseFromSourceError) -> String {
-    match error {
-        nervix_nspl::vm_program::ParseFromSourceError::Lex { diagnostics, .. }
-        | nervix_nspl::vm_program::ParseFromSourceError::Parse { diagnostics, .. } => diagnostics
-            .first()
-            .map(|diagnostic| diagnostic.message.clone())
-            .unwrap_or_else(|| "unknown parse error".to_string()),
     }
 }
 
@@ -5250,16 +5880,6 @@ fn readonly_binding_for_internal_schema(
     )
 }
 
-fn writeonly_binding_for_internal_schema(
-    namespace: impl Into<String>,
-    schema: &CreateSchema,
-) -> CompileBinding {
-    compile_binding_with_internal_schema(
-        CompileBinding::writeonly(namespace, arrow_schema_for_internal_schema(schema)),
-        schema,
-    )
-}
-
 fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
     match ty {
         ParseAsType::U8 => ArrowDataType::UInt8,
@@ -5290,58 +5910,6 @@ fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> ArrowDataType {
             arrow_data_type_for_parse_as(element),
             false,
         ))),
-    }
-}
-
-fn parse_as_type_for_output(
-    domain: &Domain,
-    identifier: &Identifier,
-    data_type: &ArrowDataType,
-) -> Result<ParseAsType, Report<RegistryError>> {
-    match data_type {
-        ArrowDataType::UInt8 => Ok(ParseAsType::U8),
-        ArrowDataType::Int8 => Ok(ParseAsType::I8),
-        ArrowDataType::UInt16 => Ok(ParseAsType::U16),
-        ArrowDataType::Int16 => Ok(ParseAsType::I16),
-        ArrowDataType::UInt32 => Ok(ParseAsType::U32),
-        ArrowDataType::Int32 => Ok(ParseAsType::I32),
-        ArrowDataType::UInt64 => Ok(ParseAsType::U64),
-        ArrowDataType::Int64 => Ok(ParseAsType::I64),
-        ArrowDataType::Float32 => Ok(ParseAsType::F32),
-        ArrowDataType::Float64 => Ok(ParseAsType::F64),
-        ArrowDataType::Boolean => Ok(ParseAsType::Bool),
-        ArrowDataType::Utf8 => Ok(ParseAsType::String),
-        ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some(tz))
-            if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
-        {
-            Ok(ParseAsType::Datetime)
-        }
-        ArrowDataType::FixedSizeList(field, len) => Ok(ParseAsType::Array {
-            element: Box::new(parse_as_type_for_output(
-                domain,
-                identifier,
-                field.data_type(),
-            )?),
-            len: u32::try_from(*len).map_err(|_| {
-                Report::new(RegistryError::InvalidModel {
-                    domain: domain.as_str().to_string(),
-                    identifier: identifier.as_str().to_string(),
-                    reason: format!("FILTER-MAP output array length {len} is not supported"),
-                })
-            })?,
-        }),
-        ArrowDataType::List(field) => Ok(ParseAsType::Vec {
-            element: Box::new(parse_as_type_for_output(
-                domain,
-                identifier,
-                field.data_type(),
-            )?),
-        }),
-        other => Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP output type {other:?} is not supported"),
-        })),
     }
 }
 
@@ -5478,99 +6046,63 @@ fn ensure_equal_internal_schema(
     }))
 }
 
-fn split_deduplicate_on_expressions(source: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0i32;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in source.char_indices() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            ',' if depth == 0 => {
-                let part = source[start..index].trim();
-                if !part.is_empty() {
-                    parts.push(part.to_string());
-                }
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let part = source[start..].trim();
-    if !part.is_empty() {
-        parts.push(part.to_string());
-    }
-    parts
-}
-
 fn ensure_deduplicator_key_compiles(
     domain: &Domain,
     identifier: &Identifier,
     deduplicator: &CreateDeduplicator,
     input_schemas: &[(&Identifier, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
-    let Some((primary_relay, primary_schema)) = input_schemas.first() else {
+    let Some((_primary_relay, primary_schema)) = input_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: "deduplicator input requires at least one input relay".to_string(),
         }));
     };
-    let expressions = split_deduplicate_on_expressions(&deduplicator.deduplicate_on);
-    if expressions.is_empty() {
+    if deduplicator.deduplicate_on.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: "DEDUPLICATE ON requires at least one expression".to_string(),
         }));
     }
-    let assignments = expressions
+    let assignments = deduplicator
+        .deduplicate_on
         .iter()
         .enumerate()
         .map(|(index, expression)| {
-            format!(
-                "{}.deduplicate_key_{} = {}",
-                primary_relay.as_str(),
-                index,
-                expression
-            )
+            Ok(Assignment {
+                target: AssignmentTarget::bare(
+                    Identifier::parse(&format!("deduplicate_key_{index}")).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: format!("invalid deduplicate key target: {error}"),
+                        })
+                    })?,
+                ),
+                value: expression.clone(),
+            })
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source = format!("SET {assignments}");
-    let parsed = parse_program(&source).map_err(|error| {
+        .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            assignments,
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new("input", "input"),
+    )
+    .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "DEDUPLICATE ON parse failed: {}",
-                first_vm_program_error(error)
-            ),
+            reason: format!("DEDUPLICATE ON is invalid: {reason}"),
         })
     })?;
-    let mut bindings = vec![writable_binding_for_internal_schema(
-        primary_relay.as_str(),
+    let bindings = vec![writable_binding_for_internal_schema(
+        "input",
         primary_schema,
     )];
-    bindings.extend(
-        input_schemas
-            .iter()
-            .skip(1)
-            .map(|(relay, schema)| readonly_binding_for_internal_schema(relay.as_str(), schema)),
-    );
     let key_types = infer_set_expr_types_for_bindings(&parsed, bindings).map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5578,7 +6110,7 @@ fn ensure_deduplicator_key_compiles(
             reason: format!("DEDUPLICATE ON compile failed: {}", error.message),
         })
     })?;
-    if key_types.len() != expressions.len() {
+    if key_types.len() != deduplicator.deduplicate_on.len() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -5655,43 +6187,23 @@ fn validate_correlate_where_for_internal_schemas(
     left_schemas: &[(&Identifier, &CreateSchema)],
     right_schemas: &[(&Identifier, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
-    let parsed = parse_program(&correlator.correlate_where).map_err(|error| {
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            where_clause: Some(correlator.correlate_where.clone()),
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new(
+            "__invalid_correlator_bare_read",
+            "__invalid_correlator_target",
+        ),
+    )
+    .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "CORRELATE WHERE parse failed: {}",
-                first_vm_program_error(error)
-            ),
+            reason: format!("CORRELATE WHERE is invalid: {reason}"),
         })
     })?;
-    if parsed.inner.filter.is_none()
-        || !parsed.inner.set.is_empty()
-        || !parsed.inner.unset.is_empty()
-        || !parsed.inner.branch_filters.is_empty()
-        || !parsed.inner.invoke.is_empty()
-    {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "CORRELATE WHERE must contain exactly one WHERE clause".to_string(),
-        }));
-    }
-
-    let mut bindings = Vec::with_capacity(left_schemas.len() + right_schemas.len());
-    for (index, (relay, schema)) in left_schemas.iter().enumerate() {
-        if index == 0 {
-            bindings.push(
-                CompileBinding::writable(relay.as_str(), arrow_schema_for_internal_schema(schema))
-                    .with_sensitivity(schema_sensitivity_for_internal_schema(schema)),
-            );
-        } else {
-            bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
-        }
-    }
-    for (relay, schema) in right_schemas {
-        bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
-    }
     let Some((_first_relay, first_schema)) = left_schemas.first() else {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5699,6 +6211,17 @@ fn validate_correlate_where_for_internal_schemas(
             reason: "correlator left input requires at least one input relay".to_string(),
         }));
     };
+    let Some((_right_relay, right_schema)) = right_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "correlator right input requires at least one input relay".to_string(),
+        }));
+    };
+    let bindings = vec![
+        writable_binding_for_internal_schema("left", first_schema),
+        readonly_binding_for_internal_schema("right", right_schema),
+    ];
 
     compile_program_for_bindings_with_sensitivity(
         &parsed,
@@ -5720,12 +6243,14 @@ fn validate_correlate_where_for_internal_schemas(
 fn validate_correlator_output(
     domain: &Domain,
     identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
     left_schemas: &[(&Identifier, &CreateSchema)],
     right_schemas: &[(&Identifier, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
+    branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(source) = output.filter_map.as_deref() else {
+    if output.construction.assignments.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -5734,20 +6259,23 @@ fn validate_correlator_output(
                 output.relay.as_str()
             ),
         }));
-    };
-    let parsed = parse_program(&source).map_err(|error| {
+    }
+    let parsed = lower_route_construction(
+        &output.construction,
+        SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
+    )
+    .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "correlator TO output '{}' parse failed: {}",
+                "correlator TO output '{}' is invalid: {}",
                 output.relay.as_str(),
-                first_vm_program_error(error)
+                reason
             ),
         })
     })?;
     if !parsed.inner.branch_filters.is_empty()
-        || !parsed.inner.unset.is_empty()
         || !parsed.inner.invoke.is_empty()
         || parsed.inner.set.is_empty()
     {
@@ -5761,18 +6289,46 @@ fn validate_correlator_output(
         }));
     }
 
+    let Some((_left_relay, left_schema)) = left_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "correlator left input requires at least one input relay".to_string(),
+        }));
+    };
+    let Some((_right_relay, right_schema)) = right_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "correlator right input requires at least one input relay".to_string(),
+        }));
+    };
     let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
-    let mut bindings = Vec::with_capacity(left_schemas.len() + right_schemas.len() + 1);
-    for (relay, schema) in left_schemas {
-        bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
+    let mut bindings = vec![
+        readonly_binding_for_internal_schema("left", left_schema),
+        readonly_binding_for_internal_schema("right", right_schema),
+        writable_binding_for_internal_schema("output", output_schema),
+    ];
+    if let Some(branch_schema) = branch_schema {
+        bindings.push(readonly_binding_for_internal_schema(
+            BRANCH_NAMESPACE,
+            branch_schema,
+        ));
     }
-    for (relay, schema) in right_schemas {
-        bindings.push(readonly_binding_for_internal_schema(relay.as_str(), schema));
-    }
-    bindings.push(writeonly_binding_for_internal_schema(
-        output.relay.as_str(),
-        output_schema,
-    ));
+    let local_namespaces = HashSet::from_iter([
+        "left".to_string(),
+        "right".to_string(),
+        "output".to_string(),
+        BRANCH_NAMESPACE.to_string(),
+    ]);
+    bindings.extend(referenced_materialized_stream_bindings(
+        domain,
+        identifier,
+        models,
+        &parsed,
+        &local_namespaces,
+        "correlator output",
+    )?);
     let compiled = compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_arrow_schema.clone(),
@@ -5873,27 +6429,77 @@ fn ensure_inferencer_input_mappings(
     processor: &CreateInferencer,
     input_schemas: &[(&Identifier, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
+    let Some((_relay, input_schema)) = input_schemas.first() else {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "inferencer requires at least one input relay".to_string(),
+        }));
+    };
     for mapping in &processor.inputs {
-        let Some((_relay, input_schema)) = input_schemas
-            .iter()
-            .find(|(relay, _schema)| **relay == mapping.relay)
-        else {
+        let target = Identifier::parse("mapped_tensor").map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("invalid inferencer mapping target: {error}"),
+            })
+        })?;
+        let parsed = lower_route_construction(
+            &RouteConstruction {
+                assignments: vec![Assignment {
+                    target: AssignmentTarget::bare(target),
+                    value: mapping.expression.clone(),
+                }],
+                ..RouteConstruction::default()
+            },
+            SemanticNamespaces::new("input", "input"),
+        )
+        .map_err(|reason| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("inference input '{}' is invalid: {reason}", mapping.tensor),
+            })
+        })?;
+        let inferred = infer_set_expr_types_for_bindings(
+            &parsed,
+            [writable_binding_for_internal_schema("input", input_schema)],
+        )
+        .map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "inference input '{}' compile failed: {}",
+                    mapping.tensor, error.message
+                ),
+            })
+        })?;
+        let Some((_field, actual_type, actual_nullable)) = inferred.first() else {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("inference input '{}' produced no value", mapping.tensor),
+            }));
+        };
+        let expected_type = arrow_data_type_for_parse_as(&mapping.schema.message_type());
+        if actual_type != &expected_type || *actual_nullable {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "inference input '{}' must read from one of the declared input relays",
-                    mapping.tensor
+                    "inference input '{}' requires {:?} non-null, found {:?}{}",
+                    mapping.tensor,
+                    expected_type,
+                    actual_type,
+                    if *actual_nullable {
+                        " nullable"
+                    } else {
+                        " non-null"
+                    }
                 ),
             }));
-        };
-        ensure_field_exists(
-            domain,
-            identifier,
-            input_schema,
-            &mapping.field,
-            &format!("inference input '{}'", mapping.tensor),
-        )?;
+        }
     }
 
     Ok(())
@@ -5903,32 +6509,26 @@ fn validate_inferencer_output_filter_map(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
-    input_schemas: &[(&Identifier, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
     processor: &CreateInferencer,
 ) -> Result<(), Report<RegistryError>> {
-    let mut parsed = if let Some(filter_map) = output.filter_map.as_deref() {
-        parse_program(filter_map).map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!("FILTER-MAP parse failed: {}", first_vm_program_error(error)),
-            })
-        })?
-    } else {
-        SpannedNode {
-            inner: Program {
-                filter: None,
-                branch_filters: Vec::new(),
-                set: Vec::new(),
-                unset: Vec::new(),
-                invoke: Vec::new(),
-            },
-            span: (0..0).into(),
-        }
-    };
+    let inner_output_schema = processor.inner_output_schema(domain, identifier)?;
+    let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
+    let generated_arrow_schema = arrow_schema_for_internal_schema(&inner_output_schema);
+    let parsed = lower_generated_route(
+        &output.construction,
+        output_arrow_schema.as_ref(),
+        generated_arrow_schema.as_ref(),
+    )
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("inferencer output route is invalid: {reason}"),
+        })
+    })?;
     if !parsed.inner.branch_filters.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -5936,48 +6536,22 @@ fn validate_inferencer_output_filter_map(
             reason: "FILTER-MAP may contain at most one WHERE clause".to_string(),
         }));
     }
-    let input_relay_names = input_schemas
-        .iter()
-        .map(|(relay, _schema)| relay.as_str().to_string())
-        .collect::<Vec<_>>();
-    parsed
-        .inner
-        .rewrite_unset_sources_to_destination(&input_relay_names, output.relay.as_str());
-
     let original_parsed = parsed.clone();
     let (parsed, lookup_fields) =
         rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
-    let mut bindings = input_schemas
-        .iter()
-        .map(|(relay, schema)| readonly_binding_for_internal_schema(relay.as_str(), schema))
-        .collect::<Vec<_>>();
-    let inner_input_schema = processor.inner_input_schema(domain, identifier, input_schemas)?;
-    let inner_output_schema = processor.inner_output_schema(domain, identifier)?;
-    bindings.push(readonly_binding_for_internal_schema(
-        INNER_INPUT_NAMESPACE,
-        &inner_input_schema,
-    ));
-    bindings.push(readonly_binding_for_internal_schema(
-        INNER_OUTPUT_NAMESPACE,
-        &inner_output_schema,
-    ));
-    bindings.push(writeonly_binding_for_internal_schema(
-        output.relay.as_str(),
-        output_schema,
-    ));
+    let mut bindings = vec![
+        readonly_binding_for_internal_schema("generated", &inner_output_schema),
+        writable_binding_for_internal_schema("output", output_schema),
+    ];
     if let Some(branch_schema) = branch_schema {
         bindings.push(readonly_binding_for_internal_schema(
             BRANCH_NAMESPACE,
             branch_schema,
         ));
     }
-    let mut local_namespaces = input_schemas
-        .iter()
-        .map(|(relay, _schema)| relay.as_str().to_string())
-        .collect::<HashSet<_>>();
-    local_namespaces.insert(output.relay.as_str().to_string());
-    local_namespaces.insert(INNER_INPUT_NAMESPACE.to_string());
-    local_namespaces.insert(INNER_OUTPUT_NAMESPACE.to_string());
+    let mut local_namespaces = HashSet::new();
+    local_namespaces.insert("generated".to_string());
+    local_namespaces.insert("output".to_string());
     local_namespaces.insert(BRANCH_NAMESPACE.to_string());
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
@@ -5991,10 +6565,13 @@ fn validate_inferencer_output_filter_map(
 
     compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
-        arrow_schema_for_internal_schema(output_schema),
+        output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions::default(),
+        CompileOptions {
+            output_mode: OutputMode::ExplicitOnly,
+            ..CompileOptions::default()
+        },
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -6008,13 +6585,6 @@ fn validate_inferencer_output_filter_map(
 }
 
 trait InferencerRegistrySchema {
-    fn inner_input_schema(
-        &self,
-        domain: &Domain,
-        identifier: &Identifier,
-        input_schemas: &[(&Identifier, &CreateSchema)],
-    ) -> Result<CreateSchema, Report<RegistryError>>;
-
     fn inner_output_schema(
         &self,
         domain: &Domain,
@@ -6023,51 +6593,6 @@ trait InferencerRegistrySchema {
 }
 
 impl InferencerRegistrySchema for CreateInferencer {
-    fn inner_input_schema(
-        &self,
-        domain: &Domain,
-        identifier: &Identifier,
-        input_schemas: &[(&Identifier, &CreateSchema)],
-    ) -> Result<CreateSchema, Report<RegistryError>> {
-        let fields = self
-            .inputs
-            .iter()
-            .map(|mapping| {
-                let name = Identifier::parse(&mapping.tensor).map_err(|error| {
-                    Report::new(RegistryError::InvalidModel {
-                        domain: domain.as_str().to_string(),
-                        identifier: identifier.as_str().to_string(),
-                        reason: format!(
-                            "ONNX input tensor '{}' cannot be referenced as '{}.{}': {}",
-                            mapping.tensor, INNER_INPUT_NAMESPACE, mapping.tensor, error
-                        ),
-                    })
-                })?;
-                let sensitive = input_schemas
-                    .iter()
-                    .find(|(relay, _schema)| **relay == mapping.relay)
-                    .and_then(|(_relay, schema)| {
-                        schema
-                            .fields
-                            .iter()
-                            .find(|field| field.name == mapping.field)
-                    })
-                    .is_some_and(|field| field.sensitive);
-                Ok(SchemaField {
-                    name,
-                    ty: mapping.schema.message_type(),
-                    optional: false,
-                    sensitive,
-                })
-            })
-            .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
-        Ok(CreateSchema {
-            name: Identifier::parse(INNER_INPUT_NAMESPACE)
-                .expect("public inferencer namespace must be a valid identifier"),
-            fields,
-        })
-    }
-
     fn inner_output_schema(
         &self,
         domain: &Domain,
@@ -6103,32 +6628,6 @@ impl InferencerRegistrySchema for CreateInferencer {
     }
 }
 
-fn ensure_field_exists(
-    domain: &Domain,
-    identifier: &Identifier,
-    schema: &CreateSchema,
-    field: &Identifier,
-    context: &str,
-) -> Result<(), Report<RegistryError>> {
-    if schema
-        .fields
-        .iter()
-        .any(|schema_field| schema_field.name == *field)
-    {
-        return Ok(());
-    }
-
-    Err(Report::new(RegistryError::IncompatibleSchema {
-        domain: domain.as_str().to_string(),
-        identifier: identifier.as_str().to_string(),
-        reason: format!(
-            "{context} field '{}' is missing from schema '{}'",
-            field.as_str(),
-            schema.name.as_str()
-        ),
-    }))
-}
-
 fn ensure_lookup_key_field_exists(
     domain: &Domain,
     identifier: &Identifier,
@@ -6152,30 +6651,6 @@ fn ensure_lookup_key_field_exists(
             schema.name.as_str()
         ),
     }))
-}
-
-fn ensure_ingestor_output_branching_source(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    ingestor: &CreateIngestor,
-    schema: &CreateSchema,
-    output_relay: &Identifier,
-) -> Result<(), Report<RegistryError>> {
-    if let Some(branch_ref) = ingestor.branched_by.branch() {
-        let branch = branch_model(domain, identifier, models, branch_ref)?;
-        ensure_branch_values_match_schema(
-            domain,
-            identifier,
-            models,
-            &branch.schema,
-            ingestor.branched_by.values(),
-            schema,
-            output_relay,
-            None,
-        )?;
-    }
-    Ok(())
 }
 
 fn ensure_ingestor_timestamp_source(
@@ -6220,29 +6695,23 @@ fn ensure_ingestor_timestamp_source(
     }
 }
 
-fn ensure_reingestor_branching_target(
+fn relay_declared_branch<'a>(
     domain: &Domain,
     identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
-    reingestor: &CreateReingestor,
-    schema: &CreateSchema,
-    output_relay: &Identifier,
-    branch_schema: Option<&CreateSchema>,
-) -> Result<(), Report<RegistryError>> {
-    if let Some(branch_ref) = reingestor.branched_by.branch() {
-        let branch = branch_model(domain, identifier, models, branch_ref)?;
-        ensure_branch_values_match_schema(
-            domain,
-            identifier,
-            models,
-            &branch.schema,
-            reingestor.branched_by.values(),
-            schema,
-            output_relay,
-            branch_schema,
-        )?;
-    }
-    Ok(())
+    models: &'a HashMap<RegistryKey, Model>,
+    relay: &Identifier,
+) -> Result<Option<&'a Identifier>, Report<RegistryError>> {
+    let Some(Model::Relay(relay_model)) =
+        models.get(&RegistryKey::new(ModelKind::Relay, relay.clone()))
+    else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Relay.as_str(),
+            reference: relay.as_str().to_string(),
+        }));
+    };
+    Ok(relay_model.branching.branch())
 }
 
 fn relay_declared_branch_schema<'a>(
@@ -6278,139 +6747,131 @@ fn relay_declared_branch_schema<'a>(
     Ok(Some(schema))
 }
 
-fn ensure_branch_values_match_schema(
+fn ensure_output_branch(
     domain: &Domain,
     identifier: &Identifier,
     models: &HashMap<RegistryKey, Model>,
-    branch_schema_name: &Identifier,
-    values: &[nervix_models::BranchValueMapping],
+    output: &ProcessorOutput,
+    input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-    output_relay: &Identifier,
-    current_branch_schema: Option<&CreateSchema>,
+    incoming_branch: Option<&Identifier>,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(Model::Schema(branch_schema_model)) = models.get(&RegistryKey::new(
-        ModelKind::Schema,
-        branch_schema_name.clone(),
-    )) else {
-        return Err(Report::new(RegistryError::MissingReference {
+    let target_branch = relay_declared_branch(domain, identifier, models, &output.relay)?;
+    let Some(branch_action) = output.branch.as_ref() else {
+        return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Schema.as_str(),
-            reference: branch_schema_name.as_str().to_string(),
+            reason: format!(
+                "TO output '{}' must declare BRANCHED BY or UNBRANCHED",
+                output.relay.as_str()
+            ),
         }));
     };
-    let mut seen = HashSet::new();
-    for value in values {
-        if !seen.insert(value.field.clone()) {
-            return Err(Report::new(RegistryError::IncompatibleSchema {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "BY value field '{}' is specified more than once",
-                    value.field.as_str()
-                ),
-            }));
-        }
-        let source_schema = if value.relay.as_str() == BRANCH_NAMESPACE {
-            let Some(current_branch_schema) = current_branch_schema else {
+
+    let (branch_ref, assignments) = match branch_action {
+        OutputBranch::Unbranched => {
+            if let Some(target_branch) = target_branch {
                 return Err(Report::new(RegistryError::IncompatibleSchema {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
                     reason: format!(
-                        "BY VALUES for '{}' cannot read '{}.{}' because the current branch is \
-                         unbranched",
-                        value.field.as_str(),
-                        value.relay.as_str(),
-                        value.relay_field.as_str()
-                    ),
-                }));
-            };
-            current_branch_schema
-        } else {
-            if value.relay != *output_relay {
-                return Err(Report::new(RegistryError::IncompatibleSchema {
-                    domain: domain.as_str().to_string(),
-                    identifier: identifier.as_str().to_string(),
-                    reason: format!(
-                        "BY VALUES for '{}' must read directly from outgoing relay '{}' or branch",
-                        value.field.as_str(),
-                        output_relay.as_str()
+                        "TO output '{}' is BRANCHED BY '{}', but the route declares UNBRANCHED",
+                        output.relay.as_str(),
+                        target_branch.as_str()
                     ),
                 }));
             }
-            output_schema
-        };
-        let Some(source_field) = source_schema
-            .fields
-            .iter()
-            .find(|schema_field| schema_field.name == value.relay_field)
-        else {
-            return Err(Report::new(RegistryError::IncompatibleSchema {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "BY source field '{}.{}' is missing from schema '{}'",
-                    value.relay.as_str(),
-                    value.relay_field.as_str(),
-                    source_schema.name.as_str()
-                ),
-            }));
-        };
-        let Some(branch_field) = branch_schema_model
-            .fields
-            .iter()
-            .find(|schema_field| schema_field.name == value.field)
-        else {
-            return Err(Report::new(RegistryError::IncompatibleSchema {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "BY schema '{}' has no field '{}'",
-                    branch_schema_name.as_str(),
-                    value.field.as_str()
-                ),
-            }));
-        };
-        if source_field.ty != branch_field.ty {
-            return Err(Report::new(RegistryError::IncompatibleSchema {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "BY value field '{}' type mismatch: schema {:?}, source {:?}",
-                    value.field.as_str(),
-                    branch_field.ty,
-                    source_field.ty
-                ),
-            }));
+            return Ok(());
         }
-        if source_field.optional != branch_field.optional {
-            return Err(Report::new(RegistryError::IncompatibleSchema {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "BY value field '{}' optionality mismatch: schema {}, source {}",
-                    value.field.as_str(),
-                    branch_field.optional,
-                    source_field.optional
-                ),
-            }));
-        }
-    }
-    for field in &branch_schema_model.fields {
-        if values.iter().any(|value| value.field == field.name) {
-            continue;
-        }
+        OutputBranch::BranchedBy {
+            branch,
+            assignments,
+        } => (branch, assignments),
+    };
+
+    if target_branch != Some(branch_ref) {
         return Err(Report::new(RegistryError::IncompatibleSchema {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "BY schema '{}' field '{}' has no VALUES mapping",
-                branch_schema_name.as_str(),
-                field.name.as_str()
+                "TO output '{}' must use its exact declared branch '{}'",
+                output.relay.as_str(),
+                target_branch.map_or("UNBRANCHED", Identifier::as_str)
             ),
         }));
     }
 
+    if incoming_branch == Some(branch_ref) {
+        if assignments.is_empty() {
+            return Ok(());
+        }
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "TO output '{}' preserves branch '{}' and cannot construct a new key",
+                output.relay.as_str(),
+                branch_ref.as_str()
+            ),
+        }));
+    }
+
+    let branch = branch_model(domain, identifier, models, branch_ref)?;
+    let branch_schema = schema_model(domain, identifier, models, &branch.schema)?;
+    let parsed = lower_branch_construction(
+        assignments,
+        arrow_schema_for_internal_schema(branch_schema).as_ref(),
+        arrow_schema_for_internal_schema(output_schema).as_ref(),
+        arrow_schema_for_internal_schema(input_schema).as_ref(),
+    )
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("branch construction is invalid: {reason}"),
+        })
+    })?;
+    let original_parsed = parsed.clone();
+    let (parsed, lookup_fields) =
+        rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let mut bindings = vec![
+        readonly_binding_for_internal_schema("input", input_schema),
+        readonly_binding_for_internal_schema("output", output_schema),
+        readonly_binding_for_internal_schema("message", output_schema),
+        writable_binding_for_internal_schema(BRANCH_NAMESPACE, branch_schema),
+    ];
+    let local_namespaces = HashSet::from_iter([
+        "input".to_string(),
+        "output".to_string(),
+        "message".to_string(),
+        BRANCH_NAMESPACE.to_string(),
+    ]);
+    bindings.extend(referenced_materialized_stream_bindings(
+        domain,
+        identifier,
+        models,
+        &original_parsed,
+        &local_namespaces,
+        "branch SET",
+    )?);
+    bindings.extend(lookup_hash_map_bindings(lookup_fields));
+    compile_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        arrow_schema_for_internal_schema(branch_schema),
+        schema_sensitivity_for_internal_schema(branch_schema),
+        bindings,
+        CompileOptions {
+            output_mode: OutputMode::ExplicitOnly,
+            ..CompileOptions::default()
+        },
+    )
+    .map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("branch SET compile failed: {}", error.message),
+        })
+    })?;
     Ok(())
 }
 
@@ -6554,10 +7015,22 @@ fn infer_stream_branchings(
             };
 
             let proposed = match model {
-                Model::Generator(generator) => Some(vec![(
-                    generator.into_relay.clone(),
-                    resolved_branch_selection(domain, producer_id, models, &generator.branched_by)?,
-                )]),
+                Model::Generator(generator) => {
+                    let branching = resolved_branch_selection(
+                        domain,
+                        producer_id,
+                        models,
+                        &generator.branched_by,
+                    )?;
+                    Some(
+                        generator
+                            .output_routes
+                            .relays()
+                            .cloned()
+                            .map(|target| (target, branching.clone()))
+                            .collect::<Vec<_>>(),
+                    )
+                }
                 Model::Inferencer(processor) => {
                     let branching = resolved_branch_selection(
                         domain,
@@ -6590,38 +7063,18 @@ fn infer_stream_branchings(
                             .collect(),
                     )
                 }
-                Model::Ingestor(ingestor) => {
-                    let branching = resolved_branch_selection(
-                        domain,
-                        producer_id,
-                        models,
-                        &ingestor.branched_by,
-                    )?;
-                    Some(
-                        ingestor
-                            .output_routes
-                            .relays()
-                            .cloned()
-                            .map(|target| (target, branching.clone()))
-                            .collect(),
-                    )
-                }
-                Model::Reingestor(reingestor) => {
-                    let branching = resolved_branch_selection(
-                        domain,
-                        producer_id,
-                        models,
-                        &reingestor.branched_by,
-                    )?;
-                    Some(
-                        reingestor
-                            .output_routes
-                            .relays()
-                            .cloned()
-                            .map(|target| (target, branching.clone()))
-                            .collect(),
-                    )
-                }
+                Model::Ingestor(ingestor) => Some(resolved_output_branches(
+                    domain,
+                    producer_id,
+                    models,
+                    &ingestor.output_routes,
+                )?),
+                Model::Reingestor(reingestor) => Some(resolved_output_branches(
+                    domain,
+                    producer_id,
+                    models,
+                    &reingestor.output_routes,
+                )?),
                 Model::Deduplicator(deduplicator) => {
                     let branching = resolved_branch_selection(
                         domain,
@@ -6730,11 +7183,8 @@ fn validate_processing_branch_selections(
                     indices,
                     graph,
                 };
-                for source_relay in
-                    generator_program_materialized_relays(domain, &key.identifier, generator)?
-                {
-                    check.matches_relay(&generator.branched_by, &source_relay)?;
-                }
+                check.matches_relay(&generator.branched_by, &generator.materialized_relay)?;
+                check.matches_outputs(&generator.branched_by, &generator.output_routes)?;
             }
             Model::Inferencer(processor) => {
                 let check = ProcessorBranchingCheck {
@@ -6748,6 +7198,10 @@ fn validate_processing_branch_selections(
                 for from_relay in processor.from.relays() {
                     check.matches_relay(&processor.branched_by, from_relay)?;
                 }
+                for dependency in &processor.materialized_state {
+                    check.matches_relay(&processor.branched_by, &dependency.relay)?;
+                }
+                check.matches_outputs(&processor.branched_by, &processor.output_routes)?;
             }
             Model::WasmProcessor(processor) => {
                 let check = ProcessorBranchingCheck {
@@ -6761,6 +7215,10 @@ fn validate_processing_branch_selections(
                 for from_relay in processor.from.relays() {
                     check.matches_relay(&processor.branched_by, from_relay)?;
                 }
+                for dependency in &processor.materialized_state {
+                    check.matches_relay(&processor.branched_by, &dependency.relay)?;
+                }
+                check.matches_outputs(&processor.branched_by, &processor.output_routes)?;
             }
             Model::Deduplicator(deduplicator) => {
                 let check = ProcessorBranchingCheck {
@@ -6774,6 +7232,10 @@ fn validate_processing_branch_selections(
                 for from_relay in deduplicator.from.relays() {
                     check.matches_relay(&deduplicator.branched_by, from_relay)?;
                 }
+                for dependency in &deduplicator.materialized_state {
+                    check.matches_relay(&deduplicator.branched_by, &dependency.relay)?;
+                }
+                check.matches_outputs(&deduplicator.branched_by, &deduplicator.output_routes)?;
             }
             Model::Correlator(correlator) => {
                 let check = ProcessorBranchingCheck {
@@ -6798,6 +7260,10 @@ fn validate_processing_branch_selections(
                 {
                     check.matches_relay(&correlator.branched_by, relay)?;
                 }
+                for dependency in &correlator.materialized_state {
+                    check.matches_relay(&correlator.branched_by, &dependency.relay)?;
+                }
+                check.matches_outputs(&correlator.branched_by, &correlator.output_routes)?;
             }
             Model::Reorderer(reorderer) => {
                 let check = ProcessorBranchingCheck {
@@ -6811,6 +7277,10 @@ fn validate_processing_branch_selections(
                 for from_relay in reorderer.from.relays() {
                     check.matches_relay(&reorderer.branched_by, from_relay)?;
                 }
+                for dependency in &reorderer.materialized_state {
+                    check.matches_relay(&reorderer.branched_by, &dependency.relay)?;
+                }
+                check.matches_outputs(&reorderer.branched_by, &reorderer.output_routes)?;
             }
             Model::Reingestor(reingestor) => {
                 for from_relay in reingestor.from.relays() {
@@ -6822,6 +7292,19 @@ fn validate_processing_branch_selections(
                         indices,
                         graph,
                     )?;
+                }
+                if let Some(from_relay) = reingestor.from.first() {
+                    for dependency in &reingestor.materialized_state {
+                        ensure_relays_have_same_branch(
+                            domain,
+                            &key.identifier,
+                            "reingestor materialized state",
+                            from_relay,
+                            &dependency.relay,
+                            &indices,
+                            &graph,
+                        )?;
+                    }
                 }
             }
             Model::WindowProcessor(window_processor) => {
@@ -6836,6 +7319,13 @@ fn validate_processing_branch_selections(
                 for from_relay in window_processor.from.relays() {
                     check.matches_relay(&window_processor.branched_by, from_relay)?;
                 }
+                for dependency in &window_processor.materialized_state {
+                    check.matches_relay(&window_processor.branched_by, &dependency.relay)?;
+                }
+                check.matches_outputs(
+                    &window_processor.branched_by,
+                    &window_processor.output_routes,
+                )?;
             }
             Model::Junction(junction) => {
                 let check = ProcessorBranchingCheck {
@@ -6848,6 +7338,23 @@ fn validate_processing_branch_selections(
                 };
                 for from_relay in junction.from.relays() {
                     check.matches_relay(&junction.branched_by, from_relay)?;
+                }
+                for dependency in &junction.materialized_state {
+                    check.matches_relay(&junction.branched_by, &dependency.relay)?;
+                }
+                check.matches_outputs(&junction.branched_by, &junction.output_routes)?;
+            }
+            Model::Emitter(emitter) => {
+                for dependency in &emitter.materialized_state {
+                    ensure_relays_have_same_branch(
+                        domain,
+                        &key.identifier,
+                        "emitter materialized state",
+                        &emitter.from_relay,
+                        &dependency.relay,
+                        &indices,
+                        &graph,
+                    )?;
                 }
             }
             _ => {}
@@ -6867,6 +7374,17 @@ struct ProcessorBranchingCheck<'a> {
 }
 
 impl ProcessorBranchingCheck<'_> {
+    fn matches_outputs(
+        &self,
+        branched_by: &BranchSelection,
+        outputs: &ProcessorOutputs,
+    ) -> Result<(), Report<RegistryError>> {
+        for output in outputs.outputs() {
+            self.matches_relay(branched_by, &output.relay)?;
+        }
+        Ok(())
+    }
+
     fn matches_relay(
         &self,
         branched_by: &BranchSelection,
@@ -6981,6 +7499,36 @@ fn ensure_processing_source_branching(
     }))
 }
 
+fn ensure_relays_have_same_branch(
+    domain: &Domain,
+    identifier: &Identifier,
+    context: &str,
+    left: &Identifier,
+    right: &Identifier,
+    indices: &HashMap<RegistryKey, NodeIndex>,
+    graph: &DiGraph<ActiveNode, EdgeKind>,
+) -> Result<(), Report<RegistryError>> {
+    let left_branching = relay_branching(indices, graph, left);
+    let right_branching = relay_branching(indices, graph, right);
+    let compatible = match (&left_branching, &right_branching) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.branch == right.branch && left.fields == right.fields,
+        _ => false,
+    };
+    if compatible {
+        return Ok(());
+    }
+    Err(Report::new(RegistryError::IncompatibleSchema {
+        domain: domain.as_str().to_string(),
+        identifier: identifier.as_str().to_string(),
+        reason: format!(
+            "{context} requires relay '{}' and materialized relay '{}' to use the same exact \
+             branch",
+            left, right
+        ),
+    }))
+}
+
 fn relay_branching(
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &DiGraph<ActiveNode, EdgeKind>,
@@ -7021,10 +7569,37 @@ impl BranchReference for BranchSelection {
     }
 }
 
-impl BranchReference for BranchInitiatorSelection {
+impl BranchReference for OutputBranch {
     fn branch_ref(&self) -> Option<&Identifier> {
         self.branch()
     }
+}
+
+fn resolved_output_branches(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
+    outputs: &ProcessorOutputs,
+) -> Result<Vec<(Identifier, ResolvedBranching)>, Report<RegistryError>> {
+    outputs
+        .outputs()
+        .map(|output| {
+            let Some(branch) = output.branch.as_ref() else {
+                return Err(Report::new(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "TO output '{}' must declare BRANCHED BY or UNBRANCHED",
+                        output.relay.as_str()
+                    ),
+                }));
+            };
+            Ok((
+                output.relay.clone(),
+                resolved_branch_selection(domain, identifier, models, branch)?,
+            ))
+        })
+        .collect()
 }
 
 fn resolved_branch_selection(
@@ -7067,13 +7642,30 @@ fn branch_model<'a>(
     Ok(branch)
 }
 
+fn schema_model<'a>(
+    domain: &Domain,
+    identifier: &Identifier,
+    models: &'a HashMap<RegistryKey, Model>,
+    schema_ref: &Identifier,
+) -> Result<&'a CreateSchema, Report<RegistryError>> {
+    let Some(Model::Schema(schema)) =
+        models.get(&RegistryKey::new(ModelKind::Schema, schema_ref.clone()))
+    else {
+        return Err(Report::new(RegistryError::MissingReference {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: ModelKind::Schema.as_str(),
+            reference: schema_ref.as_str().to_string(),
+        }));
+    };
+    Ok(schema)
+}
+
 fn model_branch_selection(model: &Model) -> Option<&dyn BranchReference> {
     match model {
         Model::Generator(generator) => Some(&generator.branched_by),
         Model::Inferencer(processor) => Some(&processor.branched_by),
         Model::WasmProcessor(processor) => Some(&processor.branched_by),
-        Model::Ingestor(ingestor) => Some(&ingestor.branched_by),
-        Model::Reingestor(reingestor) => Some(&reingestor.branched_by),
         Model::Deduplicator(deduplicator) => Some(&deduplicator.branched_by),
         Model::Correlator(correlator) => Some(&correlator.branched_by),
         Model::Junction(junction) => Some(&junction.branched_by),
@@ -7750,18 +8342,20 @@ mod tests {
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, BranchInitiatorSelection, BranchSelection,
-        BranchValueMapping, ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
-        CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction,
-        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientKafka,
-        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateGenerator,
-        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateSchema, CreateVhost,
-        CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain,
-        DomainSchedule, DropModel, EmitSink, ErrorPolicies, GeneralErrorPolicy, Identifier,
-        IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
-        KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
-        MqttIngestMode, MqttQos, MqttSession, ParseAsType, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, RelayBranching, ScheduledNode, SchemaField, WindowBound, WireSchemaField,
+        AckMode, AlterRelay, AlterRelayOperation, Assignment, AssignmentTarget,
+        AssignmentTargetScope, BranchSelection, ClientConfigEntry, CodecEncoding,
+        CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+        CreateBranch, CreateClientKafka, CreateCodec, CreateCorrelator, CreateDeduplicator,
+        CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreateReingestor,
+        CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+        CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink,
+        ErrorPolicies, Expression, FieldReference, FieldScope, GeneralErrorPolicy, Identifier,
+        IngestSource, IngestTimestampSource, Inheritance, JsonType, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model,
+        ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, ScheduledNode,
+        SchemaField, WindowBound, WireSchemaField,
     };
 
     use super::{ModelStorage, Registry, RegistryError, RuntimeChange};
@@ -7793,21 +8387,33 @@ mod tests {
         identifier(&format!("by_{relay}"))
     }
 
-    fn branched_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchInitiatorSelection {
-        BranchInitiatorSelection::branched_by(
-            branch_name_for_relay(relay),
-            fields
+    fn branched_by(relay: &str, fields: &[&str]) -> OutputBranch {
+        OutputBranch::BranchedBy {
+            branch: branch_name_for_relay(relay),
+            assignments: fields
                 .iter()
-                .map(|field| BranchValueMapping {
-                    field: identifier(field),
-                    relay: identifier(relay),
-                    relay_field: identifier(field),
+                .map(|field| Assignment {
+                    target: AssignmentTarget {
+                        scope: AssignmentTargetScope::Bare,
+                        field: identifier(field),
+                    },
+                    value: Expression::Field(FieldReference::scoped(
+                        FieldScope::Message,
+                        identifier(field),
+                    )),
                 })
                 .collect(),
-        )
+        }
     }
 
-    fn with_processor_branching(mut model: Model, schema: &str) -> Model {
+    fn with_output_branch(mut outputs: ProcessorOutputs, branch: OutputBranch) -> ProcessorOutputs {
+        for output in &mut outputs.routes {
+            output.branch = Some(branch.clone());
+        }
+        outputs
+    }
+
+    fn with_processor_branching(mut model: Model) -> Model {
         match &mut model {
             Model::Deduplicator(processor) => {
                 let branch = processor
@@ -7847,8 +8453,22 @@ mod tests {
             }
             _ => panic!("model is not a branch-preserving processor"),
         }
-        let _ = schema;
         model
+    }
+
+    fn with_inherit_all(mut outputs: ProcessorOutputs) -> ProcessorOutputs {
+        for output in &mut outputs.routes {
+            output.construction.inherit = Some(Inheritance::All);
+        }
+        outputs
+    }
+
+    fn unbranched_transforming_outputs(relay: &str) -> ProcessorOutputs {
+        with_output_branch(
+            with_inherit_all(ProcessorOutputs::single(identifier(relay)))
+                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            OutputBranch::Unbranched,
+        )
     }
 
     fn branch_schema(name: &str, fields: &[&str]) -> Model {
@@ -7866,7 +8486,7 @@ mod tests {
         })
     }
 
-    fn branch(name: &str, schema: &str, _relay: &str, _fields: &[&str]) -> Model {
+    fn branch(name: &str, schema: &str) -> Model {
         Model::Branch(CreateBranch {
             name: identifier(name),
             schema: identifier(schema),
@@ -7875,7 +8495,7 @@ mod tests {
         })
     }
 
-    fn branch_for_relay(relay: &str, schema: &str, _fields: &[&str]) -> Model {
+    fn branch_for_relay(relay: &str, schema: &str) -> Model {
         Model::Branch(CreateBranch {
             name: branch_name_for_relay(relay),
             schema: identifier(schema),
@@ -7897,11 +8517,6 @@ mod tests {
                 })
                 .collect(),
         })
-    }
-
-    fn branch_schema_name(fields: &[&str]) -> String {
-        assert!(!fields.is_empty(), "branch schema requires fields");
-        format!("{}_branch", fields.join("_"))
     }
 
     fn schema(name: &str) -> Model {
@@ -8077,7 +8692,9 @@ mod tests {
         else {
             unreachable!("ingestor helper must build an ingestor model")
         };
-        ingestor.branched_by = BranchInitiatorSelection::unbranched();
+        for output in &mut ingestor.output_routes.routes {
+            output.branch = Some(OutputBranch::Unbranched);
+        }
         Model::Ingestor(ingestor)
     }
 
@@ -8092,17 +8709,19 @@ mod tests {
         client: &str,
         branch_fields: &[&str],
     ) -> Model {
-        let branched_by = if branch_fields.is_empty() {
-            BranchInitiatorSelection::unbranched()
+        let branch = if branch_fields.is_empty() {
+            OutputBranch::Unbranched
         } else {
-            branched_by(&branch_schema_name(branch_fields), into, branch_fields)
+            branched_by(into, branch_fields)
         };
         Model::Ingestor(CreateIngestor {
             name: identifier(name),
-            output_routes: (ProcessorOutputs::single(identifier(into)))
-                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+            output_routes: with_output_branch(
+                with_inherit_all(ProcessorOutputs::single(identifier(into)))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                branch,
+            ),
             decode_using_codec: identifier(codec),
-            branched_by,
             timestamp_source: None,
             source: IngestSource::Kafka {
                 client: Identifier::parse(client).expect("valid identifier"),
@@ -8191,7 +8810,13 @@ mod tests {
         Model::WasmProcessor(CreateWasmProcessor {
             name: identifier(name),
             from: ProcessorInputs::single(identifier(from_relay)),
-            output_routes: ProcessorOutputs::single(identifier(into_relay)),
+            output_routes: {
+                let mut outputs = ProcessorOutputs::single(identifier(into_relay));
+                outputs.routes[0].construction =
+                    nervix_nspl::parse_route_construction("SET value = value")
+                        .expect("generated route construction must parse");
+                outputs
+            },
             branched_by: BranchSelection::unbranched(),
             resource: identifier("wasm_filter"),
             resource_version: Some(1),
@@ -8199,6 +8824,7 @@ mod tests {
             global_error_policy: GeneralErrorPolicy::Log,
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         })
     }
 
@@ -8210,15 +8836,17 @@ mod tests {
     ) -> Model {
         let mut output_routes = (ProcessorOutputs::single(identifier(into_relay)))
             .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()));
-        output_routes.routes[0].filter_map =
-            Some(format!("SET {into_relay}.value = {left_relay}.value"));
+        output_routes.routes[0].construction =
+            nervix_nspl::parse_route_construction("SET value = left.value")
+                .expect("route construction must parse");
         Model::Correlator(CreateCorrelator {
             name: identifier(name),
             left: ProcessorInputs::single(identifier(left_relay)),
             right: ProcessorInputs::single(identifier(right_relay)),
             output_routes,
             branched_by: BranchSelection::unbranched(),
-            correlate_where: format!("WHERE {left_relay}.value = {right_relay}.value"),
+            correlate_where: nervix_nspl::parse_expression("left.value = right.value")
+                .expect("correlator expression must parse"),
             match_policy: CorrelatorMatchPolicy::Earliest,
             max_time: "5s".to_string(),
             timeout_policy: CorrelationTimeoutPolicy {
@@ -8227,16 +8855,24 @@ mod tests {
             },
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         })
     }
 
-    fn window_processor(name: &str, from_relay: &str, into_relay: &str, aggregate: &str) -> Model {
+    fn window_processor(
+        name: &str,
+        from_relay: &str,
+        into_relay: &str,
+        construction: &str,
+    ) -> Model {
+        let mut output_routes =
+            ProcessorOutputs::single(Identifier::parse(into_relay).expect("valid identifier"));
+        output_routes.routes[0].construction = nervix_nspl::parse_route_construction(construction)
+            .expect("window route construction must parse");
         Model::WindowProcessor(CreateWindowProcessor {
             name: Identifier::parse(name).expect("valid identifier"),
             from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
-            output_routes: ProcessorOutputs::single(
-                Identifier::parse(into_relay).expect("valid identifier"),
-            ),
+            output_routes,
             branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
             width: WindowBound {
                 messages: Some(10),
@@ -8246,9 +8882,9 @@ mod tests {
                 messages: Some(5),
                 duration: None,
             },
-            aggregate: aggregate.to_string(),
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         })
     }
 
@@ -8262,7 +8898,7 @@ mod tests {
                     .collect(),
                 Vec::new(),
             ),
-            output_routes: (ProcessorOutputs::single(
+            output_routes: with_inherit_all(ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ))
             .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
@@ -8273,6 +8909,7 @@ mod tests {
             )),
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         })
     }
 
@@ -8286,34 +8923,41 @@ mod tests {
         Model::Deduplicator(CreateDeduplicator {
             name: Identifier::parse(name).expect("valid identifier"),
             from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
-            output_routes: (ProcessorOutputs::single(
+            output_routes: with_inherit_all(ProcessorOutputs::single(
                 Identifier::parse(into_relay).expect("valid identifier"),
             ))
             .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
             branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
-            deduplicate_on: field.to_string(),
+            deduplicate_on: vec![
+                nervix_nspl::parse_expression(&field.replace(&format!("{from_relay}."), "input."))
+                    .expect("deduplicate expression must parse"),
+            ],
             max_time: max_time.to_string(),
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         })
     }
 
     fn reingestor(name: &str, from_relay: &str, into_relay: &str, params: &[&str]) -> Model {
-        let branched_by = if params.is_empty() {
-            BranchInitiatorSelection::unbranched()
+        let branch = if params.is_empty() {
+            OutputBranch::Unbranched
         } else {
-            branched_by(&branch_schema_name(params), into_relay, params)
+            branched_by(into_relay, params)
         };
         Model::Reingestor(CreateReingestor {
             name: Identifier::parse(name).expect("valid identifier"),
             from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
-            output_routes: (ProcessorOutputs::single(
-                Identifier::parse(into_relay).expect("valid identifier"),
-            ))
-            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-            branched_by,
+            output_routes: with_output_branch(
+                with_inherit_all(ProcessorOutputs::single(
+                    Identifier::parse(into_relay).expect("valid identifier"),
+                ))
+                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                branch,
+            ),
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
         })
     }
 
@@ -8331,7 +8975,11 @@ mod tests {
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
-            filter_map: None,
+            construction: nervix_models::RouteConstruction {
+                inherit: Some(Inheritance::All),
+                ..nervix_models::RouteConstruction::default()
+            },
+            materialized_state: Vec::new(),
         })
     }
 
@@ -8350,7 +8998,7 @@ mod tests {
         let mut emitter = CreateEmitter {
             name: identifier("emit"),
             from_relay: identifier("events"),
-            encode_using_codec: None,
+            encode_using_codec: Some(identifier("events_codec")),
             sink: EmitSink::ZeroMq {
                 client: identifier("zeromq_main"),
             },
@@ -8358,7 +9006,11 @@ mod tests {
             max_batch_size: Some("1MiB".to_string()),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
-            filter_map: Some("INVOKE write_header(\"tenant\", message.tenant)".to_string()),
+            construction: nervix_nspl::parse_route_construction(
+                "INHERIT ALL INVOKE write_header(\"tenant\", input.tenant)",
+            )
+            .expect("valid construction"),
+            materialized_state: Vec::new(),
         };
 
         let error = super::effective_emitter_filter_map_schema(
@@ -8368,7 +9020,6 @@ mod tests {
             &emitter,
             &schema,
             &schema,
-            None,
         )
         .expect_err("ZeroMQ emitters must reject write_header");
         assert!(format!("{error:#}").contains("ZEROMQ emitters do not support write_header"));
@@ -8384,7 +9035,6 @@ mod tests {
             &emitter,
             &schema,
             &schema,
-            None,
         )
         .expect("Kafka emitters must accept write_header");
     }
@@ -8405,7 +9055,7 @@ mod tests {
         vec![
             schema("event_schema"),
             branch_schema("value_branch", &["value"]),
-            branch_for_relay("notifications", "value_branch", &["value"]),
+            branch_for_relay("notifications", "value_branch"),
             wire_schema("event_wire"),
             codec("event_codec", "event_schema"),
             client_model("broker_in"),
@@ -8782,7 +9432,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_accepts_inferencer_inheritance_and_inner_output() {
+    fn apply_batch_accepts_inferencer_generated_output() {
         let (domain, models) = example_graph_models(
             "inferencer generated output schema",
             r#"
@@ -8792,7 +9442,6 @@ mod tests {
             );
 
             CREATE SCHEMA scored (
-              tenant STRING,
               score ARRAY<F32, 1>
             );
 
@@ -8804,12 +9453,12 @@ mod tests {
 
             CREATE INFERENCER score_model
               FROM features
-              TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score UNSET features.vector ON MESSAGE ERROR LOG
-              BRANCHED BY by_tenant_branch
               USING RESOURCE fraud_model VERSION 1
               FILE 'models/simple_score.onnx'
-              INPUTS { "features" DENSE TENSOR<F32>[2] = features.vector }
-              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] };
+              INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector }
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
+              BRANCHED BY by_tenant_branch
+              TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -8817,7 +9466,7 @@ mod tests {
 
         registry
             .apply_batch(&domain, models)
-            .expect("inferencer should inherit tenant and map its inner output");
+            .expect("inferencer should construct output from immutable generated state");
 
         let _ = fs::remove_dir_all(path);
     }
@@ -8832,10 +9481,12 @@ mod tests {
             CREATE RELAY features SCHEMA features UNBRANCHED;
             CREATE RELAY scored SCHEMA scored UNBRANCHED;
             CREATE INFERENCER score_model
-              FROM features TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score ON MESSAGE ERROR LOG UNBRANCHED
+              FROM features
               USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
-              INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = features.vector }
-              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] };
+              INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = input.vector }
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
+              UNBRANCHED
+              TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -8859,10 +9510,12 @@ mod tests {
             CREATE RELAY features SCHEMA features UNBRANCHED;
             CREATE RELAY scored SCHEMA scored UNBRANCHED;
             CREATE INFERENCER score_model
-              FROM features TO scored FLUSH IMMEDIATE SET scored.score = inner_output.score ON MESSAGE ERROR LOG UNBRANCHED
+              FROM features
               USING RESOURCE fraud_model FILE 'models/simple_score.onnx'
-              INPUTS { "features" DENSE TENSOR<F32>[BATCH, BATCH, 2] = features.vector }
-              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] };
+              INPUTS { "features" DENSE TENSOR<F32>[BATCH, BATCH, 2] = input.vector }
+              OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] }
+              UNBRANCHED
+              TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -8903,12 +9556,13 @@ mod tests {
 
             CREATE WINDOW PROCESSOR latency_window
               FROM metrics
-              TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
               WIDTH 2 MESSAGES
               STEP 2 MESSAGES
-              AGGREGATE
-                metric_summaries.tenant = FIRST(metrics.tenant),
-                metric_summaries.sample_count = COUNT(metrics.latency);
+              BRANCHED BY by_tenant_branch
+              TO metric_summaries
+                SET tenant = FIRST(input.tenant),
+                    sample_count = COUNT(input.latency)
+                ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -8944,11 +9598,12 @@ mod tests {
 
             CREATE WINDOW PROCESSOR latency_window
               FROM metrics
-              TO metric_summaries ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
               WIDTH 10s DURATION
               STEP 5s DURATION
-              AGGREGATE
-                metric_summaries.total_latency = SUM(metrics.latency);
+              BRANCHED BY by_tenant_branch
+              TO metric_summaries
+                SET total_latency = SUM(input.latency)
+                ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -8958,8 +9613,9 @@ mod tests {
             .apply_batch(&domain, models)
             .expect_err("window aggregate should reject unassigned output fields");
         assert!(
-            format!("{err}")
-                .contains("window aggregate must assign output field 'metric_summaries.tenant'"),
+            format!("{err}").contains(
+                "window aggregate must assign required output field 'metric_summaries.tenant'"
+            ),
             "unexpected error: {err}"
         );
 
@@ -8991,14 +9647,20 @@ mod tests {
 
             CREATE WINDOW PROCESSOR first_window
               FROM metrics
-              TO high_summaries WHERE high_summaries.total_latency >= 100 ON MESSAGE ERROR LOG
-              TO low_summaries ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
               WIDTH 2 MESSAGES
               STEP 2 MESSAGES
-              AGGREGATE
-                high_summaries.tenant = FIRST(metrics.tenant),
-                high_summaries.sample_count = COUNT(metrics.latency),
-                high_summaries.total_latency = SUM(metrics.latency);
+              BRANCHED BY by_tenant_branch
+              TO high_summaries
+                SET tenant = FIRST(input.tenant),
+                    sample_count = COUNT(input.latency),
+                    total_latency = SUM(input.latency)
+                WHERE total_latency >= 100
+                ON MESSAGE ERROR LOG
+              TO low_summaries
+                SET tenant = FIRST(input.tenant),
+                    sample_count = COUNT(input.latency),
+                    total_latency = SUM(input.latency)
+                ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -9007,6 +9669,50 @@ mod tests {
         registry
             .apply_batch(&domain, models)
             .expect("window output route predicates should read generated output fields");
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_window_output_route_filter_on_live_input() {
+        let (domain, models) = example_graph_models(
+            "window processor output input filter",
+            r#"
+            CREATE SCHEMA metric (
+              tenant STRING,
+              latency I64
+            );
+
+            CREATE SCHEMA metric_summary (
+              tenant STRING,
+              total_latency I64
+            );
+
+            CREATE RELAY metrics SCHEMA metric UNBRANCHED;
+            CREATE RELAY metric_summaries SCHEMA metric_summary UNBRANCHED;
+
+            CREATE WINDOW PROCESSOR latency_window
+              FROM metrics
+              WIDTH 2 MESSAGES
+              STEP 2 MESSAGES
+              UNBRANCHED
+              TO metric_summaries
+                SET tenant = FIRST(input.tenant),
+                    total_latency = SUM(input.latency)
+                WHERE input.latency > 0
+                ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        let error = registry
+            .apply_batch(&domain, models)
+            .expect_err("window route WHERE must not expose live input");
+        assert!(
+            format!("{error}").contains("input is unavailable after set-only output finalization"),
+            "unexpected error: {error}"
+        );
 
         let _ = fs::remove_dir_all(path);
     }
@@ -9032,14 +9738,21 @@ mod tests {
             CREATE RELAY projected_metrics SCHEMA projected_metric UNBRANCHED;
 
             CREATE WASM PROCESSOR route_guest_output
+              FROM raw_metrics
+              FILTER WHERE input.value >= 0
               USING RESOURCE wasm_filter VERSION 1
               FILE 'processors/filter_even.wasm'
-              FROM raw_metrics FILTER WHERE raw_metrics.value >= 0
-              TO even_metrics WHERE even_metrics.value >= 10 ON MESSAGE ERROR LOG
+              UNBRANCHED
+              TO even_metrics
+                SET value = value, source = source
+                WHERE value >= 10
+                ON MESSAGE ERROR LOG
               TO projected_metrics
-                SET projected_metrics.source = input.source,
-                    projected_metrics.bucket = lower(projected_metrics.bucket) ON MESSAGE ERROR LOG
-              UNBRANCHED ON GLOBAL ERROR LOG;
+                SET value = value,
+                    source = source,
+                    bucket = lower(bucket)
+                ON MESSAGE ERROR LOG
+              ON GLOBAL ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -9066,10 +9779,11 @@ mod tests {
             CREATE RELAY deduped_metrics SCHEMA metric UNBRANCHED;
 
             CREATE DEDUPLICATOR dedup_metrics
-              FROM raw_metrics WHERE raw_metrics.value >= 0
-              TO deduped_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
-              DEDUPLICATE ON raw_metrics.source
-              MAX TIME 10m;
+              FROM raw_metrics WHERE input.value >= 0
+              DEDUPLICATE ON input.source
+              MAX TIME 10m
+              UNBRANCHED
+              TO deduped_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -9096,10 +9810,11 @@ mod tests {
             CREATE RELAY deduped_metrics SCHEMA metric UNBRANCHED;
 
             CREATE DEDUPLICATOR dedup_metrics
-              FROM raw_metrics WHERE raw_metrics.value
-              TO deduped_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
-              DEDUPLICATE ON raw_metrics.source
-              MAX TIME 10m;
+              FROM raw_metrics WHERE input.value
+              DEDUPLICATE ON input.source
+              MAX TIME 10m
+              UNBRANCHED
+              TO deduped_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -9122,7 +9837,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_processor_from_where_other_input_relay() {
+    fn apply_batch_rejects_processor_from_where_unavailable_scope() {
         let (domain, models) = example_graph_models(
             "processor source where other relay",
             r#"
@@ -9135,10 +9850,11 @@ mod tests {
             CREATE RELAY deduped_metrics SCHEMA metric UNBRANCHED;
 
             CREATE DEDUPLICATOR dedup_metrics
-              FROM raw_metrics WHERE deduped_metrics.value >= 0
-              TO deduped_metrics FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED
-              DEDUPLICATE ON raw_metrics.source
-              MAX TIME 10m;
+              FROM raw_metrics WHERE branch.value >= 0
+              DEDUPLICATE ON input.source
+              MAX TIME 10m
+              UNBRANCHED
+              TO deduped_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -9146,7 +9862,7 @@ mod tests {
 
         let err = registry
             .apply_batch(&domain, models)
-            .expect_err("source WHERE cannot reference non-input relay");
+            .expect_err("source WHERE cannot reference a branch during unbranched execution");
 
         assert!(matches!(
             err.current_context(),
@@ -9154,7 +9870,7 @@ mod tests {
         ));
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("FROM WHERE") && rendered.contains("deduped_metrics"),
+            rendered.contains("FROM WHERE") && rendered.contains("branch"),
             "unexpected error: {rendered}"
         );
 
@@ -9174,12 +9890,13 @@ mod tests {
             CREATE RELAY projected_metrics SCHEMA metric UNBRANCHED;
 
             CREATE WASM PROCESSOR route_guest_output
+              FROM raw_metrics
               USING RESOURCE wasm_filter VERSION 1
               FILE 'processors/filter_even.wasm'
-              FROM raw_metrics
-              TO projected_metrics ON MESSAGE ERROR LOG
-              TO projected_metrics WHERE projected_metrics.value >= 0 ON MESSAGE ERROR LOG
-              UNBRANCHED ON GLOBAL ERROR LOG;
+              UNBRANCHED
+              TO projected_metrics SET value = value ON MESSAGE ERROR LOG
+              TO projected_metrics SET value = value WHERE value >= 0 ON MESSAGE ERROR LOG
+              ON GLOBAL ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -9215,13 +9932,19 @@ mod tests {
                     Model::Deduplicator(CreateDeduplicator {
                         name: identifier("dedup_events"),
                         from: ProcessorInputs::single(identifier("raw_events")),
-                        output_routes: (ProcessorOutputs::single(identifier("projected_events")))
-                            .with_flush_policy("IMMEDIATE".to_string(), None),
+                        output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                            "projected_events",
+                        )))
+                        .with_flush_policy("IMMEDIATE".to_string(), None),
                         branched_by: BranchSelection::unbranched(),
-                        deduplicate_on: "raw_events.value".to_string(),
+                        deduplicate_on: vec![
+                            nervix_nspl::parse_expression("input.value")
+                                .expect("deduplicate expression must parse"),
+                        ],
                         max_time: "10m".to_string(),
                         mode: AckMode::Attached,
                         filter_where: None,
+                        materialized_state: Vec::new(),
                     }),
                 ],
             )
@@ -9379,10 +10102,10 @@ mod tests {
                     relay_branched_like("branch_c", "event_schema", "root_c"),
                     relay_branched_by_relay_branch("shared", "event_schema"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("root_a", "value_branch", &["value"]),
-                    branch_for_relay("root_b", "value_branch", &["value"]),
-                    branch_for_relay("root_c", "value_branch", &["value"]),
-                    branch_for_relay("shared", "value_branch", &["value"]),
+                    branch_for_relay("root_a", "value_branch"),
+                    branch_for_relay("root_b", "value_branch"),
+                    branch_for_relay("root_c", "value_branch"),
+                    branch_for_relay("shared", "value_branch"),
                     ingestor_with_params("ing_a", "root_a", "event_codec", "broker_a", &["value"]),
                     ingestor_with_params("ing_b", "root_b", "event_codec", "broker_b", &["value"]),
                     ingestor_with_params("ing_c", "root_c", "event_codec", "broker_c", &["value"]),
@@ -9447,13 +10170,9 @@ mod tests {
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("http_ing").expect("valid identifier"),
-                        output_routes: (ProcessorOutputs::single(
-                            Identifier::parse("notifications").expect("valid identifier"),
-                        ))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        output_routes: unbranched_transforming_outputs("notifications"),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
-                        branched_by: BranchInitiatorSelection::unbranched(),
                         timestamp_source: None,
                         source: IngestSource::Endpoint {
                             endpoint: Identifier::parse("ingest_http").expect("valid identifier"),
@@ -9508,12 +10227,8 @@ mod tests {
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("mqtt_ing").expect("valid identifier"),
-                    output_routes: (ProcessorOutputs::single(
-                        Identifier::parse("notifications").expect("valid identifier"),
-                    ))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    output_routes: unbranched_transforming_outputs("notifications"),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Mqtt {
                         client: Identifier::parse("mqtt_main").expect("valid identifier"),
@@ -9582,12 +10297,8 @@ mod tests {
                 relay("notifications", "event_schema"),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
-                    output_routes: (ProcessorOutputs::single(
-                        Identifier::parse("notifications").expect("valid identifier"),
-                    ))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    output_routes: unbranched_transforming_outputs("notifications"),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: Some(IngestTimestampSource::At(
                         Identifier::parse("occurred_at").expect("valid identifier"),
                     )),
@@ -9617,7 +10328,7 @@ mod tests {
     }
 
     #[test]
-    fn ingestor_filter_map_schema_validation_accepts_set_and_unset() {
+    fn ingestor_route_validation_accepts_explicit_projection() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -9691,23 +10402,22 @@ mod tests {
                     client_model("broker"),
                     relay_branched_by_relay_branch("notifications", "transformed_schema"),
                     branch_schema("tenant_branch", &["tenant"]),
-                    branch_for_relay("notifications", "tenant_branch", &["tenant"]),
+                    branch_for_relay("notifications", "tenant_branch"),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("ing").expect("valid identifier"),
                         output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                             relay: Identifier::parse("notifications").expect("valid identifier"),
-                            filter_map: Some(
-                                "SET notifications.total = message.value, notifications.tenant = \
-                                 message.tenant UNSET notifications.value, notifications.raw"
-                                    .to_string(),
-                            ),
+                            construction: nervix_nspl::parse_route_construction(
+                                "SET total = input.value, tenant = input.tenant",
+                            )
+                            .expect("route construction must parse"),
                             flush_policy: None,
                             message_error_policy: MessageErrorPolicy::Log,
+                            branch: Some(branched_by("notifications", &["tenant"])),
                         }]))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
-                        branched_by: branched_by("tenant_branch", "notifications", &["tenant"]),
                         timestamp_source: None,
                         source: IngestSource::Kafka {
                             client: Identifier::parse("broker").expect("valid identifier"),
@@ -9771,17 +10481,16 @@ mod tests {
                     name: Identifier::parse("ing").expect("valid identifier"),
                     output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                         relay: Identifier::parse("notifications").expect("valid identifier"),
-                        filter_map: Some(
-                            "SET notifications.total = message.missing + 1 UNSET \
-                             notifications.value"
-                                .to_string(),
-                        ),
+                        construction: nervix_nspl::parse_route_construction(
+                            "SET total = input.missing + 1",
+                        )
+                        .expect("route construction must parse"),
                         flush_policy: None,
                         message_error_policy: MessageErrorPolicy::Log,
+                        branch: Some(OutputBranch::Unbranched),
                     }]))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
-                    branched_by: BranchInitiatorSelection::unbranched(),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
                         client: Identifier::parse("broker").expect("valid identifier"),
@@ -9801,7 +10510,7 @@ mod tests {
 
         let error = result.expect_err("invalid FILTER-MAP must fail");
         assert!(
-            format!("{error:#}").contains("unknown input column 'message.missing'"),
+            format!("{error:#}").contains("unknown input field 'missing'"),
             "unexpected error: {error:#}"
         );
 
@@ -9809,7 +10518,7 @@ mod tests {
     }
 
     #[test]
-    fn ingestor_filter_map_unset_is_checked_against_target_schema() {
+    fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -9853,19 +10562,20 @@ mod tests {
                 codec("event_codec", "event_schema"),
                 client_model("broker"),
                 relay("notifications", "event_schema"),
-                branch_schema("tenant_branch", &["tenant"]),
-                branch_for_relay("notifications", "tenant_branch", &["tenant"]),
                 Model::Ingestor(CreateIngestor {
                     name: Identifier::parse("ing").expect("valid identifier"),
                     output_routes: (ProcessorOutputs::new(vec![ProcessorOutput {
                         relay: Identifier::parse("notifications").expect("valid identifier"),
-                        filter_map: Some("UNSET notifications.value".to_string()),
+                        construction: nervix_nspl::parse_route_construction(
+                            "INHERIT ALL EXCEPT value",
+                        )
+                        .expect("route construction must parse"),
                         flush_policy: None,
                         message_error_policy: MessageErrorPolicy::Log,
+                        branch: Some(OutputBranch::Unbranched),
                     }]))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     decode_using_codec: Identifier::parse("event_codec").expect("valid identifier"),
-                    branched_by: branched_by("tenant_branch", "notifications", &["tenant"]),
                     timestamp_source: None,
                     source: IngestSource::Kafka {
                         client: Identifier::parse("broker").expect("valid identifier"),
@@ -9883,11 +10593,9 @@ mod tests {
             ],
         );
 
-        let error = result.expect_err("target schema must still require unset field");
+        let error = result.expect_err("excluded required output must remain uninitialized");
         assert!(
-            format!("{error:#}").contains(
-                "UNSET field 'value' is declared in the output schema and cannot be dropped"
-            ),
+            format!("{error:#}").contains("required output field 'value' remains uninitialized"),
             "unexpected error: {error:#}"
         );
 
@@ -9917,13 +10625,9 @@ mod tests {
                     relay("notifications", "event_schema"),
                     Model::Ingestor(CreateIngestor {
                         name: Identifier::parse("ws_ing").expect("valid identifier"),
-                        output_routes: (ProcessorOutputs::single(
-                            Identifier::parse("notifications").expect("valid identifier"),
-                        ))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        output_routes: unbranched_transforming_outputs("notifications"),
                         decode_using_codec: Identifier::parse("event_codec")
                             .expect("valid identifier"),
-                        branched_by: BranchInitiatorSelection::unbranched(),
                         timestamp_source: None,
                         source: IngestSource::Endpoint {
                             endpoint: Identifier::parse("ingest_ws").expect("valid identifier"),
@@ -10468,7 +11172,7 @@ mod tests {
                     }),
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
-                    relay("events", "event_schema"),
+                    relay_branched_by_relay_branch("events", "event_schema"),
                     Model::Schema(CreateSchema {
                         name: identifier("value_branch"),
                         fields: vec![SchemaField {
@@ -10478,7 +11182,7 @@ mod tests {
                             sensitive: false,
                         }],
                     }),
-                    branch_for_relay("events", "value_branch", &["value"]),
+                    branch_for_relay("events", "value_branch"),
                     client_model("kafka_main"),
                     ingestor_with_params(
                         "events_in",
@@ -10494,10 +11198,13 @@ mod tests {
         let message = format!("{err}");
         assert!(matches!(
             err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
+            RegistryError::InvalidModel { .. }
         ));
         assert!(
-            message.contains("BY value field 'value' type mismatch"),
+            message.contains(
+                "branch SET compile failed: SET field 'value' has expression type Utf8, expected \
+                 declared output type UInt32"
+            ),
             "unexpected error: {message}"
         );
 
@@ -10573,10 +11280,10 @@ mod tests {
                             },
                         ],
                     }),
-                    relay("notifications", "event_schema"),
-                    relay("wide", "wide_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
+                    relay_branched_like("wide", "wide_schema", "notifications"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("notifications", "value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch"),
                     processor("project", "notifications", "wide"),
                 ],
             )
@@ -10584,7 +11291,7 @@ mod tests {
 
         assert!(matches!(
             err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
+            RegistryError::InvalidModel { .. }
         ));
 
         let _ = fs::remove_dir_all(path);
@@ -10630,10 +11337,14 @@ mod tests {
                         output_routes: (ProcessorOutputs::single(identifier("deduped")))
                             .with_flush_policy("IMMEDIATE".to_string(), None),
                         branched_by: BranchSelection::unbranched(),
-                        deduplicate_on: "notifications_a.value".to_string(),
+                        deduplicate_on: vec![
+                            nervix_nspl::parse_expression("input.value")
+                                .expect("deduplicate expression must parse"),
+                        ],
                         max_time: "10m".to_string(),
                         mode: AckMode::Attached,
                         filter_where: None,
+                        materialized_state: Vec::new(),
                     }),
                 ],
             )
@@ -10697,11 +11408,10 @@ mod tests {
                     Model::Reingestor(CreateReingestor {
                         name: identifier("leak_events"),
                         from: ProcessorInputs::single(identifier("sensitive_events")),
-                        output_routes: (ProcessorOutputs::single(identifier("public_events")))
-                            .with_flush_policy("IMMEDIATE".to_string(), None),
-                        branched_by: BranchInitiatorSelection::unbranched(),
+                        output_routes: unbranched_transforming_outputs("public_events"),
                         mode: AckMode::Attached,
                         filter_where: None,
+                        materialized_state: Vec::new(),
                     }),
                 ],
             )
@@ -10748,7 +11458,7 @@ mod tests {
                     relay("notifications_b", "wide_schema"),
                     relay("merged", "event_schema"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("notifications_a", "value_branch", &["value"]),
+                    branch_for_relay("notifications_a", "value_branch"),
                     junction(
                         "join_streams",
                         &["notifications_a", "notifications_b"],
@@ -10804,7 +11514,7 @@ mod tests {
                     relay("long_stream", "long_schema"),
                     relay("merged", "short_schema"),
                     branch_schema("window_branch", &["window"]),
-                    branch_for_relay("short_stream", "window_branch", &["window"]),
+                    branch_for_relay("short_stream", "window_branch"),
                     junction("merge_windows", &["short_stream", "long_stream"], "merged"),
                 ],
             )
@@ -10833,10 +11543,10 @@ mod tests {
                 &domain,
                 vec![
                     schema("event_schema"),
-                    relay("notifications", "event_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
                     relay("deduped", "event_schema"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("notifications", "value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch"),
                     deduplicator(
                         "dedup",
                         "notifications",
@@ -10877,13 +11587,15 @@ mod tests {
             CREATE CORRELATOR correlate_events
               LEFT FROM left_events
               RIGHT FROM right_events
-              CORRELATE WHERE lower(left_events.value)
+              CORRELATE WHERE lower(left.value)
               MATCH EARLIEST
-              TO correlated_events FLUSH IMMEDIATE
-              SET correlated_events.value = left_events.value
-              ON MESSAGE ERROR LOG UNBRANCHED
               MAX TIME 5s
-              ON CORRELATION TIMEOUT DROP, DROP;
+              ON CORRELATION TIMEOUT DROP, DROP
+              UNBRANCHED
+              TO correlated_events
+                SET value = left.value
+                FLUSH IMMEDIATE
+                ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -10901,6 +11613,53 @@ mod tests {
             format!("{err:#}").contains("CORRELATE WHERE compile failed"),
             "unexpected error: {err:#}"
         );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_accepts_correlator_side_scoped_from_where() {
+        let (domain, models) = example_graph_models(
+            "correlator side source predicates",
+            r#"
+            CREATE SCHEMA left_event (
+              value STRING,
+              marker I64
+            );
+
+            CREATE SCHEMA right_event (
+              value STRING,
+              active BOOL
+            );
+
+            CREATE SCHEMA correlated_event (
+              value STRING
+            );
+
+            CREATE RELAY left_events SCHEMA left_event UNBRANCHED;
+            CREATE RELAY right_events SCHEMA right_event UNBRANCHED;
+            CREATE RELAY correlated_events SCHEMA correlated_event UNBRANCHED;
+
+            CREATE CORRELATOR correlate_events
+              LEFT FROM left_events WHERE left.marker > 0
+              RIGHT FROM right_events WHERE right.active
+              CORRELATE WHERE left.value = right.value
+              MATCH EARLIEST
+              MAX TIME 5s
+              ON CORRELATION TIMEOUT DROP, DROP
+              UNBRANCHED
+              TO correlated_events
+                SET value = left.value
+                FLUSH IMMEDIATE
+                ON MESSAGE ERROR LOG;
+            "#,
+        );
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+
+        registry
+            .apply_batch(&domain, models)
+            .expect("side source predicates should use their correlator side scope");
 
         let _ = fs::remove_dir_all(path);
     }
@@ -10932,13 +11691,15 @@ mod tests {
             CREATE CORRELATOR correlate_events
               LEFT FROM left_events
               RIGHT FROM right_events
-              CORRELATE WHERE branch.tenant = left_events.tenant
+              CORRELATE WHERE input.tenant = left.tenant
               MATCH EARLIEST
-              TO correlated_events FLUSH IMMEDIATE
-              SET correlated_events.value = left_events.value
-              ON MESSAGE ERROR LOG BRANCHED BY by_tenant_branch
               MAX TIME 5s
-              ON CORRELATION TIMEOUT DROP, DROP;
+              ON CORRELATION TIMEOUT DROP, DROP
+              BRANCHED BY by_tenant_branch
+              TO correlated_events
+                SET value = left.value
+                FLUSH IMMEDIATE
+                ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -10954,7 +11715,7 @@ mod tests {
         ));
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("CORRELATE WHERE compile failed") && rendered.contains("branch"),
+            rendered.contains("CORRELATE WHERE compile failed") && rendered.contains("input"),
             "unexpected error: {rendered}"
         );
 
@@ -10986,17 +11747,19 @@ mod tests {
             CREATE CORRELATOR correlate_events
               LEFT FROM left_events
               RIGHT FROM right_events
-              CORRELATE WHERE left_events.value = right_events.value
+              CORRELATE WHERE left.value = right.value
               MATCH EARLIEST
-              TO correlated_events FLUSH IMMEDIATE
-                SET correlated_events.value = left_events.value
-                ON MESSAGE ERROR LOG
-              TO correlation_counts FLUSH IMMEDIATE
-                SET correlation_counts.count = left_events.value
-                ON MESSAGE ERROR LOG
-              UNBRANCHED
               MAX TIME 5s
-              ON CORRELATION TIMEOUT DROP, DROP;
+              ON CORRELATION TIMEOUT DROP, DROP
+              UNBRANCHED
+              TO correlated_events
+                SET value = left.value
+                FLUSH IMMEDIATE
+                ON MESSAGE ERROR LOG
+              TO correlation_counts
+                SET count = left.value
+                FLUSH IMMEDIATE
+                ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -11042,16 +11805,17 @@ mod tests {
             CREATE RELAY correlated_events SCHEMA correlated_event UNBRANCHED;
 
             CREATE CORRELATOR correlate_events
-              LEFT FROM left_events
-              LEFT FROM other_left_events
+              LEFT FROM left_events, other_left_events
               RIGHT FROM right_events
-              CORRELATE WHERE left_events.value = right_events.value
+              CORRELATE WHERE left.value = right.value
               MATCH EARLIEST
-              TO correlated_events FLUSH IMMEDIATE
-              SET correlated_events.value = left_events.value
-              ON MESSAGE ERROR LOG UNBRANCHED
               MAX TIME 5s
-              ON CORRELATION TIMEOUT DROP, DROP;
+              ON CORRELATION TIMEOUT DROP, DROP
+              UNBRANCHED
+              TO correlated_events
+                SET value = left.value
+                FLUSH IMMEDIATE
+                ON MESSAGE ERROR LOG;
             "#,
         );
         let path = temp_db_path();
@@ -11074,7 +11838,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_window_aggregate_target_outside_output_stream() {
+    fn apply_batch_rejects_window_message_target() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11087,23 +11851,23 @@ mod tests {
                     relay_branched_by_relay_branch("notifications", "event_schema"),
                     relay_branched_like("summaries", "event_schema", "notifications"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("notifications", "value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch"),
                     window_processor(
                         "window",
                         "notifications",
                         "summaries",
-                        "other.value = COUNT(notifications.value)",
+                        "SET message.value = COUNT(input.value)",
                     ),
                 ],
             )
-            .expect_err("wrong aggregate target should fail");
+            .expect_err("message is not a window output target");
 
         assert!(matches!(
             err.current_context(),
             RegistryError::InvalidModel { .. }
         ));
         assert!(
-            format!("{err}").contains("window aggregate targets must write to output relay"),
+            format!("{err}").contains("window SET targets must be bare or output.<field>"),
             "unexpected error: {err}"
         );
 
@@ -11111,7 +11875,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_window_aggregate_input_outside_input_stream() {
+    fn apply_batch_rejects_window_aggregate_argument_outside_input() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11124,23 +11888,23 @@ mod tests {
                     relay_branched_by_relay_branch("notifications", "event_schema"),
                     relay_branched_like("summaries", "event_schema", "notifications"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("notifications", "value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch"),
                     window_processor(
                         "window",
                         "notifications",
                         "summaries",
-                        "summaries.value = COUNT(other.value)",
+                        "SET value = COUNT(output.value)",
                     ),
                 ],
             )
-            .expect_err("wrong aggregate input should fail");
+            .expect_err("aggregate arguments must read the original input");
 
         assert!(matches!(
             err.current_context(),
             RegistryError::InvalidModel { .. }
         ));
         assert!(
-            format!("{err}").contains("window aggregate input field 'other.value'"),
+            format!("{err}").contains("window aggregate arguments may read only input fields"),
             "unexpected error: {err}"
         );
 
@@ -11161,9 +11925,9 @@ mod tests {
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
-                    relay("notifications", "event_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
                     branch_schema("missing_key_branch", &["missing_key"]),
-                    branch_for_relay("notifications", "missing_key_branch", &["missing_key"]),
+                    branch_for_relay("notifications", "missing_key_branch"),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -11177,10 +11941,10 @@ mod tests {
 
         assert!(matches!(
             err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
+            RegistryError::InvalidModel { .. }
         ));
         assert!(
-            format!("{err}").contains("BY source field 'notifications.missing_key' is missing"),
+            format!("{err}").contains("unknown finalized output field 'missing_key'"),
             "unexpected error: {err}"
         );
 
@@ -11188,7 +11952,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_mismatched_ingestor_branching_for_same_stream() {
+    fn apply_batch_rejects_incomplete_ingestor_branch_construction() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -11244,7 +12008,7 @@ mod tests {
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
                     client_model("broker_in_2"),
-                    relay("notifications", "event_schema"),
+                    relay_branched_by_relay_branch("notifications", "event_schema"),
                     branch_schema_with_types(
                         "tenant_user_id_branch",
                         &[
@@ -11252,11 +12016,7 @@ mod tests {
                             ("user_id", ParseAsType::I64),
                         ],
                     ),
-                    branch_for_relay(
-                        "notifications",
-                        "tenant_user_id_branch",
-                        &["tenant", "user_id"],
-                    ),
+                    branch_for_relay("notifications", "tenant_user_id_branch"),
                     ingestor_with_params(
                         "ing_a",
                         "notifications",
@@ -11264,26 +12024,26 @@ mod tests {
                         "broker_in",
                         &["tenant", "user_id"],
                     ),
-                    branch_schema_with_types("user_id_branch", &[("user_id", ParseAsType::I64)]),
-                    branch(
-                        "by_notifications_user_id",
-                        "user_id_branch",
-                        "notifications",
-                        &["user_id"],
-                    ),
                     Model::Ingestor(CreateIngestor {
                         name: identifier("ing_b"),
-                        output_routes: (ProcessorOutputs::single(identifier("notifications")))
-                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                        decode_using_codec: identifier("event_codec"),
-                        branched_by: BranchInitiatorSelection::branched_by(
-                            identifier("by_notifications_user_id"),
-                            vec![BranchValueMapping {
-                                field: identifier("user_id"),
-                                relay: identifier("notifications"),
-                                relay_field: identifier("user_id"),
-                            }],
+                        output_routes: with_output_branch(
+                            with_inherit_all(ProcessorOutputs::single(identifier("notifications")))
+                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            OutputBranch::BranchedBy {
+                                branch: branch_name_for_relay("notifications"),
+                                assignments: vec![Assignment {
+                                    target: AssignmentTarget {
+                                        scope: AssignmentTargetScope::Bare,
+                                        field: identifier("user_id"),
+                                    },
+                                    value: Expression::Field(FieldReference::scoped(
+                                        FieldScope::Message,
+                                        identifier("user_id"),
+                                    )),
+                                }],
+                            },
                         ),
+                        decode_using_codec: identifier("event_codec"),
                         timestamp_source: None,
                         source: IngestSource::Kafka {
                             client: identifier("broker_in_2"),
@@ -11303,14 +12063,14 @@ mod tests {
                     }),
                 ],
             )
-            .expect_err("mismatched ingestor branch fields should fail");
+            .expect_err("every required branch field must be initialized");
 
         assert!(matches!(
             err.current_context(),
-            RegistryError::IncompatibleSchema { .. }
+            RegistryError::InvalidModel { .. }
         ));
         assert!(
-            format!("{err}").contains("conflicting branch fields"),
+            format!("{err}").contains("required branch field 'tenant' remains uninitialized"),
             "unexpected error: {err}"
         );
 
@@ -11331,10 +12091,10 @@ mod tests {
         ) else {
             unreachable!("ingestor helper must build an ingestor model")
         };
-        let BranchInitiatorSelection::BranchedBy {
+        let Some(OutputBranch::BranchedBy {
             branch: ingestor_branch,
             ..
-        } = &mut ingestor.branched_by
+        }) = &mut ingestor.output_routes.routes[0].branch
         else {
             unreachable!("ingestor helper must build a branched ingestor")
         };
@@ -11350,8 +12110,8 @@ mod tests {
                     client_model("broker_in"),
                     relay_branched_by("notifications", "event_schema", "branch_a"),
                     branch_schema("value_branch", &["value"]),
-                    branch("branch_a", "value_branch", "notifications", &["value"]),
-                    branch("branch_b", "value_branch", "notifications", &["value"]),
+                    branch("branch_a", "value_branch"),
+                    branch("branch_b", "value_branch"),
                     Model::Ingestor(ingestor),
                 ],
             )
@@ -11362,7 +12122,7 @@ mod tests {
             RegistryError::IncompatibleSchema { .. }
         ));
         assert!(
-            format!("{err}").contains("conflicting branch names"),
+            format!("{err}").contains("must use its exact declared branch 'branch_a'"),
             "unexpected error: {err}"
         );
 
@@ -11387,8 +12147,8 @@ mod tests {
                     relay_branched_by("input", "event_schema", "branch_a"),
                     relay_branched_by("output", "event_schema", "branch_b"),
                     branch_schema("value_branch", &["value"]),
-                    branch("branch_a", "value_branch", "input", &["value"]),
-                    branch("branch_b", "value_branch", "output", &["value"]),
+                    branch("branch_a", "value_branch"),
+                    branch("branch_b", "value_branch"),
                     Model::Deduplicator(processor),
                 ],
             )
@@ -11426,17 +12186,26 @@ mod tests {
                     Model::Relay(input),
                     relay_branched_by("output", "event_schema", "branch_b"),
                     branch_schema("value_branch", &["value"]),
-                    branch("branch_a", "value_branch", "input", &["value"]),
-                    branch("branch_b", "value_branch", "output", &["value"]),
+                    branch("branch_a", "value_branch"),
+                    branch("branch_b", "value_branch"),
                     Model::Generator(CreateGenerator {
                         name: identifier("generate"),
-                        into_relay: identifier("output"),
+                        materialized_relay: identifier("input"),
                         branched_by: BranchSelection::branched_by(identifier("branch_b")),
                         each: "100ms".to_string(),
-                        flush_each: "IMMEDIATE".to_string(),
-                        max_batch_size: None,
-                        set: "SET output.value = input.value".to_string(),
-                        message_error_policy: MessageErrorPolicy::Log,
+                        output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                            relay: identifier("output"),
+                            construction: nervix_nspl::parse_route_construction(
+                                "SET value = relay_state.input.value",
+                            )
+                            .expect("generator route must parse"),
+                            flush_policy: Some(nervix_models::OutputFlushPolicy {
+                                flush_each: "IMMEDIATE".to_string(),
+                                max_batch_size: None,
+                            }),
+                            message_error_policy: MessageErrorPolicy::Log,
+                            branch: None,
+                        }]),
                     }),
                 ],
             )
@@ -11550,11 +12319,7 @@ mod tests {
                             ("user_id", ParseAsType::I64),
                         ],
                     ),
-                    branch_for_relay(
-                        "notifications",
-                        "tenant_user_id_branch",
-                        &["tenant", "user_id"],
-                    ),
+                    branch_for_relay("notifications", "tenant_user_id_branch"),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -11562,10 +12327,7 @@ mod tests {
                         "broker_in",
                         &["tenant", "user_id"],
                     ),
-                    with_processor_branching(
-                        processor("project", "notifications", "projected"),
-                        "tenant_user_id_branch",
-                    ),
+                    with_processor_branching(processor("project", "notifications", "projected")),
                 ],
             )
             .expect("graph with inherited branch fields should succeed");
@@ -11665,11 +12427,7 @@ mod tests {
                             ("user_id", ParseAsType::I64),
                         ],
                     ),
-                    branch_for_relay(
-                        "notifications",
-                        "tenant_user_id_branch",
-                        &["tenant", "user_id"],
-                    ),
+                    branch_for_relay("notifications", "tenant_user_id_branch"),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -11677,52 +12435,40 @@ mod tests {
                         "broker_in",
                         &["tenant", "user_id"],
                     ),
-                    branch(
-                        "by_route_logs",
-                        "tenant_user_id_branch",
-                        super::BRANCH_NAMESPACE,
-                        &["tenant", "user_id"],
-                    ),
+                    branch("by_route_logs", "tenant_user_id_branch"),
                     Model::Reingestor(CreateReingestor {
                         name: identifier("route_logs"),
                         from: ProcessorInputs::single(identifier("notifications")),
-                        output_routes: (ProcessorOutputs::new(vec![
-                            ProcessorOutput {
-                                relay: identifier("errors"),
-                                filter_map: Some(
-                                    r#"WHERE notifications.value = "error""#.to_string(),
-                                ),
-                                flush_policy: None,
-                                message_error_policy: MessageErrorPolicy::Log,
-                            },
-                            ProcessorOutput {
-                                relay: identifier("warnings"),
-                                filter_map: Some(
-                                    r#"WHERE notifications.value = "warn""#.to_string(),
-                                ),
-                                flush_policy: None,
-                                message_error_policy: MessageErrorPolicy::Log,
-                            },
-                            ProcessorOutput::new(identifier("info")),
-                        ]))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                        branched_by: BranchInitiatorSelection::branched_by(
-                            identifier("by_route_logs"),
-                            vec![
-                                BranchValueMapping {
-                                    field: identifier("tenant"),
-                                    relay: identifier(super::BRANCH_NAMESPACE),
-                                    relay_field: identifier("tenant"),
+                        output_routes: with_output_branch(
+                            with_inherit_all(ProcessorOutputs::new(vec![
+                                ProcessorOutput {
+                                    relay: identifier("errors"),
+                                    construction: nervix_nspl::parse_route_construction(
+                                        r#"WHERE input.value = "error""#,
+                                    )
+                                    .expect("route construction must parse"),
+                                    flush_policy: None,
+                                    message_error_policy: MessageErrorPolicy::Log,
+                                    branch: None,
                                 },
-                                BranchValueMapping {
-                                    field: identifier("user_id"),
-                                    relay: identifier(super::BRANCH_NAMESPACE),
-                                    relay_field: identifier("user_id"),
+                                ProcessorOutput {
+                                    relay: identifier("warnings"),
+                                    construction: nervix_nspl::parse_route_construction(
+                                        r#"WHERE input.value = "warn""#,
+                                    )
+                                    .expect("route construction must parse"),
+                                    flush_policy: None,
+                                    message_error_policy: MessageErrorPolicy::Log,
+                                    branch: None,
                                 },
-                            ],
+                                ProcessorOutput::new(identifier("info")),
+                            ]))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            branched_by("route_logs", &["tenant", "user_id"]),
                         ),
                         mode: AckMode::Attached,
                         filter_where: None,
+                        materialized_state: Vec::new(),
                     }),
                 ],
             )
@@ -11804,8 +12550,8 @@ mod tests {
                     relay_branched_by_relay_branch("errors", "event_schema"),
                     relay_branched_like("info", "event_schema", "errors"),
                     branch_schema("tenant_branch", &["tenant"]),
-                    branch_for_relay("notifications", "tenant_branch", &["tenant"]),
-                    branch_for_relay("errors", "tenant_branch", &["tenant"]),
+                    branch_for_relay("notifications", "tenant_branch"),
+                    branch_for_relay("errors", "tenant_branch"),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -11816,21 +12562,29 @@ mod tests {
                     Model::Reingestor(CreateReingestor {
                         name: identifier("route_logs"),
                         from: ProcessorInputs::single(identifier("notifications")),
-                        output_routes: (ProcessorOutputs::new(vec![
-                            ProcessorOutput {
-                                relay: identifier("errors"),
-                                filter_map: Some(
-                                    r#"WHERE notifications.missing = "error""#.to_string(),
-                                ),
-                                flush_policy: None,
-                                message_error_policy: MessageErrorPolicy::Log,
+                        output_routes: with_output_branch(
+                            with_inherit_all(ProcessorOutputs::new(vec![
+                                ProcessorOutput {
+                                    relay: identifier("errors"),
+                                    construction: nervix_nspl::parse_route_construction(
+                                        r#"WHERE input.missing = "error""#,
+                                    )
+                                    .expect("route construction must parse"),
+                                    flush_policy: None,
+                                    message_error_policy: MessageErrorPolicy::Log,
+                                    branch: None,
+                                },
+                                ProcessorOutput::new(identifier("info")),
+                            ]))
+                            .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                            OutputBranch::BranchedBy {
+                                branch: branch_name_for_relay("notifications"),
+                                assignments: Vec::new(),
                             },
-                            ProcessorOutput::new(identifier("info")),
-                        ]))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                        branched_by: branched_by("tenant_branch", "errors", &["tenant"]),
+                        ),
                         mode: AckMode::Attached,
                         filter_where: None,
+                        materialized_state: Vec::new(),
                     }),
                 ],
             )
@@ -11841,8 +12595,7 @@ mod tests {
             RegistryError::InvalidModel { .. }
         ));
         assert!(
-            format!("{err}").contains("FILTER-MAP compile failed")
-                && format!("{err}").contains("notifications.missing"),
+            format!("{err}").contains("unknown input field 'missing'"),
             "unexpected error: {err}"
         );
 
@@ -11861,7 +12614,7 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("notifications", "value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch"),
                     relay("notifications", "event_schema"),
                     relay_branched_like("projected", "event_schema", "notifications"),
                     processor("project", "notifications", "projected"),
@@ -11933,7 +12686,7 @@ mod tests {
                     relay_branched_by_relay_branch("notifications", "notification"),
                     relay_branched_like("deduped", "notification", "notifications"),
                     branch_schema("tenant_branch", &["tenant"]),
-                    branch_for_relay("notifications", "tenant_branch", &["tenant"]),
+                    branch_for_relay("notifications", "tenant_branch"),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -11941,16 +12694,13 @@ mod tests {
                         "broker_in",
                         &["tenant"],
                     ),
-                    with_processor_branching(
-                        deduplicator(
-                            "dedup",
-                            "notifications",
-                            "deduped",
-                            "notifications.transaction_id",
-                            "10m",
-                        ),
-                        "tenant_branch",
-                    ),
+                    with_processor_branching(deduplicator(
+                        "dedup",
+                        "notifications",
+                        "deduped",
+                        "notifications.transaction_id",
+                        "10m",
+                    )),
                 ],
             )
             .expect("graph with deduplicator branch fields should succeed");
@@ -11980,7 +12730,7 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("notifications", "value_branch", &["value"]),
+                    branch_for_relay("notifications", "value_branch"),
                     relay("notifications", "event_schema"),
                     relay_branched_like("deduped", "event_schema", "notifications"),
                     deduplicator(
@@ -12009,7 +12759,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_infers_reingestor_target_branching() {
+    fn apply_batch_constructs_reingestor_target_branching() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -12074,12 +12824,8 @@ mod tests {
                         ],
                     ),
                     branch_schema("tenant_branch", &["tenant"]),
-                    branch_for_relay(
-                        "notifications",
-                        "tenant_user_id_branch",
-                        &["tenant", "user_id"],
-                    ),
-                    branch_for_relay("tenant_notifications", "tenant_branch", &["tenant"]),
+                    branch_for_relay("notifications", "tenant_user_id_branch"),
+                    branch_for_relay("tenant_notifications", "tenant_branch"),
                     ingestor_with_params(
                         "ing",
                         "notifications",
@@ -12131,13 +12877,10 @@ mod tests {
             .iter()
             .map(|node| (node.id.as_str(), node.branching_schema.as_deref()))
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(
-            branching_schemas.get("ingestor:ing"),
-            Some(&Some("tenant_user_id_branch"))
-        );
+        assert_eq!(branching_schemas.get("ingestor:ing"), Some(&None));
         assert_eq!(
             branching_schemas.get("reingestor:tenant_partition"),
-            Some(&Some("tenant_branch"))
+            Some(&None)
         );
         assert_eq!(
             branching_schemas.get("relay:tenant_notifications"),
@@ -12175,7 +12918,7 @@ mod tests {
                         ],
                     }),
                     branch_schema("tenant_branch", &["tenant"]),
-                    branch_for_relay("tenant_notifications", "tenant_branch", &["tenant"]),
+                    branch_for_relay("tenant_notifications", "tenant_branch"),
                     relay("notifications", "event_schema"),
                     relay_branched_by_relay_branch("tenant_notifications", "event_schema"),
                     reingestor(
@@ -12233,7 +12976,7 @@ mod tests {
                 vec![
                     schema("event_schema"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("left", "value_branch", &["value"]),
+                    branch_for_relay("left", "value_branch"),
                     relay("left", "event_schema"),
                     relay("right", "event_schema"),
                     relay_branched_like("merged", "event_schema", "left"),
@@ -12256,7 +12999,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_rejects_transitive_branching_conflict() {
+    fn apply_batch_rejects_incompatible_branches_for_one_relay() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
         let domain = Domain::parse("default").expect("valid domain");
@@ -12312,11 +13055,11 @@ mod tests {
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
                     client_model("broker_in_2"),
-                    relay("left", "event_schema"),
-                    relay("right", "event_schema"),
-                    relay("merged", "event_schema"),
+                    relay_branched_by_relay_branch("left", "event_schema"),
+                    relay_branched_by_relay_branch("right", "event_schema"),
+                    relay_branched_like("merged", "event_schema", "left"),
                     branch_schema("tenant_branch", &["tenant"]),
-                    branch_for_relay("left", "tenant_branch", &["tenant"]),
+                    branch_for_relay("left", "tenant_branch"),
                     ingestor_with_params(
                         "ing_left",
                         "left",
@@ -12325,7 +13068,7 @@ mod tests {
                         &["tenant"],
                     ),
                     branch_schema_with_types("user_id_branch", &[("user_id", ParseAsType::I64)]),
-                    branch_for_relay("right", "user_id_branch", &["user_id"]),
+                    branch_for_relay("right", "user_id_branch"),
                     ingestor_with_params(
                         "ing_right",
                         "right",
@@ -12333,17 +13076,11 @@ mod tests {
                         "broker_in_2",
                         &["user_id"],
                     ),
-                    with_processor_branching(
-                        processor("left_proc", "left", "merged"),
-                        "tenant_branch",
-                    ),
-                    with_processor_branching(
-                        processor("right_proc", "right", "merged"),
-                        "user_id_branch",
-                    ),
+                    with_processor_branching(processor("left_proc", "left", "merged")),
+                    with_processor_branching(processor("right_proc", "right", "merged")),
                 ],
             )
-            .expect_err("transitive branch field conflict should fail");
+            .expect_err("one relay cannot receive incompatible branches");
 
         assert!(matches!(
             err.current_context(),
@@ -12381,7 +13118,7 @@ mod tests {
             relay_branched_by_relay_branch("notifications", "event_schema"),
             emitter("emit", "p99", "event_codec", "broker_out"),
             branch_schema("value_branch", &["value"]),
-            branch_for_relay("notifications", "value_branch", &["value"]),
+            branch_for_relay("notifications", "value_branch"),
             ingestor_with_params(
                 "ing",
                 "notifications",
@@ -12484,9 +13221,9 @@ mod tests {
                     wire_schema("event_wire"),
                     codec("event_codec", "my_schema"),
                     client_model("broker_in"),
-                    relay("input", "my_schema"),
+                    relay_branched_by_relay_branch("input", "my_schema"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("input", "value_branch", &["value"]),
+                    branch_for_relay("input", "value_branch"),
                     ingestor_with_params("ing", "input", "event_codec", "broker_in", &["value"]),
                     processor("p99_proc", "input", "missing_output"),
                 ],
@@ -12537,7 +13274,7 @@ mod tests {
                     relay_branched_by_relay_branch("raw_events", "event_schema"),
                     relay_branched_like("deduped_events", "event_schema", "raw_events"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("raw_events", "value_branch", &["value"]),
+                    branch_for_relay("raw_events", "value_branch"),
                     ingestor_with_params(
                         "ingest_events",
                         "raw_events",
@@ -12577,10 +13314,7 @@ mod tests {
             .iter()
             .map(|node| (node.id.as_str(), node.branching_schema.as_deref()))
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(
-            branching_schemas.get("ingestor:ingest_events"),
-            Some(&Some("value_branch"))
-        );
+        assert_eq!(branching_schemas.get("ingestor:ingest_events"), Some(&None));
         assert_eq!(
             branching_schemas.get("relay:raw_events"),
             Some(&Some("value_branch"))
@@ -12763,7 +13497,11 @@ mod tests {
                         correlator.output_routes.routes[0].message_error_policy =
                             MessageErrorPolicy::Dlq {
                                 relay: identifier("correlator_errors"),
-                                mappings: Vec::new(),
+                                assignments: vec![Assignment {
+                                    target: AssignmentTarget::bare(identifier("value")),
+                                    value: nervix_nspl::parse_expression("left.value")
+                                        .expect("error assignment must parse"),
+                                }],
                             };
                         Model::Correlator(correlator)
                     },
@@ -12830,6 +13568,144 @@ mod tests {
     }
 
     #[test]
+    fn correlator_message_error_set_uses_structured_scopes_and_all_optional_partial_output() {
+        fn error_schema() -> Model {
+            Model::Schema(CreateSchema {
+                name: identifier("error_schema"),
+                fields: vec![
+                    SchemaField {
+                        name: identifier("reference"),
+                        ty: ParseAsType::String,
+                        optional: false,
+                        sensitive: false,
+                    },
+                    SchemaField {
+                        name: identifier("fields"),
+                        ty: ParseAsType::Vec {
+                            element: Box::new(ParseAsType::String),
+                        },
+                        optional: false,
+                        sensitive: false,
+                    },
+                    SchemaField {
+                        name: identifier("attempted"),
+                        ty: ParseAsType::String,
+                        optional: false,
+                        sensitive: false,
+                    },
+                ],
+            })
+        }
+
+        let models_with_policy = |assignment_source: &str| {
+            let Model::Correlator(mut correlator) = unbranched_correlator(
+                "match_events",
+                "left_events",
+                "right_events",
+                "matched_events",
+            ) else {
+                unreachable!("helper must return correlator")
+            };
+            correlator.output_routes.routes[0].message_error_policy = MessageErrorPolicy::Dlq {
+                relay: identifier("correlator_errors"),
+                assignments: vec![
+                    Assignment {
+                        target: AssignmentTarget::bare(identifier("reference")),
+                        value: nervix_nspl::parse_expression("error.reference")
+                            .expect("error reference must parse"),
+                    },
+                    Assignment {
+                        target: AssignmentTarget::bare(identifier("fields")),
+                        value: nervix_nspl::parse_expression("error.fields")
+                            .expect("error fields must parse"),
+                    },
+                    Assignment {
+                        target: AssignmentTarget::bare(identifier("attempted")),
+                        value: nervix_nspl::parse_expression(assignment_source)
+                            .expect("attempted value must parse"),
+                    },
+                ],
+            };
+            vec![
+                schema("event_schema"),
+                error_schema(),
+                explicitly_unbranched_relay("left_events", "event_schema"),
+                explicitly_unbranched_relay("right_events", "event_schema"),
+                explicitly_unbranched_relay("matched_events", "event_schema"),
+                explicitly_unbranched_relay("correlator_errors", "error_schema"),
+                Model::Correlator(correlator),
+            ]
+        };
+
+        let valid_path = temp_db_path();
+        Registry::open(&valid_path)
+            .expect("registry should open")
+            .apply_batch(
+                &Domain::parse("default").expect("valid domain"),
+                models_with_policy("coalesce(partial_output.value, 'missing')"),
+            )
+            .expect("structured correlator error construction should validate");
+        let _ = fs::remove_dir_all(valid_path);
+
+        let invalid_path = temp_db_path();
+        let error = Registry::open(&invalid_path)
+            .expect("registry should open")
+            .apply_batch(
+                &Domain::parse("default").expect("valid domain"),
+                models_with_policy("input.value"),
+            )
+            .expect_err("correlator error construction must not expose input");
+        assert!(format!("{error:?}").contains("input"));
+        let _ = fs::remove_dir_all(invalid_path);
+    }
+
+    #[test]
+    fn message_error_relay_requires_the_exact_named_branch() {
+        let Model::Correlator(mut correlator) = unbranched_correlator(
+            "match_events",
+            "left_events",
+            "right_events",
+            "matched_events",
+        ) else {
+            unreachable!("helper must return correlator")
+        };
+        correlator.branched_by = BranchSelection::branched_by(identifier("event_branch"));
+        correlator.output_routes.routes[0].message_error_policy = MessageErrorPolicy::Dlq {
+            relay: identifier("correlator_errors"),
+            assignments: vec![Assignment {
+                target: AssignmentTarget::bare(identifier("value")),
+                value: nervix_nspl::parse_expression("left.value")
+                    .expect("correlator error input must parse"),
+            }],
+        };
+        let path = temp_db_path();
+        let error = Registry::open(&path)
+            .expect("registry should open")
+            .apply_batch(
+                &Domain::parse("default").expect("valid domain"),
+                vec![
+                    schema("event_schema"),
+                    schema("error_schema"),
+                    branch_schema("branch_key", &["tenant"]),
+                    branch("event_branch", "branch_key"),
+                    branch("error_branch", "branch_key"),
+                    relay_branched_by("left_events", "event_schema", "event_branch"),
+                    relay_branched_by("right_events", "event_schema", "event_branch"),
+                    relay_branched_by("matched_events", "event_schema", "event_branch"),
+                    relay_branched_by("correlator_errors", "error_schema", "error_branch"),
+                    Model::Correlator(correlator),
+                ],
+            )
+            .expect_err("structurally equal but differently named branches must be rejected");
+
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("message-error relay 'correlator_errors'"));
+        assert!(rendered.contains("error_branch"));
+        assert!(rendered.contains("event_branch"));
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn dataflow_graph_excludes_synthetic_materializer_nodes() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
@@ -12845,7 +13721,7 @@ mod tests {
                     client_model("broker_in"),
                     materialized_relay("state_txns", "event_schema"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("state_txns", "value_branch", &["value"]),
+                    branch_for_relay("state_txns", "value_branch"),
                     ingestor_with_params(
                         "state_txns_ingestor",
                         "state_txns",
@@ -13025,7 +13901,7 @@ mod tests {
                     relay_branched_by_relay_branch("input", "event_schema"),
                     relay_branched_like("output", "event_schema", "input"),
                     branch_schema("value_branch", &["value"]),
-                    branch_for_relay("input", "value_branch", &["value"]),
+                    branch_for_relay("input", "value_branch"),
                     ingestor_with_params("ing", "input", "event_codec", "broker_in", &["value"]),
                     processor("p99_proc", "input", "output"),
                 ],

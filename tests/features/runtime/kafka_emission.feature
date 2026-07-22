@@ -53,14 +53,19 @@ Feature: Kafka emission
         CONFIG {
           'addr' = 'mqtt://127.0.0.1:1883',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
-        }; CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { tenant = notifications.tenant }
-
+        };
+      CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_ingress
         TOPIC notifications_headers_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        MODE NO_ACK SEQUENTIAL
+        DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          BRANCHED BY by_mqtt_notifications
+          SET tenant = message.tenant
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE CLIENT kafka_main
         TYPE KAFKA
@@ -72,14 +77,16 @@ Feature: Kafka emission
         FROM notifications
         ENCODE USING emitted_notification_codec
         TO KAFKA kafka_main TOPIC notifications_headers_out_{{test_id}}
-        SET message.amount = message.amount + 1,
-            message.normalized = lower(message.raw)
-        UNSET message.raw, message.active
-        WHERE message.active
-        INVOKE write_header(lower("TENANT"), message.tenant),
+        INHERIT ALL EXCEPT raw, active
+        SET amount = amount + 1,
+            normalized = lower(input.raw)
+        WHERE input.active
+        INVOKE write_header(lower("TENANT"), output.tenant),
                write_header(lower("ROUTE"), "primary"),
-               write_header(lower("ROUTE"), message.normalized)
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+               write_header(lower("ROUTE"), output.normalized)
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       START;
       """
     And MQTT message is published to topic "notifications_headers_in_{{test_id}}"
@@ -131,22 +138,25 @@ Feature: Kafka emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
       CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
-        CREATE EMITTER kafka_notifications
-        FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 2s MAX BATCH SIZE 1MiB;
+        CREATE EMITTER kafka_notifications FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        INHERIT ALL
+        FLUSH EACH 2s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     And emitter "kafka_notifications" enters stall mode

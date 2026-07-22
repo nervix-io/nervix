@@ -23,8 +23,6 @@ Feature: Materialized relay state
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_state_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_state
         SCHEMA notification
@@ -42,24 +40,35 @@ Feature: Materialized relay state
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR state_notifications
-        TO tenant_state FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_state_notifications VALUES { tenant = tenant_state.tenant }
-
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE INGESTOR http_notifications
-        TO incoming_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-        DECODE USING notification_codec
-        BRANCHED BY by_state_notifications VALUES { tenant = incoming_notifications.tenant }
-
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE DEDUPLICATOR enrich_notifications
-        FROM incoming_notifications
-        TO enriched_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-          SET enriched_notifications.source = tenant_state.source ON MESSAGE ERROR LOG
+        TO tenant_state
+        INHERIT ALL
         BRANCHED BY by_state_notifications
-        DEDUPLICATE ON incoming_notifications.user_id
-        MAX TIME 10m;
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE INGESTOR http_notifications
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING notification_codec
+        TO incoming_notifications
+        INHERIT ALL
+        BRANCHED BY by_state_notifications
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR enrich_notifications FROM incoming_notifications
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
+        BRANCHED BY by_state_notifications
+        USING MATERIALIZED STATE tenant_state REQUIRED WAIT
+        TO enriched_notifications
+        INHERIT ALL
+        SET source = relay_state.tenant_state.source
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION enriched_notifications_subscription TO enriched_notifications;
         START;
       """
@@ -136,11 +145,15 @@ Feature: Materialized relay state
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
@@ -209,12 +222,16 @@ Feature: Materialized relay state
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
         TIMESTAMP NOW
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
@@ -272,11 +289,15 @@ Feature: Materialized relay state
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"

@@ -226,10 +226,11 @@ fn starts_with_server_command_keyword(tokens: &[Token]) -> bool {
     if *iden == Keyword::Create || *iden == Keyword::Delete {
         return if let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.get(1) {
             *iden != Keyword::Subscription
-        } else if let Some(Token::Word(Word::UnknownWord(_))) | None = tokens.get(1) {
-            false
         } else {
-            true
+            !matches!(
+                tokens.get(1),
+                Some(Token::Word(Word::UnknownWord(_))) | None
+            )
         };
     }
     !starts_with_client_command_keyword(tokens)
@@ -423,10 +424,14 @@ mod tests {
                 && let nervix_models::Model::WindowProcessor(window_processor) =
                     create.body.as_ref()
             {
-                crate::window_processor::aggregate::parse_aggregate_program(
-                    &window_processor.aggregate,
-                )
-                .unwrap_or_else(|error| panic!("{name} window aggregate should parse: {error:?}"));
+                for output in window_processor.output_routes.outputs() {
+                    crate::window_processor::aggregate::lower_window_assignments(
+                        &output.construction,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{name} window aggregate should lower: {error}")
+                    });
+                }
             }
         }
     }

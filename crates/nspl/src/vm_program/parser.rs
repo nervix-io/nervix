@@ -319,14 +319,6 @@ where
             .allow_trailing()
             .collect::<Vec<_>>(),
     );
-    let unset_block = keyword(Token::Unset).ignore_then(
-        field_ref_parser()
-            .map(|field_ref| field_ref.inner)
-            .separated_by(keyword(Token::Comma))
-            .at_least(1)
-            .allow_trailing()
-            .collect::<Vec<_>>(),
-    );
     let invocation = identifier_name()
         .then(
             expr.clone()
@@ -355,25 +347,19 @@ where
     set_block
         .or_not()
         .then_ignore(keyword(Token::Semicolon).repeated())
-        .then(unset_block.or_not())
-        .then_ignore(keyword(Token::Semicolon).repeated())
         .then(keyword(Token::Where).ignore_then(expr).or_not())
         .then_ignore(keyword(Token::Semicolon).repeated())
         .then(invoke_block.or_not())
         .then_ignore(keyword(Token::Semicolon).repeated())
-        .try_map(|(((set, unset), filter), invoke), span| {
-            if set.is_none() && unset.is_none() && filter.is_none() && invoke.is_none() {
-                return Err(Rich::custom(
-                    span,
-                    "expected SET, UNSET, WHERE, or INVOKE clause",
-                ));
+        .try_map(|((set, filter), invoke), span| {
+            if set.is_none() && filter.is_none() && invoke.is_none() {
+                return Err(Rich::custom(span, "expected SET, WHERE, or INVOKE clause"));
             }
 
             Ok(Program {
                 filter,
                 branch_filters: Vec::new(),
                 set: set.unwrap_or_default(),
-                unset: unset.unwrap_or_default(),
                 invoke: invoke.unwrap_or_default(),
             })
         })
@@ -439,10 +425,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_set_unset_and_where_blocks() {
+    fn parses_set_and_where_blocks() {
         let parsed = parse_program(
-            "SET input.total = input.amount * 2, input.kind = lower(input.name) UNSET \
-             input.legacy, input.old_flag WHERE input.amount > 10 AND input.active;",
+            "SET input.total = input.amount * 2, input.kind = lower(input.name) WHERE \
+             input.amount > 10 AND input.active;",
         )
         .expect("program must parse");
 
@@ -452,25 +438,12 @@ mod tests {
         assert_eq!(parsed.inner.set[0].0.relay, "input");
         assert_eq!(parsed.inner.set[0].0.field, "total");
         assert_eq!(parsed.inner.set[1].0.field, "kind");
-        assert_eq!(
-            parsed.inner.unset,
-            vec![
-                FieldRef {
-                    relay: "input".to_string(),
-                    field: "legacy".to_string(),
-                },
-                FieldRef {
-                    relay: "input".to_string(),
-                    field: "old_flag".to_string(),
-                },
-            ]
-        );
     }
 
     #[test]
     fn parses_clauses_in_canonical_order() {
         let parsed = parse_program(
-            "SET input.total = input.amount UNSET input.legacy WHERE input.active = true INVOKE \
+            "SET input.total = input.amount WHERE input.active = true INVOKE \
              write_header(lower(\"X-Tenant\"), input.tenant), write_header(\"x-route\", \
              input.route);",
         )
@@ -479,7 +452,6 @@ mod tests {
         assert!(parsed.inner.filter.is_some());
         assert!(parsed.inner.branch_filters.is_empty());
         assert_eq!(parsed.inner.set.len(), 1);
-        assert_eq!(parsed.inner.unset[0].field, "legacy");
         assert_eq!(parsed.inner.invoke.len(), 2);
         assert_eq!(
             parsed.inner.invoke[0].inner.function,
@@ -494,7 +466,6 @@ mod tests {
             .expect("invoke-only program must parse");
 
         assert!(parsed.inner.set.is_empty());
-        assert!(parsed.inner.unset.is_empty());
         assert!(parsed.inner.filter.is_none());
         assert_eq!(parsed.inner.invoke.len(), 1);
     }
@@ -696,7 +667,6 @@ mod tests {
         assert!(parsed.inner.filter.is_some());
         assert!(parsed.inner.branch_filters.is_empty());
         assert!(parsed.inner.set.is_empty());
-        assert!(parsed.inner.unset.is_empty());
     }
 
     #[test]
@@ -712,9 +682,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_unset_identifiers() {
-        let error =
-            parse_program("SET input.total = input.amount UNSET").expect_err("program must fail");
+    fn rejects_removed_unset_clause() {
+        let error = parse_program("SET input.total = input.amount UNSET input.legacy")
+            .expect_err("removed UNSET syntax must fail");
 
         match error {
             ParseFromSourceError::Parse { diagnostics, .. } => {

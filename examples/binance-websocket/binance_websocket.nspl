@@ -87,11 +87,15 @@ CREATE IF NOT EXISTS SCHEMA symbol_branch (
 );
 
 CREATE INGESTOR ingest_binance_ws
-  TO binance_ws_events FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+  FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL
   DECODE USING binance_ws_event_codec
-  BRANCHED BY by_symbol VALUES { symbol = binance_ws_events.symbol }
-
-  FROM WEBSOCKETS binance_ws MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+  TO binance_ws_events
+  INHERIT ALL
+  BRANCHED BY by_symbol
+  SET symbol = message.symbol
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
 
 CREATE SUBSCRIPTION binance_ws_events_subscription TO binance_ws_events;
 START;

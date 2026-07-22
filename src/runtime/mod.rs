@@ -10,7 +10,6 @@ use std::{
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use arc_swap::ArcSwapOption;
-use arrow_arith::boolean::and_kleene;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array,
     builder::{
@@ -23,7 +22,10 @@ use arrow_array::{
 };
 use arrow_ipc::reader::StreamReader;
 use arrow_schema::DataType as ArrowDataType;
-use arrow_select::{concat::concat as concat_arrow_arrays, take::take as take_arrow_array};
+use arrow_select::{
+    concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array,
+    take::take as take_arrow_array,
+};
 use chrono::{TimeDelta, TimeZone, Utc};
 use dashmap::DashMap;
 use fjall::Database;
@@ -32,7 +34,7 @@ use nervix_interconnect::{
     Envelope, RelayPayload, RelayPayloadKind, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AckMode, BranchValueMapping, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
+    AckMode, Assignment, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
     CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy,
     CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
     CreateClientKafka, CreateClientKinesis, CreateClientMqtt, CreateClientNats,
@@ -40,25 +42,28 @@ use nervix_models::{
     CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor,
     CreateRelay, CreateSignalingProtocol, CreateWireSchemaStmt, Domain, DomainConfig, DomainPace,
-    DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorFieldMapping,
-    ErrorPolicies, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    Identifier, InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping,
-    IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
-    KinesisIngestMode, MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction,
+    DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath,
+    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
+    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    KinesisIngestMode, Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode,
+    MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction,
     MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-    MySqlValueMapping, PostgresConflictAction, PostgresValueMapping, PulsarIngestMode,
-    RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, ScheduledNode, SqsIngestMode,
-    Timestamp,
+    MySqlValueMapping, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
+    PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction,
+    ScheduledNode, SqsIngestMode, StructuredMessageError, Timestamp,
 };
 use nervix_nspl::{
     vm_program::{
         BinaryOp, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
-        SpannedExpr, UnaryOp, parse_program,
+        SemanticNamespaces, Span as VmSpan, SpannedExpr, UnaryOp, lower_finalized_output_filter,
+        lower_generated_route, lower_route_construction, lower_set_only_route,
+        lower_transforming_route,
     },
     window_processor::aggregate::{
         WindowAggregateDemand, WindowAggregateFunction, WindowAggregateProgram,
-        WindowAggregateStorageKind, parse_aggregate_program,
+        WindowAggregateStorageKind, lower_window_assignments,
     },
 };
 #[cfg(test)]
@@ -82,11 +87,12 @@ use nervix_wasm::{
 use ordered_float::OrderedFloat;
 use parking_lot::{Mutex as ParkingMutex, RwLock};
 use registry::{ActiveGraph, RuntimeChange, RuntimeChanges};
+use sorted_vec::SortedSet;
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::{
     io::AsyncBufReadExt,
-    sync::{Mutex, broadcast, mpsc, oneshot, watch},
+    sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Duration, Instant, sleep, sleep_until},
 };
@@ -108,7 +114,7 @@ use crate::{
         CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufCodecDescriptor,
         RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
         compile_codec_with_protobuf, compile_schema, decode_with_codec, decode_with_codec_owned,
-        encode_with_codec,
+        encode_with_codec, runtime_value_from_arrow_array,
     },
 };
 
@@ -154,11 +160,12 @@ use materialized_state::{
     ReplicatedMaterializedRelayState, decode_materialized_stream_snapshot,
     encode_materialized_stream_snapshot_entries,
 };
+#[cfg(test)]
+use planning::resolve_concrete_branch;
 use planning::{
     branched_ingestor_specs_from_active_graph, branched_ingestor_specs_from_models,
     branched_ingestor_specs_from_scheduled_nodes, branched_processor_ids, format_branched_by,
-    materialize_branch_instance_template, resolve_concrete_branch,
-    resolve_concrete_branch_from_mappings,
+    materialize_branch_instance_template, resolve_concrete_branch_from_assignments,
 };
 use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec,
@@ -206,12 +213,8 @@ const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
 const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_millis(25);
 const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
-const INGEST_MESSAGE_NAMESPACE: &str = "message";
 const INGEST_METADATA_NAMESPACE: &str = "metadata";
 const BRANCH_NAMESPACE: &str = "branch";
-const INNER_INPUT_NAMESPACE: &str = "inner_input";
-const INNER_OUTPUT_NAMESPACE: &str = "inner_output";
-const WASM_INPUT_NAMESPACE: &str = "input";
 
 pub(crate) type IngestHeaders = Vec<(String, String)>;
 
@@ -366,11 +369,6 @@ impl BranchKey {
 
     pub(crate) fn as_str(&self) -> &str {
         self.json.as_str()
-    }
-
-    fn value(&self, field: &str) -> Option<&RuntimeValue> {
-        let field = Identifier::try_from(field.to_string()).ok()?;
-        self.fields.get(&field)
     }
 
     fn fields(&self) -> impl Iterator<Item = (&Identifier, &RuntimeValue)> {
@@ -588,8 +586,6 @@ struct EndpointIngestBinding {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branching: Vec<Identifier>,
-    branch_value_mappings: Vec<BranchValueMapping>,
     branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
 }
 
@@ -597,8 +593,6 @@ struct IngestorDependencies {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branching: Vec<Identifier>,
-    branch_value_mappings: Vec<BranchValueMapping>,
     branched_templates: HashMap<Identifier, (SharedActiveGraph, BranchInstanceTemplate)>,
 }
 
@@ -606,8 +600,6 @@ struct IngestDispatch<'a> {
     domain: &'a Domain,
     ingestor: &'a Identifier,
     timestamp_source: Option<&'a IngestTimestampSource>,
-    branching: &'a [Identifier],
-    branch_value_mappings: Option<&'a [BranchValueMapping]>,
     output_routes: &'a mut RelayProcessorOutputsNode,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
@@ -625,21 +617,14 @@ struct BranchedIngestorRuntimes {
 
 struct IngestBatchSelection<'a> {
     domain: &'a Domain,
-    ingestor: &'a Identifier,
-    branching: &'a [Identifier],
-    branch_value_mappings: Option<&'a [BranchValueMapping]>,
     filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     records: &'a [RuntimeRecord],
     filter_map_metadata: Option<&'a [IngestFilterMapMetadata]>,
 }
 
-enum BranchedEntrypointInput {
-    PendingBranchingBatch(RelayRecordBatch),
-    UnresolvedRecord { record: RuntimeRecord, acks: AckSet },
-}
+type BranchedEntrypointInput = RelayRecordBatch;
 
 struct BranchedEntrypointBatch {
-    schema: Arc<CompiledSchema>,
     batch: RuntimeRecordBatch,
     records: Vec<RuntimeRecord>,
     metadata: Vec<RuntimeRecordMetadata>,
@@ -650,7 +635,7 @@ struct BranchedEntrypointBatch {
 #[derive(Clone)]
 struct BranchedBranchSelection {
     key: Option<BranchKey>,
-    filters: Vec<(Identifier, RuntimeValue)>,
+    rows: Vec<usize>,
 }
 
 struct BranchedEntrypointRowError {
@@ -665,66 +650,29 @@ struct BranchedBranchPlan {
     valid_rows: Vec<(Option<BranchKey>, usize)>,
 }
 
-impl BranchedEntrypointInput {
-    fn estimated_bytes(&self) -> u64 {
-        match self {
-            Self::PendingBranchingBatch(batch) => batch.estimated_bytes(),
-            Self::UnresolvedRecord { record, .. } => record.estimated_bytes(),
-        }
-    }
-}
-
 impl BranchedEntrypointBatch {
-    fn from_inputs(
-        schema: Arc<CompiledSchema>,
-        inputs: Vec<BranchedEntrypointInput>,
-    ) -> Result<Self, (String, Vec<AckSet>)> {
+    fn from_inputs(inputs: Vec<BranchedEntrypointInput>) -> Result<Self, (String, Vec<AckSet>)> {
+        if inputs.is_empty() {
+            return Err((
+                "cannot build branch batch from zero inputs".to_string(),
+                Vec::new(),
+            ));
+        }
         let mut batches = Vec::<RuntimeRecordBatch>::new();
         let mut records = Vec::<RuntimeRecord>::new();
         let mut metadata = Vec::<RuntimeRecordMetadata>::new();
         let mut keys = Vec::<Option<BranchKey>>::new();
         let mut acks = Vec::<AckSet>::new();
-        let mut record_only_inputs = Vec::<RuntimeRecord>::new();
-        let mut had_input = false;
 
         for input in inputs {
-            had_input = true;
-            match input {
-                BranchedEntrypointInput::PendingBranchingBatch(batch) => {
-                    Self::push_pending_record_batch(
-                        &schema,
-                        &mut batches,
-                        &mut record_only_inputs,
-                        &acks,
-                    )?;
-                    let (runtime_batch, batch_records, batch_metadata, batch_keys, batch_acks) =
-                        batch.into_unkeyed_parts();
-                    batches.push(runtime_batch);
-                    records.extend(batch_records);
-                    metadata.extend(batch_metadata);
-                    keys.extend(batch_keys);
-                    acks.extend(batch_acks);
-                }
-                BranchedEntrypointInput::UnresolvedRecord {
-                    record,
-                    acks: record_acks,
-                } => {
-                    metadata.push(record.metadata().clone());
-                    keys.push(None);
-                    record_only_inputs.push(record.clone());
-                    records.push(record);
-                    acks.push(record_acks);
-                }
-            }
+            let (runtime_batch, batch_records, batch_metadata, batch_keys, batch_acks) =
+                input.into_unkeyed_parts();
+            batches.push(runtime_batch);
+            records.extend(batch_records);
+            metadata.extend(batch_metadata);
+            keys.extend(batch_keys);
+            acks.extend(batch_acks);
         }
-
-        if !had_input {
-            return Err((
-                "cannot build branch batch from zero inputs".to_string(),
-                acks,
-            ));
-        }
-        Self::push_pending_record_batch(&schema, &mut batches, &mut record_only_inputs, &acks)?;
         let batch_refs = batches.iter().collect::<Vec<_>>();
         let batch = RuntimeRecordBatch::concat(&batch_refs).map_err(|error| {
             (
@@ -752,7 +700,6 @@ impl BranchedEntrypointBatch {
         }
 
         Ok(Self {
-            schema,
             batch,
             records,
             metadata,
@@ -761,38 +708,20 @@ impl BranchedEntrypointBatch {
         })
     }
 
-    fn push_pending_record_batch(
-        schema: &Arc<CompiledSchema>,
-        batches: &mut Vec<RuntimeRecordBatch>,
-        records: &mut Vec<RuntimeRecord>,
-        acks: &[AckSet],
-    ) -> Result<(), (String, Vec<AckSet>)> {
-        if records.is_empty() {
-            return Ok(());
-        }
-        let pending = std::mem::take(records);
-        batches.push(schema.arrow_batch_from_records(&pending).map_err(|error| {
-            (
-                format!("failed to build branch input batch: {error}"),
-                acks.to_vec(),
-            )
-        })?);
-        Ok(())
-    }
-
     fn branch_selections(
         &self,
-        mappings: &[BranchValueMapping],
+        mappings: &[Assignment],
         source: &Identifier,
         root_relay: &Identifier,
     ) -> BranchedBranchPlan {
         let mut selections = Vec::<BranchedBranchSelection>::new();
-        let mut positions = HashMap::default();
+        let mut positions = HashMap::<Option<BranchKey>, usize>::default();
         let mut row_errors = Vec::new();
         let mut valid_rows = Vec::new();
         for (index, record) in self.records.iter().enumerate() {
-            match resolve_concrete_branch_from_mappings(
+            match resolve_concrete_branch_from_assignments(
                 record,
+                None,
                 self.keys.get(index).and_then(Option::as_ref),
                 mappings,
                 source,
@@ -800,21 +729,15 @@ impl BranchedEntrypointBatch {
                 Ok(branch) => {
                     let key = branch.into_relay_key();
                     valid_rows.push((key.clone(), index));
-                    if positions.contains_key(&key) {
+                    if let Some(position) = positions.get(&key).copied() {
+                        selections[position].rows.push(index);
                         continue;
                     }
-                    let filters = mappings
-                        .iter()
-                        .filter(|mapping| mapping.relay.as_str() != BRANCH_NAMESPACE)
-                        .filter_map(|mapping| {
-                            record
-                                .value(mapping.relay_field.as_str())
-                                .cloned()
-                                .map(|value| (mapping.relay_field.clone(), value))
-                        })
-                        .collect::<Vec<_>>();
                     positions.insert(key.clone(), selections.len());
-                    selections.push(BranchedBranchSelection { key, filters });
+                    selections.push(BranchedBranchSelection {
+                        key,
+                        rows: vec![index],
+                    });
                 }
                 Err(error) => {
                     row_errors.push(BranchedEntrypointRowError {
@@ -885,19 +808,16 @@ impl BranchedEntrypointBatch {
         selection: &BranchedBranchSelection,
     ) -> Result<BooleanArray, String> {
         let row_count = self.batch.batch().num_rows();
-        let mut predicate = None::<BooleanArray>;
-        for (field, value) in &selection.filters {
-            let field_predicate =
-                self.schema
-                    .arrow_eq_predicate(&self.batch, field.as_str(), value)?;
-            predicate = Some(match predicate {
-                Some(current) => and_kleene(&current, &field_predicate)
-                    .map_err(|error| format!("branch predicate conjunction failed: {error}"))?,
-                None => field_predicate,
-            });
+        let mut selected = vec![false; row_count];
+        for row in &selection.rows {
+            let Some(value) = selected.get_mut(*row) else {
+                return Err(format!(
+                    "branch selection row {row} is outside batch with {row_count} rows"
+                ));
+            };
+            *value = true;
         }
-        Ok(predicate
-            .unwrap_or_else(|| BooleanArray::from_iter(std::iter::repeat_n(Some(true), row_count))))
+        Ok(BooleanArray::from(selected))
     }
 }
 
@@ -911,8 +831,46 @@ struct MessageErrorContext<'a> {
     domain: &'a Domain,
     node_kind: &'a str,
     node: &'a Identifier,
+    source_route: Option<&'a Identifier>,
     message: &'a RelayMessage,
-    reason: &'a str,
+    error: &'a StructuredMessageError,
+    partial_output: Option<&'a RuntimeRecord>,
+    materialized_state: &'a HashMap<String, RuntimeValue>,
+    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
+}
+
+struct MessageErrorHandling<'a> {
+    domain: &'a Domain,
+    node_kind: &'a str,
+    node: &'a Identifier,
+    source_route: Option<&'a Identifier>,
+    policy: &'a MessageErrorPolicy,
+    message: RelayMessage,
+    error: StructuredMessageError,
+    partial_output: Option<RuntimeRecord>,
+    materialized_state: HashMap<String, RuntimeValue>,
+    ingest_metadata: Option<&'a IngestFilterMapMetadata>,
+}
+
+#[derive(Debug, Clone)]
+struct MessageErrorCompileSchemas {
+    input: Option<Arc<CompiledSchema>>,
+    left: Option<Arc<CompiledSchema>>,
+    right: Option<Arc<CompiledSchema>>,
+    partial_output: Option<Arc<CompiledSchema>>,
+    current_branching: Vec<Identifier>,
+    allow_header_reads: bool,
+}
+
+#[derive(Debug)]
+enum SingleRecordFilterMapOutcome {
+    Filtered,
+    Output(RuntimeRecord),
+    MessageError {
+        error: StructuredMessageError,
+        partial_output: Option<RuntimeRecord>,
+        materialized_state: HashMap<String, RuntimeValue>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1606,30 +1564,17 @@ fn branched_entrypoint_inputs_estimated_bytes(inputs: &[BranchedEntrypointInput]
 }
 
 fn branched_entrypoint_inputs_acks(inputs: &[BranchedEntrypointInput]) -> Vec<AckSet> {
-    let mut acks = Vec::new();
-    for input in inputs {
-        match input {
-            BranchedEntrypointInput::PendingBranchingBatch(batch) => {
-                acks.extend(batch.acks.iter().cloned());
-            }
-            BranchedEntrypointInput::UnresolvedRecord {
-                acks: record_acks, ..
-            } => {
-                acks.push(record_acks.clone());
-            }
-        }
-    }
-    acks
+    inputs
+        .iter()
+        .flat_map(|input| input.acks.iter().cloned())
+        .collect()
 }
 
 async fn branched_entrypoint_batch_from_inputs_blocking(
-    schema: Arc<CompiledSchema>,
     inputs: Vec<BranchedEntrypointInput>,
 ) -> Result<Arc<BranchedEntrypointBatch>, (String, Vec<AckSet>)> {
     let acks = branched_entrypoint_inputs_acks(&inputs);
-    match tokio::task::spawn_blocking(move || BranchedEntrypointBatch::from_inputs(schema, inputs))
-        .await
-    {
+    match tokio::task::spawn_blocking(move || BranchedEntrypointBatch::from_inputs(inputs)).await {
         Ok(Ok(batch)) => Ok(Arc::new(batch)),
         Ok(Err(error)) => Err(error),
         Err(error) => Err((
@@ -1698,9 +1643,14 @@ struct EmitterTaskBuildDeps<'a> {
 
 struct GeneratorTaskSpec {
     generator: CreateGenerator,
-    program: Arc<CompiledFilterMapProgram>,
-    source_relays: Vec<Identifier>,
-    output_branching: Vec<Identifier>,
+    source_relay: Identifier,
+    source_branching: Vec<Identifier>,
+    routes: Vec<GeneratorTaskRouteSpec>,
+}
+
+struct GeneratorTaskRouteSpec {
+    output: ProcessorOutput,
+    program: CompiledProgramWithMaterializedInterest,
     output_schema: Arc<CompiledSchema>,
     output_registry: RelayRegistry,
     output_services: Arc<RelayBoundaryServices>,
@@ -1709,6 +1659,11 @@ struct GeneratorTaskSpec {
 #[derive(Default)]
 struct GeneratorBranchTaskState {
     next_generation: Option<Timestamp>,
+    routes: Vec<GeneratorRouteBranchTaskState>,
+}
+
+#[derive(Default)]
+struct GeneratorRouteBranchTaskState {
     next_flush: Option<Timestamp>,
     pending: Vec<RelayMessage>,
 }
@@ -1803,7 +1758,52 @@ pub(crate) struct CompiledProgramWithMaterializedInterest {
     pub(crate) compiled: Arc<VmCompiledProgram>,
     pub(crate) output_sensitivity: VmSchemaSensitivity,
     pub(crate) materialized_interest: MaterializedProgramInterest,
+    output_namespace_input: OutputNamespaceInput,
     lookup_hash_maps: Vec<LookupHashMapCall>,
+    error_sites: Vec<CompiledMessageErrorSite>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputNamespaceInput {
+    Uninitialized,
+    Finalized,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledMessageErrorSite {
+    span: VmSpan,
+    operation: MessageErrorOperation,
+    operation_index: Option<u32>,
+    fields: SortedSet<FieldPath>,
+}
+
+impl CompiledProgramWithMaterializedInterest {
+    fn captures_partial_output(&self) -> bool {
+        self.error_sites.iter().any(|site| {
+            matches!(
+                site.operation,
+                MessageErrorOperation::Inherit | MessageErrorOperation::Set
+            )
+        })
+    }
+
+    fn structured_side_error(
+        &self,
+        reason: String,
+        span: VmSpan,
+        fallback_operation: MessageErrorOperation,
+    ) -> StructuredMessageError {
+        let site = self.error_sites.iter().find(|site| site.span == span);
+        structured_message_error(
+            MessageErrorCode::Evaluation,
+            reason,
+            site.map_or(fallback_operation, |site| site.operation),
+            site.and_then(|site| site.operation_index),
+            site.map(|site| site.fields.iter().cloned())
+                .into_iter()
+                .flatten(),
+        )
+    }
 }
 
 pub(crate) type EmitterHeaders = Vec<(String, String)>;
@@ -1812,6 +1812,7 @@ pub(crate) type EmitterHeaders = Vec<(String, String)>;
 pub(crate) struct CompiledEmitterFilterMapProgram {
     pub(crate) body: CompiledProgramWithMaterializedInterest,
     pub(crate) materialized_interest: MaterializedProgramInterest,
+    pub(crate) codec_route: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1903,6 +1904,7 @@ pub struct Runtime {
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedKafkaOffsetState>, RandomState>>,
     replicated_materialized_stream_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedMaterializedRelayState>, RandomState>>,
+    materialized_state_changed: Arc<Notify>,
     replicated_window_processor_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedWindowProcessorState>, RandomState>>,
     replicated_wasm_processor_states:
@@ -2387,6 +2389,12 @@ enum ProcessorInputFilterKind {
     FilterWhere,
 }
 
+enum MaterializedDependencyResolution {
+    Ready(HashMap<String, RuntimeValue>),
+    Skip,
+    Wait,
+}
+
 impl ProcessorInputFilterKind {
     fn label(self) -> &'static str {
         match self {
@@ -2394,9 +2402,55 @@ impl ProcessorInputFilterKind {
             Self::FilterWhere => "FILTER WHERE",
         }
     }
+
+    fn error_operation(self) -> MessageErrorOperation {
+        match self {
+            Self::FromWhere => MessageErrorOperation::SourceWhere,
+            Self::FilterWhere => MessageErrorOperation::FilterWhere,
+        }
+    }
 }
 
 impl RelayProcessorNode {
+    fn from_where_filter_scope(&self, incoming_relay: &Identifier) -> RuntimeFilterScope {
+        match &self.operation {
+            RelayProcessorOperationNode::Correlator {
+                left_relays,
+                right_relays,
+                ..
+            } if left_relays.contains(incoming_relay) => RuntimeFilterScope::Source {
+                namespace: "left",
+                allow_header_reads: false,
+                allow_metadata: false,
+            },
+            RelayProcessorOperationNode::Correlator { right_relays, .. }
+                if right_relays.contains(incoming_relay) =>
+            {
+                RuntimeFilterScope::Source {
+                    namespace: "right",
+                    allow_header_reads: false,
+                    allow_metadata: false,
+                }
+            }
+            _ => RuntimeFilterScope::Source {
+                namespace: "input",
+                allow_header_reads: false,
+                allow_metadata: false,
+            },
+        }
+    }
+
+    async fn resolve_materialized_dependencies(
+        &self,
+        branch: &BranchRuntime,
+        branch_key: &Option<BranchKey>,
+    ) -> Result<MaterializedDependencyResolution, String> {
+        branch
+            .runtime
+            .resolve_materialized_dependencies(&branch.domain, branch_key, &self.materialized_state)
+            .await
+    }
+
     fn refresh(&mut self, graph: Option<StdArc<ActiveGraph>>) {
         let changed = match (&self.last_graph, &graph) {
             (Some(previous), Some(current)) => !StdArc::ptr_eq(previous, current),
@@ -2508,20 +2562,21 @@ impl RelayProcessorNode {
                 .get(&branch.domain)
                 .map(|execution| execution.lookups.clone())
                 .unwrap_or_default();
-            let filter_input_relays = match kind {
-                ProcessorInputFilterKind::FromWhere => vec![incoming_relay.clone()],
-                ProcessorInputFilterKind::FilterWhere => self.input_relays.clone(),
+            let filter_scope = match kind {
+                ProcessorInputFilterKind::FromWhere => self.from_where_filter_scope(incoming_relay),
+                ProcessorInputFilterKind::FilterWhere => RuntimeFilterScope::Source {
+                    namespace: "input",
+                    allow_header_reads: false,
+                    allow_metadata: false,
+                },
             };
-            match compile_filter_map_program(
+            match compile_scoped_filter_program(
                 &branch.domain,
                 &self.processor,
-                &filter_input_relays,
                 Some(&filter_where),
                 batch.arrow_schema(),
                 input_schema.vm_sensitivity(),
-                input_schema.arrow_schema(),
-                input_schema.vm_sensitivity(),
-                false,
+                kind.error_operation(),
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &available_lookups,
@@ -2529,6 +2584,7 @@ impl RelayProcessorNode {
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
                 },
+                filter_scope,
             ) {
                 Ok(Some(program)) => match kind {
                     ProcessorInputFilterKind::FromWhere => {
@@ -2651,6 +2707,49 @@ impl RelayProcessorNode {
             let current = graph.load_full();
             let current = current.as_ref().map(StdArc::clone);
             self.refresh(current);
+            let batch = match self
+                .resolve_materialized_dependencies(branch, &batch.key)
+                .await
+            {
+                Ok(MaterializedDependencyResolution::Ready(values)) => {
+                    if values.is_empty() {
+                        batch
+                    } else {
+                        let mut batch = batch;
+                        batch.records = augment_runtime_records_with_side_inputs(
+                            std::mem::take(&mut batch.records),
+                            &values,
+                        );
+                        batch
+                    }
+                }
+                Ok(MaterializedDependencyResolution::Skip) => {
+                    for ack in batch.acks.iter() {
+                        ack.ack_success();
+                    }
+                    return;
+                }
+                Ok(MaterializedDependencyResolution::Wait) => {
+                    self.pending_materialized
+                        .push_back((incoming_relay.clone(), batch));
+                    return;
+                }
+                Err(error) => {
+                    branch.runtime.handle_internal_processor_error_for_acks(
+                        &branch.domain,
+                        self.kind.as_str(),
+                        &self.processor,
+                        &self.error_policies,
+                        batch.acks.iter(),
+                        format!(
+                            "{} '{}' failed to resolve materialized dependencies: {error}",
+                            self.kind.as_str(),
+                            self.processor
+                        ),
+                    );
+                    return;
+                }
+            };
             let Some(batch) = self
                 .filter_input_batch(graph, branch, incoming_relay, batch)
                 .await
@@ -2800,8 +2899,6 @@ impl RelayProcessorNode {
                             Ok(None) => {
                                 debug!(
                                     deduplicator = self.processor.as_str(),
-                                    deduplicate_on = deduplicate_on.as_str(),
-                                    key = dedup_key.as_str(),
                                     "branched deduplicator dropped duplicate message"
                                 );
                                 acks.ack_success();
@@ -2937,7 +3034,7 @@ impl RelayProcessorNode {
                     width_duration,
                     step_duration,
                     aggregate,
-                    compiled_aggregate,
+                    compiled_aggregates,
                     state,
                     replicated_state,
                 } => {
@@ -2996,7 +3093,6 @@ impl RelayProcessorNode {
                             state.clear(aggregate);
                             continue;
                         }
-
                         flush_ready_window_processor(
                             WindowFlushContext {
                                 graph,
@@ -3008,7 +3104,7 @@ impl RelayProcessorNode {
                             },
                             state,
                             aggregate,
-                            compiled_aggregate,
+                            compiled_aggregates,
                             WindowBounds {
                                 width_messages: *width_messages,
                                 step_messages: *step_messages,
@@ -3392,8 +3488,6 @@ impl RelayProcessorNode {
                         };
                         match correlate_incoming_message(
                             &self.processor,
-                            left_relays,
-                            right_relays,
                             where_program,
                             side,
                             *match_policy,
@@ -3483,12 +3577,31 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
+                    let materialized_stream_specs =
+                        materialized_stream_specs_for_graph(&branch.runtime, &branch.domain, graph);
+                    let current_branching = branch
+                        .runtime
+                        .executions
+                        .get(&branch.domain)
+                        .and_then(|execution| execution.relay_branchings.get(left_relay).cloned())
+                        .unwrap_or_default();
+                    let current_branch_schema = relay_branch_schema_for_runtime(
+                        &branch.runtime,
+                        &branch.domain,
+                        left_relay,
+                    );
+                    let available_lookups = branch
+                        .runtime
+                        .executions
+                        .get(&branch.domain)
+                        .map(|execution| execution.lookups.clone())
+                        .unwrap_or_default();
                     for output_index in 0..output_routes.routes.len() {
                         if compiled_output_programs[output_index].is_some() {
                             continue;
                         }
                         let output = &output_routes.routes[output_index];
-                        let Some(filter_map) = output.filter_map.as_deref() else {
+                        if output.construction.assignments.is_empty() {
                             branch.runtime.handle_internal_processor_error_for_acks(
                                 &branch.domain,
                                 self.kind.as_str(),
@@ -3504,7 +3617,7 @@ impl RelayProcessorNode {
                                 ),
                             );
                             return;
-                        };
+                        }
                         let output_schema = match relay_schema_for_runtime(
                             &branch.runtime,
                             &branch.domain,
@@ -3527,13 +3640,21 @@ impl RelayProcessorNode {
                         };
                         let compiled = CorrelatorOutputCompileContext {
                             processor: &self.processor,
-                            left_relays,
                             left_schema: left_schema.arrow_schema(),
-                            right_relays,
+                            left_sensitivity: left_schema.vm_sensitivity(),
                             right_schema: right_schema.arrow_schema(),
+                            right_sensitivity: right_schema.vm_sensitivity(),
                             output_relay: &output.relay,
                             output_schema: output_schema.arrow_schema(),
-                            filter_map,
+                            output_sensitivity: output_schema.vm_sensitivity(),
+                            construction: &output.construction,
+                            runtime: RuntimeVmCompileContext {
+                                available_materialized_streams: &materialized_stream_specs,
+                                available_lookups: &available_lookups,
+                                current_branching: &current_branching,
+                                current_branch_schema: current_branch_schema.as_ref(),
+                                current_branch_sensitivity: None,
+                            },
                         }
                         .compile();
                         match compiled {
@@ -3562,12 +3683,8 @@ impl RelayProcessorNode {
                         .collect::<Vec<_>>();
                     for (left, right) in correlations {
                         let key = left.message.key.clone();
-                        let combined = correlator_combined_record(
-                            left_relays,
-                            &left.message.record,
-                            right_relays,
-                            &right.message.record,
-                        );
+                        let combined =
+                            correlator_combined_record(&left.message.record, &right.message.record);
                         let mut pair_acks = Some(AckSet::merged([
                             left.message.acks.attached(),
                             right.message.acks.attached(),
@@ -3606,20 +3723,26 @@ impl RelayProcessorNode {
                                     messages_by_output[output_index].push(message);
                                 }
                                 Ok(None) => {}
-                                Err((reason, message)) => {
+                                Err(error) => {
                                     let policy = output_routes.routes[output_index]
                                         .message_error_policy
                                         .clone();
                                     branch
                                         .runtime
-                                        .handle_message_error_with_policy(
-                                            &branch.domain,
-                                            self.kind.as_str(),
-                                            &self.processor,
-                                            &policy,
-                                            message,
-                                            reason,
-                                        )
+                                        .handle_structured_message_error(MessageErrorHandling {
+                                            domain: &branch.domain,
+                                            node_kind: self.kind.as_str(),
+                                            node: &self.processor,
+                                            source_route: Some(
+                                                &output_routes.routes[output_index].relay,
+                                            ),
+                                            policy: &policy,
+                                            message: error.message,
+                                            error: error.error,
+                                            partial_output: error.partial_output,
+                                            materialized_state: error.materialized_state,
+                                            ingest_metadata: None,
+                                        })
                                         .await;
                                 }
                             }
@@ -3812,7 +3935,7 @@ impl RelayProcessorNode {
                     width_duration,
                     step_duration,
                     aggregate,
-                    compiled_aggregate,
+                    compiled_aggregates,
                     state,
                     replicated_state,
                 } => {
@@ -3828,7 +3951,7 @@ impl RelayProcessorNode {
                         },
                         state,
                         aggregate,
-                        compiled_aggregate,
+                        compiled_aggregates,
                         WindowBounds {
                             width_messages: *width_messages,
                             step_messages: *step_messages,
@@ -4181,7 +4304,8 @@ impl RelayProcessorTemplate {
     fn instantiate_output(output: &RelayProcessorOutputTemplate) -> RelayProcessorOutputNode {
         RelayProcessorOutputNode {
             relay: output.output_relay.clone(),
-            filter_map: output.filter_map.clone(),
+            construction: output.construction.clone(),
+            branch: None,
             flush_policy: output.flush_policy,
             message_error_policy: output.message_error_policy.clone(),
             pending: Vec::new(),
@@ -4215,6 +4339,8 @@ impl RelayProcessorTemplate {
             from_where: self.from_where.clone(),
             compiled_from_where: HashMap::default(),
             filter_where: self.filter_where.clone(),
+            materialized_state: self.materialized_state.clone(),
+            pending_materialized: VecDeque::new(),
             compiled_filter_where: HashMap::default(),
             operation: match &self.operation {
                 RelayProcessorOperationTemplate::Deduplicator {
@@ -4247,7 +4373,7 @@ impl RelayProcessorTemplate {
                     width_duration,
                     step_duration,
                     aggregate,
-                    compiled_aggregate,
+                    compiled_aggregates,
                 } => {
                     let replicated_state = runtime
                         .replicated_window_processor_state(
@@ -4271,7 +4397,7 @@ impl RelayProcessorTemplate {
                         width_duration: *width_duration,
                         step_duration: *step_duration,
                         aggregate: aggregate.clone(),
-                        compiled_aggregate: compiled_aggregate.clone(),
+                        compiled_aggregates: compiled_aggregates.clone(),
                         state,
                         replicated_state,
                     }
@@ -4560,6 +4686,39 @@ impl BranchRuntime {
         }
     }
 
+    async fn retry_materialized_waiters(
+        &mut self,
+        graph: &SharedActiveGraph,
+        updated_relay: &Identifier,
+    ) {
+        let processor_ids = self
+            .processors
+            .iter()
+            .filter(|(_, processor)| {
+                processor
+                    .materialized_state
+                    .iter()
+                    .any(|dependency| &dependency.relay == updated_relay)
+                    && !processor.pending_materialized.is_empty()
+            })
+            .map(|(identifier, _)| identifier.clone())
+            .collect::<Vec<_>>();
+        for processor_id in processor_ids {
+            let Some(mut processor) = self.processors.remove(&processor_id) else {
+                continue;
+            };
+            let pending_count = processor.pending_materialized.len();
+            for _ in 0..pending_count {
+                let Some((incoming_relay, batch)) = processor.pending_materialized.pop_front()
+                else {
+                    break;
+                };
+                processor.execute(graph, self, &incoming_relay, batch).await;
+            }
+            self.processors.insert(processor_id, processor);
+        }
+    }
+
     async fn dispatch(&mut self, graph: &SharedActiveGraph, batch: RelayRecordBatch) {
         let root_relay = self.root_relay.clone();
         self.runtime
@@ -4638,6 +4797,7 @@ impl BranchRuntime {
             };
             runtime_stream.dispatch_boundary(batch).await?;
             self.materialize_stream_batch(relay, batch).await;
+            self.retry_materialized_waiters(graph, relay).await;
             self.runtime.metrics.observe_branch_stream_received(
                 branch_key_display(&self.key),
                 RelayBatchObservation {
@@ -4807,12 +4967,7 @@ impl BranchedIngestorRuntime {
             return None;
         }
 
-        let input_batch = match branched_entrypoint_batch_from_inputs_blocking(
-            template.entrypoint_schema.clone(),
-            inputs,
-        )
-        .await
-        {
+        let input_batch = match branched_entrypoint_batch_from_inputs_blocking(inputs).await {
             Ok(batch) => batch,
             Err((error, acks)) => {
                 let reason = format!(
@@ -4843,7 +4998,7 @@ impl BranchedIngestorRuntime {
             }
         };
         let branch_plan = input_batch.branch_selections(
-            &template.entrypoint_branch_mappings,
+            &template.entrypoint_branch_assignments,
             &template.source,
             &template.root_relay,
         );
@@ -5527,8 +5682,6 @@ fn wall_duration_until_domain_deadline(
         .unwrap_or(Duration::from_millis(100))
 }
 
-pub(crate) type CompiledFilterMapProgram = VmCompiledProgram;
-
 #[derive(Debug, Clone)]
 struct LookupHashMapCall {
     lookup: Identifier,
@@ -5546,13 +5699,6 @@ struct PendingLookupHashMapCall {
     lookup_field_type: ArrowDataType,
     generated_field: String,
     key_expr: SpannedExpr,
-}
-
-struct PreparedFilterMapProgram {
-    parsed: nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-    bindings: Vec<VmCompileBinding>,
-    materialized_interest: MaterializedProgramInterest,
-    lookup_hash_maps: Vec<LookupHashMapCall>,
 }
 
 fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>) {
@@ -5856,7 +6002,6 @@ fn rewrite_lookup_hash_map_program(
                     .map(|expr| (field.clone(), expr))
             })
             .collect::<Result<Vec<_>, _>>()?,
-        unset: parsed.inner.unset.clone(),
         invoke: parsed
             .inner
             .invoke
@@ -5924,7 +6069,6 @@ fn compile_lookup_hash_map_calls(
                     },
                     call.key_expr,
                 )],
-                unset: Vec::new(),
                 invoke: Vec::new(),
             },
             span: (0..0).into(),
@@ -5991,7 +6135,10 @@ fn referenced_materialized_stream_bindings(
         {
             continue;
         }
-        let Ok(relay) = Identifier::parse(&relay) else {
+        let Some(relay_name) = relay.strip_prefix("relay_state.") else {
+            continue;
+        };
+        let Ok(relay) = Identifier::parse(relay_name) else {
             continue;
         };
         let Some(spec) = available_materialized_streams.get(&relay) else {
@@ -6000,7 +6147,7 @@ fn referenced_materialized_stream_bindings(
         if !spec.branching.is_empty() && spec.branching != current_branching {
             return Err(format!(
                 "materialized relay '{}' uses branch fields ({}) but current input uses ({})",
-                relay.as_str(),
+                format!("relay_state.{}", relay.as_str()),
                 format_branched_by(&spec.branching),
                 format_branched_by(current_branching),
             ));
@@ -6031,7 +6178,7 @@ fn referenced_materialized_stream_bindings(
         );
         bindings.push(
             VmCompileBinding::readonly(
-                relay.as_str(),
+                format!("relay_state.{}", relay.as_str()),
                 StdArc::new(arrow_schema::Schema::new(projected_fields)),
             )
             .with_sensitivity(projected_sensitivity),
@@ -6079,63 +6226,572 @@ fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
     }
 }
 
-fn emitter_filter_map_local_namespaces(from_relay: &Identifier) -> HashSet<String> {
-    HashSet::from_iter([
-        INGEST_MESSAGE_NAMESPACE.to_string(),
-        BRANCH_NAMESPACE.to_string(),
-        from_relay.as_str().to_string(),
-    ])
+fn collect_expression_field_paths(expression: &SpannedExpr, fields: &mut Vec<FieldPath>) {
+    match &expression.inner {
+        Expr::FieldRef(field) => {
+            fields.push(FieldPath::new(format!("{}.{}", field.relay, field.field)));
+        }
+        Expr::InternalFieldRef(_) => {}
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            collect_expression_field_paths(expr, fields);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expression_field_paths(left, fields);
+            collect_expression_field_paths(right, fields);
+        }
+        Expr::Call { args, .. } => {
+            for argument in args {
+                collect_expression_field_paths(argument, fields);
+            }
+        }
+        Expr::Literal(_) => {}
+    }
 }
 
-fn emitter_filter_map_message_bindings(
-    from_relay: &Identifier,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-) -> Vec<VmCompileBinding> {
+fn compiled_message_error_sites(
+    program: &nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
+    set_operations: &[MessageErrorOperation],
+    filter_operation: Option<MessageErrorOperation>,
+) -> Result<Vec<CompiledMessageErrorSite>, String> {
+    if set_operations.len() != program.inner.set.len() {
+        return Err(format!(
+            "message-error metadata has {} SET operations for {} lowered assignments",
+            set_operations.len(),
+            program.inner.set.len()
+        ));
+    }
+    let mut sites = Vec::with_capacity(
+        program.inner.set.len()
+            + usize::from(program.inner.filter.is_some())
+            + program.inner.invoke.len(),
+    );
+    for (index, ((target, expression), operation)) in
+        program.inner.set.iter().zip(set_operations).enumerate()
+    {
+        let mut fields = vec![FieldPath::new(format!("{}.{}", target.relay, target.field))];
+        collect_expression_field_paths(expression, &mut fields);
+        sites.push(CompiledMessageErrorSite {
+            span: expression.span,
+            operation: *operation,
+            operation_index: Some(
+                u32::try_from(index).map_err(|_| "too many ordered SET operations".to_string())?,
+            ),
+            fields: SortedSet::from_unsorted(fields),
+        });
+    }
+    if let Some(expression) = &program.inner.filter {
+        let mut fields = Vec::new();
+        collect_expression_field_paths(expression, &mut fields);
+        sites.push(CompiledMessageErrorSite {
+            span: expression.span,
+            operation: filter_operation.ok_or_else(|| {
+                "message-error metadata is missing the filter operation".to_string()
+            })?,
+            operation_index: None,
+            fields: SortedSet::from_unsorted(fields),
+        });
+    }
+    for (index, invocation) in program.inner.invoke.iter().enumerate() {
+        let mut fields = Vec::new();
+        for argument in &invocation.inner.args {
+            collect_expression_field_paths(argument, &mut fields);
+        }
+        sites.push(CompiledMessageErrorSite {
+            span: invocation.span,
+            operation: MessageErrorOperation::Invoke,
+            operation_index: Some(
+                u32::try_from(index)
+                    .map_err(|_| "too many ordered INVOKE operations".to_string())?,
+            ),
+            fields: SortedSet::from_unsorted(fields),
+        });
+    }
+    Ok(sites)
+}
+
+fn message_error_arrow_schema() -> StdArc<arrow_schema::Schema> {
+    StdArc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("reference", ArrowDataType::Utf8, false),
+        arrow_schema::Field::new("code", ArrowDataType::Utf8, false),
+        arrow_schema::Field::new("message", ArrowDataType::Utf8, false),
+        arrow_schema::Field::new("operation", ArrowDataType::Utf8, false),
+        arrow_schema::Field::new("operation_index", ArrowDataType::UInt32, true),
+        arrow_schema::Field::new(
+            "fields",
+            ArrowDataType::List(StdArc::new(arrow_schema::Field::new(
+                "item",
+                ArrowDataType::Utf8,
+                false,
+            ))),
+            false,
+        ),
+        arrow_schema::Field::new(
+            "occurred_at",
+            ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("+00:00".into())),
+            false,
+        ),
+    ]))
+}
+
+fn all_optional_arrow_schema(schema: &CompiledSchema) -> StdArc<arrow_schema::Schema> {
+    StdArc::new(arrow_schema::Schema::new(
+        schema
+            .arrow_schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone().with_nullable(true))
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn compile_message_error_set_program(
+    domain: &Domain,
+    node: &Identifier,
+    assignments: &[Assignment],
+    output_schema: Arc<CompiledSchema>,
+    schemas: MessageErrorCompileSchemas,
+    context: RuntimeVmCompileContext<'_>,
+) -> Result<CompiledProgramWithMaterializedInterest, String> {
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            assignments: assignments.to_vec(),
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new("error_output", "error_output"),
+    )
+    .map_err(|reason| {
+        format!(
+            "message-error SET for '{}' in domain '{}' is invalid: {reason}",
+            node.as_str(),
+            domain.as_str()
+        )
+    })?;
+    let set_operations = vec![MessageErrorOperation::Set; parsed.inner.set.len()];
+    let error_sites = compiled_message_error_sites(&parsed, &set_operations, None)?;
     let mut bindings = vec![
-        VmCompileBinding::writable(INGEST_MESSAGE_NAMESPACE, input_schema.clone())
-            .with_sensitivity(input_sensitivity.clone()),
+        VmCompileBinding::writable("error_output", output_schema.arrow_schema())
+            .with_sensitivity(output_schema.vm_sensitivity()),
     ];
-    if from_relay.as_str() != INGEST_MESSAGE_NAMESPACE {
+    if let Some(input) = schemas.input {
         bindings.push(
-            VmCompileBinding::writable(from_relay.as_str(), input_schema)
-                .with_sensitivity(input_sensitivity),
+            VmCompileBinding::readonly("input", input.arrow_schema())
+                .with_sensitivity(input.vm_sensitivity()),
         );
     }
-    bindings
+    if let Some(left) = schemas.left {
+        bindings.push(
+            VmCompileBinding::readonly("left", left.arrow_schema())
+                .with_sensitivity(left.vm_sensitivity()),
+        );
+    }
+    if let Some(right) = schemas.right {
+        bindings.push(
+            VmCompileBinding::readonly("right", right.arrow_schema())
+                .with_sensitivity(right.vm_sensitivity()),
+        );
+    }
+    if let Some(partial_output) = schemas.partial_output {
+        bindings.push(
+            VmCompileBinding::readonly(
+                "partial_output",
+                all_optional_arrow_schema(partial_output.as_ref()),
+            )
+            .with_sensitivity(partial_output.vm_sensitivity()),
+        );
+    }
+    bindings.push(VmCompileBinding::readonly(
+        "error",
+        message_error_arrow_schema(),
+    ));
+
+    let local_namespaces = HashSet::from_iter([
+        "error_output".to_string(),
+        "input".to_string(),
+        "left".to_string(),
+        "right".to_string(),
+        "partial_output".to_string(),
+        "error".to_string(),
+    ]);
+    let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
+        &parsed,
+        &local_namespaces,
+        context.available_materialized_streams,
+        &schemas.current_branching,
+    )?;
+    bindings.extend(materialized_bindings);
+    let (parsed, pending_lookup_calls) =
+        rewrite_lookup_hash_map_program(&parsed, context.available_lookups)?;
+    let (lookup_hash_maps, lookup_binding) =
+        compile_lookup_hash_map_calls(pending_lookup_calls, "error_output", &bindings)?;
+    if let Some(lookup_binding) = lookup_binding {
+        bindings.push(lookup_binding);
+    }
+    let output_sensitivity = output_schema.vm_sensitivity();
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        output_schema.arrow_schema(),
+        output_sensitivity.clone(),
+        bindings,
+        VmCompileOptions {
+            output_mode: VmOutputMode::ExplicitOnly,
+            allow_header_reads: schemas.allow_header_reads,
+            ..VmCompileOptions::default()
+        },
+    )
+    .map_err(|error| {
+        format!(
+            "message-error SET compile failed for '{}': {}",
+            node.as_str(),
+            error.message
+        )
+    })?;
+    Ok(CompiledProgramWithMaterializedInterest {
+        compiled: Arc::new(compiled),
+        output_sensitivity,
+        materialized_interest,
+        output_namespace_input: OutputNamespaceInput::Uninitialized,
+        lookup_hash_maps,
+        error_sites,
+    })
 }
 
-pub(crate) fn compile_filter_map_program(
+pub(crate) fn compile_expression_filter_program(
     domain: &Domain,
     identifier: &Identifier,
-    relay_names: &[Identifier],
-    filter_map: Option<&str>,
+    filter: Option<&nervix_models::Expression>,
     input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
-    output_schema: StdArc<arrow_schema::Schema>,
-    output_sensitivity: VmSchemaSensitivity,
     allow_header_reads: bool,
+    filter_operation: MessageErrorOperation,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let Some(filter_map) = filter_map else {
-        return Ok(None);
-    };
-    let prepared = prepare_filter_map_program(
+    compile_scoped_filter_program(
         domain,
         identifier,
-        relay_names,
-        filter_map,
+        filter,
         input_schema,
         input_sensitivity,
+        filter_operation,
         context,
-    )?;
+        RuntimeFilterScope::Source {
+            namespace: "input",
+            allow_header_reads,
+            allow_metadata: allow_header_reads,
+        },
+    )
+}
+
+fn compile_finalized_output_filter_program(
+    domain: &Domain,
+    identifier: &Identifier,
+    filter: Option<&nervix_models::Expression>,
+    output_schema: StdArc<arrow_schema::Schema>,
+    output_sensitivity: VmSchemaSensitivity,
+    context: RuntimeVmCompileContext<'_>,
+) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+    compile_scoped_filter_program(
+        domain,
+        identifier,
+        filter,
+        output_schema,
+        output_sensitivity,
+        MessageErrorOperation::RouteWhere,
+        context,
+        RuntimeFilterScope::FinalizedOutput,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RuntimeFilterScope {
+    Source {
+        namespace: &'static str,
+        allow_header_reads: bool,
+        allow_metadata: bool,
+    },
+    FinalizedOutput,
+}
+
+impl RuntimeFilterScope {
+    const fn namespace(self) -> &'static str {
+        match self {
+            Self::Source { namespace, .. } => namespace,
+            Self::FinalizedOutput => "output",
+        }
+    }
+
+    const fn allow_header_reads(self) -> bool {
+        match self {
+            Self::Source {
+                allow_header_reads, ..
+            } => allow_header_reads,
+            Self::FinalizedOutput => false,
+        }
+    }
+
+    const fn allow_metadata(self) -> bool {
+        match self {
+            Self::Source { allow_metadata, .. } => allow_metadata,
+            Self::FinalizedOutput => false,
+        }
+    }
+}
+
+fn compile_scoped_filter_program(
+    domain: &Domain,
+    identifier: &Identifier,
+    filter: Option<&nervix_models::Expression>,
+    schema: StdArc<arrow_schema::Schema>,
+    sensitivity: VmSchemaSensitivity,
+    filter_operation: MessageErrorOperation,
+    context: RuntimeVmCompileContext<'_>,
+    scope: RuntimeFilterScope,
+) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+    let Some(filter) = filter else {
+        return Ok(None);
+    };
+    let parsed = match scope {
+        RuntimeFilterScope::Source { .. } => lower_route_construction(
+            &RouteConstruction {
+                where_clause: Some(filter.clone()),
+                ..RouteConstruction::default()
+            },
+            SemanticNamespaces::new("input", "__invalid_filter_target"),
+        ),
+        RuntimeFilterScope::FinalizedOutput => lower_finalized_output_filter(filter, &schema),
+    }
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!("filter for '{}' is invalid: {reason}", identifier.as_str()),
+    })?;
+    let error_sites =
+        compiled_message_error_sites(&parsed, &[], Some(filter_operation)).map_err(|reason| {
+            RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason,
+            }
+        })?;
+    let mut local_namespaces =
+        HashSet::from_iter([scope.namespace().to_string(), BRANCH_NAMESPACE.to_string()]);
+    if scope.allow_metadata() {
+        local_namespaces.insert(INGEST_METADATA_NAMESPACE.to_string());
+    }
+    let mut bindings = vec![
+        VmCompileBinding::writable(scope.namespace(), schema.clone())
+            .with_sensitivity(sensitivity.clone()),
+    ];
+    if let Some(binding) = context.branch_binding() {
+        bindings.push(binding);
+    }
+    let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
+        &parsed,
+        &local_namespaces,
+        context.available_materialized_streams,
+        context.current_branching,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
+    })?;
+    bindings.extend(materialized_bindings);
+    let (parsed, pending_lookup_calls) =
+        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+            RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "filter compile failed for '{}': {reason}",
+                    identifier.as_str()
+                ),
+            }
+        })?;
+    let (lookup_hash_maps, lookup_binding) =
+        compile_lookup_hash_map_calls(pending_lookup_calls, scope.namespace(), &bindings).map_err(
+            |reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "filter compile failed for '{}': {reason}",
+                    identifier.as_str()
+                ),
+            },
+        )?;
+    if let Some(lookup_binding) = lookup_binding {
+        bindings.push(lookup_binding);
+    }
     let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
-        &prepared.parsed,
+        &parsed,
+        schema,
+        sensitivity.clone(),
+        bindings,
+        VmCompileOptions {
+            allow_header_reads: scope.allow_header_reads(),
+            ..VmCompileOptions::default()
+        },
+    )
+    .map_err(|error| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "filter compile failed for '{}': {}",
+            identifier.as_str(),
+            error.message
+        ),
+    })?;
+    Ok(Some(CompiledProgramWithMaterializedInterest {
+        compiled: Arc::new(compiled),
+        output_sensitivity: sensitivity,
+        materialized_interest,
+        output_namespace_input: match scope {
+            RuntimeFilterScope::Source { .. } => OutputNamespaceInput::Uninitialized,
+            RuntimeFilterScope::FinalizedOutput => OutputNamespaceInput::Finalized,
+        },
+        lookup_hash_maps,
+        error_sites,
+    }))
+}
+
+fn compile_processor_output_filter_map_program(
+    domain: &Domain,
+    identifier: &Identifier,
+    input_relays: &[Identifier],
+    output_relay: &Identifier,
+    construction: &RouteConstruction,
+    input_schema: StdArc<arrow_schema::Schema>,
+    input_sensitivity: VmSchemaSensitivity,
+    inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
+    output_schema: StdArc<arrow_schema::Schema>,
+    output_sensitivity: VmSchemaSensitivity,
+    context: RuntimeVmCompileContext<'_>,
+) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+    let parsed = if let Some(tensors) = inferencer_tensors {
+        lower_generated_route(
+            construction,
+            output_schema.as_ref(),
+            tensors.output_arrow_schema().as_ref(),
+        )
+    } else {
+        lower_transforming_route(construction, &input_schema, &output_schema)
+    }
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "output construction for '{}' is invalid: {reason}",
+            identifier
+        ),
+    })?;
+    if !parsed.inner.branch_filters.is_empty() {
+        return Err(RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!(
+                "FILTER-MAP for '{}' may contain at most one WHERE clause",
+                identifier.as_str()
+            ),
+        });
+    }
+    let inherited_count = if inferencer_tensors.is_some() {
+        0
+    } else {
+        parsed
+            .inner
+            .set
+            .len()
+            .saturating_sub(construction.assignments.len())
+    };
+    let set_operations = (0..parsed.inner.set.len())
+        .map(|index| {
+            if index < inherited_count {
+                MessageErrorOperation::Inherit
+            } else {
+                MessageErrorOperation::Set
+            }
+        })
+        .collect::<Vec<_>>();
+    let error_sites = compiled_message_error_sites(
+        &parsed,
+        &set_operations,
+        Some(MessageErrorOperation::RouteWhere),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
+    })?;
+    let original_parsed = parsed.clone();
+    let mut bindings = vec![
+        VmCompileBinding::writable("output", output_schema.clone())
+            .with_sensitivity(output_sensitivity.clone()),
+    ];
+    if let Some(tensors) = inferencer_tensors {
+        bindings.push(VmCompileBinding::readonly(
+            "generated",
+            tensors.output_arrow_schema(),
+        ));
+    } else {
+        bindings.insert(
+            0,
+            VmCompileBinding::readonly("input", input_schema.clone())
+                .with_sensitivity(input_sensitivity.clone()),
+        );
+        for relay in input_relays {
+            bindings.push(
+                VmCompileBinding::readonly(relay.as_str(), input_schema.clone())
+                    .with_sensitivity(input_sensitivity.clone()),
+            );
+        }
+    }
+    if let Some(binding) = context.branch_binding() {
+        bindings.push(binding);
+    }
+    let mut local_namespaces = HashSet::from_iter([
+        "input".to_string(),
+        "output".to_string(),
+        "generated".to_string(),
+        BRANCH_NAMESPACE.to_string(),
+    ]);
+    if inferencer_tensors.is_none() {
+        local_namespaces.extend(input_relays.iter().map(|relay| relay.as_str().to_string()));
+        local_namespaces.insert(output_relay.as_str().to_string());
+    }
+    let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
+        &original_parsed,
+        &local_namespaces,
+        context.available_materialized_streams,
+        context.current_branching,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
+    })?;
+    bindings.extend(materialized_bindings);
+    let (parsed, pending_lookup_calls) =
+        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+            RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "FILTER-MAP compile failed for '{}': {}",
+                    identifier.as_str(),
+                    reason
+                ),
+            }
+        })?;
+    let (lookup_hash_maps, lookup_binding) =
+        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings).map_err(
+            |reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "FILTER-MAP compile failed for '{}': {}",
+                    identifier.as_str(),
+                    reason
+                ),
+            },
+        )?;
+    if let Some(lookup_binding) = lookup_binding {
+        bindings.push(lookup_binding);
+    }
+
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
         output_schema,
         output_sensitivity.clone(),
-        prepared.bindings,
+        bindings,
         VmCompileOptions {
-            allow_header_reads,
+            output_mode: VmOutputMode::ExplicitOnly,
             ..VmCompileOptions::default()
         },
     )
@@ -6150,181 +6806,30 @@ pub(crate) fn compile_filter_map_program(
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         output_sensitivity,
-        materialized_interest: prepared.materialized_interest,
-        lookup_hash_maps: prepared.lookup_hash_maps,
-    }))
-}
-
-fn compile_processor_output_filter_map_program(
-    domain: &Domain,
-    identifier: &Identifier,
-    input_relays: &[Identifier],
-    output_relay: &Identifier,
-    filter_map: Option<&str>,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
-    output_schema: StdArc<arrow_schema::Schema>,
-    output_sensitivity: VmSchemaSensitivity,
-    context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let Some(filter_map) = filter_map else {
-        return Ok(None);
-    };
-    let mut parsed =
-        parse_program(filter_map).map_err(|error| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP parse failed for '{}': {}",
-                identifier.as_str(),
-                Runtime::vm_program_error(error)
-            ),
-        })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
-    let input_relay_names = input_relays
-        .iter()
-        .map(|relay| relay.as_str().to_string())
-        .collect::<Vec<_>>();
-    parsed
-        .inner
-        .rewrite_unset_sources_to_destination(&input_relay_names, output_relay.as_str());
-    let original_parsed = parsed.clone();
-    let mut bindings = Vec::new();
-    let mut output_bound = false;
-    for relay in input_relays {
-        if relay == output_relay {
-            bindings.push(
-                VmCompileBinding::writable(relay.as_str(), input_schema.clone())
-                    .with_sensitivity(input_sensitivity.clone()),
-            );
-            output_bound = true;
-        } else {
-            bindings.push(
-                VmCompileBinding::readonly(relay.as_str(), input_schema.clone())
-                    .with_sensitivity(input_sensitivity.clone()),
-            );
-        }
-    }
-    if let Some(tensors) = inferencer_tensors {
-        bindings.push(
-            VmCompileBinding::readonly(INNER_INPUT_NAMESPACE, tensors.input_arrow_schema())
-                .with_sensitivity(tensors.input_sensitivity(&input_sensitivity)),
-        );
-        bindings.push(VmCompileBinding::readonly(
-            INNER_OUTPUT_NAMESPACE,
-            tensors.output_arrow_schema(),
-        ));
-    }
-    if !output_bound {
-        bindings.push(
-            VmCompileBinding::writeonly(output_relay.as_str(), output_schema.clone())
-                .with_sensitivity(output_sensitivity.clone()),
-        );
-    }
-    if let Some(binding) = context.branch_binding() {
-        bindings.push(binding);
-    }
-    let local_namespaces = input_relays
-        .iter()
-        .map(|relay| relay.as_str().to_string())
-        .chain(std::iter::once(output_relay.as_str().to_string()))
-        .chain(std::iter::once(BRANCH_NAMESPACE.to_string()))
-        .chain(inferencer_tensors.into_iter().flat_map(|_| {
-            [
-                INNER_INPUT_NAMESPACE.to_string(),
-                INNER_OUTPUT_NAMESPACE.to_string(),
-            ]
-        }))
-        .collect::<HashSet<_>>();
-    let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
-        &original_parsed,
-        &local_namespaces,
-        context.available_materialized_streams,
-        context.current_branching,
-    )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason,
-    })?;
-    bindings.extend(materialized_bindings);
-    let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            }
-        })?;
-    let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, output_relay.as_str(), &bindings)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            })?;
-    if let Some(lookup_binding) = lookup_binding {
-        bindings.push(lookup_binding);
-    }
-
-    let compiled = compile_vm_program_for_bindings_with_sensitivity(
-        &parsed,
-        output_schema,
-        output_sensitivity.clone(),
-        bindings,
-    )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP compile failed for '{}': {}",
-            identifier.as_str(),
-            error.message
-        ),
-    })?;
-    Ok(Some(CompiledProgramWithMaterializedInterest {
-        compiled: Arc::new(compiled),
-        output_sensitivity,
         materialized_interest,
+        output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
+        error_sites,
     }))
 }
 
 fn compile_wasm_output_filter_map_program(
     domain: &Domain,
     identifier: &Identifier,
-    input_relays: &[Identifier],
-    output_relay: &Identifier,
-    filter_map: Option<&str>,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
+    construction: &RouteConstruction,
     output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let Some(filter_map) = filter_map else {
-        return Ok(None);
-    };
-    let parsed = parse_program(filter_map).map_err(|error| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP parse failed for '{}': {}",
-            identifier.as_str(),
-            Runtime::vm_program_error(error)
-        ),
-    })?;
+    let parsed =
+        lower_generated_route(construction, output_schema.as_ref(), output_schema.as_ref())
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "WASM output construction for '{}' is invalid: {reason}",
+                    identifier
+                ),
+            })?;
     if !parsed.inner.branch_filters.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
@@ -6334,49 +6839,41 @@ fn compile_wasm_output_filter_map_program(
             ),
         });
     }
-    if !parsed.inner.unset.is_empty() || !parsed.inner.invoke.is_empty() {
+    if !parsed.inner.invoke.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
             reason: format!(
-                "WASM processor '{}' TO clauses may use SET and WHERE, but not UNSET or INVOKE",
+                "WASM processor '{}' TO clauses may use SET and WHERE, but not INVOKE",
                 identifier.as_str()
             ),
         });
     }
+    let set_operations = vec![MessageErrorOperation::Set; parsed.inner.set.len()];
+    let error_sites = compiled_message_error_sites(
+        &parsed,
+        &set_operations,
+        Some(MessageErrorOperation::RouteWhere),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
+    })?;
 
     let original_parsed = parsed.clone();
     let mut bindings = vec![
-        VmCompileBinding::writable(output_relay.as_str(), output_schema.clone())
+        VmCompileBinding::readonly("generated", output_schema.clone())
+            .with_sensitivity(output_sensitivity.clone()),
+        VmCompileBinding::writable("output", output_schema.clone())
             .with_sensitivity(output_sensitivity.clone()),
     ];
-    for input_relay in input_relays {
-        if input_relay != output_relay {
-            bindings.push(
-                VmCompileBinding::readonly(input_relay.as_str(), input_schema.clone())
-                    .with_sensitivity(input_sensitivity.clone()),
-            );
-        }
-    }
-    if input_relays
-        .iter()
-        .all(|relay| relay.as_str() != WASM_INPUT_NAMESPACE)
-        && output_relay.as_str() != WASM_INPUT_NAMESPACE
-    {
-        bindings.push(
-            VmCompileBinding::readonly(WASM_INPUT_NAMESPACE, input_schema)
-                .with_sensitivity(input_sensitivity),
-        );
-    }
     if let Some(binding) = context.branch_binding() {
         bindings.push(binding);
     }
-    let mut local_namespaces = input_relays
-        .iter()
-        .map(|relay| relay.as_str().to_string())
-        .collect::<HashSet<_>>();
-    local_namespaces.insert(output_relay.as_str().to_string());
-    local_namespaces.insert(WASM_INPUT_NAMESPACE.to_string());
-    local_namespaces.insert(BRANCH_NAMESPACE.to_string());
+    let local_namespaces = HashSet::from_iter([
+        "generated".to_string(),
+        "output".to_string(),
+        BRANCH_NAMESPACE.to_string(),
+    ]);
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
         &original_parsed,
         &local_namespaces,
@@ -6400,24 +6897,29 @@ fn compile_wasm_output_filter_map_program(
             }
         })?;
     let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, output_relay.as_str(), &bindings)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
+        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings).map_err(
+            |reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
                     "FILTER-MAP compile failed for '{}': {}",
                     identifier.as_str(),
                     reason
                 ),
-            })?;
+            },
+        )?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
 
-    let compiled = compile_vm_program_for_bindings_with_sensitivity(
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_schema,
         output_sensitivity.clone(),
         bindings,
+        VmCompileOptions {
+            output_mode: VmOutputMode::ExplicitOnly,
+            ..VmCompileOptions::default()
+        },
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -6431,7 +6933,9 @@ fn compile_wasm_output_filter_map_program(
         compiled: Arc::new(compiled),
         output_sensitivity,
         materialized_interest,
+        output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
+        error_sites,
     }))
 }
 
@@ -6444,26 +6948,42 @@ pub(crate) fn compile_emitter_filter_map_program(
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledEmitterFilterMapProgram>, RuntimeError> {
-    let Some(filter_map) = emitter.filter_map.as_deref() else {
+    if emitter.construction.is_empty() {
         return Ok(None);
-    };
-    let parsed = parse_program(filter_map).map_err(|error| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP parse failed for '{}': {}",
-            emitter.name.as_str(),
-            Runtime::vm_program_error(error)
-        ),
-    })?;
-    if !parsed.inner.branch_filters.is_empty() {
+    }
+    let codec_route = emitter.encode_using_codec.is_some();
+    if !codec_route
+        && (emitter.construction.inherit.is_some()
+            || !emitter.construction.assignments.is_empty()
+            || !emitter.construction.invocations.is_empty())
+    {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
             reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
+                "direct emitter '{}' supports VALUES and WHERE only",
                 emitter.name.as_str()
             ),
         });
     }
+    let parsed = if codec_route {
+        lower_transforming_route(
+            &emitter.construction,
+            input_schema.as_ref(),
+            output_schema.as_ref(),
+        )
+    } else {
+        lower_route_construction(
+            &emitter.construction,
+            SemanticNamespaces::new("input", "__invalid_direct_emitter_output"),
+        )
+    }
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "emitter route '{}' is invalid: {reason}",
+            emitter.name.as_str()
+        ),
+    })?;
     if parsed
         .inner
         .invoke
@@ -6479,46 +6999,85 @@ pub(crate) fn compile_emitter_filter_map_program(
             ),
         });
     }
+    let inherited_count = if codec_route {
+        parsed
+            .inner
+            .set
+            .len()
+            .saturating_sub(emitter.construction.assignments.len())
+    } else {
+        0
+    };
+    let set_operations = (0..parsed.inner.set.len())
+        .map(|index| {
+            if index < inherited_count {
+                MessageErrorOperation::Inherit
+            } else {
+                MessageErrorOperation::Set
+            }
+        })
+        .collect::<Vec<_>>();
+    let error_sites = compiled_message_error_sites(
+        &parsed,
+        &set_operations,
+        Some(MessageErrorOperation::RouteWhere),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
+    })?;
 
     let body = compile_emitter_filter_map_part(
         domain,
         &emitter.name,
-        &emitter.from_relay,
         parsed,
         input_schema,
         input_sensitivity,
         output_schema,
         output_sensitivity,
+        codec_route,
+        error_sites,
         context,
     )?;
     let materialized_interest = body.materialized_interest.clone();
     Ok(Some(CompiledEmitterFilterMapProgram {
         body,
         materialized_interest,
+        codec_route,
     }))
 }
 
 fn compile_emitter_filter_map_part(
     domain: &Domain,
     identifier: &Identifier,
-    from_relay: &Identifier,
     parsed: nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
     input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
+    codec_route: bool,
+    error_sites: Vec<CompiledMessageErrorSite>,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
-    let mut bindings = Vec::new();
-    bindings.extend(emitter_filter_map_message_bindings(
-        from_relay,
-        input_schema,
-        input_sensitivity,
-    ));
-    if let Some(binding) = context.branch_binding() {
-        bindings.push(binding);
-    }
-    let local_namespaces = emitter_filter_map_local_namespaces(from_relay);
+    let mut bindings = if codec_route {
+        vec![
+            VmCompileBinding::readonly("input", input_schema.clone())
+                .with_sensitivity(input_sensitivity.clone()),
+            VmCompileBinding::writable("output", output_schema.clone())
+                .with_sensitivity(output_sensitivity.clone()),
+        ]
+    } else {
+        vec![
+            VmCompileBinding::writable("input", input_schema.clone())
+                .with_sensitivity(input_sensitivity.clone()),
+            VmCompileBinding::readonly("message", input_schema).with_sensitivity(input_sensitivity),
+        ]
+    };
+    let local_namespaces = HashSet::from_iter([
+        "input".to_string(),
+        "message".to_string(),
+        "output".to_string(),
+    ]);
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
         &parsed,
         &local_namespaces,
@@ -6541,8 +7100,9 @@ fn compile_emitter_filter_map_part(
                 ),
             }
         })?;
+    let lookup_output_namespace = if codec_route { "output" } else { "input" };
     let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, INGEST_MESSAGE_NAMESPACE, &bindings)
+        compile_lookup_hash_map_calls(pending_lookup_calls, lookup_output_namespace, &bindings)
             .map_err(|reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
@@ -6560,8 +7120,12 @@ fn compile_emitter_filter_map_part(
         output_sensitivity.clone(),
         bindings,
         VmCompileOptions {
-            output_mode: VmOutputMode::PassthroughByName,
-            allow_sensitive_output: true,
+            output_mode: if codec_route {
+                VmOutputMode::ExplicitOnly
+            } else {
+                VmOutputMode::PassthroughByName
+            },
+            allow_sensitive_output: false,
             allow_header_writes: true,
             ..VmCompileOptions::default()
         },
@@ -6578,252 +7142,30 @@ fn compile_emitter_filter_map_part(
         compiled: Arc::new(compiled),
         output_sensitivity,
         materialized_interest,
+        output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
+        error_sites,
     })
 }
 
 pub(crate) fn compile_session_filter_map_program(
     domain: &Domain,
     identifier: &Identifier,
-    relay_names: &[Identifier],
-    filter_map: Option<&str>,
+    where_clause: Option<&nervix_models::Expression>,
     input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let Some(filter_map) = filter_map else {
-        return Ok(None);
-    };
-    let prepared = prepare_filter_map_program(
+    compile_expression_filter_program(
         domain,
         identifier,
-        relay_names,
-        filter_map,
-        input_schema.clone(),
-        input_sensitivity.clone(),
-        context,
-    )?;
-    let (output_schema, output_sensitivity) = infer_session_filter_map_output_schema(
-        domain,
-        identifier,
-        &prepared,
+        where_clause,
         input_schema,
         input_sensitivity,
-    )?;
-    let compiled = compile_vm_program_for_bindings_with_sensitivity(
-        &prepared.parsed,
-        output_schema,
-        output_sensitivity.clone(),
-        prepared.bindings,
+        false,
+        MessageErrorOperation::SourceWhere,
+        context,
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP compile failed for '{}': {}",
-            identifier.as_str(),
-            error.message
-        ),
-    })?;
-    Ok(Some(CompiledProgramWithMaterializedInterest {
-        compiled: Arc::new(compiled),
-        output_sensitivity,
-        materialized_interest: prepared.materialized_interest,
-        lookup_hash_maps: prepared.lookup_hash_maps,
-    }))
-}
-
-fn prepare_filter_map_program(
-    domain: &Domain,
-    identifier: &Identifier,
-    relay_names: &[Identifier],
-    filter_map: &str,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    context: RuntimeVmCompileContext<'_>,
-) -> Result<PreparedFilterMapProgram, RuntimeError> {
-    let parsed = parse_program(filter_map).map_err(|error| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP parse failed for '{}': {}",
-            identifier.as_str(),
-            Runtime::vm_program_error(error)
-        ),
-    })?;
-    if !parsed.inner.branch_filters.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP for '{}' may contain at most one WHERE clause",
-                identifier.as_str()
-            ),
-        });
-    }
-    let writable_namespaces = relay_names
-        .iter()
-        .map(|name| name.as_str().to_string())
-        .collect::<HashSet<_>>();
-    let mut bindings = relay_names
-        .iter()
-        .map(|name| {
-            VmCompileBinding::writable(name.as_str(), input_schema.clone())
-                .with_sensitivity(input_sensitivity.clone())
-        })
-        .collect::<Vec<_>>();
-    if let Some(binding) = context.branch_binding() {
-        bindings.push(binding);
-    }
-    let local_namespaces = writable_namespaces
-        .iter()
-        .cloned()
-        .chain(std::iter::once(BRANCH_NAMESPACE.to_string()))
-        .collect::<HashSet<_>>();
-    let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
-        &parsed,
-        &local_namespaces,
-        context.available_materialized_streams,
-        context.current_branching,
-    )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason,
-    })?;
-    bindings.extend(materialized_bindings);
-    let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            }
-        })?;
-    let writable_namespace =
-        relay_names
-            .first()
-            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP for '{}' requires at least one writable relay",
-                    identifier.as_str()
-                ),
-            })?;
-    let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, writable_namespace.as_str(), &bindings)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            })?;
-    if let Some(lookup_binding) = lookup_binding {
-        bindings.push(lookup_binding);
-    }
-    Ok(PreparedFilterMapProgram {
-        parsed,
-        bindings,
-        materialized_interest,
-        lookup_hash_maps,
-    })
-}
-
-fn infer_session_filter_map_output_schema(
-    domain: &Domain,
-    identifier: &Identifier,
-    prepared: &PreparedFilterMapProgram,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-) -> Result<(StdArc<arrow_schema::Schema>, VmSchemaSensitivity), RuntimeError> {
-    let unset = prepared
-        .parsed
-        .inner
-        .unset
-        .iter()
-        .map(|field_ref| field_ref.field.clone())
-        .collect::<HashSet<_>>();
-    let inferred_set_fields =
-        infer_vm_set_expr_types_for_bindings(&prepared.parsed, prepared.bindings.iter().cloned())
-            .map_err(|error| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "FILTER-MAP output schema inference failed for '{}': {}",
-                identifier.as_str(),
-                error.message
-            ),
-        })?;
-    let mut set_order = Vec::with_capacity(inferred_set_fields.len());
-    let mut set_fields = HashMap::with_capacity(inferred_set_fields.len());
-    for (name, data_type, nullable) in inferred_set_fields {
-        if !set_fields.contains_key(&name) {
-            set_order.push(name.clone());
-        }
-        set_fields.insert(name, (data_type, nullable));
-    }
-
-    let mut output_fields = Vec::new();
-    let mut output_sensitive_fields = Vec::new();
-    for field in input_schema.fields() {
-        let name = field.name();
-        if let Some((data_type, nullable)) = set_fields.remove(name) {
-            output_fields.push(arrow_schema::Field::new(name, data_type, nullable));
-        } else if !unset.contains(name) {
-            output_fields.push(field.as_ref().clone());
-            if input_sensitivity.is_sensitive(name) {
-                output_sensitive_fields.push(name.clone());
-            }
-        }
-    }
-    for name in set_order {
-        if let Some((data_type, nullable)) = set_fields.remove(&name) {
-            output_fields.push(arrow_schema::Field::new(name, data_type, nullable));
-        }
-    }
-
-    Ok((
-        StdArc::new(arrow_schema::Schema::new(output_fields)),
-        VmSchemaSensitivity::from_sensitive_fields(output_sensitive_fields),
-    ))
-}
-
-fn split_reorder_by_expressions(source: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0i32;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in source.char_indices() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            ',' if depth == 0 => {
-                let part = source[start..index].trim();
-                if !part.is_empty() {
-                    parts.push(part.to_string());
-                }
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let part = source[start..].trim();
-    if !part.is_empty() {
-        parts.push(part.to_string());
-    }
-    parts
 }
 
 pub(super) fn compile_key_projection_program(
@@ -6831,43 +7173,51 @@ pub(super) fn compile_key_projection_program(
     processor: &Identifier,
     clause: &str,
     input_relays: &[Identifier],
-    expressions: &[String],
+    expressions: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<VmCompiledProgram, String> {
-    let Some(primary_input_relay) = input_relays.first() else {
+    if input_relays.is_empty() {
         return Err(format!(
             "{} '{}' {} requires at least one input relay",
             processor_kind,
             processor.as_str(),
             clause
         ));
-    };
+    }
     let assignments = expressions
         .iter()
         .enumerate()
-        .map(|(index, expr)| format!("{}.key_{} = {}", primary_input_relay.as_str(), index, expr))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source = format!("SET {assignments}");
-    let parsed = parse_program(&source).map_err(|error| {
+        .map(|(index, expression)| {
+            Ok(nervix_models::Assignment {
+                target: nervix_models::AssignmentTarget::bare(
+                    Identifier::parse(&format!("key_{index}")).map_err(|error| {
+                        format!(
+                            "{processor_kind} '{}' has invalid key target: {error}",
+                            processor
+                        )
+                    })?,
+                ),
+                value: expression.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            assignments,
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new("input", "input"),
+    )
+    .map_err(|reason| {
         format!(
-            "{} '{}' {} parse failed: {}",
+            "{} '{}' {} is invalid: {}",
             processor_kind,
             processor.as_str(),
             clause,
-            Runtime::vm_program_error(error)
+            reason
         )
     })?;
-    let mut bindings = vec![VmCompileBinding::writable(
-        primary_input_relay.as_str(),
-        input_schema.clone(),
-    )];
-    bindings.extend(
-        input_relays
-            .iter()
-            .skip(1)
-            .map(|relay| VmCompileBinding::readonly(relay.as_str(), input_schema.clone())),
-    );
+    let bindings = vec![VmCompileBinding::writable("input", input_schema.clone())];
     let key_types =
         infer_vm_set_expr_types_for_bindings(&parsed, bindings.clone()).map_err(|error| {
             format!(
@@ -6916,11 +7266,10 @@ pub(super) fn compile_key_projection_program(
 fn compile_reorderer_program(
     processor: &Identifier,
     input_relays: &[Identifier],
-    order_by: &str,
+    order_by: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<CompiledReordererProgram, String> {
-    let expressions = split_reorder_by_expressions(order_by);
-    if expressions.is_empty() {
+    if order_by.is_empty() {
         return Err(format!(
             "reorderer '{}' requires at least one BY expression",
             processor.as_str()
@@ -6931,62 +7280,51 @@ fn compile_reorderer_program(
         processor,
         "BY",
         input_relays,
-        &expressions,
+        order_by,
         input_schema,
     )?;
     Ok(CompiledReordererProgram {
         key_column_offset: 0,
-        key_count: expressions.len(),
+        key_count: order_by.len(),
         program: compiled,
     })
 }
 
 fn compile_correlator_where_program(
     processor: &Identifier,
-    correlate_where: &str,
+    correlate_where: &nervix_models::Expression,
     left_relays: &[Identifier],
     left_schema: StdArc<arrow_schema::Schema>,
     right_relays: &[Identifier],
     right_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<CompiledCorrelatorWhereProgram, String> {
-    let parsed = parse_program(correlate_where).map_err(|error| {
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            where_clause: Some(correlate_where.clone()),
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new(
+            "__invalid_correlator_bare_read",
+            "__invalid_correlator_target",
+        ),
+    )
+    .map_err(|reason| {
         format!(
-            "correlator '{}' CORRELATE WHERE parse failed: {}",
+            "correlator '{}' CORRELATE WHERE is invalid: {}",
             processor.as_str(),
-            Runtime::vm_program_error(error)
+            reason
         )
     })?;
-    if parsed.inner.filter.is_none()
-        || !parsed.inner.branch_filters.is_empty()
-        || !parsed.inner.set.is_empty()
-        || !parsed.inner.unset.is_empty()
-        || !parsed.inner.invoke.is_empty()
-    {
+    if left_relays.is_empty() || right_relays.is_empty() {
         return Err(format!(
-            "correlator '{}' CORRELATE WHERE must contain exactly one WHERE clause",
+            "correlator '{}' requires both LEFT and RIGHT inputs",
             processor.as_str()
         ));
     }
-    let mut bindings = Vec::with_capacity(left_relays.len() + right_relays.len());
-    for (index, relay) in left_relays.iter().enumerate() {
-        if index == 0 {
-            bindings.push(VmCompileBinding::writable(
-                relay.as_str(),
-                left_schema.clone(),
-            ));
-        } else {
-            bindings.push(VmCompileBinding::readonly(
-                relay.as_str(),
-                left_schema.clone(),
-            ));
-        }
-    }
-    for relay in right_relays {
-        bindings.push(VmCompileBinding::readonly(
-            relay.as_str(),
-            right_schema.clone(),
-        ));
-    }
+    let bindings = vec![
+        VmCompileBinding::writable("left", left_schema.clone()),
+        VmCompileBinding::readonly("right", right_schema.clone()),
+    ];
     let program = compile_vm_program_for_bindings_with_sensitivity(
         &parsed,
         left_schema.clone(),
@@ -7005,27 +7343,24 @@ fn compile_correlator_where_program(
 
 struct CorrelatorOutputCompileContext<'a> {
     processor: &'a Identifier,
-    left_relays: &'a [Identifier],
     left_schema: StdArc<arrow_schema::Schema>,
-    right_relays: &'a [Identifier],
+    left_sensitivity: VmSchemaSensitivity,
     right_schema: StdArc<arrow_schema::Schema>,
+    right_sensitivity: VmSchemaSensitivity,
     output_relay: &'a Identifier,
     output_schema: StdArc<arrow_schema::Schema>,
-    filter_map: &'a str,
+    output_sensitivity: VmSchemaSensitivity,
+    construction: &'a RouteConstruction,
+    runtime: RuntimeVmCompileContext<'a>,
 }
 
 impl CorrelatorOutputCompileContext<'_> {
     fn compile(self) -> Result<CompiledCorrelatorOutputProgram, String> {
-        let parsed = parse_program(self.filter_map).map_err(|error| {
-            format!(
-                "correlator '{}' TO output '{}' parse failed: {}",
-                self.processor.as_str(),
-                self.output_relay.as_str(),
-                Runtime::vm_program_error(error)
-            )
-        })?;
+        let parsed = lower_route_construction(
+            self.construction,
+            SemanticNamespaces::new("__invalid_correlator_bare_read", "output"),
+        )?;
         if !parsed.inner.branch_filters.is_empty()
-            || !parsed.inner.unset.is_empty()
             || !parsed.inner.invoke.is_empty()
             || parsed.inner.set.is_empty()
         {
@@ -7035,27 +7370,48 @@ impl CorrelatorOutputCompileContext<'_> {
                 self.output_relay.as_str()
             ));
         }
-        let mut bindings = Vec::with_capacity(self.left_relays.len() + self.right_relays.len() + 1);
-        for relay in self.left_relays {
-            bindings.push(VmCompileBinding::readonly(
-                relay.as_str(),
-                self.left_schema.clone(),
-            ));
+        let error_sites = compiled_message_error_sites(
+            &parsed,
+            &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
+            Some(MessageErrorOperation::RouteWhere),
+        )?;
+        let original_parsed = parsed.clone();
+        let mut bindings = vec![
+            VmCompileBinding::readonly("left", self.left_schema.clone())
+                .with_sensitivity(self.left_sensitivity),
+            VmCompileBinding::readonly("right", self.right_schema.clone())
+                .with_sensitivity(self.right_sensitivity),
+            VmCompileBinding::writeonly("output", self.output_schema.clone())
+                .with_sensitivity(self.output_sensitivity.clone()),
+        ];
+        if let Some(binding) = self.runtime.branch_binding() {
+            bindings.push(binding);
         }
-        for relay in self.right_relays {
-            bindings.push(VmCompileBinding::readonly(
-                relay.as_str(),
-                self.right_schema.clone(),
-            ));
+        let local_namespaces = HashSet::from_iter([
+            "left".to_string(),
+            "right".to_string(),
+            "output".to_string(),
+            BRANCH_NAMESPACE.to_string(),
+        ]);
+        let (materialized_bindings, materialized_interest) =
+            referenced_materialized_stream_bindings(
+                &original_parsed,
+                &local_namespaces,
+                self.runtime.available_materialized_streams,
+                self.runtime.current_branching,
+            )?;
+        bindings.extend(materialized_bindings);
+        let (parsed, pending_lookup_calls) =
+            rewrite_lookup_hash_map_program(&parsed, self.runtime.available_lookups)?;
+        let (lookup_hash_maps, lookup_binding) =
+            compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings)?;
+        if let Some(lookup_binding) = lookup_binding {
+            bindings.push(lookup_binding);
         }
-        bindings.push(VmCompileBinding::writeonly(
-            self.output_relay.as_str(),
-            self.output_schema.clone(),
-        ));
-        let program = compile_vm_program_with_options_for_bindings_with_sensitivity(
+        let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
             &parsed,
             self.output_schema.clone(),
-            VmSchemaSensitivity::default(),
+            self.output_sensitivity.clone(),
             bindings,
             VmCompileOptions {
                 output_mode: VmOutputMode::ExplicitOnly,
@@ -7070,7 +7426,16 @@ impl CorrelatorOutputCompileContext<'_> {
                 error.message
             )
         })?;
-        Ok(CompiledCorrelatorOutputProgram { program })
+        Ok(CompiledCorrelatorOutputProgram {
+            program: CompiledProgramWithMaterializedInterest {
+                compiled: Arc::new(compiled),
+                output_sensitivity: self.output_sensitivity,
+                materialized_interest,
+                output_namespace_input: OutputNamespaceInput::Uninitialized,
+                lookup_hash_maps,
+                error_sites,
+            },
+        })
     }
 }
 
@@ -7230,6 +7595,7 @@ async fn flush_branch_reorderer_output(
                         &message_error_policy,
                         message,
                         error.to_string(),
+                        MessageErrorOperation::Finalize,
                     )
                     .await;
             }
@@ -7338,8 +7704,6 @@ fn store_correlator_unmatched_incoming(
 
 async fn correlate_incoming_message(
     processor: &Identifier,
-    left_relays: &[Identifier],
-    right_relays: &[Identifier],
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     match_policy: CorrelatorMatchPolicy,
@@ -7356,28 +7720,21 @@ async fn correlate_incoming_message(
             CorrelatorSide::Left => (&incoming, &candidate),
             CorrelatorSide::Right => (&candidate, &incoming),
         };
-        let matched = match evaluate_correlator_where_match(
-            processor,
-            left_relays,
-            right_relays,
-            program,
-            left,
-            right,
-            execution_now,
-        )
-        .await
-        {
-            Ok(matched) => matched,
-            Err(error) => {
-                let mut restore = evaluated
-                    .into_iter()
-                    .map(|(pending, _matched)| pending)
-                    .collect::<Vec<_>>();
-                restore.extend(pending_iter);
-                restore_correlator_opposite_pending(state, incoming_side, restore);
-                return Err(error);
-            }
-        };
+        let matched =
+            match evaluate_correlator_where_match(processor, program, left, right, execution_now)
+                .await
+            {
+                Ok(matched) => matched,
+                Err(error) => {
+                    let mut restore = evaluated
+                        .into_iter()
+                        .map(|(pending, _matched)| pending)
+                        .collect::<Vec<_>>();
+                    restore.extend(pending_iter);
+                    restore_correlator_opposite_pending(state, incoming_side, restore);
+                    return Err(error);
+                }
+            };
         evaluated.push((candidate, matched));
     }
 
@@ -7414,20 +7771,13 @@ async fn correlate_incoming_message(
 
 async fn evaluate_correlator_where_match(
     processor: &Identifier,
-    left_relays: &[Identifier],
-    right_relays: &[Identifier],
     program: &CompiledCorrelatorWhereProgram,
     left: &CorrelatorPendingMessage,
     right: &CorrelatorPendingMessage,
     execution_now: Timestamp,
 ) -> Result<bool, (String, Vec<AckSet>)> {
     let acks = AckSet::merged([left.message.acks.attached(), right.message.acks.attached()]);
-    let combined = correlator_combined_record(
-        left_relays,
-        &left.message.record,
-        right_relays,
-        &right.message.record,
-    );
+    let combined = correlator_combined_record(&left.message.record, &right.message.record);
     let input = vm_typed_batch_from_runtime_record(&combined, None, &program.program.input_schema)
         .map_err(|error| {
             (
@@ -7461,25 +7811,21 @@ async fn evaluate_correlator_where_match(
     Ok(!result.selected_rows.is_empty())
 }
 
-fn correlator_combined_record(
-    left_relays: &[Identifier],
-    left: &RuntimeRecord,
-    right_relays: &[Identifier],
-    right: &RuntimeRecord,
-) -> RuntimeRecord {
-    let mut fields = Vec::new();
-    for relay in left_relays {
-        fields.extend(
-            left.fields()
-                .map(|(name, value)| (format!("{}.{}", relay.as_str(), name), value.clone())),
-        );
+fn correlator_combined_record(left: &RuntimeRecord, right: &RuntimeRecord) -> RuntimeRecord {
+    let mut fields = HashMap::default();
+    for (name, value) in left.fields() {
+        if name.starts_with("relay_state.") {
+            fields.insert(name.to_string(), value.clone());
+        } else if !name.starts_with("branch.") {
+            fields.insert(format!("left.{name}"), value.clone());
+        }
     }
-    for relay in right_relays {
-        fields.extend(
-            right
-                .fields()
-                .map(|(name, value)| (format!("{}.{}", relay.as_str(), name), value.clone())),
-        );
+    for (name, value) in right.fields() {
+        if name.starts_with("relay_state.") {
+            fields.insert(name.to_string(), value.clone());
+        } else if !name.starts_with("branch.") {
+            fields.insert(format!("right.{name}"), value.clone());
+        }
     }
     RuntimeRecord::from_fields_with_metadata(
         fields,
@@ -7506,29 +7852,58 @@ async fn evaluate_correlator_output_message(
     combined: RuntimeRecord,
     acks: AckSet,
     execution_now: Timestamp,
-) -> Result<Option<RelayMessage>, (String, RelayMessage)> {
+) -> Result<Option<RelayMessage>, PlannedMessageError> {
+    let combined = augment_runtime_record_with_branch_key(combined, key.as_ref());
     let source_message = RelayMessage {
-        key,
-        record: combined,
+        key: key.clone(),
+        record: combined.clone(),
         acks,
     };
-    let input = vm_typed_batch_from_runtime_record(
-        &source_message.record,
-        None,
-        &program.program.input_schema,
+    let combined = augment_runtime_records_with_lookup_hash_maps(
+        vec![combined],
+        &program.program,
+        execution_now,
     )
+    .await
     .map_err(|error| {
-        (
+        planned_message_error(
+            source_message.clone(),
+            MessageErrorCode::Evaluation,
             format!(
-                "correlator '{}' failed to build TO output input batch: {}",
+                "correlator '{}' failed to prepare TO output lookup inputs: {}",
                 processor.as_str(),
                 error
             ),
-            source_message.clone(),
+            MessageErrorOperation::Set,
+            None,
+            std::iter::empty(),
+            None,
+            materialized_state_snapshot(&source_message.record),
         )
-    })?;
+    })?
+    .into_iter()
+    .next()
+    .expect("one correlator pair must prepare one output input record");
+    let input =
+        vm_typed_batch_from_runtime_record(&combined, None, &program.program.compiled.input_schema)
+            .map_err(|error| {
+                planned_message_error(
+                    source_message.clone(),
+                    MessageErrorCode::Internal,
+                    format!(
+                        "correlator '{}' failed to build TO output input batch: {}",
+                        processor.as_str(),
+                        error
+                    ),
+                    MessageErrorOperation::Set,
+                    None,
+                    std::iter::empty(),
+                    None,
+                    materialized_state_snapshot(&source_message.record),
+                )
+            })?;
     let result = execute_program_with_selection_in_context(
-        &program.program,
+        program.program.compiled.as_ref(),
         &input,
         &VmExecutionContext {
             now: execution_now,
@@ -7537,13 +7912,19 @@ async fn evaluate_correlator_output_message(
     )
     .await
     .map_err(|error| {
-        (
+        planned_message_error(
+            source_message.clone(),
+            MessageErrorCode::Internal,
             format!(
                 "correlator '{}' failed to evaluate TO output: {}",
                 processor.as_str(),
                 error
             ),
-            source_message.clone(),
+            MessageErrorOperation::Set,
+            None,
+            std::iter::empty(),
+            None,
+            materialized_state_snapshot(&source_message.record),
         )
     })?;
     if result.selected_rows.is_empty() {
@@ -7551,35 +7932,66 @@ async fn evaluate_correlator_output_message(
         return Ok(None);
     }
     if result.selected_rows.len() != 1 || result.batch.row_count() != 1 {
-        return Err((
+        return Err(planned_message_error(
+            source_message,
+            MessageErrorCode::Internal,
             format!(
                 "correlator '{}' TO output produced {} rows for one correlation",
                 processor.as_str(),
                 result.batch.row_count()
             ),
-            source_message,
+            MessageErrorOperation::Finalize,
+            None,
+            std::iter::empty(),
+            None,
+            HashMap::default(),
         ));
     }
     if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        return Err((
-            format!(
-                "correlator '{}' TO output side error {}: {} at {}",
-                processor.as_str(),
-                side_error.code.as_str(),
-                side_error.message,
-                side_error.span
-            ),
+        let partial_output = vm_partial_output_row_to_runtime_record(
+            &result.batch,
+            0,
+            source_message.record.metadata().clone(),
+        )
+        .ok();
+        let materialized_state = materialized_state_snapshot(&source_message.record);
+        return Err(planned_structured_message_error(
             source_message,
+            program.program.structured_side_error(
+                format!(
+                    "correlator '{}' TO output side error {}: {} at {}",
+                    processor.as_str(),
+                    side_error.code.as_str(),
+                    side_error.message,
+                    side_error.span
+                ),
+                side_error.span,
+                MessageErrorOperation::Set,
+            ),
+            partial_output,
+            materialized_state,
         ));
     }
     let record = vm_output_row_to_decoded_record(&result.batch, 0).map_err(|error| {
-        (
+        let partial_output = vm_partial_output_row_to_runtime_record(
+            &result.batch,
+            0,
+            source_message.record.metadata().clone(),
+        )
+        .ok();
+        planned_message_error(
+            source_message.clone(),
+            MessageErrorCode::Validation,
             format!(
                 "correlator '{}' failed to decode TO output row: {}",
                 processor.as_str(),
                 error
             ),
-            source_message.clone(),
+            MessageErrorOperation::Finalize,
+            None,
+            invalid_output_fields(&result.batch, 0),
+            partial_output,
+            materialized_state_snapshot(&source_message.record),
         )
     })?;
     let RelayMessage {
@@ -7646,6 +8058,7 @@ async fn enqueue_correlator_output(
                             &policy,
                             message,
                             error.to_string(),
+                            MessageErrorOperation::Finalize,
                         )
                         .await;
                 }
@@ -7737,7 +8150,11 @@ async fn handle_correlator_timeout_action(
         CorrelationTimeoutAction::SendTo { relay } => {
             let output = RelayProcessorOutputNode {
                 relay: relay.clone(),
-                filter_map: None,
+                construction: RouteConstruction {
+                    inherit: Some(nervix_models::Inheritance::All),
+                    ..RouteConstruction::default()
+                },
+                branch: None,
                 flush_policy: None,
                 message_error_policy: error_policies.message.clone(),
                 pending: Vec::new(),
@@ -7808,23 +8225,20 @@ async fn handle_correlator_timeout_action(
 fn compile_ingestor_filter_map_program(
     domain: &Domain,
     identifier: &Identifier,
-    output_relay: &Identifier,
     source: &IngestSource,
-    filter_map: Option<&str>,
+    construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let Some(filter_map) = filter_map else {
-        return Ok(None);
-    };
-    let parsed = parse_program(filter_map).map_err(|error| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP parse failed for '{}': {}",
-            identifier.as_str(),
-            Runtime::vm_program_error(error)
-        ),
-    })?;
+    let parsed = lower_transforming_route(construction, &schemas.input, &schemas.output).map_err(
+        |reason| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!(
+                "ingestor output construction for '{}' is invalid: {reason}",
+                identifier
+            ),
+        },
+    )?;
     if !parsed.inner.branch_filters.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
@@ -7834,14 +8248,37 @@ fn compile_ingestor_filter_map_program(
             ),
         });
     }
+    let inherited_count = parsed
+        .inner
+        .set
+        .len()
+        .saturating_sub(construction.assignments.len());
+    let set_operations = (0..parsed.inner.set.len())
+        .map(|index| {
+            if index < inherited_count {
+                MessageErrorOperation::Inherit
+            } else {
+                MessageErrorOperation::Set
+            }
+        })
+        .collect::<Vec<_>>();
+    let error_sites = compiled_message_error_sites(
+        &parsed,
+        &set_operations,
+        Some(MessageErrorOperation::RouteWhere),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
+    })?;
 
     let mut bindings = vec![
-        VmCompileBinding::readonly(INGEST_MESSAGE_NAMESPACE, schemas.input.clone())
+        VmCompileBinding::readonly("input", schemas.input.clone())
             .with_sensitivity(schemas.input_sensitivity),
-        VmCompileBinding::writeonly(output_relay.as_str(), schemas.output.clone())
+        VmCompileBinding::writable("output", schemas.output.clone())
             .with_sensitivity(schemas.output_sensitivity.clone()),
     ];
-    let writable_namespaces = HashSet::from_iter([output_relay.as_str().to_string()]);
+    let writable_namespaces = HashSet::from_iter(["input".to_string(), "output".to_string()]);
     if let Some(metadata_schema) = ingestor_filter_map_metadata_arrow_schema(source) {
         bindings.push(VmCompileBinding::readonly(
             INGEST_METADATA_NAMESPACE,
@@ -7871,15 +8308,16 @@ fn compile_ingestor_filter_map_program(
             }
         })?;
     let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, output_relay.as_str(), &bindings)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
+        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings).map_err(
+            |reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
                     "FILTER-MAP compile failed for '{}': {}",
                     identifier.as_str(),
                     reason
                 ),
-            })?;
+            },
+        )?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -7890,6 +8328,7 @@ fn compile_ingestor_filter_map_program(
         schemas.output_sensitivity.clone(),
         bindings,
         VmCompileOptions {
+            output_mode: VmOutputMode::ExplicitOnly,
             allow_header_reads: ingest_source_supports_headers(source),
             ..VmCompileOptions::default()
         },
@@ -7906,113 +8345,76 @@ fn compile_ingestor_filter_map_program(
         compiled: Arc::new(compiled),
         output_sensitivity: schemas.output_sensitivity,
         materialized_interest,
+        output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
+        error_sites,
     }))
-}
-
-fn parse_generator_program(
-    identifier: &Identifier,
-    program: &str,
-) -> Result<nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>, String> {
-    let parsed = parse_program(program).map_err(|error| {
-        format!(
-            "GENERATOR SET parse failed for '{}': {}",
-            identifier.as_str(),
-            Runtime::vm_program_error(error)
-        )
-    })?;
-    if parsed.inner.filter.is_some()
-        || !parsed.inner.branch_filters.is_empty()
-        || !parsed.inner.unset.is_empty()
-        || !parsed.inner.invoke.is_empty()
-        || parsed.inner.set.is_empty()
-    {
-        return Err(format!(
-            "GENERATOR '{}' must contain SET only",
-            identifier.as_str()
-        ));
-    }
-    Ok(parsed)
-}
-
-fn collect_generator_expr_streams(expr: &SpannedExpr, relays: &mut HashSet<String>) {
-    match &expr.inner {
-        Expr::Literal(_) | Expr::InternalFieldRef(_) => {}
-        Expr::FieldRef(field_ref) => {
-            relays.insert(field_ref.relay.clone());
-        }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
-            collect_generator_expr_streams(expr, relays);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_generator_expr_streams(left, relays);
-            collect_generator_expr_streams(right, relays);
-        }
-        Expr::Call { args, .. } => {
-            for arg in args {
-                collect_generator_expr_streams(arg, relays);
-            }
-        }
-    }
-}
-
-fn generator_source_streams(
-    identifier: &Identifier,
-    program: &str,
-    into_relay: &Identifier,
-) -> Result<Vec<Identifier>, String> {
-    let parsed = parse_generator_program(identifier, program)?;
-    let mut relay_names = HashSet::default();
-    for (_field_ref, expr) in &parsed.inner.set {
-        collect_generator_expr_streams(expr, &mut relay_names);
-    }
-    relay_names.remove(into_relay.as_str());
-    let mut relay_names = relay_names.into_iter().collect::<Vec<_>>();
-    relay_names.sort();
-    relay_names
-        .into_iter()
-        .map(|stream| {
-            Identifier::parse(&stream)
-                .map_err(|error| format!("invalid generator namespace '{stream}': {error}"))
-        })
-        .collect()
 }
 
 fn compile_generator_set_program(
     domain: &Domain,
     generator: &CreateGenerator,
+    output: &ProcessorOutput,
     output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
-    source_schemas: &[(Identifier, StdArc<arrow_schema::Schema>)],
-) -> Result<Arc<CompiledFilterMapProgram>, RuntimeError> {
-    let parsed = parse_generator_program(&generator.name, &generator.set).map_err(|reason| {
-        RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason,
-        }
+    source_schema: StdArc<arrow_schema::Schema>,
+    branch_schema: Option<StdArc<arrow_schema::Schema>>,
+) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+    let parsed =
+        lower_set_only_route(&output.construction, output_schema.as_ref()).map_err(|reason| {
+            RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "generator '{}' output '{}' is invalid: {reason}",
+                    generator.name, output.relay
+                ),
+            }
+        })?;
+    let error_sites = compiled_message_error_sites(
+        &parsed,
+        &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
+        Some(MessageErrorOperation::RouteWhere),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason,
     })?;
-    let mut bindings = vec![VmCompileBinding::writable(
-        generator.into_relay.as_str(),
-        StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new())),
-    )];
-    for (relay, schema) in source_schemas {
-        bindings.push(VmCompileBinding::readonly(relay.as_str(), schema.clone()));
+    let mut bindings = vec![
+        VmCompileBinding::writable("output", output_schema.clone())
+            .with_sensitivity(output_sensitivity.clone()),
+        VmCompileBinding::readonly(
+            format!("relay_state.{}", generator.materialized_relay),
+            source_schema,
+        ),
+    ];
+    if let Some(branch_schema) = branch_schema {
+        bindings.push(VmCompileBinding::readonly("branch", branch_schema));
     }
-    let compiled = compile_vm_program_for_bindings_with_sensitivity(
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_schema,
-        output_sensitivity,
+        output_sensitivity.clone(),
         bindings,
+        VmCompileOptions {
+            output_mode: VmOutputMode::ExplicitOnly,
+            ..VmCompileOptions::default()
+        },
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
         reason: format!(
-            "GENERATOR SET compile failed for '{}': {}",
-            generator.name.as_str(),
-            error.message
+            "generator '{}' output '{}' compile failed: {}",
+            generator.name, output.relay, error.message
         ),
     })?;
-    Ok(Arc::new(compiled))
+    Ok(CompiledProgramWithMaterializedInterest {
+        compiled: Arc::new(compiled),
+        output_sensitivity,
+        materialized_interest: MaterializedProgramInterest::default(),
+        output_namespace_input: OutputNamespaceInput::Uninitialized,
+        lookup_hash_maps: Vec::new(),
+        error_sites,
+    })
 }
 
 fn ingestor_filter_map_metadata_arrow_schema(
@@ -8035,6 +8437,30 @@ pub(crate) async fn execute_filter_map_on_record(
     filter_map_metadata: Option<&IngestFilterMapMetadata>,
     execution_now: Timestamp,
 ) -> Result<Option<RuntimeRecord>, String> {
+    match evaluate_filter_map_on_record(
+        filter_map,
+        record,
+        branch_key,
+        filter_map_metadata,
+        execution_now,
+    )
+    .await?
+    {
+        SingleRecordFilterMapOutcome::Filtered => Ok(None),
+        SingleRecordFilterMapOutcome::Output(record) => Ok(Some(record)),
+        SingleRecordFilterMapOutcome::MessageError { error, .. } => {
+            Err(format!("FILTER-MAP message error: {}", error.message))
+        }
+    }
+}
+
+async fn evaluate_filter_map_on_record(
+    filter_map: &CompiledProgramWithMaterializedInterest,
+    record: RuntimeRecord,
+    branch_key: Option<&BranchKey>,
+    filter_map_metadata: Option<&IngestFilterMapMetadata>,
+    execution_now: Timestamp,
+) -> Result<SingleRecordFilterMapOutcome, String> {
     let metadata = record.metadata().clone();
     let record = augment_runtime_record_with_branch_key(record, branch_key);
     let record =
@@ -8043,10 +8469,21 @@ pub(crate) async fn execute_filter_map_on_record(
             .into_iter()
             .next()
             .expect("single lookup-augmented record must remain");
-    let batch = vm_typed_batch_from_runtime_record(
-        &record,
-        filter_map_metadata,
+    let uninitialized = VmUninitializedInput {
+        fields: filter_map
+            .compiled
+            .input_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name().starts_with("output."))
+            .map(|field| field.name().clone())
+            .collect(),
+    };
+    let batch = vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
+        std::slice::from_ref(&record),
+        filter_map_metadata.map(std::slice::from_ref),
         &filter_map.compiled.input_schema,
+        Some(&uninitialized),
     )?;
     let result = execute_program_with_selection_in_context(
         filter_map.compiled.as_ref(),
@@ -8062,7 +8499,7 @@ pub(crate) async fn execute_filter_map_on_record(
     .await
     .map_err(|error| format!("FILTER-MAP execution failed: {error}"))?;
     if result.batch.row_count() == 0 {
-        return Ok(None);
+        return Ok(SingleRecordFilterMapOutcome::Filtered);
     }
     if result.batch.row_count() != 1 {
         return Err(format!(
@@ -8071,39 +8508,33 @@ pub(crate) async fn execute_filter_map_on_record(
         ));
     }
     if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        return Err(format!(
-            "FILTER-MAP side error {}: {} at {}",
-            side_error.code.as_str(),
-            side_error.message,
-            side_error.span
-        ));
+        let partial_output =
+            vm_partial_output_row_to_runtime_record(&result.batch, 0, metadata.clone()).ok();
+        return Ok(SingleRecordFilterMapOutcome::MessageError {
+            error: filter_map.structured_side_error(
+                format!(
+                    "FILTER-MAP side error {}: {} at {}",
+                    side_error.code.as_str(),
+                    side_error.message,
+                    side_error.span
+                ),
+                side_error.span,
+                MessageErrorOperation::Set,
+            ),
+            partial_output,
+            materialized_state: materialized_state_snapshot(&record),
+        });
     }
     vm_output_row_to_decoded_record(&result.batch, 0)
-        .map(|record| Some(record.into_runtime_record(metadata)))
+        .map(|record| SingleRecordFilterMapOutcome::Output(record.into_runtime_record(metadata)))
 }
 
 #[derive(Debug, Clone, Copy)]
 struct InferencerFilterMapTensors<'a> {
-    inputs: &'a [InferencerTensorMapping],
     output_schema: &'a [InferencerTensorDeclaration],
 }
 
 impl InferencerFilterMapTensors<'_> {
-    fn input_arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
-        StdArc::new(arrow_schema::Schema::new(
-            self.inputs
-                .iter()
-                .map(|mapping| {
-                    arrow_schema::Field::new(
-                        &mapping.tensor,
-                        crate::runtime_schema::arrow_data_type(&mapping.schema.message_type()),
-                        false,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        ))
-    }
-
     fn output_arrow_schema(&self) -> StdArc<arrow_schema::Schema> {
         StdArc::new(arrow_schema::Schema::new(
             self.output_schema
@@ -8119,45 +8550,58 @@ impl InferencerFilterMapTensors<'_> {
         ))
     }
 
-    fn input_sensitivity(&self, source: &VmSchemaSensitivity) -> VmSchemaSensitivity {
-        VmSchemaSensitivity::from_sensitive_fields(
-            self.inputs
-                .iter()
-                .filter(|mapping| source.is_sensitive(mapping.field.as_str()))
-                .map(|mapping| mapping.tensor.clone()),
-        )
-    }
-
     fn augment_record(
         &self,
         record: &RuntimeRecord,
-        outputs: std::collections::HashMap<String, RuntimeValue>,
+        outputs: HashMap<String, RuntimeValue>,
     ) -> Result<RuntimeRecord, String> {
         let mut fields = record
             .fields()
+            .filter(|(name, _value)| name.starts_with("branch."))
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect::<HashMap<_, _>>();
-        for mapping in self.inputs {
-            let value = record.value(mapping.field.as_str()).ok_or_else(|| {
-                format!(
-                    "ONNX input tensor '{}' field '{}.{}' is missing",
-                    mapping.tensor,
-                    mapping.relay.as_str(),
-                    mapping.field.as_str()
-                )
-            })?;
-            fields.insert(
-                format!("{INNER_INPUT_NAMESPACE}.{}", mapping.tensor),
-                value.clone(),
-            );
-        }
         for (tensor, value) in outputs {
-            fields.insert(format!("{INNER_OUTPUT_NAMESPACE}.{tensor}"), value);
+            fields.insert(format!("generated.{tensor}"), value);
         }
         Ok(RuntimeRecord::from_fields_with_metadata(
             fields,
             record.metadata().clone(),
         ))
+    }
+}
+
+fn expression_reads_sensitive_source(
+    expression: &nervix_models::Expression,
+    sensitivity: &VmSchemaSensitivity,
+) -> bool {
+    match expression {
+        nervix_models::Expression::Literal(_) => false,
+        nervix_models::Expression::Field(reference) => {
+            matches!(
+                reference.scope,
+                nervix_models::FieldScope::Bare | nervix_models::FieldScope::Input
+            ) && sensitivity.is_sensitive(reference.field.as_str())
+        }
+        nervix_models::Expression::Unary { expression, .. }
+        | nervix_models::Expression::Cast { expression, .. } => {
+            expression_reads_sensitive_source(expression, sensitivity)
+        }
+        nervix_models::Expression::Binary { left, right, .. } => {
+            expression_reads_sensitive_source(left, sensitivity)
+                || expression_reads_sensitive_source(right, sensitivity)
+        }
+        nervix_models::Expression::Call {
+            function,
+            arguments,
+        } => {
+            !function.as_str().eq_ignore_ascii_case("leak_sensitive")
+                && arguments
+                    .iter()
+                    .any(|argument| expression_reads_sensitive_source(argument, sensitivity))
+        }
+        nervix_models::Expression::Array(items) => items
+            .iter()
+            .any(|item| expression_reads_sensitive_source(item, sensitivity)),
     }
 }
 
@@ -8227,7 +8671,9 @@ struct PendingProcessorOutputMessageError {
     row: usize,
     key: Option<BranchKey>,
     record: RuntimeRecord,
-    reason: String,
+    error: StructuredMessageError,
+    partial_output: Option<RuntimeRecord>,
+    materialized_state: HashMap<String, RuntimeValue>,
 }
 
 fn pending_passthrough_output_batch(
@@ -8269,7 +8715,7 @@ async fn evaluate_processor_output_events(
     PlannedGeneralError,
 > {
     let input_relays = context.filter_source.relays(context.input_relays);
-    if output.compiled_program.is_none() && output.filter_map.is_some() {
+    if output.compiled_program.is_none() {
         let materialized_stream_specs = materialized_stream_specs_for_graph(
             &context.branch.runtime,
             &context.branch.domain,
@@ -8310,25 +8756,40 @@ async fn evaluate_processor_output_events(
             }
         };
         let input_sensitivity = processor_output_input_sensitivity(context.branch, &input_relays);
-        match compile_processor_output_filter_map_program(
-            &context.branch.domain,
-            context.processor,
-            &input_relays,
-            &output.relay,
-            output.filter_map.as_deref(),
-            batch.arrow_schema(),
-            input_sensitivity,
-            context.filter_source.inferencer_tensors(),
-            output_schema.arrow_schema(),
-            output_schema.vm_sensitivity(),
-            RuntimeVmCompileContext {
-                available_materialized_streams: &materialized_stream_specs,
-                available_lookups: &available_lookups,
-                current_branching: &current_branching,
-                current_branch_schema: current_branch_schema.as_ref(),
-                current_branch_sensitivity: None,
-            },
-        ) {
+        let compile_context = RuntimeVmCompileContext {
+            available_materialized_streams: &materialized_stream_specs,
+            available_lookups: &available_lookups,
+            current_branching: &current_branching,
+            current_branch_schema: current_branch_schema.as_ref(),
+            current_branch_sensitivity: None,
+        };
+        let compiled = match context.filter_source {
+            ProcessorOutputFilterSource::OutputRelay => compile_finalized_output_filter_program(
+                &context.branch.domain,
+                context.processor,
+                output.construction.where_clause.as_ref(),
+                output_schema.arrow_schema(),
+                output_schema.vm_sensitivity(),
+                compile_context,
+            ),
+            ProcessorOutputFilterSource::InputRelays
+            | ProcessorOutputFilterSource::Inferencer(_) => {
+                compile_processor_output_filter_map_program(
+                    &context.branch.domain,
+                    context.processor,
+                    &input_relays,
+                    &output.relay,
+                    &output.construction,
+                    batch.arrow_schema(),
+                    input_sensitivity,
+                    context.filter_source.inferencer_tensors(),
+                    output_schema.arrow_schema(),
+                    output_schema.vm_sensitivity(),
+                    compile_context,
+                )
+            }
+        };
+        match compiled {
             Ok(program) => output.compiled_program = program,
             Err(error) => {
                 return Err(PlannedGeneralError {
@@ -8434,33 +8895,35 @@ async fn evaluate_processor_output_events(
             });
         }
     };
-    let output_batch =
-        vm_typed_batch_to_runtime_batch(&executed.batch).map_err(|error| PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: format!(
-                "{} '{}' failed to materialize FILTER-MAP output batch: {}",
-                context.node_kind,
-                context.processor.as_str(),
-                error
-            ),
-        })?;
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors()[output_row].first() {
+            let partial_output = vm_partial_output_row_to_runtime_record(
+                &executed.batch,
+                output_row,
+                batch.records[input_row].metadata().clone(),
+            )
+            .ok();
             message_errors.push(PendingProcessorOutputMessageError {
                 row: input_row,
                 key: batch.keys[input_row].clone(),
                 record: batch.records[input_row].clone(),
-                reason: format!(
-                    "{} '{}' FILTER-MAP side error {}: {} at {}",
-                    context.node_kind,
-                    context.processor.as_str(),
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
+                error: program.structured_side_error(
+                    format!(
+                        "{} '{}' FILTER-MAP side error {}: {} at {}",
+                        context.node_kind,
+                        context.processor.as_str(),
+                        side_error.code.as_str(),
+                        side_error.message,
+                        side_error.span
+                    ),
+                    side_error.span,
+                    MessageErrorOperation::Set,
                 ),
+                partial_output,
+                materialized_state: materialized_state_snapshot(&input_records[input_row]),
             });
             continue;
         }
@@ -8470,25 +8933,17 @@ async fn evaluate_processor_output_events(
     let output_batches = if success_output_rows.is_empty() {
         Vec::new()
     } else {
-        let output_batch = if success_output_rows.len() == executed.batch.row_count() {
-            output_batch
-        } else {
-            let success_output_rows = success_output_rows.iter().copied().collect::<HashSet<_>>();
-            let keep = BooleanArray::from_iter(
-                (0..executed.batch.row_count()).map(|row| Some(success_output_rows.contains(&row))),
-            );
-            output_batch
-                .filter(&keep)
+        let output_batch =
+            vm_typed_batch_selected_rows_to_runtime_batch(&executed.batch, &success_output_rows)
                 .map_err(|error| PlannedGeneralError {
                     acks: batch.acks.clone(),
                     reason: format!(
-                        "{} '{}' failed to filter FILTER-MAP output batch: {}",
+                        "{} '{}' failed to materialize successful FILTER-MAP rows: {}",
                         context.node_kind,
                         context.processor.as_str(),
                         error
                     ),
-                })?
-        };
+                })?;
         let records = output_schema
             .decoded_records_from_arrow_batch(&output_batch)
             .map_err(|error| PlannedGeneralError {
@@ -8685,18 +9140,22 @@ async fn dispatch_selected_processor_outputs(
         context
             .branch
             .runtime
-            .handle_message_error_with_policy(
-                &context.branch.domain,
-                context.node_kind,
-                context.processor,
-                &outputs.routes[output_index].message_error_policy,
-                RelayMessage {
+            .handle_structured_message_error(MessageErrorHandling {
+                domain: &context.branch.domain,
+                node_kind: context.node_kind,
+                node: context.processor,
+                source_route: Some(&outputs.routes[output_index].relay),
+                policy: &outputs.routes[output_index].message_error_policy,
+                message: RelayMessage {
                     key: error.key,
                     record: error.record,
                     acks,
                 },
-                error.reason,
-            )
+                error: error.error,
+                partial_output: error.partial_output,
+                materialized_state: error.materialized_state,
+                ingest_metadata: None,
+            })
             .await;
     }
 
@@ -8735,6 +9194,7 @@ async fn dispatch_selected_processor_outputs(
                                 &message_error_policy,
                                 message,
                                 error.to_string(),
+                                MessageErrorOperation::Finalize,
                             )
                             .await;
                     }
@@ -8965,22 +9425,35 @@ async fn plan_filter_map_messages(
         key, keys, acks, ..
     } = batch;
     let mut acks = acks;
-    let vm_batch =
-        match vm_typed_batch_from_runtime_records(&input_records, &program.compiled.input_schema) {
-            Ok(vm_batch) => vm_batch,
-            Err(error) => {
-                return Err(PlannedGeneralError {
-                    acks,
-                    reason: format!(
-                        "{} '{}' failed to prepare {} input batch: {}",
-                        processor_kind,
-                        processor.as_str(),
-                        program_label,
-                        error
-                    ),
-                });
-            }
-        };
+    let uninitialized = VmUninitializedInput {
+        fields: program
+            .compiled
+            .input_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name().starts_with("output."))
+            .map(|field| field.name().clone())
+            .collect(),
+    };
+    let vm_batch = match vm_typed_batch_from_runtime_records_with_uninitialized(
+        &input_records,
+        &program.compiled.input_schema,
+        Some(&uninitialized),
+    ) {
+        Ok(vm_batch) => vm_batch,
+        Err(error) => {
+            return Err(PlannedGeneralError {
+                acks,
+                reason: format!(
+                    "{} '{}' failed to prepare {} input batch: {}",
+                    processor_kind,
+                    processor.as_str(),
+                    program_label,
+                    error
+                ),
+            });
+        }
+    };
     let result = match execute_program_with_selection_in_context(
         program.compiled.as_ref(),
         &vm_batch,
@@ -9024,41 +9497,71 @@ async fn plan_filter_map_messages(
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
         if let Some(side_error) = result.batch.errors()[output_row].first() {
-            message_errors.push(PlannedMessageError {
-                message: RelayMessage {
+            let partial_output = if program.captures_partial_output() {
+                Some(vm_partial_output_row_to_runtime_record(
+                    &result.batch,
+                    output_row,
+                    source_records[input_row].metadata().clone(),
+                ))
+            } else {
+                None
+            };
+            let partial_output_failure = partial_output
+                .as_ref()
+                .and_then(|partial_output| partial_output.as_ref().err());
+            let reason = format!(
+                "{} '{}' {} side error {}: {} at {}",
+                processor_kind,
+                processor.as_str(),
+                program_label,
+                side_error.code.as_str(),
+                side_error.message,
+                side_error.span
+            );
+            let reason = if let Some(partial_output_failure) = partial_output_failure {
+                format!("{reason}; failed to capture partial output: {partial_output_failure}")
+            } else {
+                reason
+            };
+            message_errors.push(planned_structured_message_error(
+                RelayMessage {
                     key: keys[input_row].clone(),
                     record: source_records[input_row].clone(),
                     acks: std::mem::take(&mut acks[input_row]),
                 },
-                reason: format!(
-                    "{} '{}' {} side error {}: {} at {}",
-                    processor_kind,
-                    processor.as_str(),
-                    program_label,
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
+                program.structured_side_error(
+                    reason,
+                    side_error.span,
+                    operation_for_filter_label(program_label),
                 ),
-            });
+                partial_output.and_then(Result::ok),
+                materialized_state_snapshot(&input_records[input_row]),
+            ));
             continue;
         }
         let record = match vm_output_row_to_decoded_record(&result.batch, output_row) {
             Ok(record) => record.into_runtime_record(source_records[input_row].metadata().clone()),
             Err(error) => {
-                message_errors.push(PlannedMessageError {
-                    message: RelayMessage {
+                message_errors.push(planned_message_error(
+                    RelayMessage {
                         key: keys[input_row].clone(),
                         record: source_records[input_row].clone(),
                         acks: std::mem::take(&mut acks[input_row]),
                     },
-                    reason: format!(
+                    MessageErrorCode::Evaluation,
+                    format!(
                         "{} '{}' failed to materialize {} output row: {}",
                         processor_kind,
                         processor.as_str(),
                         program_label,
                         error
                     ),
-                });
+                    operation_for_filter_label(program_label),
+                    None,
+                    std::iter::empty(),
+                    None,
+                    materialized_state_snapshot(&input_records[input_row]),
+                ));
                 continue;
             }
         };
@@ -9070,38 +9573,18 @@ async fn plan_filter_map_messages(
     let batch = if success_output_rows.is_empty() {
         None
     } else {
-        let output_batch = vm_typed_batch_to_runtime_batch(&result.batch).map_err(|error| {
-            PlannedGeneralError {
-                acks: acks.clone(),
-                reason: format!(
-                    "{} '{}' failed to materialize {} output batch: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    program_label,
-                    error
-                ),
-            }
-        })?;
-        let output_batch = if success_output_rows.len() == result.batch.row_count() {
-            output_batch
-        } else {
-            let success_output_rows = success_output_rows.iter().copied().collect::<HashSet<_>>();
-            let keep = BooleanArray::from_iter(
-                (0..result.batch.row_count()).map(|row| Some(success_output_rows.contains(&row))),
-            );
-            output_batch
-                .filter(&keep)
+        let output_batch =
+            vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &success_output_rows)
                 .map_err(|error| PlannedGeneralError {
                     acks: acks.clone(),
                     reason: format!(
-                        "{} '{}' failed to filter {} output batch: {}",
+                        "{} '{}' failed to materialize successful {} rows: {}",
                         processor_kind,
                         processor.as_str(),
                         program_label,
                         error
                     ),
-                })?
-        };
+                })?;
         let metadata = success_records
             .iter()
             .map(|record| record.metadata().clone())
@@ -9198,56 +9681,116 @@ async fn plan_emitter_filter_map_messages(
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in body_result.selected_rows.iter().enumerate() {
         if let Some(side_error) = body_result.batch.errors()[output_row].first() {
-            message_errors.push(PlannedMessageError {
-                message: RelayMessage {
+            let partial_output = program
+                .codec_route
+                .then(|| {
+                    vm_partial_output_row_to_runtime_record(
+                        &body_result.batch,
+                        output_row,
+                        source_records[input_row].metadata().clone(),
+                    )
+                    .ok()
+                })
+                .flatten();
+            let reason = format!(
+                "emitter '{}' FILTER-MAP side error {}: {} at {}",
+                emitter.as_str(),
+                side_error.code.as_str(),
+                side_error.message,
+                side_error.span
+            );
+            message_errors.push(planned_structured_message_error(
+                RelayMessage {
                     key: keys[input_row].clone(),
                     record: source_records[input_row].clone(),
                     acks: std::mem::take(&mut acks[input_row]),
                 },
-                reason: format!(
-                    "emitter '{}' FILTER-MAP side error {}: {} at {}",
-                    emitter.as_str(),
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
+                program.body.structured_side_error(
+                    reason,
+                    side_error.span,
+                    if program.codec_route {
+                        MessageErrorOperation::Set
+                    } else {
+                        MessageErrorOperation::Values
+                    },
                 ),
-            });
+                partial_output,
+                materialized_state_snapshot(&body_input_records[input_row]),
+            ));
             continue;
         }
         let message_headers =
             match emitter_headers_from_invocations(&body_result.invocations, output_row) {
                 Ok(headers) => headers,
                 Err(error) => {
-                    message_errors.push(PlannedMessageError {
-                        message: RelayMessage {
+                    let partial_output = program
+                        .codec_route
+                        .then(|| {
+                            vm_partial_output_row_to_runtime_record(
+                                &body_result.batch,
+                                output_row,
+                                source_records[input_row].metadata().clone(),
+                            )
+                            .ok()
+                        })
+                        .flatten();
+                    message_errors.push(planned_message_error(
+                        RelayMessage {
                             key: keys[input_row].clone(),
                             record: source_records[input_row].clone(),
                             acks: std::mem::take(&mut acks[input_row]),
                         },
-                        reason: format!(
+                        MessageErrorCode::Evaluation,
+                        format!(
                             "emitter '{}' failed to materialize FILTER-MAP headers: {}",
                             emitter.as_str(),
                             error
                         ),
-                    });
+                        MessageErrorOperation::Invoke,
+                        None,
+                        std::iter::empty(),
+                        partial_output,
+                        materialized_state_snapshot(&body_input_records[input_row]),
+                    ));
                     continue;
                 }
             };
         let record = match vm_output_row_to_decoded_record(&body_result.batch, output_row) {
             Ok(record) => record.into_runtime_record(source_records[input_row].metadata().clone()),
             Err(error) => {
-                message_errors.push(PlannedMessageError {
-                    message: RelayMessage {
+                let partial_output = program
+                    .codec_route
+                    .then(|| {
+                        vm_partial_output_row_to_runtime_record(
+                            &body_result.batch,
+                            output_row,
+                            source_records[input_row].metadata().clone(),
+                        )
+                        .ok()
+                    })
+                    .flatten();
+                message_errors.push(planned_message_error(
+                    RelayMessage {
                         key: keys[input_row].clone(),
                         record: source_records[input_row].clone(),
                         acks: std::mem::take(&mut acks[input_row]),
                     },
-                    reason: format!(
+                    MessageErrorCode::Validation,
+                    format!(
                         "emitter '{}' failed to materialize FILTER-MAP output row: {}",
                         emitter.as_str(),
                         error
                     ),
-                });
+                    if program.codec_route {
+                        MessageErrorOperation::Finalize
+                    } else {
+                        MessageErrorOperation::Values
+                    },
+                    None,
+                    invalid_output_fields(&body_result.batch, output_row),
+                    partial_output,
+                    materialized_state_snapshot(&body_input_records[input_row]),
+                ));
                 continue;
             }
         };
@@ -9327,21 +9870,13 @@ async fn execute_filter_map_program(
     .await
 }
 
-struct VmUninitializedInput<'a> {
-    namespace: &'a str,
+struct VmUninitializedInput {
     fields: HashSet<String>,
 }
 
-impl VmUninitializedInput<'_> {
+impl VmUninitializedInput {
     fn contains(&self, field: &arrow_schema::Field) -> bool {
-        if self.fields.contains(field.name()) {
-            return true;
-        }
-        if let Some((namespace, field_name)) = field.name().split_once('.') {
-            namespace == self.namespace && self.fields.contains(field_name)
-        } else {
-            false
-        }
+        self.fields.contains(field.name())
     }
 }
 
@@ -9352,12 +9887,29 @@ async fn execute_filter_map_program_with_uninitialized(
     input_records: &[RuntimeRecord],
     execution_now: Timestamp,
     acks: Vec<AckSet>,
-    uninitialized: Option<&VmUninitializedInput<'_>>,
+    uninitialized: Option<&VmUninitializedInput>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralError> {
+    let mut uninitialized_fields = match program.output_namespace_input {
+        OutputNamespaceInput::Uninitialized => program
+            .compiled
+            .input_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name().starts_with("output."))
+            .map(|field| field.name().clone())
+            .collect::<HashSet<_>>(),
+        OutputNamespaceInput::Finalized => HashSet::default(),
+    };
+    if let Some(uninitialized) = uninitialized {
+        uninitialized_fields.extend(uninitialized.fields.iter().cloned());
+    }
+    let uninitialized = (!uninitialized_fields.is_empty()).then_some(VmUninitializedInput {
+        fields: uninitialized_fields,
+    });
     let vm_batch = match vm_typed_batch_from_runtime_records_with_uninitialized(
         input_records,
         &program.compiled.input_schema,
-        uninitialized,
+        uninitialized.as_ref(),
     ) {
         Ok(vm_batch) => vm_batch,
         Err(error) => {
@@ -9466,7 +10018,7 @@ async fn flush_ready_window_processor(
     context: WindowFlushContext<'_>,
     state: &mut WindowProcessorState,
     aggregate: &WindowAggregateProgram,
-    compiled_aggregate: &CompiledWindowAggregateProgram,
+    compiled_aggregates: &[CompiledWindowAggregateProgram],
     bounds: WindowBounds,
     now: Timestamp,
 ) -> bool {
@@ -9478,30 +10030,27 @@ async fn flush_ready_window_processor(
         branch,
         output_routes,
     } = context;
-    let Some(base_output_relay) = output_routes
-        .routes
-        .first()
-        .map(|output| output.relay.clone())
-    else {
+    if output_routes.routes.is_empty() {
         state.clear(aggregate);
         return true;
-    };
-    let output_schema =
-        match relay_schema_for_runtime(&branch.runtime, &branch.domain, &base_output_relay) {
-            Ok(schema) => schema,
-            Err(error) => {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    state.entries.iter().map(|entry| &entry.message.acks),
-                    error,
-                );
-                state.clear(aggregate);
-                return true;
-            }
-        };
+    }
+    if output_routes.routes.len() != compiled_aggregates.len() {
+        branch.runtime.handle_internal_processor_error_for_acks(
+            &branch.domain,
+            node_kind,
+            processor,
+            error_policies,
+            state.entries.iter().map(|entry| &entry.message.acks),
+            format!(
+                "window processor '{}' has {} output routes but {} compiled aggregate programs",
+                processor.as_str(),
+                output_routes.routes.len(),
+                compiled_aggregates.len()
+            ),
+        );
+        state.clear(aggregate);
+        return true;
+    }
     let mut changed = false;
     match state.purge_timeouts(now) {
         Ok(purged) => {
@@ -9525,26 +10074,6 @@ async fn flush_ready_window_processor(
         }
     }
     while window_width_met(state, bounds.width_messages, bounds.width_duration, now) {
-        let output_record = match evaluate_window_aggregate(compiled_aggregate, state).await {
-            Ok(record) => record,
-            Err(error) => {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    state.entries.iter().map(|entry| &entry.message.acks),
-                    format!(
-                        "window processor '{}' aggregate failed: {}",
-                        processor.as_str(),
-                        error
-                    ),
-                );
-                state.clear(aggregate);
-                changed = true;
-                break;
-            }
-        };
         let Some(first_entry) = state.entries.front() else {
             break;
         };
@@ -9589,19 +10118,27 @@ async fn flush_ready_window_processor(
                 break;
             }
         };
-        let output_message = RelayMessage {
-            key: first_entry.message.key.clone(),
-            record: output_record.into_runtime_record(output_metadata),
-            acks: AckSet::merged(
-                state
-                    .entries
-                    .iter()
-                    .map(|entry| entry.message.acks.attached()),
-            ),
-        };
-        let forwarded =
-            match RelayRecordBatch::from_messages(output_schema.clone(), vec![output_message]) {
-                Ok(batch) => batch,
+        let mut route_failed = false;
+        for (output_index, compiled_aggregate) in compiled_aggregates.iter().enumerate() {
+            let output_relay = output_routes.routes[output_index].relay.clone();
+            let output_schema =
+                match relay_schema_for_runtime(&branch.runtime, &branch.domain, &output_relay) {
+                    Ok(schema) => schema,
+                    Err(error) => {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            node_kind,
+                            processor,
+                            error_policies,
+                            state.entries.iter().map(|entry| &entry.message.acks),
+                            error,
+                        );
+                        route_failed = true;
+                        break;
+                    }
+                };
+            let output_record = match evaluate_window_aggregate(compiled_aggregate, state).await {
+                Ok(record) => record,
                 Err(error) => {
                     branch.runtime.handle_internal_processor_error_for_acks(
                         &branch.domain,
@@ -9610,35 +10147,73 @@ async fn flush_ready_window_processor(
                         error_policies,
                         state.entries.iter().map(|entry| &entry.message.acks),
                         format!(
-                            "window processor '{}' failed to build output batch: {}",
+                            "window processor '{}' output route '{}' aggregate failed: {}",
                             processor.as_str(),
+                            output_relay.as_str(),
                             error
                         ),
                     );
-                    state.clear(aggregate);
-                    changed = true;
+                    route_failed = true;
                     break;
                 }
             };
-        if let Some(acks) = dispatch_processor_outputs(
-            ProcessorOutputDispatchContext {
-                graph,
-                branch,
-                node_kind,
-                source_kind: ModelKind::WindowProcessor,
-                processor,
-                error_policies,
-                input_relays: std::slice::from_ref(&base_output_relay),
-                filter_source: ProcessorOutputFilterSource::OutputRelay,
-            },
-            output_routes,
-            forwarded,
-        )
-        .await
-        {
-            for ack in acks {
-                ack.ack_success();
+            let output_message = RelayMessage {
+                key: first_entry.message.key.clone(),
+                record: output_record.into_runtime_record(output_metadata.clone()),
+                acks: AckSet::merged(
+                    state
+                        .entries
+                        .iter()
+                        .map(|entry| entry.message.acks.attached()),
+                ),
+            };
+            let forwarded =
+                match RelayRecordBatch::from_messages(output_schema, vec![output_message]) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            node_kind,
+                            processor,
+                            error_policies,
+                            state.entries.iter().map(|entry| &entry.message.acks),
+                            format!(
+                                "window processor '{}' failed to build output route '{}' batch: {}",
+                                processor.as_str(),
+                                output_relay.as_str(),
+                                error
+                            ),
+                        );
+                        route_failed = true;
+                        break;
+                    }
+                };
+            if let Some(acks) = dispatch_processor_output(
+                ProcessorOutputDispatchContext {
+                    graph,
+                    branch,
+                    node_kind,
+                    source_kind: ModelKind::WindowProcessor,
+                    processor,
+                    error_policies,
+                    input_relays: std::slice::from_ref(&output_relay),
+                    filter_source: ProcessorOutputFilterSource::OutputRelay,
+                },
+                output_routes,
+                forwarded,
+                output_index,
+            )
+            .await
+            {
+                for ack in acks {
+                    ack.ack_success();
+                }
             }
+        }
+        if route_failed {
+            state.clear(aggregate);
+            changed = true;
+            break;
         }
         if let Err(error) = advance_window(
             state,
@@ -10391,6 +10966,7 @@ fn advance_window(
 struct WindowAggregateFunctionInjector {
     accumulators: Vec<WindowAggregateAccumulator>,
     demand_types: Vec<ArrowDataType>,
+    demand_offset: usize,
 }
 
 impl VmFunctionInjector for WindowAggregateFunctionInjector {
@@ -10406,11 +10982,13 @@ impl VmFunctionInjector for WindowAggregateFunctionInjector {
                 message: format!("function '{}' is not a window aggregate", function.as_str()),
             });
         };
-        let accumulator = self.accumulators.get(invocation.demand_id).ok_or_else(|| {
+        let accumulator_id = self.demand_offset.saturating_add(invocation.demand_id);
+        let accumulator = self.accumulators.get(accumulator_id).ok_or_else(|| {
             nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
-                    "window aggregate is missing accumulator for demand {}",
-                    invocation.demand_id
+                    "window aggregate is missing accumulator for route demand {} (shared demand \
+                     {})",
+                    invocation.demand_id, accumulator_id
                 ),
             }
         })?;
@@ -10454,6 +11032,7 @@ async fn evaluate_window_aggregate(
         Arc::new(Box::new(WindowAggregateFunctionInjector {
             accumulators: state.accumulators.clone(),
             demand_types: program.demand_types.clone(),
+            demand_offset: program.demand_offset,
         }));
     for assignment in &program.assignments {
         let value = evaluate_window_aggregate_expr(
@@ -10877,10 +11456,28 @@ fn vm_typed_batch_from_runtime_records(
 fn vm_typed_batch_from_runtime_records_with_uninitialized(
     records: &[RuntimeRecord],
     schema: &StdArc<arrow_schema::Schema>,
-    uninitialized: Option<&VmUninitializedInput<'_>>,
+    uninitialized: Option<&VmUninitializedInput>,
+) -> Result<VmTypedBatch, String> {
+    vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
+        records,
+        None,
+        schema,
+        uninitialized,
+    )
+}
+
+fn vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
+    records: &[RuntimeRecord],
+    filter_map_metadata: Option<&[IngestFilterMapMetadata]>,
+    schema: &StdArc<arrow_schema::Schema>,
+    uninitialized: Option<&VmUninitializedInput>,
 ) -> Result<VmTypedBatch, String> {
     let Some(uninitialized) = uninitialized else {
-        return vm_typed_batch_from_runtime_records(records, schema);
+        return vm_typed_batch_from_runtime_records_with_metadata(
+            records,
+            filter_map_metadata,
+            schema,
+        );
     };
     let relaxed_schema = StdArc::new(arrow_schema::Schema::new(
         schema
@@ -10895,7 +11492,11 @@ fn vm_typed_batch_from_runtime_records_with_uninitialized(
             })
             .collect::<Vec<_>>(),
     ));
-    let batch = vm_typed_batch_from_runtime_records(records, &relaxed_schema)?;
+    let batch = vm_typed_batch_from_runtime_records_with_metadata(
+        records,
+        filter_map_metadata,
+        &relaxed_schema,
+    )?;
     let mut columns = batch.columns().to_vec();
     for (index, field) in schema.fields().iter().enumerate() {
         if uninitialized.contains(field) {
@@ -10962,7 +11563,7 @@ fn augment_runtime_record_with_side_inputs(
         .map(|field| (field.name, RuntimeValue::from_remote(field.value)))
         .collect::<HashMap<_, _>>();
     for (name, value) in side_inputs {
-        fields.insert(name.clone(), value.clone());
+        fields.entry(name.clone()).or_insert_with(|| value.clone());
     }
     RuntimeRecord::from_fields_with_metadata(fields, metadata)
 }
@@ -11039,7 +11640,21 @@ async fn runtime_record_lookup_key(
     records: &[RuntimeRecord],
     execution_now: Timestamp,
 ) -> Result<Vec<Option<String>>, String> {
-    let vm_batch = vm_typed_batch_from_runtime_records(records, &call.key_program.input_schema)?;
+    let uninitialized = VmUninitializedInput {
+        fields: call
+            .key_program
+            .input_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name().starts_with("output."))
+            .map(|field| field.name().clone())
+            .collect(),
+    };
+    let vm_batch = vm_typed_batch_from_runtime_records_with_uninitialized(
+        records,
+        &call.key_program.input_schema,
+        Some(&uninitialized),
+    )?;
     let result = execute_program_with_selection_in_context(
         call.key_program.as_ref(),
         &vm_batch,
@@ -11754,12 +12369,15 @@ fn vm_output_row_to_decoded_record(
                         chrono::DateTime::from_timestamp_nanos(values.value(row)).fixed_offset(),
                     )
                 }),
-                VmTypedArray::Generic(_) => {
-                    return Err(format!(
-                        "FILTER-MAP output field '{}' has unsupported type {:?}",
+                VmTypedArray::Generic(array) => {
+                    let ty = parse_as_type_from_arrow(field.data_type())?;
+                    runtime_value_from_arrow_array(
+                        array.as_ref(),
+                        &ty,
+                        field.is_nullable(),
+                        row,
                         field.name(),
-                        field.data_type()
-                    ));
+                    )?
                 }
                 VmTypedArray::Uninitialized { .. } => None,
             };
@@ -11781,8 +12399,124 @@ fn vm_output_row_to_decoded_record(
     Ok(DecodedRecord::from_fields(fields))
 }
 
+fn compile_inferencer_input_mappings(
+    processor: &Identifier,
+    mappings: &[InferencerTensorMapping],
+    input_schema: StdArc<arrow_schema::Schema>,
+    input_sensitivity: VmSchemaSensitivity,
+) -> Result<VmCompiledProgram, String> {
+    let assignments = mappings
+        .iter()
+        .map(|mapping| {
+            Ok(nervix_models::Assignment {
+                target: nervix_models::AssignmentTarget::bare(
+                    Identifier::parse(&mapping.tensor).map_err(|error| {
+                        format!(
+                            "inferencer '{}' tensor name '{}' is not a valid field: {error}",
+                            processor, mapping.tensor
+                        )
+                    })?,
+                ),
+                value: mapping.expression.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            assignments,
+            ..RouteConstruction::default()
+        },
+        SemanticNamespaces::new("input", "mapped_input"),
+    )
+    .map_err(|reason| {
+        format!(
+            "inferencer '{}' INPUTS mapping is invalid: {reason}",
+            processor
+        )
+    })?;
+    let output_schema = StdArc::new(arrow_schema::Schema::new(
+        mappings
+            .iter()
+            .map(|mapping| {
+                arrow_schema::Field::new(
+                    &mapping.tensor,
+                    crate::runtime_schema::arrow_data_type(&mapping.schema.message_type()),
+                    false,
+                )
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let output_sensitivity = VmSchemaSensitivity::from_sensitive_fields(
+        mappings
+            .iter()
+            .filter(|mapping| {
+                expression_reads_sensitive_source(&mapping.expression, &input_sensitivity)
+            })
+            .map(|mapping| mapping.tensor.clone()),
+    );
+    compile_vm_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        output_schema.clone(),
+        output_sensitivity.clone(),
+        [
+            VmCompileBinding::readonly("input", input_schema).with_sensitivity(input_sensitivity),
+            VmCompileBinding::writeonly("mapped_input", output_schema)
+                .with_sensitivity(output_sensitivity),
+        ],
+        VmCompileOptions {
+            output_mode: VmOutputMode::ExplicitOnly,
+            ..VmCompileOptions::default()
+        },
+    )
+    .map_err(|error| {
+        format!(
+            "inferencer '{}' INPUTS compile failed: {}",
+            processor, error.message
+        )
+    })
+}
+
 fn vm_typed_batch_to_runtime_batch(batch: &VmTypedBatch) -> Result<RuntimeRecordBatch, String> {
     let record_batch = batch.to_record_batch().map_err(|error| error.to_string())?;
+    RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
+}
+
+fn vm_typed_batch_selected_rows_to_runtime_batch(
+    batch: &VmTypedBatch,
+    selected_rows: &[usize],
+) -> Result<RuntimeRecordBatch, String> {
+    if selected_rows.len() == batch.row_count() {
+        return vm_typed_batch_to_runtime_batch(batch);
+    }
+    let selected = selected_rows.iter().copied().collect::<HashSet<_>>();
+    let predicate =
+        BooleanArray::from_iter((0..batch.row_count()).map(|row| Some(selected.contains(&row))));
+    let columns = batch
+        .columns()
+        .iter()
+        .zip(batch.schema().fields())
+        .map(|(column, field)| {
+            let column = filter_arrow_array(column.to_array_ref().as_ref(), &predicate)
+                .map_err(|error| error.to_string())?;
+            if !field.is_nullable() && column.null_count() > 0 {
+                return Err(format!(
+                    "required output column '{}' contains null values",
+                    field.name()
+                ));
+            }
+            Ok(column)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let record_batch = if columns.is_empty() {
+        RecordBatch::try_new_with_options(
+            batch.schema().clone(),
+            columns,
+            &arrow_array::RecordBatchOptions::new().with_row_count(Some(selected_rows.len())),
+        )
+    } else {
+        RecordBatch::try_new(batch.schema().clone(), columns)
+    }
+    .map_err(|error| error.to_string())?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
 }
 
@@ -12026,10 +12760,114 @@ async fn flush_branch_inferencer_output(
         );
         return;
     };
-    let input_records = messages
+    let source_records = messages
         .iter()
         .map(|message| message.record.clone())
         .collect::<Vec<_>>();
+    let input_sensitivity = input_relays
+        .first()
+        .and_then(|relay| {
+            relay_schema_for_runtime(&branch.runtime, &branch.domain, relay)
+                .ok()
+                .map(|schema| schema.vm_sensitivity())
+        })
+        .unwrap_or_default();
+    let mapped_program = match compile_inferencer_input_mappings(
+        processor,
+        inputs,
+        input_batch.schema().clone(),
+        input_sensitivity,
+    ) {
+        Ok(program) => program,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                messages.iter().map(|message| &message.acks),
+                error,
+            );
+            return;
+        }
+    };
+    let mapped_vm_input =
+        match vm_typed_batch_from_runtime_records(&source_records, &mapped_program.input_schema) {
+            Ok(batch) => batch,
+            Err(error) => {
+                branch.runtime.handle_internal_processor_error_for_acks(
+                    &branch.domain,
+                    node_kind,
+                    processor,
+                    error_policies,
+                    messages.iter().map(|message| &message.acks),
+                    format!("inferencer '{}' INPUTS batch failed: {error}", processor),
+                );
+                return;
+            }
+        };
+    let mapped_result = match execute_program_with_selection_in_context(
+        &mapped_program,
+        &mapped_vm_input,
+        &VmExecutionContext {
+            now: current_timestamp(),
+            injector: None,
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                messages.iter().map(|message| &message.acks),
+                format!(
+                    "inferencer '{}' INPUTS execution failed: {error}",
+                    processor
+                ),
+            );
+            return;
+        }
+    };
+    let input_records = match (0..mapped_result.batch.row_count())
+        .map(|row| {
+            vm_output_row_to_decoded_record(&mapped_result.batch, row)
+                .map(|record| record.into_runtime_record(messages[row].record.metadata().clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(records) if records.len() == messages.len() => records,
+        Ok(records) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                messages.iter().map(|message| &message.acks),
+                format!(
+                    "inferencer '{}' INPUTS produced {} rows for {} messages",
+                    processor,
+                    records.len(),
+                    messages.len()
+                ),
+            );
+            return;
+        }
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                messages.iter().map(|message| &message.acks),
+                format!("inferencer '{}' INPUTS output failed: {error}", processor),
+            );
+            return;
+        }
+    };
     let output_fields = match session
         .execute(&input_records, inputs, output_schema, execution_mode)
         .await
@@ -12070,10 +12908,7 @@ async fn flush_branch_inferencer_output(
         );
         return;
     }
-    let inferencer_tensors = InferencerFilterMapTensors {
-        inputs,
-        output_schema,
-    };
+    let inferencer_tensors = InferencerFilterMapTensors { output_schema };
     let output_records = match messages
         .iter()
         .zip(output_fields)
@@ -12586,7 +13421,6 @@ struct WasmOutputContext<'a> {
 
 struct WasmDecodedOutputBatch {
     batch: RelayRecordBatch,
-    input_records: Vec<Option<RuntimeRecord>>,
     uninitialized_columns: HashSet<usize>,
 }
 
@@ -13290,7 +14124,6 @@ async fn dispatch_wasm_output_envelopes(
                 processor,
                 error_policies,
                 input_relays,
-                input_schema,
                 dispatch_error,
             },
             output_batch,
@@ -13322,7 +14155,6 @@ struct WasmRouteDispatchContext<'a> {
     processor: &'a Identifier,
     error_policies: &'a ErrorPolicies,
     input_relays: &'a [Identifier],
-    input_schema: &'a Arc<CompiledSchema>,
     dispatch_error: &'static str,
 }
 
@@ -13331,7 +14163,7 @@ async fn dispatch_wasm_output_route(
     mut decoded: WasmDecodedOutputBatch,
     output: &mut RelayProcessorOutputNode,
 ) -> Option<Vec<AckSet>> {
-    if output.compiled_program.is_none() && output.filter_map.is_some() {
+    if output.compiled_program.is_none() {
         let Some(primary_input_relay) = context.input_relays.first() else {
             context
                 .branch
@@ -13397,11 +14229,7 @@ async fn dispatch_wasm_output_route(
         match compile_wasm_output_filter_map_program(
             &context.branch.domain,
             context.processor,
-            context.input_relays,
-            &output.relay,
-            output.filter_map.as_deref(),
-            context.input_schema.arrow_schema(),
-            context.input_schema.vm_sensitivity(),
+            &output.construction,
             output_schema.arrow_schema(),
             output_schema.vm_sensitivity(),
             RuntimeVmCompileContext {
@@ -13530,12 +14358,7 @@ async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let input_records = match wasm_filter_map_records(
-        &output.relay,
-        context.input_relays,
-        &decoded.batch.records,
-        &decoded.input_records,
-    ) {
+    let input_records = match wasm_filter_map_records(&decoded.batch.records) {
         Ok(records) => records,
         Err(error) => {
             context
@@ -13582,12 +14405,11 @@ async fn dispatch_wasm_output_route(
     };
     let output_arrow_schema = decoded.batch.arrow_schema();
     let uninitialized_input = VmUninitializedInput {
-        namespace: output.relay.as_str(),
         fields: decoded
             .uninitialized_columns
             .iter()
             .filter_map(|column_index| output_arrow_schema.fields().get(*column_index))
-            .map(|field| field.name().clone())
+            .map(|field| format!("generated.{}", field.name()))
             .collect(),
     };
     let executed = match execute_filter_map_program_with_uninitialized(
@@ -13638,47 +14460,35 @@ async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let output_batch = match vm_typed_batch_to_runtime_batch(&executed.batch).map_err(|error| {
-        format!(
-            "{} '{}' failed to materialize FILTER-MAP output batch: {}",
-            context.node_kind,
-            context.processor.as_str(),
-            error
-        )
-    }) {
-        Ok(batch) => batch,
-        Err(error) => {
-            context
-                .branch
-                .runtime
-                .handle_internal_processor_error_for_acks(
-                    &context.branch.domain,
-                    context.node_kind,
-                    context.processor,
-                    context.error_policies,
-                    decoded.batch.acks.iter(),
-                    error,
-                );
-            return None;
-        }
-    };
     let mut success_output_rows = Vec::new();
     let mut success_input_rows = Vec::new();
     let mut message_errors = Vec::new();
     for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors()[output_row].first() {
+            let partial_output = vm_partial_output_row_to_runtime_record(
+                &executed.batch,
+                output_row,
+                decoded.batch.records[input_row].metadata().clone(),
+            )
+            .ok();
             message_errors.push(PendingProcessorOutputMessageError {
                 row: input_row,
                 key: decoded.batch.keys[input_row].clone(),
                 record: decoded.batch.records[input_row].clone(),
-                reason: format!(
-                    "{} '{}' FILTER-MAP side error {}: {} at {}",
-                    context.node_kind,
-                    context.processor.as_str(),
-                    side_error.code.as_str(),
-                    side_error.message,
-                    side_error.span
+                error: program.structured_side_error(
+                    format!(
+                        "{} '{}' FILTER-MAP side error {}: {} at {}",
+                        context.node_kind,
+                        context.processor.as_str(),
+                        side_error.code.as_str(),
+                        side_error.message,
+                        side_error.span
+                    ),
+                    side_error.span,
+                    MessageErrorOperation::Set,
                 ),
+                partial_output,
+                materialized_state: materialized_state_snapshot(&input_records[input_row]),
             });
             continue;
         }
@@ -13718,7 +14528,9 @@ async fn dispatch_wasm_output_route(
                 record: error.record,
                 acks,
             },
-            reason: error.reason,
+            error: error.error,
+            partial_output: error.partial_output,
+            materialized_state: error.materialized_state,
         });
     }
     context
@@ -13728,6 +14540,7 @@ async fn dispatch_wasm_output_route(
             &context.branch.domain,
             context.node_kind,
             context.processor,
+            Some(&output.relay),
             &output.message_error_policy,
             planned_errors,
         )
@@ -13735,34 +14548,29 @@ async fn dispatch_wasm_output_route(
     if success_output_rows.is_empty() {
         return Some(Vec::new());
     }
-    let output_batch = if success_output_rows.len() == executed.batch.row_count() {
-        output_batch
-    } else {
-        let success_output_rows = success_output_rows.iter().copied().collect::<HashSet<_>>();
-        let keep = BooleanArray::from_iter(
-            (0..executed.batch.row_count()).map(|row| Some(success_output_rows.contains(&row))),
-        );
-        match output_batch.filter(&keep) {
-            Ok(batch) => batch,
-            Err(error) => {
-                context
-                    .branch
-                    .runtime
-                    .handle_internal_processor_error_for_acks(
-                        &context.branch.domain,
+    let output_batch = match vm_typed_batch_selected_rows_to_runtime_batch(
+        &executed.batch,
+        &success_output_rows,
+    ) {
+        Ok(batch) => batch,
+        Err(error) => {
+            context
+                .branch
+                .runtime
+                .handle_internal_processor_error_for_acks(
+                    &context.branch.domain,
+                    context.node_kind,
+                    context.processor,
+                    context.error_policies,
+                    ack_queues.iter().flatten(),
+                    format!(
+                        "{} '{}' failed to materialize successful FILTER-MAP rows: {}",
                         context.node_kind,
-                        context.processor,
-                        context.error_policies,
-                        ack_queues.iter().flatten(),
-                        format!(
-                            "{} '{}' failed to filter FILTER-MAP output batch: {}",
-                            context.node_kind,
-                            context.processor.as_str(),
-                            error
-                        ),
-                    );
-                return None;
-            }
+                        context.processor.as_str(),
+                        error
+                    ),
+                );
+            return None;
         }
     };
     let records = match output_schema.decoded_records_from_arrow_batch(&output_batch) {
@@ -13895,48 +14703,13 @@ fn wasm_output_token_use_counts(outputs: &[WasmMaterializedOutput]) -> HashMap<u
     token_use_counts
 }
 
-fn wasm_filter_map_records(
-    output_relay: &Identifier,
-    input_relays: &[Identifier],
-    output_records: &[RuntimeRecord],
-    input_records: &[Option<RuntimeRecord>],
-) -> Result<Vec<RuntimeRecord>, String> {
-    if output_records.len() != input_records.len() {
-        return Err(format!(
-            "WASM output record count {} does not match source input record count {}",
-            output_records.len(),
-            input_records.len()
-        ));
-    }
+fn wasm_filter_map_records(output_records: &[RuntimeRecord]) -> Result<Vec<RuntimeRecord>, String> {
     Ok(output_records
         .iter()
-        .zip(input_records)
-        .map(|(output_record, input_record)| {
+        .map(|output_record| {
             let metadata = output_record.metadata().clone();
             let mut fields = HashMap::new();
-            insert_wasm_filter_map_fields(&mut fields, output_relay.as_str(), output_record, true);
-            if let Some(input_record) = input_record {
-                for input_relay in input_relays {
-                    insert_wasm_filter_map_fields(
-                        &mut fields,
-                        input_relay.as_str(),
-                        input_record,
-                        false,
-                    );
-                }
-                if input_relays
-                    .iter()
-                    .all(|relay| relay.as_str() != WASM_INPUT_NAMESPACE)
-                    && output_relay.as_str() != WASM_INPUT_NAMESPACE
-                {
-                    insert_wasm_filter_map_fields(
-                        &mut fields,
-                        WASM_INPUT_NAMESPACE,
-                        input_record,
-                        false,
-                    );
-                }
-            }
+            insert_wasm_filter_map_fields(&mut fields, "generated", output_record, true);
             RuntimeRecord::from_fields_with_metadata(fields, metadata)
         })
         .collect())
@@ -13982,6 +14755,7 @@ async fn apply_wasm_sidecar_terminal_decisions(
                         acks: context.acks,
                     },
                     message_error.reason.clone(),
+                    MessageErrorOperation::Wasm,
                 )
                 .await;
         }
@@ -14036,7 +14810,6 @@ fn relay_batch_from_wasm_output(
 ) -> Result<WasmDecodedOutputBatch, String> {
     let mut metadata = Vec::with_capacity(rows.len());
     let mut acks = Vec::with_capacity(rows.len());
-    let mut input_records = Vec::with_capacity(rows.len());
     for row in rows {
         let source_context = row
             .source_token
@@ -14048,8 +14821,6 @@ fn relay_batch_from_wasm_output(
             },
             |context| context.metadata.clone(),
         ));
-        input_records.push(source_context.map(|context| context.record.clone()));
-
         let mut row_ack_sets = Vec::with_capacity(row.tokens.len());
         for token in row.tokens {
             let remaining_uses = token_use_counts
@@ -14079,7 +14850,6 @@ fn relay_batch_from_wasm_output(
     RelayRecordBatch::from_filtered_parts(key.clone(), batch, records, metadata, acks).map(
         |batch| WasmDecodedOutputBatch {
             batch,
-            input_records,
             uninitialized_columns,
         },
     )
@@ -14274,12 +15044,13 @@ fn generator_context_batch(
 }
 
 async fn execute_generator_program_on_context(
-    program: &CompiledFilterMapProgram,
+    program: &CompiledProgramWithMaterializedInterest,
     input: &VmTypedBatch,
     execution_now: Timestamp,
-) -> Result<Option<RuntimeRecord>, String> {
+    materialized_state: &HashMap<String, RuntimeValue>,
+) -> Result<SingleRecordFilterMapOutcome, String> {
     let result = execute_program_with_selection_in_context(
-        program,
+        program.compiled.as_ref(),
         input,
         &VmExecutionContext {
             now: execution_now,
@@ -14289,7 +15060,7 @@ async fn execute_generator_program_on_context(
     .await
     .map_err(|error| format!("GENERATOR execution failed: {error}"))?;
     if result.batch.row_count() == 0 {
-        return Ok(None);
+        return Ok(SingleRecordFilterMapOutcome::Filtered);
     }
     if result.batch.row_count() != 1 {
         return Err(format!(
@@ -14298,20 +15069,28 @@ async fn execute_generator_program_on_context(
         ));
     }
     if let Some(side_error) = result.batch.errors().iter().flatten().next() {
-        return Err(format!(
-            "GENERATOR side error {}: {} at {}",
-            side_error.code.as_str(),
-            side_error.message,
-            side_error.span
-        ));
+        let metadata =
+            RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now);
+        return Ok(SingleRecordFilterMapOutcome::MessageError {
+            error: program.structured_side_error(
+                format!(
+                    "GENERATOR side error {}: {} at {}",
+                    side_error.code.as_str(),
+                    side_error.message,
+                    side_error.span
+                ),
+                side_error.span,
+                MessageErrorOperation::Set,
+            ),
+            partial_output: vm_partial_output_row_to_runtime_record(&result.batch, 0, metadata)
+                .ok(),
+            materialized_state: materialized_state.clone(),
+        });
     }
     vm_output_row_to_decoded_record(&result.batch, 0).map(|record| {
-        Some(
-            record.into_runtime_record(RuntimeRecordMetadata::from_ingested_at_watermarks(
-                execution_now,
-                execution_now,
-            )),
-        )
+        SingleRecordFilterMapOutcome::Output(record.into_runtime_record(
+            RuntimeRecordMetadata::from_ingested_at_watermarks(execution_now, execution_now),
+        ))
     })
 }
 
@@ -14531,6 +15310,207 @@ pub(crate) fn scheduled_branched_stream_owner_nodes(
 
 fn current_timestamp() -> Timestamp {
     Timestamp::now()
+}
+
+fn structured_message_error(
+    code: MessageErrorCode,
+    message: String,
+    operation: MessageErrorOperation,
+    operation_index: Option<u32>,
+    fields: impl IntoIterator<Item = FieldPath>,
+) -> StructuredMessageError {
+    StructuredMessageError {
+        reference: uuid::Uuid::now_v7(),
+        code,
+        message,
+        operation,
+        operation_index,
+        fields: SortedSet::from_unsorted(fields.into_iter().collect()),
+        occurred_at: current_timestamp(),
+    }
+}
+
+fn planned_message_error(
+    message: RelayMessage,
+    code: MessageErrorCode,
+    reason: String,
+    operation: MessageErrorOperation,
+    operation_index: Option<u32>,
+    fields: impl IntoIterator<Item = FieldPath>,
+    partial_output: Option<RuntimeRecord>,
+    materialized_state: HashMap<String, RuntimeValue>,
+) -> PlannedMessageError {
+    PlannedMessageError {
+        message,
+        error: structured_message_error(code, reason, operation, operation_index, fields),
+        partial_output,
+        materialized_state,
+    }
+}
+
+fn planned_structured_message_error(
+    message: RelayMessage,
+    error: StructuredMessageError,
+    partial_output: Option<RuntimeRecord>,
+    materialized_state: HashMap<String, RuntimeValue>,
+) -> PlannedMessageError {
+    PlannedMessageError {
+        message,
+        error,
+        partial_output,
+        materialized_state,
+    }
+}
+
+fn materialized_state_snapshot(record: &RuntimeRecord) -> HashMap<String, RuntimeValue> {
+    record
+        .fields()
+        .filter(|(name, _)| name.starts_with("relay_state."))
+        .map(|(name, value)| (name.to_string(), value.clone()))
+        .collect()
+}
+
+fn operation_for_filter_label(label: &str) -> MessageErrorOperation {
+    match label {
+        "FROM WHERE" => MessageErrorOperation::SourceWhere,
+        "FILTER WHERE" => MessageErrorOperation::FilterWhere,
+        _ => MessageErrorOperation::Set,
+    }
+}
+
+fn preserved_message_error_branch(
+    target_branching: &[Identifier],
+    incoming: &Option<BranchKey>,
+    relay: &Identifier,
+    reference: uuid::Uuid,
+) -> Result<Option<BranchKey>, String> {
+    match (target_branching.is_empty(), incoming.as_ref()) {
+        (true, None) | (false, Some(_)) => Ok(incoming.clone()),
+        (true, Some(_)) => Err(format!(
+            "unbranched DLQ relay '{}' cannot receive branched message error {}",
+            relay, reference
+        )),
+        (false, None) => Err(format!(
+            "branched DLQ relay '{}' cannot receive unbranched message error {}",
+            relay, reference
+        )),
+    }
+}
+
+fn parse_as_type_from_arrow(
+    data_type: &ArrowDataType,
+) -> Result<nervix_models::ParseAsType, String> {
+    use nervix_models::ParseAsType;
+
+    match data_type {
+        ArrowDataType::UInt8 => Ok(ParseAsType::U8),
+        ArrowDataType::Int8 => Ok(ParseAsType::I8),
+        ArrowDataType::UInt16 => Ok(ParseAsType::U16),
+        ArrowDataType::Int16 => Ok(ParseAsType::I16),
+        ArrowDataType::UInt32 => Ok(ParseAsType::U32),
+        ArrowDataType::Int32 => Ok(ParseAsType::I32),
+        ArrowDataType::UInt64 => Ok(ParseAsType::U64),
+        ArrowDataType::Int64 => Ok(ParseAsType::I64),
+        ArrowDataType::Boolean => Ok(ParseAsType::Bool),
+        ArrowDataType::Utf8 => Ok(ParseAsType::String),
+        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, _) => {
+            Ok(ParseAsType::Datetime)
+        }
+        ArrowDataType::Float32 => Ok(ParseAsType::F32),
+        ArrowDataType::Float64 => Ok(ParseAsType::F64),
+        ArrowDataType::List(element) => Ok(ParseAsType::Vec {
+            element: Box::new(parse_as_type_from_arrow(element.data_type())?),
+        }),
+        ArrowDataType::FixedSizeList(element, len) => Ok(ParseAsType::Array {
+            element: Box::new(parse_as_type_from_arrow(element.data_type())?),
+            len: u32::try_from(*len)
+                .map_err(|_| format!("negative fixed-size list length {len}"))?,
+        }),
+        other => Err(format!(
+            "partial output does not support Arrow type {other:?}"
+        )),
+    }
+}
+
+fn vm_partial_output_row_to_runtime_record(
+    batch: &VmTypedBatch,
+    row: usize,
+    metadata: RuntimeRecordMetadata,
+) -> Result<RuntimeRecord, String> {
+    let fields = batch
+        .schema()
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        .filter_map(|(field, column)| {
+            let array: &dyn Array = match column {
+                VmTypedArray::UInt8(array) => array,
+                VmTypedArray::Int8(array) => array,
+                VmTypedArray::UInt16(array) => array,
+                VmTypedArray::Int16(array) => array,
+                VmTypedArray::UInt32(array) => array,
+                VmTypedArray::Int32(array) => array,
+                VmTypedArray::UInt64(array) => array,
+                VmTypedArray::Int64(array) => array,
+                VmTypedArray::Float32(array) => array,
+                VmTypedArray::Float64(array) => array,
+                VmTypedArray::Boolean(array) => array,
+                VmTypedArray::Utf8(array) => array,
+                VmTypedArray::Datetime(array) => array,
+                VmTypedArray::Generic(array) => array.as_ref(),
+                VmTypedArray::Uninitialized { .. } => return None,
+            };
+            let field_name = field
+                .name()
+                .strip_prefix("output.")
+                .unwrap_or(field.name())
+                .to_string();
+            Some(
+                parse_as_type_from_arrow(field.data_type())
+                    .and_then(|ty| {
+                        runtime_value_from_arrow_array(array, &ty, true, row, &field_name)
+                    })
+                    .map(|value| value.map(|value| (field_name, value))),
+            )
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten();
+    Ok(RuntimeRecord::from_fields_with_metadata(fields, metadata))
+}
+
+fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<FieldPath> {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        .filter_map(|(field, column)| {
+            let invalid = match column {
+                VmTypedArray::Uninitialized { .. } => true,
+                VmTypedArray::UInt8(array) => array.is_null(row),
+                VmTypedArray::Int8(array) => array.is_null(row),
+                VmTypedArray::UInt16(array) => array.is_null(row),
+                VmTypedArray::Int16(array) => array.is_null(row),
+                VmTypedArray::UInt32(array) => array.is_null(row),
+                VmTypedArray::Int32(array) => array.is_null(row),
+                VmTypedArray::UInt64(array) => array.is_null(row),
+                VmTypedArray::Int64(array) => array.is_null(row),
+                VmTypedArray::Float32(array) => array.is_null(row),
+                VmTypedArray::Float64(array) => array.is_null(row),
+                VmTypedArray::Boolean(array) => array.is_null(row),
+                VmTypedArray::Utf8(array) => array.is_null(row),
+                VmTypedArray::Datetime(array) => array.is_null(row),
+                VmTypedArray::Generic(array) => array.is_null(row),
+            };
+            (invalid && !field.is_nullable()).then(|| {
+                FieldPath::new(format!(
+                    "output.{}",
+                    field.name().strip_prefix("output.").unwrap_or(field.name())
+                ))
+            })
+        })
+        .collect()
 }
 
 fn domain_clock_window_matches(

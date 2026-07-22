@@ -27,8 +27,6 @@ struct MqttTaskContext {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branching: Vec<Identifier>,
-    branch_value_mappings: Vec<BranchValueMapping>,
     branched_senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
     events: broadcast::Sender<RuntimeEvent>,
 }
@@ -160,7 +158,6 @@ impl MqttIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let branching = dependencies.branching;
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances as usize);
@@ -183,8 +180,6 @@ impl MqttIngestor {
                 output_routes: output_routes.clone(),
                 filter_where: filter_where.clone(),
                 codec: codec.clone(),
-                branching: branching.clone(),
-                branch_value_mappings: dependencies.branch_value_mappings.clone(),
                 branched_senders: branched_senders.clone(),
                 events: runtime.events.clone(),
             };
@@ -859,8 +854,6 @@ impl MqttIngestor {
                 domain: &context.domain,
                 ingestor: &context.ingestor,
                 timestamp_source: context.timestamp_source.as_ref(),
-                branching: &context.branching,
-                branch_value_mappings: Some(&context.branch_value_mappings),
                 output_routes: &mut output_routes,
                 filter_where: context.filter_where.as_ref(),
                 branched_senders: &context.branched_senders,

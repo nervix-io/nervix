@@ -39,13 +39,15 @@ Feature: ClickHouse TLS resource mounts
           'client_id' = 'nervix-cucumber-clickhouse-tls-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC tls_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC tls_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT clickhouse_client
         TYPE CLICKHOUSE
         MOUNT dev_tls
@@ -55,17 +57,10 @@ Feature: ClickHouse TLS resource mounts
           'password' = 'nervix',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE EMITTER to_ch
-        FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE tls_notifications_out_{{test_id}}
-        VALUES {
-          "clickhouse_user_id" = notifications.user_id,
-          "clickhouse_now" = NOW() AS STRING,
-          "clickhouse_action" = LOWER(notifications.action)
-        }
+        CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client INSERT TO TABLE tls_notifications_out_{{test_id}} VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = LOWER(input.action) }
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

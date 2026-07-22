@@ -16,27 +16,30 @@ use arrow_schema::Schema as ArrowSchema;
 use fjall::Database;
 use nervix_interconnect::{RelayPayload, RelayPayloadKind};
 use nervix_models::{
-    AckMode, BranchInitiatorSelection, BranchSelection, BranchValueMapping, ClientConfigEntry,
-    ClusterSchedule, CodecWireFormat, CreateBranch, CreateClientHttp, CreateClientMqtt,
-    CreateClientPrometheus, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSchema, CreateWasmProcessor, CreateWindowProcessor, Domain, DomainConfig, DomainPace,
-    DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink, ErrorPolicies,
-    GeneralErrorPolicy, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, MessageErrorPolicy,
-    ModelKind, MqttIngestMode, MqttQos, MqttSession, ParseAsType, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, RemoteAckOutcome,
-    RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus, RetryPolicy,
-    ScheduledNode, SchemaField, Timestamp, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection,
+    ClientConfigEntry, ClusterSchedule, CodecWireFormat, CreateBranch, CreateClientHttp,
+    CreateClientMqtt, CreateClientPrometheus, CreateClientWebsockets, CreateClientZeroMq,
+    CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateJsonWireSchema, CreateJunction, CreateLookup, CreateReingestor,
+    CreateRelay, CreateSchema, CreateWasmProcessor, CreateWindowProcessor, Domain, DomainConfig,
+    DomainPace, DomainSchedule, DomainState, DomainStatus, DomainTick, EmitSink, ErrorPolicies,
+    Expression, FieldPath, FieldReference, FieldScope, GeneralErrorPolicy, Identifier,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema, IngestSource,
+    IngestTimestampSource, JsonType, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy,
+    ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
+    RemoteAckOutcome, RemoteAckResolution, ResourceId, ResourceVersion, ResourceVersionStatus,
+    RetryPolicy, ScheduledNode, SchemaField, StructuredMessageError, Timestamp, WindowBound,
+    WireSchemaField, ZeroMqIngestMode,
 };
+use nervix_nspl::window_processor::aggregate::lower_window_assignments;
 use nervix_wasm::{
     WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmEnvelope, WasmOutputColumnRef,
     WasmOutputRow, WasmRoutedOutput,
 };
 use ordered_float::OrderedFloat;
-use sorted_vec::SortedVec;
+use sorted_vec::{SortedSet, SortedVec};
 
 fn inferencer_tensor_schema(size: u32) -> InferencerTensorSchema {
     InferencerTensorSchema {
@@ -56,7 +59,7 @@ use super::{
     BranchInstanceRegistry, BranchKey, BranchedProcessorOperationSpec, RelayMessage,
     RuntimeStateKind, RuntimeStatePlacement, RuntimeStateStore, STUPID_CHANNEL_CAPACITY_REMOVE_ME,
     WindowAggregateFunction, WindowProcessorState, advance_window, evaluate_window_aggregate,
-    message_timestamp, parse_aggregate_program, window_output_metadata,
+    message_timestamp, window_output_metadata,
 };
 use crate::{
     metrics::RuntimeMetrics,
@@ -67,6 +70,37 @@ use crate::{
 
 fn identifier(raw: &str) -> Identifier {
     Identifier::parse(raw).expect("valid identifier")
+}
+
+fn expression(raw: &str) -> nervix_models::Expression {
+    nervix_nspl::parse_expression(raw).expect("valid semantic expression")
+}
+
+fn construction(raw: &str) -> nervix_models::RouteConstruction {
+    nervix_nspl::parse_route_construction(raw).expect("valid route construction")
+}
+
+fn window_outputs(relay: &str, set: &str) -> ProcessorOutputs {
+    ProcessorOutputs::new(vec![ProcessorOutput {
+        relay: identifier(relay),
+        construction: construction(set),
+        flush_policy: None,
+        message_error_policy: MessageErrorPolicy::Log,
+        branch: None,
+    }])
+}
+
+fn with_inherit_all(mut outputs: ProcessorOutputs) -> ProcessorOutputs {
+    for output in &mut outputs.routes {
+        output.construction.inherit = Some(nervix_models::Inheritance::All);
+    }
+    outputs
+}
+
+fn window_aggregate(set: &str) -> nervix_nspl::window_processor::aggregate::WindowAggregateProgram {
+    lower_window_assignments(&construction(set))
+        .expect("window route construction should lower")
+        .inner
 }
 
 fn compile_window_aggregate_for_test(
@@ -135,18 +169,18 @@ fn nonzero_capacity(capacity: usize) -> NonZeroUsize {
     NonZeroUsize::new(capacity).expect("test relay capacity must be nonzero")
 }
 
-fn branched_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchInitiatorSelection {
+fn branched_by(relay: &str, fields: &[&str]) -> OutputBranch {
     if fields.is_empty() {
-        BranchInitiatorSelection::unbranched()
+        OutputBranch::Unbranched
     } else {
-        BranchInitiatorSelection::branched_by(
-            identifier(&format!("by_{relay}")),
-            branch_mappings(relay, fields),
-        )
+        OutputBranch::BranchedBy {
+            branch: identifier(&format!("by_{relay}")),
+            assignments: branch_mappings(fields),
+        }
     }
 }
 
-fn processor_branched_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchSelection {
+fn processor_branched_by(relay: &str, fields: &[&str]) -> BranchSelection {
     if fields.is_empty() {
         BranchSelection::unbranched()
     } else {
@@ -154,13 +188,18 @@ fn processor_branched_by(_schema: &str, relay: &str, fields: &[&str]) -> BranchS
     }
 }
 
-fn branch_mappings(relay: &str, fields: &[&str]) -> Vec<BranchValueMapping> {
+fn branch_mappings(fields: &[&str]) -> Vec<Assignment> {
     fields
         .iter()
-        .map(|field| BranchValueMapping {
-            field: identifier(field),
-            relay: identifier(relay),
-            relay_field: identifier(field),
+        .map(|field| Assignment {
+            target: AssignmentTarget {
+                scope: AssignmentTargetScope::Bare,
+                field: identifier(field),
+            },
+            value: Expression::Field(FieldReference::scoped(
+                FieldScope::Message,
+                identifier(field),
+            )),
         })
         .collect()
 }
@@ -341,18 +380,17 @@ async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array(
             },
         ],
     });
-    let aggregate = parse_aggregate_program(
-        "summary.count = COUNT(events.latency), summary.adjusted_count = COUNT(events.latency) + \
-         2, summary.p50 = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 100, '2s'), \
-         summary.latencies = [PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 100, '2s'), \
-         PERCENTILE_LINEAR_HISTOGRAM(events.latency, 100, 10, 0, 100, '2s')]",
-    )
-    .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate(
+        "SET count = COUNT(input.latency), adjusted_count = COUNT(input.latency) + 2, p50 = \
+         PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), latencies = \
+         [PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), \
+         PERCENTILE_LINEAR_HISTOGRAM(input.latency, 100, 10, 0, 100, '2s')]",
+    );
+    let mut state = WindowProcessorState::new(&aggregate);
     for value in [10.0, 20.0, 30.0] {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 Timestamp::now(),
                 RelayMessage {
                     key: None,
@@ -366,8 +404,7 @@ async fn window_aggregate_evaluator_computes_vm_expression_percentile_and_array(
             .expect("aggregate state should accept message");
     }
 
-    let compiled =
-        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::F64, &output_schema);
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::F64, &output_schema);
     let record = evaluate_window_aggregate(&compiled, &state)
         .await
         .expect("aggregate should evaluate");
@@ -412,14 +449,12 @@ async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
             },
         ],
     });
-    let aggregate = parse_aggregate_program(
-        "summary.p50 = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 100, '2s'), \
-         summary.p90 = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 90, 10, 0, 100, '2s'), \
-         summary.p50_other_range = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 200, \
-         '2s')",
-    )
-    .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate(
+        "SET p50 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s'), p90 = \
+         PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 10, 0, 100, '2s'), p50_other_range = \
+         PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 200, '2s')",
+    );
+    let mut state = WindowProcessorState::new(&aggregate);
 
     assert_eq!(
         state.accumulators.len(),
@@ -430,7 +465,7 @@ async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
     for value in [10, 20, 30] {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 Timestamp::now(),
                 RelayMessage {
                     key: None,
@@ -444,8 +479,7 @@ async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
             .expect("aggregate state should accept message");
     }
 
-    let compiled =
-        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
     let record = evaluate_window_aggregate(&compiled, &state)
         .await
         .expect("aggregate should evaluate");
@@ -466,13 +500,12 @@ async fn window_linear_histogram_percentiles_share_accumulator_by_config() {
 
 #[test]
 fn window_advance_removes_step_messages() {
-    let aggregate = parse_aggregate_program("summary.count = COUNT(events.latency)")
-        .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate("SET count = COUNT(input.latency)");
+    let mut state = WindowProcessorState::new(&aggregate);
     for sequence in 0..5 {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 Timestamp::now(),
                 RelayMessage {
                     key: None,
@@ -486,14 +519,8 @@ fn window_advance_removes_step_messages() {
             .expect("aggregate state should accept message");
     }
 
-    advance_window(
-        &mut state,
-        &aggregate.inner,
-        Some(2),
-        None,
-        Timestamp::now(),
-    )
-    .expect("window should advance");
+    advance_window(&mut state, &aggregate, Some(2), None, Timestamp::now())
+        .expect("window should advance");
 
     assert_eq!(state.entries.len(), 3);
     assert_eq!(state.entries.front().map(|entry| entry.sequence), Some(2));
@@ -516,18 +543,17 @@ async fn linear_histogram_zero_delay_removes_step_values_immediately() {
             sensitive: false,
         }],
     });
-    let aggregate = parse_aggregate_program(
-        "summary.p0 = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 0, 10, 0, 100, '0ms')",
-    )
-    .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate(
+        "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '0ms')",
+    );
+    let mut state = WindowProcessorState::new(&aggregate);
     for (timestamp, value) in [
         (Timestamp::from_unix_nanos(0), 10),
         (Timestamp::from_unix_nanos(1_000_000_000), 90),
     ] {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 timestamp,
                 RelayMessage {
                     key: None,
@@ -543,14 +569,13 @@ async fn linear_histogram_zero_delay_removes_step_values_immediately() {
 
     advance_window(
         &mut state,
-        &aggregate.inner,
+        &aggregate,
         Some(1),
         None,
         Timestamp::from_unix_nanos(1_000_000_000),
     )
     .expect("window should advance");
-    let compiled =
-        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
     let record = evaluate_window_aggregate(&compiled, &state)
         .await
         .expect("aggregate should evaluate");
@@ -572,18 +597,17 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
             sensitive: false,
         }],
     });
-    let aggregate = parse_aggregate_program(
-        "summary.p0 = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 0, 10, 0, 100, '2s')",
-    )
-    .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate(
+        "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '2s')",
+    );
+    let mut state = WindowProcessorState::new(&aggregate);
     for (timestamp, value) in [
         (Timestamp::from_unix_nanos(0), 10),
         (Timestamp::from_unix_nanos(1_000_000_000), 90),
     ] {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 timestamp,
                 RelayMessage {
                     key: None,
@@ -599,14 +623,13 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
 
     advance_window(
         &mut state,
-        &aggregate.inner,
+        &aggregate,
         Some(1),
         None,
         Timestamp::from_unix_nanos(1_000_000_000),
     )
     .expect("window should advance");
-    let compiled =
-        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
     let retained = evaluate_window_aggregate(&compiled, &state)
         .await
         .expect("aggregate should evaluate while delay retains value");
@@ -617,7 +640,7 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
 
     state
         .push_message(
-            &aggregate.inner,
+            &aggregate,
             Timestamp::from_unix_nanos(2_000_000_000),
             RelayMessage {
                 key: None,
@@ -639,7 +662,7 @@ async fn linear_histogram_delay_retains_removed_step_values_until_expired() {
 
     state
         .push_message(
-            &aggregate.inner,
+            &aggregate,
             Timestamp::from_unix_nanos(4_000_000_000),
             RelayMessage {
                 key: None,
@@ -671,18 +694,17 @@ async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() 
             sensitive: false,
         }],
     });
-    let aggregate = parse_aggregate_program(
-        "summary.p0 = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 0, 10, 0, 100, '2s')",
-    )
-    .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate(
+        "SET p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '2s')",
+    );
+    let mut state = WindowProcessorState::new(&aggregate);
     for (timestamp, value) in [
         (Timestamp::from_unix_nanos(0), 10),
         (Timestamp::from_unix_nanos(1_000_000_000), 90),
     ] {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 timestamp,
                 RelayMessage {
                     key: None,
@@ -698,7 +720,7 @@ async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() 
 
     advance_window(
         &mut state,
-        &aggregate.inner,
+        &aggregate,
         Some(1),
         None,
         Timestamp::from_unix_nanos(1_000_000_000),
@@ -721,8 +743,7 @@ async fn linear_histogram_delay_exposes_timeout_deadline_without_new_messages() 
     );
     assert_eq!(state.next_timeout_deadline(), None);
 
-    let compiled =
-        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
     let record = evaluate_window_aggregate(&compiled, &state)
         .await
         .expect("aggregate should evaluate after timeout purge");
@@ -769,17 +790,16 @@ async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
             },
         ],
     });
-    let aggregate = parse_aggregate_program(
-        "summary.first_latency = FIRST(events.latency), summary.last_latency = \
-         LAST(events.latency), summary.min_latency = MIN(events.latency), summary.max_latency = \
-         MAX(events.latency), summary.total_latency = SUM(events.latency)",
-    )
-    .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate(
+        "SET first_latency = FIRST(input.latency), last_latency = LAST(input.latency), \
+         min_latency = MIN(input.latency), max_latency = MAX(input.latency), total_latency = \
+         SUM(input.latency)",
+    );
+    let mut state = WindowProcessorState::new(&aggregate);
     for value in [30, 10, 20] {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 Timestamp::now(),
                 RelayMessage {
                     key: None,
@@ -798,8 +818,7 @@ async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
         3,
         "FIRST/LAST and MIN/MAX should each share one physical structure"
     );
-    let compiled =
-        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
     let record = evaluate_window_aggregate(&compiled, &state)
         .await
         .expect("aggregate should evaluate");
@@ -810,14 +829,8 @@ async fn window_aggregate_state_updates_first_last_min_max_and_sum() {
     assert_eq!(record.value("max_latency"), Some(&RuntimeValue::I64(30)));
     assert_eq!(record.value("total_latency"), Some(&RuntimeValue::I64(60)));
 
-    advance_window(
-        &mut state,
-        &aggregate.inner,
-        Some(1),
-        None,
-        Timestamp::now(),
-    )
-    .expect("window should advance");
+    advance_window(&mut state, &aggregate, Some(1), None, Timestamp::now())
+        .expect("window should advance");
     let record = evaluate_window_aggregate(&compiled, &state)
         .await
         .expect("aggregate should evaluate after removal");
@@ -849,9 +862,8 @@ fn window_message_timestamp_uses_low_watermark() {
 
 #[test]
 fn window_output_metadata_uses_window_low_and_emit_high_watermark() {
-    let aggregate = parse_aggregate_program("summary.count = COUNT(events.latency)")
-        .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate("SET count = COUNT(input.latency)");
+    let mut state = WindowProcessorState::new(&aggregate);
     for timestamp in [
         Timestamp::from_unix_nanos(30),
         Timestamp::from_unix_nanos(10),
@@ -859,7 +871,7 @@ fn window_output_metadata_uses_window_low_and_emit_high_watermark() {
     ] {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 timestamp,
                 RelayMessage {
                     key: None,
@@ -911,19 +923,18 @@ async fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
             },
         ],
     });
-    let aggregate = parse_aggregate_program(
-        "summary.count = COUNT(events.latency), summary.first_latency = FIRST(events.latency), \
-         summary.p50 = PERCENTILE_LINEAR_HISTOGRAM(events.latency, 50, 10, 0, 100, '2s')",
-    )
-    .expect("aggregate should parse");
-    let mut state = WindowProcessorState::new(&aggregate.inner);
+    let aggregate = window_aggregate(
+        "SET count = COUNT(input.latency), first_latency = FIRST(input.latency), p50 = \
+         PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s')",
+    );
+    let mut state = WindowProcessorState::new(&aggregate);
     for (timestamp, value) in [
         (Timestamp::from_unix_nanos(10), 10),
         (Timestamp::from_unix_nanos(20), 30),
     ] {
         state
             .push_message(
-                &aggregate.inner,
+                &aggregate,
                 timestamp,
                 RelayMessage {
                     key: string_branch_key("tenant", "acme"),
@@ -940,10 +951,9 @@ async fn window_processor_state_snapshot_roundtrips_entries_and_accumulators() {
             .expect("window should accept message");
     }
 
-    let restored = WindowProcessorState::from_snapshot(&aggregate.inner, state.to_snapshot())
+    let restored = WindowProcessorState::from_snapshot(&aggregate, state.to_snapshot())
         .expect("snapshot should restore");
-    let compiled =
-        compile_window_aggregate_for_test(&aggregate.inner, ParseAsType::I64, &output_schema);
+    let compiled = compile_window_aggregate_for_test(&aggregate, ParseAsType::I64, &output_schema);
     let record = evaluate_window_aggregate(&compiled, &restored)
         .await
         .expect("restored aggregate should evaluate");
@@ -1070,7 +1080,8 @@ fn validate_wasm_test_output_groups(
             .iter()
             .map(|(relay, _)| super::RelayProcessorOutputNode {
                 relay: relay.clone(),
-                filter_map: None,
+                construction: nervix_models::RouteConstruction::default(),
+                branch: None,
                 flush_policy: None,
                 message_error_policy: MessageErrorPolicy::Log,
                 pending: Vec::new(),
@@ -2305,13 +2316,12 @@ async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
                             ingestor.clone(),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
-                                output_routes: (ProcessorOutputs::single(relay.clone()))
-                                    .with_flush_policy(
-                                        "100ms".to_string(),
-                                        Some("1MiB".to_string()),
-                                    ),
+                                output_routes: with_inherit_all(ProcessorOutputs::single(
+                                    relay.clone(),
+                                ))
+                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                                .with_branch(OutputBranch::Unbranched),
                                 decode_using_codec: codec.clone(),
-                                branched_by: BranchInitiatorSelection::unbranched(),
                                 timestamp_source: None,
                                 source: IngestSource::Mqtt {
                                     client,
@@ -2446,13 +2456,12 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
                             ingestor.clone(),
                             nervix_models::Model::Ingestor(CreateIngestor {
                                 name: ingestor.clone(),
-                                output_routes: (ProcessorOutputs::single(relay.clone()))
-                                    .with_flush_policy(
-                                        "100ms".to_string(),
-                                        Some("1MiB".to_string()),
-                                    ),
+                                output_routes: with_inherit_all(ProcessorOutputs::single(
+                                    relay.clone(),
+                                ))
+                                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                                .with_branch(OutputBranch::Unbranched),
                                 decode_using_codec: codec.clone(),
-                                branched_by: BranchInitiatorSelection::unbranched(),
                                 timestamp_source: None,
                                 source: IngestSource::Mqtt {
                                     client,
@@ -2511,11 +2520,12 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 from: ProcessorInputs::single(identifier("orders")),
                 output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
-                deduplicate_on: "orders.order_id".to_string(),
+                branched_by: processor_branched_by("orders", &["tenant"]),
+                deduplicate_on: vec![expression("input.order_id")],
                 max_time: "10m".to_string(),
                 mode: AckMode::Attached,
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             "deduplicator 'dedup_orders' is not attached to a branch root",
         ),
@@ -2530,9 +2540,10 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 ),
                 output_routes: (ProcessorOutputs::single(identifier("joined_orders")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                branched_by: processor_branched_by("tenant", "left_orders", &["tenant"]),
+                branched_by: processor_branched_by("left_orders", &["tenant"]),
                 mode: AckMode::Attached,
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             "junction 'join_orders' is not attached to a branch root",
         ),
@@ -2542,8 +2553,8 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
             nervix_models::Model::WindowProcessor(CreateWindowProcessor {
                 name: identifier("orders_window"),
                 from: ProcessorInputs::single(identifier("orders")),
-                output_routes: ProcessorOutputs::single(identifier("order_summaries")),
-                branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
+                output_routes: window_outputs("order_summaries", "SET count = COUNT(input.amount)"),
+                branched_by: processor_branched_by("orders", &["tenant"]),
                 width: WindowBound {
                     messages: Some(10),
                     duration: None,
@@ -2553,8 +2564,8 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                     duration: None,
                 },
                 mode: AckMode::Attached,
-                aggregate: "order_summaries.count = COUNT(orders.amount)".to_string(),
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             "window processor 'orders_window' is not attached to a branch root",
         ),
@@ -2566,15 +2577,14 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 from: ProcessorInputs::single(identifier("orders")),
                 output_routes: (ProcessorOutputs::single(identifier("scores")))
                     .with_flush_policy("IMMEDIATE".to_string(), None),
-                branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
+                branched_by: processor_branched_by("orders", &["tenant"]),
                 resource: identifier("score_model"),
                 resource_version: None,
                 file: "models/score.onnx".to_string(),
                 inputs: vec![InferencerTensorMapping {
                     tensor: "features".to_string(),
                     schema: inferencer_tensor_schema(2),
-                    relay: identifier("orders"),
-                    field: identifier("features"),
+                    expression: expression("input.features"),
                 }],
                 output_schema: vec![InferencerTensorDeclaration {
                     tensor: "score".to_string(),
@@ -2582,6 +2592,7 @@ async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
                 }],
                 mode: AckMode::Attached,
                 filter_where: None,
+                materialized_state: Vec::new(),
             }),
             "inferencer 'score_orders' is not attached to a branch root",
         ),
@@ -4232,7 +4243,7 @@ fn resolve_concrete_branch_uses_branch_values() {
 }
 
 #[test]
-fn resolve_concrete_branch_mapping_can_read_branch_key() {
+fn empty_branch_assignments_preserve_incoming_key() {
     let record = RuntimeRecord::from_fields([(
         "tenant".to_string(),
         RuntimeValue::String("message-tenant".to_string()),
@@ -4243,17 +4254,14 @@ fn resolve_concrete_branch_mapping_can_read_branch_key() {
     )]);
 
     assert_eq!(
-        super::resolve_concrete_branch_from_mappings(
+        super::resolve_concrete_branch_from_assignments(
             &record,
+            None,
             Some(&branch_key),
-            &[BranchValueMapping {
-                field: identifier("tenant"),
-                relay: identifier("branch"),
-                relay_field: identifier("tenant"),
-            }],
+            &[],
             &identifier("reingestor")
         )
-        .expect("branch mapping should resolve"),
+        .expect("preserved branch should resolve"),
         super::ConcreteBranch::Key(concrete_branch_key([(
             identifier("tenant"),
             RuntimeValue::String("branch-tenant".to_string()),
@@ -4274,6 +4282,238 @@ fn resolve_concrete_branch_errors_when_branch_field_is_missing() {
 
     assert!(error.contains("branch field 'user_id' is missing"));
     assert!(error.contains("'ing'"));
+}
+
+#[tokio::test]
+async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
+    let source = RuntimeRecord::from_fields([("input_id".to_string(), RuntimeValue::U32(7))]);
+    let message = RelayMessage {
+        key: None,
+        record: source,
+        acks: AckSet::empty(),
+    };
+    let partial_output = RuntimeRecord::from_fields([("total".to_string(), RuntimeValue::I64(41))]);
+    let materialized_state = HashMap::from_iter([(
+        "relay_state.profiles.plan".to_string(),
+        RuntimeValue::String("pro".to_string()),
+    )]);
+    let reference = uuid::Uuid::now_v7();
+    let occurred_at = Timestamp::now();
+    let error = StructuredMessageError {
+        reference,
+        code: MessageErrorCode::Evaluation,
+        message: "division failed".to_string(),
+        operation: MessageErrorOperation::Set,
+        operation_index: Some(2),
+        fields: SortedSet::from_unsorted(vec![
+            FieldPath::new("input.denominator"),
+            FieldPath::new("output.total"),
+        ]),
+        occurred_at,
+    };
+    let input_schema = test_schema(&[("input_id", ParseAsType::U32)]);
+    let partial_schema = test_schema(&[("total", ParseAsType::I64)]);
+    let state_schema = test_schema(&[("plan", ParseAsType::String)]);
+    let output_schema = test_optional_schema(&[
+        ("input_id", ParseAsType::U32, false),
+        ("message_digest", ParseAsType::String, false),
+        ("attempted", ParseAsType::I64, true),
+        ("plan", ParseAsType::String, false),
+        ("operation", ParseAsType::String, false),
+        ("operation_index", ParseAsType::U32, true),
+    ]);
+    let materialized_specs = HashMap::from_iter([(
+        identifier("profiles"),
+        super::RuntimeMaterializedRelaySpec {
+            schema: state_schema.arrow_schema(),
+            sensitivity: super::VmSchemaSensitivity::default(),
+            branching: Vec::new(),
+        },
+    )]);
+    let assignments = construction(
+        "SET input_id = input.input_id, message_digest = md5(error.message), attempted = \
+         partial_output.total, plan = relay_state.profiles.plan, operation = error.operation, \
+         operation_index = error.operation_index",
+    )
+    .assignments;
+    let program = super::compile_message_error_set_program(
+        &domain("default"),
+        &identifier("calculate"),
+        &assignments,
+        output_schema,
+        super::MessageErrorCompileSchemas {
+            input: Some(input_schema),
+            left: None,
+            right: None,
+            partial_output: Some(partial_schema),
+            current_branching: Vec::new(),
+            allow_header_reads: false,
+        },
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &materialized_specs,
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+        },
+    )
+    .expect("message-error SET should compile through the VM");
+    let output = super::Runtime::execute_message_error_set_program(
+        &program,
+        &message,
+        &error,
+        Some(&partial_output),
+        &materialized_state,
+        None,
+        occurred_at,
+    )
+    .await
+    .expect("message-error SET should execute through the VM");
+
+    assert_eq!(output.value("input_id"), Some(&RuntimeValue::U32(7)));
+    assert_eq!(output.value("attempted"), Some(&RuntimeValue::I64(41)));
+    assert_eq!(
+        output.value("plan"),
+        Some(&RuntimeValue::String("pro".to_string()))
+    );
+    assert_eq!(
+        output.value("operation"),
+        Some(&RuntimeValue::String("set".to_string()))
+    );
+    assert_eq!(output.value("operation_index"), Some(&RuntimeValue::U32(2)));
+    let Some(RuntimeValue::String(digest)) = output.value("message_digest") else {
+        panic!("message digest should be a string");
+    };
+    assert_eq!(digest.len(), 32);
+}
+
+#[test]
+fn message_error_routes_preserve_branch_identity_without_reconstruction() {
+    let incoming = string_branch_key("tenant", "acme");
+    let relay = identifier("processing_errors");
+    let reference = uuid::Uuid::now_v7();
+
+    assert_eq!(
+        super::preserved_message_error_branch(
+            &[identifier("tenant")],
+            &incoming,
+            &relay,
+            reference,
+        )
+        .expect("matching branched error route should preserve its key"),
+        incoming
+    );
+    assert!(
+        super::preserved_message_error_branch(&[], &incoming, &relay, reference)
+            .expect_err("unbranched error relay must reject a branch")
+            .contains("cannot receive branched message error")
+    );
+    assert!(
+        super::preserved_message_error_branch(&[identifier("tenant")], &None, &relay, reference,)
+            .expect_err("branched error relay must reject unbranched execution")
+            .contains("cannot receive unbranched message error")
+    );
+}
+
+#[test]
+fn correlator_runtime_rows_use_only_left_and_right_scopes() {
+    let left = RuntimeRecord::from_fields([
+        ("id".to_string(), RuntimeValue::U32(1)),
+        (
+            "relay_state.profiles.status".to_string(),
+            RuntimeValue::String("active".to_string()),
+        ),
+    ]);
+    let right = RuntimeRecord::from_fields([("id".to_string(), RuntimeValue::U32(2))]);
+
+    let combined = super::correlator_combined_record(&left, &right);
+
+    assert_eq!(combined.value("left.id"), Some(&RuntimeValue::U32(1)));
+    assert_eq!(combined.value("right.id"), Some(&RuntimeValue::U32(2)));
+    assert_eq!(
+        combined.value("relay_state.profiles.status"),
+        Some(&RuntimeValue::String("active".to_string()))
+    );
+    assert_eq!(combined.value("left.relay_state.profiles.status"), None);
+    assert_eq!(combined.value("id"), None);
+}
+
+#[tokio::test]
+async fn correlator_output_reads_branch_and_declared_materialized_state() {
+    let left_schema = test_schema(&[("id", ParseAsType::U32)]);
+    let right_schema = test_schema(&[("score", ParseAsType::I64)]);
+    let output_schema = test_schema(&[
+        ("tenant", ParseAsType::String),
+        ("status", ParseAsType::String),
+        ("score", ParseAsType::I64),
+    ]);
+    let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
+    let state_schema = test_schema(&[("status", ParseAsType::String)]);
+    let branch = identifier("by_tenant");
+    let materialized_specs = HashMap::from_iter([(
+        identifier("profiles"),
+        super::RuntimeMaterializedRelaySpec {
+            schema: state_schema.arrow_schema(),
+            sensitivity: super::VmSchemaSensitivity::default(),
+            branching: vec![branch.clone()],
+        },
+    )]);
+    let program = super::CorrelatorOutputCompileContext {
+        processor: &identifier("join_profiles"),
+        left_schema: left_schema.arrow_schema(),
+        left_sensitivity: super::VmSchemaSensitivity::default(),
+        right_schema: right_schema.arrow_schema(),
+        right_sensitivity: super::VmSchemaSensitivity::default(),
+        output_relay: &identifier("joined_profiles"),
+        output_schema: output_schema.arrow_schema(),
+        output_sensitivity: super::VmSchemaSensitivity::default(),
+        construction: &construction(
+            "SET tenant = branch.tenant, status = relay_state.profiles.status, score = \
+             right.score WHERE relay_state.profiles.status = \"active\"",
+        ),
+        runtime: super::RuntimeVmCompileContext {
+            available_materialized_streams: &materialized_specs,
+            available_lookups: &HashMap::default(),
+            current_branching: std::slice::from_ref(&branch),
+            current_branch_schema: Some(&branch_schema),
+            current_branch_sensitivity: None,
+        },
+    }
+    .compile()
+    .expect("correlator output should compile with branch and materialized state bindings");
+    let left = RuntimeRecord::from_fields([
+        ("id".to_string(), RuntimeValue::U32(7)),
+        (
+            "relay_state.profiles.status".to_string(),
+            RuntimeValue::String("active".to_string()),
+        ),
+    ]);
+    let right = RuntimeRecord::from_fields([("score".to_string(), RuntimeValue::I64(42))]);
+    let combined = super::correlator_combined_record(&left, &right);
+    let message = match super::evaluate_correlator_output_message(
+        &identifier("join_profiles"),
+        &program,
+        string_branch_key("tenant", "acme"),
+        combined,
+        AckSet::empty(),
+        super::current_timestamp(),
+    )
+    .await
+    {
+        Ok(Some(message)) => message,
+        Ok(None) => panic!("route predicate should select the output"),
+        Err(error) => panic!("correlator output should evaluate: {}", error.error.message),
+    };
+
+    assert_eq!(
+        message.record.value("tenant"),
+        Some(&RuntimeValue::String("acme".to_string()))
+    );
+    assert_eq!(
+        message.record.value("status"),
+        Some(&RuntimeValue::String("active".to_string()))
+    );
+    assert_eq!(message.record.value("score"), Some(&RuntimeValue::I64(42)));
 }
 
 #[test]
@@ -4957,9 +5197,9 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(identifier("orders")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("orders", &["tenant"])),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: branched_by("tenant", "orders", &["tenant"]),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
@@ -4978,11 +5218,12 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
-                    deduplicate_on: "projected_orders.order_id".to_string(),
+                    branched_by: processor_branched_by("orders", &["tenant"]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -4994,11 +5235,12 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                     from: ProcessorInputs::single(identifier("projected_orders")),
                     output_routes: (ProcessorOutputs::single(identifier("aggregated_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "projected_orders", &["tenant"]),
-                    deduplicate_on: "tenant_orders.order_id".to_string(),
+                    branched_by: processor_branched_by("projected_orders", &["tenant"]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5016,7 +5258,8 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                     max_batch_size: Some("1MiB".to_string()),
                     mode: AckMode::Attached,
                     error_policies: ErrorPolicies::handled_by_log(),
-                    filter_map: None,
+                    construction: nervix_models::RouteConstruction::default(),
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5058,9 +5301,9 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("metrics_ingestor"),
                     output_routes: (ProcessorOutputs::single(identifier("metrics")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("metrics", &["host"])),
                     decode_using_codec: identifier("metrics_codec"),
-                    branched_by: branched_by("host", "metrics", &["host"]),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
@@ -5077,8 +5320,11 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                 nervix_models::Model::WindowProcessor(CreateWindowProcessor {
                     name: identifier("metric_window"),
                     from: ProcessorInputs::single(identifier("metrics")),
-                    output_routes: ProcessorOutputs::single(identifier("metric_summary")),
-                    branched_by: processor_branched_by("host", "metrics", &["host"]),
+                    output_routes: window_outputs(
+                        "metric_summary",
+                        "SET count = COUNT(input.latency)",
+                    ),
+                    branched_by: processor_branched_by("metrics", &["host"]),
                     width: WindowBound {
                         messages: Some(100),
                         duration: None,
@@ -5088,8 +5334,8 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                         duration: None,
                     },
                     mode: AckMode::Attached,
-                    aggregate: "metric_summary.count = COUNT(metrics.latency)".to_string(),
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("host")]),
             ),
@@ -5101,11 +5347,12 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                     from: ProcessorInputs::single(identifier("metric_summary")),
                     output_routes: (ProcessorOutputs::single(identifier("projected_summary")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("host", "metric_summary", &["host"]),
-                    deduplicate_on: "metric_summary.count".to_string(),
+                    branched_by: processor_branched_by("metric_summary", &["host"]),
+                    deduplicate_on: vec![expression("input.count")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("host")]),
             ),
@@ -5122,7 +5369,6 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
         output_routes,
         width,
         step,
-        aggregate,
     } = &spec.roots[0].operation
     else {
         panic!("expected window processor branch node");
@@ -5136,7 +5382,7 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
     assert_eq!(output.children[0].processor, identifier("dedup_summary"));
     assert_eq!(width.messages, Some(100));
     assert_eq!(step.messages, Some(10));
-    assert!(aggregate.contains("COUNT(metrics.latency)"));
+    assert_eq!(output.construction.assignments.len(), 1);
 }
 
 #[test]
@@ -5151,9 +5397,9 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("features_ingestor"),
                     output_routes: (ProcessorOutputs::single(identifier("features")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("features", &["tenant"])),
                     decode_using_codec: identifier("features_codec"),
-                    branched_by: branched_by("tenant", "features", &["tenant"]),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
@@ -5172,22 +5418,22 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                     from: ProcessorInputs::single(identifier("features")),
                     output_routes: (ProcessorOutputs::single(identifier("scores")))
                         .with_flush_policy("IMMEDIATE".to_string(), None),
-                    branched_by: processor_branched_by("tenant", "features", &["tenant"]),
+                    branched_by: processor_branched_by("features", &["tenant"]),
                     resource: identifier("fraud_model"),
                     resource_version: Some(3),
                     file: "models/fraud.onnx".to_string(),
                     inputs: vec![InferencerTensorMapping {
                         tensor: "features".to_string(),
                         schema: inferencer_tensor_schema(2),
-                        relay: identifier("features"),
-                        field: identifier("vector"),
+                        expression: expression("input.vector"),
                     }],
                     output_schema: vec![InferencerTensorDeclaration {
                         tensor: "score".to_string(),
                         schema: inferencer_tensor_schema(1),
                     }],
                     mode: AckMode::Attached,
-                    filter_where: Some("WHERE active".to_string()),
+                    filter_where: Some(expression("input.active")),
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5199,11 +5445,12 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                     from: ProcessorInputs::single(identifier("scores")),
                     output_routes: (ProcessorOutputs::single(identifier("projected_scores")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "scores", &["tenant"]),
-                    deduplicate_on: "scores.score".to_string(),
+                    branched_by: processor_branched_by("scores", &["tenant"]),
+                    deduplicate_on: vec![expression("input.score")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5241,7 +5488,7 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
     assert_eq!(inputs.len(), 1);
     assert_eq!(output_schema.len(), 1);
     assert_eq!(output.flush_each.as_deref(), Some("IMMEDIATE"));
-    assert_eq!(spec.roots[0].filter_where.as_deref(), Some("WHERE active"));
+    assert_eq!(spec.roots[0].filter_where, Some(expression("input.active")));
 }
 
 #[test]
@@ -5255,11 +5502,14 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
                 nervix_models::Model::Reingestor(CreateReingestor {
                     name: identifier("tenant_partition"),
                     from: ProcessorInputs::single(identifier("orders")),
-                    output_routes: (ProcessorOutputs::single(identifier("tenant_orders")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: branched_by("tenant", "tenant_orders", &["tenant"]),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                        "tenant_orders",
+                    )))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                    .with_branch(branched_by("tenant_orders", &["tenant"])),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5271,11 +5521,12 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
                     from: ProcessorInputs::single(identifier("tenant_orders")),
                     output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "tenant_orders", &["tenant"]),
-                    deduplicate_on: "urgent_orders.order_id".to_string(),
+                    branched_by: processor_branched_by("tenant_orders", &["tenant"]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5305,9 +5556,9 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(identifier("orders")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("orders", &["tenant"])),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: branched_by("tenant", "orders", &["tenant"]),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
@@ -5327,23 +5578,29 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                     output_routes: (ProcessorOutputs::new(vec![
                         ProcessorOutput {
                             relay: identifier("urgent_orders"),
-                            filter_map: Some("WHERE urgent".to_string()),
+                            construction: nervix_nspl::parse_route_construction(
+                                "WHERE output.urgent",
+                            )
+                            .expect("route construction must parse"),
                             flush_policy: None,
                             message_error_policy: MessageErrorPolicy::Log,
+                            branch: None,
                         },
                         ProcessorOutput {
                             relay: identifier("default_orders"),
-                            filter_map: None,
+                            construction: nervix_models::RouteConstruction::default(),
                             flush_policy: None,
                             message_error_policy: MessageErrorPolicy::Log,
+                            branch: None,
                         },
                     ]))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
-                    deduplicate_on: "orders.order_id".to_string(),
+                    branched_by: processor_branched_by("orders", &["tenant"]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
-                    filter_where: Some("WHERE active".to_string()),
+                    filter_where: Some(expression("input.active")),
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5355,11 +5612,12 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                     from: ProcessorInputs::single(identifier("urgent_orders")),
                     output_routes: (ProcessorOutputs::single(identifier("urgent_projected")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "urgent_orders", &["tenant"]),
-                    deduplicate_on: "default_orders.order_id".to_string(),
+                    branched_by: processor_branched_by("urgent_orders", &["tenant"]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5371,11 +5629,12 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                     from: ProcessorInputs::single(identifier("default_orders")),
                     output_routes: (ProcessorOutputs::single(identifier("default_projected")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "default_orders", &["tenant"]),
-                    deduplicate_on: "projected_orders.order_id".to_string(),
+                    branched_by: processor_branched_by("default_orders", &["tenant"]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5392,11 +5651,11 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
     else {
         panic!("expected deduplicator output routes");
     };
-    assert_eq!(spec.roots[0].filter_where.as_deref(), Some("WHERE active"));
+    assert_eq!(spec.roots[0].filter_where, Some(expression("input.active")));
     assert_eq!(output_routes.routes.len(), 2);
     assert_eq!(
-        output_routes.routes[0].filter_map.as_deref(),
-        Some("WHERE urgent")
+        output_routes.routes[0].construction.where_clause,
+        Some(expression("output.urgent"))
     );
     assert_eq!(output_routes.routes[0].children.len(), 1);
     assert_eq!(
@@ -5425,9 +5684,9 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("left_ingestor"),
                     output_routes: (ProcessorOutputs::single(identifier("left_stream")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("left_stream", &["tenant"])),
                     decode_using_codec: identifier("notification_codec"),
-                    branched_by: branched_by("tenant", "left_stream", &["tenant"]),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
@@ -5445,9 +5704,9 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("right_ingestor"),
                     output_routes: (ProcessorOutputs::single(identifier("right_stream")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("right_stream", &["tenant"])),
                     decode_using_codec: identifier("notification_codec"),
-                    branched_by: branched_by("tenant", "right_stream", &["tenant"]),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
@@ -5470,9 +5729,10 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                     ),
                     output_routes: (ProcessorOutputs::single(identifier("joined_stream")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "left_stream", &["tenant"]),
+                    branched_by: processor_branched_by("left_stream", &["tenant"]),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5484,11 +5744,12 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                     from: ProcessorInputs::single(identifier("joined_stream")),
                     output_routes: (ProcessorOutputs::single(identifier("projected_joined")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "joined_stream", &["tenant"]),
-                    deduplicate_on: "joined_stream.tenant".to_string(),
+                    branched_by: processor_branched_by("joined_stream", &["tenant"]),
+                    deduplicate_on: vec![expression("input.tenant")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5543,9 +5804,9 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(identifier("orders")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("orders", &["tenant"])),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: branched_by("tenant", "orders", &["tenant"]),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
@@ -5566,16 +5827,17 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
                         vec![identifier("orders")],
                         vec![ProcessorInputWhere {
                             relay: identifier("orders"),
-                            where_clause: "WHERE orders.active".to_string(),
+                            where_clause: expression("input.active"),
                         }],
                     ),
                     output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "orders", &["tenant"]),
-                    deduplicate_on: "orders.order_id".to_string(),
+                    branched_by: processor_branched_by("orders", &["tenant"]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
-                    filter_where: Some("WHERE active".to_string()),
+                    filter_where: Some(expression("input.active")),
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5587,11 +5849,12 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
                     from: ProcessorInputs::single(identifier("projected_orders")),
                     output_routes: (ProcessorOutputs::single(identifier("aggregated_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("tenant", "projected_orders", &["tenant"]),
-                    deduplicate_on: "orders.order_id".to_string(),
+                    branched_by: processor_branched_by("projected_orders", &["tenant"]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(vec![identifier("tenant")]),
             ),
@@ -5605,14 +5868,14 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
     assert_eq!(spec.roots[0].processor, identifier("orders_filter"));
     assert_eq!(
         spec.roots[0].from_where.get(&identifier("orders")),
-        Some(&"WHERE orders.active".to_string())
+        Some(&expression("input.active"))
     );
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
         &spec.roots[0].operation
     else {
         panic!("expected processor output routes");
     };
-    assert_eq!(spec.roots[0].filter_where.as_deref(), Some("WHERE active"));
+    assert_eq!(spec.roots[0].filter_where, Some(expression("input.active")));
     assert_eq!(output_routes.routes.len(), 1);
     assert_eq!(
         output_routes.routes[0].relay,
@@ -5635,9 +5898,9 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
                 nervix_models::Model::Ingestor(CreateIngestor {
                     name: identifier("orders_ingestor"),
                     output_routes: (ProcessorOutputs::single(identifier("orders")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(OutputBranch::Unbranched),
                     decode_using_codec: identifier("orders_codec"),
-                    branched_by: branched_by("root", "orders", &[]),
                     timestamp_source: None,
                     source: IngestSource::ZeroMq {
                         client: identifier("zmq_client"),
@@ -5657,11 +5920,12 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
                     from: ProcessorInputs::single(identifier("orders")),
                     output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: processor_branched_by("root", "orders", &[]),
-                    deduplicate_on: "orders.order_id".to_string(),
+                    branched_by: processor_branched_by("orders", &[]),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(Vec::new()),
             ),
@@ -5701,10 +5965,11 @@ fn branched_ingestor_specs_use_explicit_unbranched_relay_as_root() {
                     output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: BranchSelection::unbranched(),
-                    deduplicate_on: "orders.order_id".to_string(),
+                    deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(Vec::new()),
             ),
@@ -5750,6 +6015,7 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                     global_error_policy: GeneralErrorPolicy::Ignore,
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 Some(Vec::new()),
             ),
@@ -5781,10 +6047,11 @@ fn branched_ingestor_specs_include_reingestor_with_declared_branching() {
                     name: identifier("tenant_partition"),
                     from: ProcessorInputs::single(identifier("notifications")),
                     output_routes: (ProcessorOutputs::single(identifier("tenant_notifications")))
-                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                    branched_by: branched_by("tenant", "tenant_notifications", &["tenant"]),
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                        .with_branch(branched_by("tenant_notifications", &["tenant"])),
                     mode: AckMode::Attached,
                     filter_where: None,
+                    materialized_state: Vec::new(),
                 }),
                 None,
             ),
@@ -5886,8 +6153,7 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
-        entrypoint_schema: schema.clone(),
-        entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+        entrypoint_branch_assignments: branch_mappings(&["tenant"]),
         entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -5957,7 +6223,7 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
             now: Timestamp::from_unix_nanos(1_000_000_000),
         },
         &mut instances,
-        vec![super::BranchedEntrypointInput::PendingBranchingBatch(input)],
+        vec![input],
     )
     .await;
 
@@ -5998,8 +6264,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
-        entrypoint_schema: schema.clone(),
-        entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+        entrypoint_branch_assignments: branch_mappings(&["tenant"]),
         entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Detached),
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -6047,7 +6312,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
                 now: Timestamp::from_unix_nanos(1_000_000_000 + i64::from(round)),
             },
             &mut instances,
-            vec![super::BranchedEntrypointInput::PendingBranchingBatch(input)],
+            vec![input],
         )
         .await;
 
@@ -6067,6 +6332,38 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
         ("tenant", ParseAsType::String),
         ("user_id", ParseAsType::U32),
     ]);
+    let (execution_shutdown, _) = watch::channel(false);
+    runtime.executions.insert(
+        domain.clone(),
+        super::DomainExecution {
+            schedule: DomainSchedule {
+                domain: domain.clone(),
+                nodes: Vec::new(),
+            },
+            passive_only: false,
+            shutdown: execution_shutdown,
+            graph: StdArc::new(ArcSwapOption::empty()),
+            relay_registries: HashMap::default(),
+            relay_schemas: [
+                (identifier("orders"), schema.clone()),
+                (identifier("tenant_orders"), schema.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            relay_services: HashMap::default(),
+            relay_branchings: HashMap::default(),
+            relay_branching_schemas: HashMap::default(),
+            materialized_stream_specs: HashMap::default(),
+            materialized_stream_owner_nodes: HashMap::default(),
+            branched_ingestors: HashMap::default(),
+            branched_entrypoints: HashMap::default(),
+            codecs: HashMap::default(),
+            signaling_protocols: HashMap::default(),
+            lookups: HashMap::default(),
+            endpoint_routes: HashMap::default(),
+            tasks: Vec::new(),
+        },
+    );
     let branched_runtime = super::BranchedIngestorRuntime::new(
         runtime.clone(),
         domain.clone(),
@@ -6078,8 +6375,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             root_relay: relay.clone(),
             branch_ttl: Some(Duration::from_secs(30)),
             branch_max_instances: None,
-            entrypoint_schema: schema.clone(),
-            entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+            entrypoint_branch_assignments: branch_mappings(&["tenant"]),
             entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(
                 AckMode::Attached,
             ),
@@ -6118,11 +6414,14 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             CreateReingestor {
                 name: identifier("tenant_partition"),
                 from: ProcessorInputs::single(identifier("orders")),
-                output_routes: (ProcessorOutputs::single(identifier("tenant_orders")))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                branched_by: branched_by("tenant", "orders", &["tenant"]),
+                output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                    "tenant_orders",
+                )))
+                .with_flush_policy("100ms".to_string(), Some("1MiB".to_string()))
+                .with_branch(branched_by("tenant_orders", &["tenant"])),
                 mode: AckMode::Attached,
                 filter_where: None,
+                materialized_state: Vec::new(),
             },
             identifier("orders"),
             fan_in,
@@ -6295,8 +6594,7 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
             root_relay: root_relay.clone(),
             branch_ttl: Some(Duration::from_secs(30)),
             branch_max_instances: None,
-            entrypoint_schema: schema,
-            entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+            entrypoint_branch_assignments: branch_mappings(&["tenant"]),
             entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Preserve,
             entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -6319,13 +6617,18 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
 
     branched_runtime
         .sender()
-        .send(super::BranchedEntrypointInput::UnresolvedRecord {
-            record: RuntimeRecord::from_fields([(
-                "tenant".to_string(),
-                RuntimeValue::String("acme".to_string()),
-            )]),
-            acks: AckSet::empty(),
-        })
+        .send(
+            super::RelayRecordBatch::single(
+                schema,
+                branch_key.clone(),
+                RuntimeRecord::from_fields([(
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                )]),
+                AckSet::empty(),
+            )
+            .expect("branch input batch should build"),
+        )
         .await
         .expect("branched runtime should accept input");
 
@@ -6372,8 +6675,7 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
-        entrypoint_schema: schema.clone(),
-        entrypoint_branch_mappings: branch_mappings("orders", &["tenant"]),
+        entrypoint_branch_assignments: branch_mappings(&["tenant"]),
         entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Preserve,
         entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -6391,12 +6693,15 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
         processors_by_input: HashMap::default(),
     };
     let inputs = (0..8)
-        .map(|index| super::BranchedEntrypointInput::UnresolvedRecord {
-            record: RuntimeRecord::from_fields([(
-                "tenant".to_string(),
-                RuntimeValue::String(format!("tenant-{index}")),
-            )]),
-            acks: AckSet::empty(),
+        .map(|index| {
+            let tenant = format!("tenant-{index}");
+            super::RelayRecordBatch::single(
+                schema.clone(),
+                string_branch_key("tenant", &tenant),
+                RuntimeRecord::from_fields([("tenant".to_string(), RuntimeValue::String(tenant))]),
+                AckSet::empty(),
+            )
+            .expect("branch input batch should build")
         })
         .collect::<Vec<_>>();
     let graph = StdArc::new(ArcSwapOption::from(None));
@@ -6464,6 +6769,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
     let lookup_schema = test_schema(&[
         ("normalized_title", ParseAsType::String),
         ("city_name", ParseAsType::String),
+        ("region_name", ParseAsType::String),
     ]);
     let lookup = Arc::new(super::LookupRuntime {
         model: CreateLookup {
@@ -6477,57 +6783,71 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         schema: lookup_schema,
         entries: Arc::new(HashMap::from_iter([(
             "mr".to_string(),
-            crate::runtime_schema::DecodedRecord::from_fields([(
-                "city_name".to_string(),
-                RuntimeValue::String("Chicago".to_string()),
-            )]),
+            crate::runtime_schema::DecodedRecord::from_fields([
+                (
+                    "city_name".to_string(),
+                    RuntimeValue::String("Chicago".to_string()),
+                ),
+                (
+                    "region_name".to_string(),
+                    RuntimeValue::String("IL".to_string()),
+                ),
+            ]),
         )])),
     });
     let lookups = HashMap::from_iter([(identifier("titles_by_normalized"), lookup)]);
-    let program = super::compile_filter_map_program(
+    let output_schema = Arc::new(compile_schema(&CreateSchema {
+        name: identifier("lookup_output"),
+        fields: vec![
+            nervix_models::SchemaField {
+                name: identifier("id"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            },
+            nervix_models::SchemaField {
+                name: identifier("active"),
+                ty: ParseAsType::Bool,
+                optional: false,
+                sensitive: false,
+            },
+            nervix_models::SchemaField {
+                name: identifier("title_key"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            },
+            nervix_models::SchemaField {
+                name: identifier("city"),
+                ty: ParseAsType::String,
+                optional: true,
+                sensitive: false,
+            },
+            nervix_models::SchemaField {
+                name: identifier("region"),
+                ty: ParseAsType::String,
+                optional: true,
+                sensitive: false,
+            },
+        ],
+    }));
+    let program = super::compile_processor_output_filter_map_program(
         &domain("default"),
         &identifier("project_titles"),
         &[identifier("incoming_logs")],
-        Some(
-            "SET incoming_logs.city = LOOKUP_HASH_MAP(\"titles_by_normalized\", \
-             lower(incoming_logs.title), \"city_name\") WHERE NOT \
-             is_null(LOOKUP_HASH_MAP(\"titles_by_normalized\", lower(incoming_logs.title), \
+        &identifier("projected_titles"),
+        &construction(
+            "INHERIT ALL EXCEPT title SET title_key = lower(input.title), city = \
+             LOOKUP_HASH_MAP(\"titles_by_normalized\", lower(input.title), \"city_name\"), region \
+             = LOOKUP_HASH_MAP(\"titles_by_normalized\", lower(input.title), \"region_name\") \
+             WHERE NOT is_null(LOOKUP_HASH_MAP(\"titles_by_normalized\", lower(input.title), \
              \"city_name\"))",
         ),
         input_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
-        Arc::new(compile_schema(&CreateSchema {
-            name: identifier("lookup_output"),
-            fields: vec![
-                nervix_models::SchemaField {
-                    name: identifier("id"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: identifier("active"),
-                    ty: ParseAsType::Bool,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: identifier("title"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                },
-                nervix_models::SchemaField {
-                    name: identifier("city"),
-                    ty: ParseAsType::String,
-                    optional: true,
-                    sensitive: false,
-                },
-            ],
-        }))
-        .arrow_schema(),
+        None,
+        output_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
-        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &lookups,
@@ -6538,7 +6858,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
     )
     .expect("filter-map should compile")
     .expect("program should exist");
-    assert_eq!(program.lookup_hash_maps.len(), 1);
+    assert_eq!(program.lookup_hash_maps.len(), 2);
 
     let (hit_acks, _hit_completion) = AckSet::root();
     let (miss_acks, _miss_completion) = AckSet::root();
@@ -6592,6 +6912,10 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         messages[0].record.value("city"),
         Some(&RuntimeValue::String("Chicago".to_string()))
     );
+    assert_eq!(
+        messages[0].record.value("region"),
+        Some(&RuntimeValue::String("IL".to_string()))
+    );
 }
 
 #[tokio::test]
@@ -6602,19 +6926,20 @@ async fn filter_map_can_read_branch_namespace() {
         ("branch_tenant", ParseAsType::String),
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
-    let program = super::compile_filter_map_program(
+    let program = super::compile_processor_output_filter_map_program(
         &domain("default"),
         &identifier("project_notifications"),
         &[identifier("notifications")],
-        Some(
-            "SET notifications.branch_tenant = branch.tenant, notifications.amount = \
-             notifications.amount + 1 WHERE branch.tenant = notifications.tenant",
+        &identifier("projected_notifications"),
+        &construction(
+            "INHERIT ALL SET branch_tenant = branch.tenant, amount = amount + 1 WHERE \
+             branch.tenant = output.tenant",
         ),
         input_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        None,
         input_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
-        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -6659,6 +6984,15 @@ async fn filter_map_can_read_branch_namespace() {
     .await
     .expect("filter-map planning should succeed");
 
+    assert!(
+        plan.message_errors.is_empty(),
+        "projection should not produce message errors: {:?}",
+        plan.message_errors
+            .iter()
+            .map(|error| error.error.message.as_str())
+            .collect::<Vec<_>>()
+    );
+
     let messages = plan
         .batch
         .expect("filter-map should produce a batch")
@@ -6677,7 +7011,7 @@ async fn filter_map_can_read_branch_namespace() {
 }
 
 #[tokio::test]
-async fn filter_map_with_unset_can_read_branch_namespace() {
+async fn projection_can_read_branch_namespace() {
     let input_schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("active", ParseAsType::Bool),
@@ -6689,20 +7023,20 @@ async fn filter_map_with_unset_can_read_branch_namespace() {
         ("branch_tenant", ParseAsType::String),
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
-    let program = super::compile_filter_map_program(
+    let program = super::compile_processor_output_filter_map_program(
         &domain("default"),
         &identifier("project_notifications"),
         &[identifier("notifications")],
-        Some(
-            "SET notifications.branch_tenant = branch.tenant, notifications.amount = \
-             notifications.amount + 1 UNSET notifications.active WHERE branch.tenant = \
-             notifications.tenant",
+        &identifier("projected_notifications"),
+        &construction(
+            "INHERIT tenant, amount SET branch_tenant = branch.tenant, amount = amount + 1 WHERE \
+             branch.tenant = output.tenant",
         ),
         input_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        None,
         output_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
-        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -6744,6 +7078,15 @@ async fn filter_map_with_unset_can_read_branch_namespace() {
     .await
     .expect("filter-map planning should succeed");
 
+    assert!(
+        plan.message_errors.is_empty(),
+        "projection should not produce message errors: {:?}",
+        plan.message_errors
+            .iter()
+            .map(|error| error.error.message.as_str())
+            .collect::<Vec<_>>()
+    );
+
     let messages = plan
         .batch
         .expect("filter-map should produce a batch")
@@ -6765,19 +7108,182 @@ async fn filter_map_with_unset_can_read_branch_namespace() {
     );
 }
 
+#[tokio::test]
+async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
+    let schema = test_schema(&[(
+        "vector",
+        ParseAsType::Array {
+            element: Box::new(ParseAsType::F32),
+            len: 2,
+        },
+    )]);
+    let program = super::compile_processor_output_filter_map_program(
+        &domain("default"),
+        &identifier("copy_vectors"),
+        &[identifier("vectors")],
+        &identifier("copied_vectors"),
+        &construction("INHERIT ALL"),
+        schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        None,
+        schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+        },
+    )
+    .expect("array inheritance should compile")
+    .expect("INHERIT ALL should produce a VM program");
+    let expected = RuntimeValue::Array(vec![
+        RuntimeValue::F32(1.25.into()),
+        RuntimeValue::F32((-2.5).into()),
+    ]);
+    let batch = super::RelayRecordBatch::from_messages(
+        schema,
+        vec![RelayMessage {
+            key: None,
+            record: RuntimeRecord::from_fields([("vector".to_string(), expected.clone())]),
+            acks: AckSet::empty(),
+        }],
+    )
+    .expect("array input batch should build");
+
+    let plan = super::plan_filter_map_messages(
+        "junction",
+        &identifier("copy_vectors"),
+        "FILTER-MAP",
+        &program,
+        batch,
+        super::current_timestamp(),
+        &HashMap::default(),
+    )
+    .await
+    .expect("array inheritance should execute");
+
+    assert!(plan.message_errors.is_empty());
+    assert_eq!(
+        plan.batch.expect("array output batch should exist").records[0].value("vector"),
+        Some(&expected)
+    );
+}
+
+#[tokio::test]
+async fn ordered_set_error_reports_operation_index_and_previous_partial_value() {
+    let input_schema = test_schema(&[
+        ("amount", ParseAsType::I64),
+        ("denominator", ParseAsType::I64),
+    ]);
+    let output_schema = test_schema(&[("amount", ParseAsType::I64)]);
+    let program = super::compile_processor_output_filter_map_program(
+        &domain("default"),
+        &identifier("calculate_amount"),
+        &[identifier("amounts")],
+        &identifier("calculated_amounts"),
+        &construction("SET amount = input.amount, amount = amount / input.denominator"),
+        input_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        None,
+        output_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+        },
+    )
+    .expect("ordered SET should compile")
+    .expect("ordered SET should produce a program");
+    let batch = super::RelayRecordBatch::from_messages(
+        input_schema,
+        vec![
+            RelayMessage {
+                key: None,
+                record: RuntimeRecord::from_fields([
+                    ("amount".to_string(), RuntimeValue::I64(7)),
+                    ("denominator".to_string(), RuntimeValue::I64(0)),
+                ]),
+                acks: AckSet::empty(),
+            },
+            RelayMessage {
+                key: None,
+                record: RuntimeRecord::from_fields([
+                    ("amount".to_string(), RuntimeValue::I64(10)),
+                    ("denominator".to_string(), RuntimeValue::I64(2)),
+                ]),
+                acks: AckSet::empty(),
+            },
+        ],
+    )
+    .expect("input batch should build");
+
+    let plan = super::plan_filter_map_messages(
+        "junction",
+        &identifier("calculate_amount"),
+        "FILTER-MAP",
+        &program,
+        batch,
+        super::current_timestamp(),
+        &HashMap::default(),
+    )
+    .await
+    .expect("a side error is a planned message error");
+
+    let successful = plan
+        .batch
+        .as_ref()
+        .expect("the successful row should remain in the output batch");
+    assert_eq!(successful.message_count(), 1);
+    assert_eq!(
+        successful.records[0].value("amount"),
+        Some(&RuntimeValue::I64(5))
+    );
+    let [error] = plan.message_errors.as_slice() else {
+        panic!("expected exactly one planned message error");
+    };
+    assert_eq!(error.error.code, MessageErrorCode::Evaluation);
+    assert_eq!(error.error.operation, MessageErrorOperation::Set);
+    assert_eq!(error.error.operation_index, Some(1));
+    assert_eq!(
+        error
+            .error
+            .fields
+            .iter()
+            .map(FieldPath::as_str)
+            .collect::<Vec<_>>(),
+        vec!["input.denominator", "output.amount"]
+    );
+    assert_eq!(
+        error
+            .partial_output
+            .as_ref()
+            .and_then(|output| output.value("amount")),
+        Some(&RuntimeValue::I64(7)),
+        "partial output: {:?}; error: {}",
+        error.partial_output,
+        error.error.message
+    );
+}
+
 #[test]
 fn filter_map_rejects_branch_namespace_without_branch_schema() {
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
-    let error = super::compile_filter_map_program(
+    let error = super::compile_processor_output_filter_map_program(
         &domain("default"),
         &identifier("project_notifications"),
         &[identifier("notifications")],
-        Some("WHERE branch.tenant = notifications.tenant"),
+        &identifier("projected_notifications"),
+        &construction("INHERIT ALL WHERE branch.tenant = output.tenant"),
         schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        None,
         schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
-        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -6799,16 +7305,17 @@ fn filter_map_rejects_branch_namespace_without_branch_schema() {
 fn filter_map_rejects_missing_branch_key() {
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
     let branch_schema = test_schema(&[("region", ParseAsType::String)]).arrow_schema();
-    let error = super::compile_filter_map_program(
+    let error = super::compile_processor_output_filter_map_program(
         &domain("default"),
         &identifier("project_notifications"),
         &[identifier("notifications")],
-        Some("WHERE branch.tenant = notifications.tenant"),
+        &identifier("projected_notifications"),
+        &construction("INHERIT ALL WHERE branch.tenant = output.tenant"),
         schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
+        None,
         schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
-        false,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -6849,12 +7356,13 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
         max_batch_size: Some("1MiB".to_string()),
         mode: AckMode::Attached,
         error_policies: ErrorPolicies::handled_by_log(),
-        filter_map: Some(
-            "SET message.normalized = lower(message.raw) UNSET message.raw, message.active WHERE \
-             message.active INVOKE write_header(lower(\"TENANT\"), message.tenant), \
-             write_header(\"route\", message.normalized), write_header(\"route\", \"second\")"
-                .to_string(),
+        construction: construction(
+            "INHERIT tenant SET normalized = lower(input.raw) WHERE input.active INVOKE \
+             write_header(lower(\"TENANT\"),
+             input.tenant), write_header(\"route\", output.normalized), write_header(\"route\", \
+             \"second\")",
         ),
+        materialized_state: Vec::new(),
     };
     let program = super::compile_emitter_filter_map_program(
         &domain("default"),
@@ -7053,28 +7561,19 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
         &identifier("logic_ingestor"),
-        &identifier("logic_notifications"),
         &IngestSource::Endpoint {
             endpoint: identifier("logic_endpoint"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
         },
-        Some(
-            "SET logic_notifications.u8_next = message.u8 + (1 AS U8), logic_notifications.i8_abs \
-             = abs(message.i8), logic_notifications.u16_keep = coalesce(message.u16, (0 AS U16)), \
-             logic_notifications.i16_prev = message.i16 - (1 AS I16), \
-             logic_notifications.u32_same = coalesce(nullif(message.u32, (999 AS U32)), (0 AS \
-             U32)), logic_notifications.i32_neg = -message.i32, logic_notifications.u64_next = \
-             message.u64 + (2 AS U64), logic_notifications.i64_keep = message.i64, \
-             logic_notifications.f32_next = message.f32 + (1.5 AS F32), \
-             logic_notifications.f64_keep = message.f64, logic_notifications.bool_copy = \
-             message.active, logic_notifications.occurred_text = message.occurred_at AS STRING, \
-             logic_notifications.occurred_copy = (message.occurred_at AS STRING) AS DATETIME \
-             UNSET logic_notifications.active, logic_notifications.u8, logic_notifications.i8, \
-             logic_notifications.u16, logic_notifications.i16, logic_notifications.u32, \
-             logic_notifications.i32, logic_notifications.u64, logic_notifications.i64, \
-             logic_notifications.f32, logic_notifications.f64, logic_notifications.occurred_at, \
-             logic_notifications.raw WHERE message.active AND message.occurred_at > \
-             ('2026-04-07T00:00:00Z' AS DATETIME)",
+        &construction(
+            "INHERIT tenant SET u8_next = input.u8 + (1 AS U8), i8_abs = abs(input.i8), u16_keep \
+             = coalesce(input.u16, (0 AS U16)), i16_prev = input.i16 - (1 AS I16), u32_same = \
+             coalesce(nullif(input.u32, (999 AS U32)), (0 AS U32)), i32_neg = -input.i32, \
+             u64_next = input.u64 + (2 AS U64), i64_keep = input.i64, f32_next = input.f32 + (1.5 \
+             AS F32), f64_keep = input.f64, bool_copy = input.active, occurred_text = \
+             input.occurred_at AS STRING, occurred_copy = (input.occurred_at AS STRING) AS \
+             DATETIME WHERE input.active AND input.occurred_at > ('2026-04-07T00:00:00Z' AS \
+             DATETIME)",
         ),
         super::RuntimeVmSchemaPair {
             input: input_schema.arrow_schema(),
@@ -7178,7 +7677,7 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
     let program = super::compile_reorderer_program(
         &identifier("order_notifications"),
         &[identifier("incoming_notifications")],
-        "incoming_notifications.sequence",
+        &[expression("input.sequence")],
         input_schema.arrow_schema(),
     )
     .expect("reorderer key program should compile");
@@ -7244,7 +7743,7 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
     let program = super::compile_reorderer_program(
         &identifier("order_notifications"),
         &[identifier("incoming_notifications")],
-        "incoming_notifications.sequence",
+        &[expression("input.sequence")],
         input_schema.arrow_schema(),
     )
     .expect("reorderer key program should compile");
@@ -7284,34 +7783,8 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
 }
 
 #[test]
-fn processor_key_programs_reject_unqualified_fields() {
-    let input_schema = test_schema(&[
-        ("tenant", ParseAsType::String),
-        ("sequence", ParseAsType::U32),
-    ]);
-    let reorderer_error = super::compile_reorderer_program(
-        &identifier("order_notifications"),
-        &[identifier("incoming_notifications")],
-        "sequence",
-        input_schema.arrow_schema(),
-    )
-    .expect_err("reorderer BY must require qualified field references");
-    assert!(
-        reorderer_error.contains("BY parse failed"),
-        "unexpected reorderer error: {reorderer_error}"
-    );
-
-    let deduplicator_error = super::compile_deduplicator_key_program(
-        &identifier("deduplicate_notifications"),
-        &[identifier("incoming_notifications")],
-        "sequence",
-        input_schema.arrow_schema(),
-    )
-    .expect_err("deduplicator DEDUPLICATE ON must require qualified field references");
-    assert!(
-        deduplicator_error.contains("DEDUPLICATE ON parse failed"),
-        "unexpected deduplicator error: {deduplicator_error}"
-    );
+fn processor_key_expressions_reject_relay_qualified_fields() {
+    assert!(nervix_nspl::parse_expression("incoming_notifications.sequence").is_err());
 }
 
 #[tokio::test]
@@ -7353,14 +7826,11 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
         &identifier("logic_ingestor"),
-        &identifier("logic_notifications"),
         &IngestSource::Endpoint {
             endpoint: identifier("logic_endpoint"),
             mode: nervix_models::EndpointIngestMode::NoAckSequential,
         },
-        Some(
-            "SET logic_notifications.normalized = lower(message.raw) UNSET logic_notifications.raw",
-        ),
+        &construction("INHERIT tenant SET normalized = lower(input.raw)"),
         super::RuntimeVmSchemaPair {
             input: input_schema.arrow_schema(),
             input_sensitivity: super::VmSchemaSensitivity::default(),
@@ -7411,7 +7881,6 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
         &identifier("logic_ingestor"),
-        &identifier("logic_notifications"),
         &IngestSource::Kafka {
             client: identifier("logic_kafka"),
             topic: identifier("logic_notifications"),
@@ -7425,11 +7894,9 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
                 },
             },
         },
-        Some(
-            "SET logic_notifications.topic = metadata.topic, logic_notifications.partition = \
-             metadata.partition, logic_notifications.offset = metadata.offset UNSET \
-             logic_notifications.active, logic_notifications.amount, logic_notifications.raw \
-             WHERE metadata.offset >= 0",
+        &construction(
+            "INHERIT tenant SET topic = metadata.topic, partition = metadata.partition, offset = \
+             metadata.offset WHERE metadata.offset >= 0",
         ),
         super::RuntimeVmSchemaPair {
             input: input_schema.arrow_schema(),
@@ -7568,13 +8035,11 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     let program = super::compile_ingestor_filter_map_program(
         &domain("default"),
         &identifier("header_ingestor"),
-        &identifier("header_output"),
         &source,
-        Some(
-            "SET header_output.first = read_header(lower(message.header_name)), \
-             header_output.total = count(read_headers(lower(message.header_name))) UNSET \
-             header_output.header_name, header_output.raw WHERE read_header(\"tenant\") = \
-             message.tenant AND count(read_headers(\"missing\")) = 0",
+        &construction(
+            "INHERIT tenant SET first = read_header(lower(input.header_name)), total = \
+             count(read_headers(lower(input.header_name))) WHERE read_header(\"tenant\") = \
+             input.tenant AND count(read_headers(\"missing\")) = 0",
         ),
         super::RuntimeVmSchemaPair {
             input: input_schema.arrow_schema(),
@@ -7626,20 +8091,17 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     );
     assert_eq!(output.value("total"), Some(&RuntimeValue::I64(2)));
 
-    let message_namespace = identifier("message");
-    let top_filter = super::compile_filter_map_program(
+    let top_filter = super::compile_expression_filter_program(
         &domain("default"),
         &identifier("header_ingestor"),
-        &[message_namespace],
-        Some(
-            "WHERE read_header(lower(message.header_name)) = \"primary\" AND \
+        Some(&expression(
+            "read_header(lower(input.header_name)) = \"primary\" AND \
              count(read_headers(\"missing\")) = 0",
-        ),
-        input_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        )),
         input_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
         true,
+        MessageErrorOperation::FilterWhere,
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -7665,6 +8127,68 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
 }
 
 #[tokio::test]
+async fn finalized_output_filter_reads_constructed_output_values() {
+    let output_schema =
+        test_schema(&[("tenant", ParseAsType::String), ("total", ParseAsType::I64)]);
+    let program = super::compile_finalized_output_filter_program(
+        &domain("default"),
+        &identifier("aggregate_route"),
+        Some(&expression("output.total >= 100 AND tenant = \"acme\"")),
+        output_schema.arrow_schema(),
+        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &[],
+            current_branch_schema: None,
+            current_branch_sensitivity: None,
+        },
+    )
+    .expect("finalized output filter must compile")
+    .expect("program must exist");
+
+    let selected = RuntimeRecord::from_fields([
+        (
+            "tenant".to_string(),
+            RuntimeValue::String("acme".to_string()),
+        ),
+        ("total".to_string(), RuntimeValue::I64(130)),
+    ]);
+    assert!(
+        super::execute_filter_map_on_record(
+            &program,
+            selected,
+            None,
+            None,
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .expect("finalized output filter must execute")
+        .is_some()
+    );
+
+    let rejected = RuntimeRecord::from_fields([
+        (
+            "tenant".to_string(),
+            RuntimeValue::String("acme".to_string()),
+        ),
+        ("total".to_string(), RuntimeValue::I64(99)),
+    ]);
+    assert!(
+        super::execute_filter_map_on_record(
+            &program,
+            rejected,
+            None,
+            None,
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .expect("finalized output filter must execute")
+        .is_none()
+    );
+}
+
+#[tokio::test]
 async fn generator_set_program_can_project_from_materialized_relay_namespace() {
     let source_schema = test_schema(&[
         ("tenant", ParseAsType::String),
@@ -7674,49 +8198,158 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
         ("tenant", ParseAsType::String),
         ("amount", ParseAsType::I64),
     ]);
+    let output = ProcessorOutput {
+        relay: identifier("generated_notifications"),
+        construction: construction(
+            "SET tenant = relay_state.notifications.tenant, amount = \
+             relay_state.notifications.amount + 1",
+        ),
+        flush_policy: Some(nervix_models::OutputFlushPolicy {
+            flush_each: "100ms".to_string(),
+            max_batch_size: Some("1MiB".to_string()),
+        }),
+        message_error_policy: MessageErrorPolicy::Log,
+        branch: None,
+    };
     let generator = CreateGenerator {
         name: identifier("synth_notifications"),
-        into_relay: identifier("generated_notifications"),
-        branched_by: processor_branched_by("tenant", "generated_notifications", &["tenant"]),
+        materialized_relay: identifier("notifications"),
+        branched_by: processor_branched_by("generated_notifications", &["tenant"]),
         each: "100ms".to_string(),
-        flush_each: "100ms".to_string(),
-        max_batch_size: Some("1MiB".to_string()),
-        set: "SET generated_notifications.tenant = notifications.tenant, \
-              generated_notifications.amount = notifications.amount + 1"
-            .to_string(),
-        message_error_policy: MessageErrorPolicy::Log,
+        output_routes: ProcessorOutputs::new(vec![output.clone()]),
     };
 
     let program = super::compile_generator_set_program(
         &domain("default"),
         &generator,
+        &output,
         output_schema.arrow_schema(),
         super::VmSchemaSensitivity::default(),
-        &[(identifier("notifications"), source_schema.arrow_schema())],
+        source_schema.arrow_schema(),
+        None,
     )
     .expect("generator set program must compile");
 
     let mut values = HashMap::default();
     values.insert(
-        "notifications.tenant".to_string(),
+        "relay_state.notifications.tenant".to_string(),
         RuntimeValue::String("acme".to_string()),
     );
-    values.insert("notifications.amount".to_string(), RuntimeValue::I64(7));
-    let input = super::generator_context_batch(&program.input_schema, &values)
+    values.insert(
+        "relay_state.notifications.amount".to_string(),
+        RuntimeValue::I64(7),
+    );
+    let input = super::generator_context_batch(&program.compiled.input_schema, &values)
         .expect("generator input batch must build");
 
     let output = super::execute_generator_program_on_context(
         &program,
         &input,
         Timestamp::from_unix_nanos(1),
+        &values,
     )
     .await
-    .expect("generator program must execute")
-    .expect("generator program must emit one row");
+    .expect("generator program must execute");
+    let super::SingleRecordFilterMapOutcome::Output(output) = output else {
+        panic!("generator program must emit one row");
+    };
 
     assert_eq!(
         output.value("tenant"),
         Some(&RuntimeValue::String("acme".to_string()))
     );
     assert_eq!(output.value("amount"), Some(&RuntimeValue::I64(8)));
+}
+
+#[tokio::test]
+async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_order() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let state_schema = test_optional_schema(&[
+        ("status", ParseAsType::String, false),
+        ("note", ParseAsType::String, true),
+    ]);
+    let (shutdown, _) = watch::channel(false);
+    let materialized_stream_specs = ["profiles", "rules"]
+        .into_iter()
+        .map(|relay| {
+            (
+                identifier(relay),
+                super::RuntimeMaterializedRelaySpec {
+                    schema: state_schema.arrow_schema(),
+                    sensitivity: super::VmSchemaSensitivity::default(),
+                    branching: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    runtime.executions.insert(
+        domain.clone(),
+        super::DomainExecution {
+            schedule: DomainSchedule {
+                domain: domain.clone(),
+                nodes: Vec::new(),
+            },
+            passive_only: false,
+            shutdown,
+            graph: StdArc::new(ArcSwapOption::empty()),
+            relay_registries: HashMap::default(),
+            relay_schemas: HashMap::default(),
+            relay_services: HashMap::default(),
+            relay_branchings: HashMap::default(),
+            relay_branching_schemas: HashMap::default(),
+            materialized_stream_specs,
+            materialized_stream_owner_nodes: HashMap::default(),
+            branched_ingestors: HashMap::default(),
+            branched_entrypoints: HashMap::default(),
+            codecs: HashMap::default(),
+            signaling_protocols: HashMap::default(),
+            lookups: HashMap::default(),
+            endpoint_routes: HashMap::default(),
+            tasks: Vec::new(),
+        },
+    );
+
+    let default = nervix_models::MaterializedStateDependency {
+        relay: identifier("profiles"),
+        policy: nervix_models::MaterializedStatePolicy::Default(vec![Assignment {
+            target: AssignmentTarget::bare(identifier("status")),
+            value: Expression::Literal(nervix_models::Literal::String("unknown".to_string())),
+        }]),
+    };
+    let resolved = runtime
+        .resolve_materialized_dependencies(&domain, &None, &[default])
+        .await
+        .expect("default dependency should resolve");
+    let super::MaterializedDependencyResolution::Ready(values) = resolved else {
+        panic!("default dependency should be ready");
+    };
+    assert_eq!(
+        values.get("relay_state.profiles.status"),
+        Some(&RuntimeValue::String("unknown".to_string()))
+    );
+    assert!(!values.contains_key("relay_state.profiles.note"));
+
+    let wait = nervix_models::MaterializedStateDependency {
+        relay: identifier("profiles"),
+        policy: nervix_models::MaterializedStatePolicy::RequiredWait,
+    };
+    let skip = nervix_models::MaterializedStateDependency {
+        relay: identifier("rules"),
+        policy: nervix_models::MaterializedStatePolicy::RequiredSkip,
+    };
+    assert!(matches!(
+        runtime
+            .resolve_materialized_dependencies(&domain, &None, &[wait.clone(), skip.clone()])
+            .await
+            .expect("missing dependencies should produce a policy outcome"),
+        super::MaterializedDependencyResolution::Wait
+    ));
+    assert!(matches!(
+        runtime
+            .resolve_materialized_dependencies(&domain, &None, &[skip, wait])
+            .await
+            .expect("missing dependencies should produce a policy outcome"),
+        super::MaterializedDependencyResolution::Skip
+    ));
 }

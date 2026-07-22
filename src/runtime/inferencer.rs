@@ -1,5 +1,6 @@
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
+use ahash::{HashMap, HashMapExt};
 use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, InferencerTensorSchema,
@@ -166,12 +167,10 @@ impl PreparedInvocation {
         let inputs = mappings
             .iter()
             .map(|mapping| {
-                let value = record.value(mapping.field.as_str()).ok_or_else(|| {
+                let value = record.value(&mapping.tensor).ok_or_else(|| {
                     format!(
-                        "ONNX input tensor '{}' field '{}.{}' is missing",
-                        mapping.tensor,
-                        mapping.relay.as_str(),
-                        mapping.field.as_str()
+                        "ONNX input tensor '{}' mapped value is missing",
+                        mapping.tensor
                     )
                 })?;
                 let tensor = mapping.schema.tensor_from_runtime_value(value)?;
@@ -197,12 +196,10 @@ impl PreparedInvocation {
             let shapes = mappings
                 .iter()
                 .map(|mapping| {
-                    let value = record.value(mapping.field.as_str()).ok_or_else(|| {
+                    let value = record.value(&mapping.tensor).ok_or_else(|| {
                         format!(
-                            "ONNX input tensor '{}' field '{}.{}' is missing",
-                            mapping.tensor,
-                            mapping.relay.as_str(),
-                            mapping.field.as_str()
+                            "ONNX input tensor '{}' mapped value is missing",
+                            mapping.tensor
                         )
                     })?;
                     Ok(mapping.schema.tensor_from_runtime_value(value)?.shape)
@@ -228,12 +225,10 @@ impl PreparedInvocation {
                     .iter()
                     .map(|message_index| {
                         let record = &records[*message_index];
-                        let value = record.value(mapping.field.as_str()).ok_or_else(|| {
+                        let value = record.value(&mapping.tensor).ok_or_else(|| {
                             format!(
-                                "ONNX input tensor '{}' field '{}.{}' is missing",
-                                mapping.tensor,
-                                mapping.relay.as_str(),
-                                mapping.field.as_str()
+                                "ONNX input tensor '{}' mapped value is missing",
+                                mapping.tensor
                             )
                         })?;
                         mapping.schema.tensor_from_runtime_value(value)

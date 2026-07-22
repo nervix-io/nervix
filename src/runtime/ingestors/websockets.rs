@@ -72,7 +72,6 @@ impl WebsocketsIngestor {
         let output_routes = dependencies.output_routes;
         let filter_where = dependencies.filter_where;
         let codec = dependencies.codec;
-        let branching = dependencies.branching;
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_runtime = runtime.clone();
@@ -80,7 +79,6 @@ impl WebsocketsIngestor {
         let task_ingestor = ingestor.name.clone();
         let task_signaling_protocol = signaling_protocol.clone();
         let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_branch_value_mappings = dependencies.branch_value_mappings.clone();
         let task_events = runtime.events.clone();
         let task_endpoint_requires_tls =
             match ServiceUrl::new(endpoint.as_str(), "WebSockets endpoint")
@@ -234,8 +232,6 @@ impl WebsocketsIngestor {
                                         &task_domain,
                                         &task_ingestor,
                                         task_timestamp_source.as_ref(),
-                                        &branching,
-                                        &task_branch_value_mappings,
                                         &output_routes,
                                         filter_where.as_ref(),
                                         &branched_senders,
@@ -279,8 +275,6 @@ impl WebsocketsIngestor {
                                                         &task_domain,
                                                         &task_ingestor,
                                                         task_timestamp_source.as_ref(),
-                                                        &branching,
-                                                        &task_branch_value_mappings,
                                                         &output_routes,
                                                         filter_where.as_ref(),
                                                         &branched_senders,
@@ -368,8 +362,6 @@ impl WebsocketsIngestor {
         domain: &Domain,
         ingestor: &Identifier,
         timestamp_source: Option<&IngestTimestampSource>,
-        branching: &[Identifier],
-        branch_value_mappings: &[BranchValueMapping],
         output_routes: &RelayProcessorOutputsNode,
         filter_where: Option<&CompiledProgramWithMaterializedInterest>,
         branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
@@ -385,8 +377,6 @@ impl WebsocketsIngestor {
                         domain,
                         ingestor,
                         timestamp_source,
-                        branching,
-                        branch_value_mappings: Some(branch_value_mappings),
                         output_routes: &mut output_routes,
                         filter_where,
                         branched_senders,

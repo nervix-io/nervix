@@ -247,10 +247,8 @@ impl IcebergEmitter {
         let program = compile_iceberg_values_program(
             &context.domain,
             &context.emitter,
-            &context.from_relay,
             values,
             input_schema.arrow_schema(),
-            context.branch_schema.clone(),
         )
         .map_err(|error| {
             Report::new(IcebergEmitterError::CompileValues).attach_printable(error.to_string())

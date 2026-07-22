@@ -26,13 +26,15 @@ Feature: Redis ingestion
           'addr' = 'redis://127.0.0.1:6379/'
         };
         CREATE INGESTOR redis_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_redis_notifications VALUES { user_id = notifications.user_id }
-
-        FROM REDIS PUBSUB redis_main
-        CHANNEL notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_redis_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -80,13 +82,15 @@ Feature: Redis ingestion
           'addr' = 'redis://127.0.0.1:6379/'
         };
         CREATE INGESTOR redis_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM REDIS PUBSUB redis_main CHANNEL notifications_reconnect_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_redis_notifications VALUES { user_id = notifications.user_id }
-
-        FROM REDIS PUBSUB redis_main
-        CHANNEL notifications_reconnect_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_redis_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

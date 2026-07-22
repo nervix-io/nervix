@@ -8,8 +8,8 @@ Feature: HTTP ingestor specific filter-map logic
       """
     When the ingestor logic fixture "http_endpoint" fails to start with output schema "input" and program
       """
-      SET logic_notifications.normalized = lower(trim(message.raw)), logic_notifications.amount = message.amount + 1
-      UNSET logic_notifications.raw
+      INHERIT ALL EXCEPT raw
+      SET normalized = lower(trim(message.raw)), amount = message.amount + 1
       """
     Then the ingestor logic expectation "compile_error" is observed
 
@@ -27,18 +27,18 @@ Feature: HTTP ingestor specific filter-map logic
       """
     When the ingestor logic fixture "http_endpoint" starts with output schema "function_matrix" and program
       """
-      SET logic_notifications.amount_abs = abs(-message.amount),
-          logic_notifications.trimmed = trim(message.raw),
-          logic_notifications.lowered = lower(trim(message.raw)),
-          logic_notifications.uppered = upper(trim(message.raw)),
-          logic_notifications.raw_len = length(trim(message.raw)),
-          logic_notifications.contains_keep = contains(lower(trim(message.raw)), 'eep'),
-          logic_notifications.starts_keep = starts_with(lower(trim(message.raw)), 'keep'),
-          logic_notifications.ends_me = ends_with(lower(trim(message.raw)), 'me'),
-          logic_notifications.fallback = coalesce(nullif(lower(trim(message.raw)), 'keepme'), 'fallback'),
-          logic_notifications.was_keep = is_null(nullif(lower(trim(message.raw)), 'keepme'))
-      UNSET logic_notifications.active, logic_notifications.amount, logic_notifications.raw
-      WHERE message.active AND message.amount > 5 AND NOT starts_with(lower(trim(message.raw)), 'drop') AND (contains(lower(message.raw), 'keep') OR ends_with(lower(trim(message.raw)), 'me'))
+      INHERIT ALL EXCEPT active, amount, raw
+      SET amount_abs = abs(-input.amount),
+          trimmed = trim(input.raw),
+          lowered = lower(trim(input.raw)),
+          uppered = upper(trim(input.raw)),
+          raw_len = length(trim(input.raw)),
+          contains_keep = contains(lower(trim(input.raw)), 'eep'),
+          starts_keep = starts_with(lower(trim(input.raw)), 'keep'),
+          ends_me = ends_with(lower(trim(input.raw)), 'me'),
+          fallback = coalesce(nullif(lower(trim(input.raw)), 'keepme'), 'fallback'),
+          was_keep = is_null(nullif(lower(trim(input.raw)), 'keepme'))
+      WHERE input.active AND input.amount > 5 AND NOT starts_with(lower(trim(input.raw)), 'drop') AND (contains(lower(input.raw), 'keep') OR ends_with(lower(trim(input.raw)), 'me'))
       """
     And the ingestor logic transport "http_endpoint" delivers payload fixture "function_matrix_message"
     Then the relay subscription receives a payload
@@ -77,17 +77,17 @@ Feature: HTTP ingestor specific filter-map logic
       """
     When the ingestor logic fixture "http_endpoint" starts with output schema "arithmetic_matrix" and program
       """
-      SET logic_notifications.parsed = message.raw AS INT64,
-          logic_notifications.sum = message.amount + (message.raw AS INT64),
-          logic_notifications.difference = message.amount - (message.raw AS INT64),
-          logic_notifications.product = message.amount * (message.raw AS INT64),
-          logic_notifications.quotient = message.amount / (message.raw AS INT64),
-          logic_notifications.remainder = message.amount % (message.raw AS INT64),
-          logic_notifications.complex = (message.amount + (message.raw AS INT64)) * (message.amount - (message.raw AS INT64)),
-          logic_notifications.comparison = (message.amount / (message.raw AS INT64)) > ((message.raw AS INT64) - 4),
-          logic_notifications.chained = lower(trim(upper(message.tenant)))
-      UNSET logic_notifications.active, logic_notifications.amount, logic_notifications.raw
-      WHERE (message.active AND message.amount < 0) OR (NOT message.active AND ((message.raw AS INT64) < message.amount AND message.amount > 10))
+      INHERIT ALL EXCEPT active, amount, raw
+      SET parsed = input.raw AS INT64,
+          sum = input.amount + (input.raw AS INT64),
+          difference = input.amount - (input.raw AS INT64),
+          product = input.amount * (input.raw AS INT64),
+          quotient = input.amount / (input.raw AS INT64),
+          remainder = input.amount % (input.raw AS INT64),
+          complex = (input.amount + (input.raw AS INT64)) * (input.amount - (input.raw AS INT64)),
+          comparison = (input.amount / (input.raw AS INT64)) > ((input.raw AS INT64) - 4),
+          chained = lower(trim(upper(message.tenant)))
+      WHERE (input.active AND input.amount < 0) OR (NOT input.active AND ((input.raw AS INT64) < input.amount AND input.amount > 10))
       """
     And the ingestor logic transport "http_endpoint" delivers payload fixture "arithmetic_message"
     Then the relay subscription receives a payload
@@ -123,39 +123,39 @@ Feature: HTTP ingestor specific filter-map logic
       """
     When the ingestor logic fixture "http_endpoint" starts with output schema "extended_builtin_matrix" and program
       """
-      SET logic_notifications.now_text = now() AS STRING,
-          logic_notifications.uuid4 = uuid_v4(),
-          logic_notifications.uuid7 = uuid_v7(),
-          logic_notifications.bit_len = bit_length(trim(message.raw)),
-          logic_notifications.ascii_value = ascii(trim(message.raw)),
-          logic_notifications.btrimmed = btrim(message.raw),
-          logic_notifications.char_len = char_length(message.raw),
-          logic_notifications.joined = concat('he', '-', message.tenant),
-          logic_notifications.titled = initcap(message.raw),
-          logic_notifications.lefted = left(trim(message.raw), 2),
-          logic_notifications.lowered = lower(trim(message.raw)),
-          logic_notifications.lpaded = lpad('he', 7, 'xy'),
-          logic_notifications.ltrimmed = ltrim(message.raw),
-          logic_notifications.digest = md5('he'),
-          logic_notifications.repeated = repeat('he', 2),
-          logic_notifications.replaced = replace(trim(message.raw), 'he', 'HE'),
-          logic_notifications.reversed = reverse('he'),
-          logic_notifications.righted = right(trim(message.raw), 2),
-          logic_notifications.rpaded = rpad('he', 7, 'xy'),
-          logic_notifications.rtrimmed = rtrim(message.raw),
-          logic_notifications.part = split_part('alpha.beta.gamma', '.', 2),
-          logic_notifications.starts = starts_with(lower(trim(message.raw)), 'he'),
-          logic_notifications.pos = strpos(trim(message.raw), 'he'),
-          logic_notifications.piece = substr(trim(message.raw), 2, 3),
-          logic_notifications.hexed = to_hex(255),
-          logic_notifications.translated = translate('he', 'he', 'HE'),
-          logic_notifications.trimmed2 = trim(message.raw),
-          logic_notifications.uppered = upper(message.tenant),
-          logic_notifications.regex_ok = regexp_like(trim(message.raw), 'h[a-z]+'),
-          logic_notifications.regex_replaced = regexp_replace(trim(message.raw), 'h[a-z]+', 'XX'),
-          logic_notifications.regex_piece = regexp_substr(message.raw, 'h[a-z]+')
-      UNSET logic_notifications.active, logic_notifications.amount, logic_notifications.raw
-      WHERE message.tenant = 'acme' AND message.active AND starts_with(lower(trim(message.raw)), 'he')
+      INHERIT ALL EXCEPT active, amount, raw
+      SET now_text = now() AS STRING,
+          uuid4 = uuid_v4(),
+          uuid7 = uuid_v7(),
+          bit_len = bit_length(trim(input.raw)),
+          ascii_value = ascii(trim(input.raw)),
+          btrimmed = btrim(input.raw),
+          char_len = char_length(input.raw),
+          joined = concat('he', '-', message.tenant),
+          titled = initcap(input.raw),
+          lefted = left(trim(input.raw), 2),
+          lowered = lower(trim(input.raw)),
+          lpaded = lpad('he', 7, 'xy'),
+          ltrimmed = ltrim(input.raw),
+          digest = md5('he'),
+          repeated = repeat('he', 2),
+          replaced = replace(trim(input.raw), 'he', 'HE'),
+          reversed = reverse('he'),
+          righted = right(trim(input.raw), 2),
+          rpaded = rpad('he', 7, 'xy'),
+          rtrimmed = rtrim(input.raw),
+          part = split_part('alpha.beta.gamma', '.', 2),
+          starts = starts_with(lower(trim(input.raw)), 'he'),
+          pos = strpos(trim(input.raw), 'he'),
+          piece = substr(trim(input.raw), 2, 3),
+          hexed = to_hex(255),
+          translated = translate('he', 'he', 'HE'),
+          trimmed2 = trim(input.raw),
+          uppered = upper(message.tenant),
+          regex_ok = regexp_like(trim(input.raw), 'h[a-z]+'),
+          regex_replaced = regexp_replace(trim(input.raw), 'h[a-z]+', 'XX'),
+          regex_piece = regexp_substr(input.raw, 'h[a-z]+')
+      WHERE message.tenant = 'acme' AND input.active AND starts_with(lower(trim(input.raw)), 'he')
       """
     And the ingestor logic transport "http_endpoint" delivers payload fixture "extended_builtin_message"
     Then the relay subscription receives a payload
@@ -216,19 +216,19 @@ Feature: HTTP ingestor specific filter-map logic
       """
     When the ingestor logic fixture "http_endpoint" starts with output schema "cast_matrix" and program
       """
-      SET logic_notifications.parsed = message.raw AS INT64,
-          logic_notifications.amount_text = message.amount AS STRING,
-          logic_notifications.amount_float = message.amount AS FLOAT64,
-          logic_notifications.truthy = 1 AS BOOLEAN,
-          logic_notifications.not_active = NOT message.active,
-          logic_notifications.literal_bool = true,
-          logic_notifications.literal_float = 3.5,
-          logic_notifications.literal_int = 9,
-          logic_notifications.label = 'ready',
-          logic_notifications.is_exact = message.raw = (message.amount AS STRING),
-          logic_notifications.negated = -message.amount
-      UNSET logic_notifications.active, logic_notifications.amount, logic_notifications.raw
-      WHERE message.tenant = 'acme' AND NOT message.active
+      INHERIT ALL EXCEPT active, amount, raw
+      SET parsed = input.raw AS INT64,
+          amount_text = input.amount AS STRING,
+          amount_float = input.amount AS FLOAT64,
+          truthy = 1 AS BOOLEAN,
+          not_active = NOT input.active,
+          literal_bool = true,
+          literal_float = 3.5,
+          literal_int = 9,
+          label = 'ready',
+          is_exact = input.raw = (input.amount AS STRING),
+          negated = -input.amount
+      WHERE message.tenant = 'acme' AND NOT input.active
       """
     And the ingestor logic transport "http_endpoint" delivers payload fixture "cast_matrix_message"
     Then the relay subscription receives a payload
@@ -266,23 +266,23 @@ Feature: HTTP ingestor specific filter-map logic
       """
     When the ingestor logic fixture "http_endpoint" starts with output schema "math_builtin_matrix" and program
       """
-      SET logic_notifications.absolute = abs(-message.amount),
-          logic_notifications.acos_value = acos(0.5),
-          logic_notifications.asin_value = asin(0.5),
-          logic_notifications.atan_value = atan(2.0),
-          logic_notifications.ceil_value = ceil(-1.75),
-          logic_notifications.cos_value = cos(0.5),
-          logic_notifications.exp_value = exp(1.0),
-          logic_notifications.floor_value = floor(-1.75),
-          logic_notifications.ln_value = ln(2.0),
-          logic_notifications.log_value = log(100.0),
-          logic_notifications.log_base_value = log(2.0, 100.0),
-          logic_notifications.pow_value = pow(2.0, 3.0),
-          logic_notifications.round_value = round(1.6),
-          logic_notifications.sqrt_value = sqrt(9.0),
-          logic_notifications.tan_value = tan(0.5)
-      UNSET logic_notifications.active, logic_notifications.amount, logic_notifications.raw
-      WHERE message.tenant = 'acme' AND message.active
+      INHERIT ALL EXCEPT active, amount, raw
+      SET absolute = abs(-input.amount),
+          acos_value = acos(0.5),
+          asin_value = asin(0.5),
+          atan_value = atan(2.0),
+          ceil_value = ceil(-1.75),
+          cos_value = cos(0.5),
+          exp_value = exp(1.0),
+          floor_value = floor(-1.75),
+          ln_value = ln(2.0),
+          log_value = log(100.0),
+          log_base_value = log(2.0, 100.0),
+          pow_value = pow(2.0, 3.0),
+          round_value = round(1.6),
+          sqrt_value = sqrt(9.0),
+          tan_value = tan(0.5)
+      WHERE message.tenant = 'acme' AND input.active
       """
     And the ingestor logic transport "http_endpoint" delivers payload fixture "math_builtin_message"
     Then the relay subscription receives a payload
@@ -324,21 +324,21 @@ Feature: HTTP ingestor specific filter-map logic
       """
     When the ingestor logic fixture "http_endpoint" starts with output schema "internal_types" and program
       """
-      SET logic_notifications.u8_next = (message.u8 AS U8) + (1 AS U8),
-          logic_notifications.i8_abs = abs(message.i8 AS I8),
-          logic_notifications.u16_keep = coalesce((message.u16 AS U16), (0 AS U16)),
-          logic_notifications.i16_prev = (message.i16 AS I16) - (1 AS I16),
-          logic_notifications.u32_same = coalesce(nullif((message.u32 AS U32), (999 AS U32)), (0 AS U32)),
-          logic_notifications.i32_neg = -(message.i32 AS I32),
-          logic_notifications.u64_next = (message.u64 AS U64) + (2 AS U64),
-          logic_notifications.i64_keep = message.i64,
-          logic_notifications.f32_next = (message.f32 AS F32) + (1.5 AS F32),
-          logic_notifications.f64_keep = message.f64,
-          logic_notifications.bool_copy = message.active,
-          logic_notifications.occurred_text = (message.occurred_at AS DATETIME) AS STRING,
-          logic_notifications.occurred_copy = (message.occurred_at AS STRING) AS DATETIME
-      UNSET logic_notifications.active, logic_notifications.u8, logic_notifications.i8, logic_notifications.u16, logic_notifications.i16, logic_notifications.u32, logic_notifications.i32, logic_notifications.u64, logic_notifications.i64, logic_notifications.f32, logic_notifications.f64, logic_notifications.occurred_at, logic_notifications.raw
-      WHERE message.active AND (message.occurred_at AS DATETIME) > ('2026-04-07T00:00:00Z' AS DATETIME)
+      INHERIT ALL EXCEPT active, u8, i8, u16, i16, u32, i32, u64, i64, f32, f64, occurred_at, raw
+      SET u8_next = (input.u8 AS U8) + (1 AS U8),
+          i8_abs = abs(input.i8 AS I8),
+          u16_keep = coalesce((input.u16 AS U16), (0 AS U16)),
+          i16_prev = (input.i16 AS I16) - (1 AS I16),
+          u32_same = coalesce(nullif((input.u32 AS U32), (999 AS U32)), (0 AS U32)),
+          i32_neg = -(input.i32 AS I32),
+          u64_next = (input.u64 AS U64) + (2 AS U64),
+          i64_keep = input.i64,
+          f32_next = (input.f32 AS F32) + (1.5 AS F32),
+          f64_keep = input.f64,
+          bool_copy = input.active,
+          occurred_text = (input.occurred_at AS DATETIME) AS STRING,
+          occurred_copy = (input.occurred_at AS STRING) AS DATETIME
+      WHERE input.active AND (input.occurred_at AS DATETIME) > ('2026-04-07T00:00:00Z' AS DATETIME)
       """
     And the ingestor logic transport "http_endpoint" delivers payload fixture "internal_types_message"
     Then the relay subscription receives a payload

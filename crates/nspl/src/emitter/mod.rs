@@ -11,10 +11,11 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, byte_size_lit, channel_ref, client_ref,
-        codec_ref, current_word_prefix, duration_lit, emitter_name, error_policies,
-        filter_map_program, flush_each, if_not_exists_clause, into_parse_error, kw, kw_phrase2,
-        lex_input, queue_ref, relay_ref, render_vm_program_tokens, string_lit,
-        suggestions_from_errors, table_ref, tok, topic_ref,
+        codec_ref, current_word_prefix, duration_lit, emitter_name, flush_each,
+        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
+        materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
+        render_vm_program_tokens, route_construction, string_lit, suggestions_from_errors,
+        table_ref, tok, topic_ref,
     },
 };
 
@@ -98,20 +99,41 @@ fn sqs_emit_sink_parser<'src>()
         .map(|(client, queue)| EmitSink::Sqs { client, queue })
 }
 
+fn balanced_value_expression_group<'src>()
+-> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
+    recursive(|element| {
+        let contents = element
+            .repeated()
+            .collect::<Vec<_>>()
+            .map(|parts| parts.into_iter().flatten().collect::<Vec<_>>());
+        let parenthesized = contents
+            .delimited_by(tok(Token::LParen), tok(Token::RParen))
+            .map(|mut tokens| {
+                tokens.insert(0, Token::LParen);
+                tokens.push(Token::RParen);
+                tokens
+            });
+        let leaf = any()
+            .filter(|token: &Token| !matches!(token, Token::LParen | Token::RParen | Token::RBrace))
+            .map(|token| vec![token]);
+        choice((parenthesized, leaf))
+    })
+}
+
 fn clickhouse_value_expr<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    any()
-        .filter(|token: &Token| !matches!(token, Token::Comma | Token::RBrace))
+-> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
+{
+    balanced_value_expression_group()
+        .filter(|tokens| !matches!(tokens.as_slice(), [Token::Comma]))
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()
+        .map(|parts| parts.into_iter().flatten().collect::<Vec<_>>())
         .try_map(|tokens, span| {
             let source = render_vm_program_tokens(&tokens);
-            crate::vm_program::parse_program(&format!("SET clickhouse.value = {source}"))
-                .map(|_| source)
-                .map_err(|error| {
-                    Rich::custom(span, crate::parser_support::vm_program_error_message(error))
-                })
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, crate::parser_support::vm_program_error_message(error))
+            })
         })
 }
 
@@ -514,12 +536,14 @@ pub fn create_emitter_parser<'src>()
                 .ignore_then(codec_ref())
                 .or_not(),
         )
+        .then(materialized_state_dependencies())
         .then_ignore(kw(Identifier::To))
         .then(emit_sink_parser())
-        .then(filter_map_program().or_not())
-        .then(error_policies())
+        .then(route_construction().or_not())
         .then(flush_each())
         .then(iceberg_commit_each().or_not())
+        .then(message_error_policy())
+        .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .try_map(
             |(
@@ -527,16 +551,25 @@ pub fn create_emitter_parser<'src>()
                     (
                         (
                             (
-                                ((((if_not_exists, mode), name), from_relay), encode_using_codec),
-                                sink,
+                                (
+                                    (
+                                        (
+                                            (((if_not_exists, mode), name), from_relay),
+                                            encode_using_codec,
+                                        ),
+                                        materialized_state,
+                                    ),
+                                    sink,
+                                ),
+                                construction,
                             ),
-                            filter_map,
+                            sink_flush_each,
                         ),
-                        error_policies,
+                        sink_commit_each,
                     ),
-                    sink_flush_each,
+                    message_error_policy,
                 ),
-                sink_commit_each,
+                general_error_policy,
             ),
              span| {
                 if let EmitSink::Iceberg { .. } = &sink
@@ -551,6 +584,17 @@ pub fn create_emitter_parser<'src>()
                     return Err(Rich::custom(
                         span,
                         "encoded emitters require ENCODE USING <codec>",
+                    ));
+                }
+                let construction = construction.unwrap_or_default();
+                if encode_using_codec.is_none()
+                    && (construction.inherit.is_some()
+                        || !construction.assignments.is_empty()
+                        || !construction.invocations.is_empty())
+                {
+                    return Err(Rich::custom(
+                        span,
+                        "direct emitter routes support VALUES and WHERE only",
                     ));
                 }
                 let iceberg_commit_each = if let Some(commit_each) = sink_commit_each {
@@ -676,9 +720,13 @@ pub fn create_emitter_parser<'src>()
                         sink,
                         flush_each,
                         max_batch_size,
-                        error_policies,
+                        error_policies: nervix_models::ErrorPolicies {
+                            message: message_error_policy,
+                            general: general_error_policy,
+                        },
                         mode: mode.unwrap_or(AckMode::Attached),
-                        filter_map,
+                        construction,
+                        materialized_state,
                     },
                     if_not_exists,
                 ))
@@ -740,13 +788,17 @@ mod tests {
             .collect()
     }
 
+    fn expression(source: &str) -> nervix_models::Expression {
+        crate::parse_expression(source).expect("valid structured expression")
+    }
+
     #[test]
     fn parses_create_emitter_kafka() {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO KAFKA broker1 TOPIC topic ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO KAFKA broker1 TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -780,13 +832,11 @@ mod tests {
                 FROM notifications
                 TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
                 VALUES {
-                    "clickhouse_user_id" = notifications.user_id,
+                    "clickhouse_user_id" = input.user_id,
                     "clickhouse_now" = NOW(),
-                    "clickhouse_action" = LOWER(notifications.action)
+                    "clickhouse_action" = LOWER(input.action)
                 }
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -803,15 +853,15 @@ mod tests {
                 values: vec![
                     ClickHouseValueMapping {
                         column: "clickhouse_user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: expression("input.user_id"),
                     },
                     ClickHouseValueMapping {
                         column: "clickhouse_now".to_string(),
-                        expression: "NOW ( )".to_string(),
+                        expression: expression("NOW ( )"),
                     },
                     ClickHouseValueMapping {
                         column: "clickhouse_action".to_string(),
-                        expression: "LOWER ( notifications.action )".to_string(),
+                        expression: expression("LOWER ( input.action )"),
                     },
                 ],
                 flush_each: "10s".to_string(),
@@ -825,7 +875,7 @@ mod tests {
             r#"
             CREATE EMITTER to_ch FROM notifications
             TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -844,15 +894,12 @@ mod tests {
                 FROM notifications
                 TO ICEBERG ON S3 s3_client TABLE notifications
                 VALUES {
-                    "user_id" = notifications.user_id,
-                    "action" = notifications.action
+                    "user_id" = input.user_id,
+                    "action" = input.action
                 }
                 LOCATION 's3://nervix-iceberg/tables/notifications'
                 CATALOG iceberg_catalog
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 64MiB
-                COMMIT EACH 1m MAX SIZE 512MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 64MiB COMMIT EACH 1m MAX SIZE 512MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -871,11 +918,11 @@ mod tests {
                 values: vec![
                     ClickHouseValueMapping {
                         column: "user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: expression("input.user_id"),
                     },
                     ClickHouseValueMapping {
                         column: "action".to_string(),
-                        expression: "notifications.action".to_string(),
+                        expression: expression("input.action"),
                     },
                 ],
                 location: "s3://nervix-iceberg/tables/notifications".to_string(),
@@ -898,15 +945,12 @@ mod tests {
                 FROM notifications
                 TO ICEBERG ON GCS gcs_client TABLE notifications
                 VALUES {
-                    "user_id" = notifications.user_id,
-                    "action" = notifications.action
+                    "user_id" = input.user_id,
+                    "action" = input.action
                 }
                 LOCATION 'gs://nervix-iceberg/tables/notifications'
                 CATALOG iceberg_catalog
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH IMMEDIATE
-                COMMIT EACH 1m MAX SIZE 512MiB;
+                FLUSH IMMEDIATE COMMIT EACH 1m MAX SIZE 512MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -923,11 +967,11 @@ mod tests {
                 values: vec![
                     ClickHouseValueMapping {
                         column: "user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: expression("input.user_id"),
                     },
                     ClickHouseValueMapping {
                         column: "action".to_string(),
-                        expression: "notifications.action".to_string(),
+                        expression: expression("input.action"),
                     },
                 ],
                 location: "gs://nervix-iceberg/tables/notifications".to_string(),
@@ -950,15 +994,12 @@ mod tests {
                 FROM notifications
                 TO ICEBERG ON AZURE_BLOB azure_client TABLE notifications
                 VALUES {
-                    "user_id" = notifications.user_id,
-                    "action" = notifications.action
+                    "user_id" = input.user_id,
+                    "action" = input.action
                 }
                 LOCATION 'wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/notifications'
                 CATALOG iceberg_catalog
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH IMMEDIATE
-                COMMIT EACH 1m MAX SIZE 512MiB;
+                FLUSH IMMEDIATE COMMIT EACH 1m MAX SIZE 512MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -975,11 +1016,11 @@ mod tests {
                 values: vec![
                     ClickHouseValueMapping {
                         column: "user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: expression("input.user_id"),
                     },
                     ClickHouseValueMapping {
                         column: "action".to_string(),
-                        expression: "notifications.action".to_string(),
+                        expression: expression("input.action"),
                     },
                 ],
                 location: "wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/\
@@ -1003,7 +1044,7 @@ mod tests {
             r#"
             CREATE EMITTER to_iceberg FROM notifications
             TO ICEBERG ON S3 s3_client TABLE notifications
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             LOCATION 's3://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1025,7 +1066,7 @@ mod tests {
             TO ICEBERG ON s3_client TABLE notifications
             LOCATION 's3://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH IMMEDIATE;
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1039,10 +1080,10 @@ mod tests {
             r#"
             CREATE EMITTER to_iceberg FROM notifications ENCODE USING json_codec
             TO ICEBERG ON S3 s3_client TABLE notifications
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             LOCATION 's3://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH IMMEDIATE;
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1062,7 +1103,7 @@ mod tests {
             TO ICEBERG ON S3 s3_client TABLE notifications
             LOCATION 's3://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH IMMEDIATE;
+            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1079,11 +1120,10 @@ mod tests {
             r#"
             CREATE EMITTER to_iceberg FROM notifications
             TO ICEBERG ON S3 s3_client TABLE notifications
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             LOCATION 's3://nervix-iceberg/tables/notifications'
             CATALOG iceberg_catalog
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-            FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+            FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1101,10 +1141,8 @@ mod tests {
             r#"
             CREATE EMITTER to_ch FROM notifications
             TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-            FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-            COMMIT EACH 1m MAX SIZE 512MiB;
+            VALUES { "user_id" = input.user_id }
+            FLUSH EACH 100ms MAX BATCH SIZE 1MiB COMMIT EACH 1m MAX SIZE 512MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1122,12 +1160,10 @@ mod tests {
             r#"
             CREATE EMITTER to_iceberg FROM notifications
             TO ICEBERG ON S3 s3_client TABLE notifications
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             LOCATION 's3://nervix-iceberg/tables/notifications'
-            CATALOG SAME CLIENT LOCATION 's3://nervix-iceberg/catalogs/notifications.catalog.json'
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-            FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-            COMMIT EACH 1m MAX SIZE 512MiB;
+            CATALOG SAME CLIENT LOCATION 's3://nervix-iceberg/catalogs/input.catalog.json'
+            FLUSH EACH 100ms MAX BATCH SIZE 1MiB COMMIT EACH 1m MAX SIZE 512MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1138,7 +1174,7 @@ mod tests {
     #[test]
     fn iceberg_catalog_context_suggestions_do_not_leak_sink_keywords() {
         let input = "CREATE EMITTER to_iceberg FROM notifications TO ICEBERG ON S3 s3_client \
-                     TABLE notifications VALUES { \"user_id\" = notifications.user_id } LOCATION \
+                     TABLE notifications VALUES { \"user_id\" = input.user_id } LOCATION \
                      's3://bucket/table' CATALOG ";
         let suggestions = suggest_create_emitter(input, input.len());
         assert!(suggestions.contains(&"ref:client".to_string()));
@@ -1173,29 +1209,29 @@ mod tests {
             r#"
             CREATE EMITTER to_ch FROM notifications
             TO CLICKHOUSE clickhouse_client TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+            VALUES { "user_id" = input.user_id }
+            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
             r#"
             CREATE EMITTER to_pg FROM notifications
             TO POSTGRES postgres_client TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
             r#"
             CREATE EMITTER to_mysql FROM notifications
             TO MYSQL mysql_client TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
             r#"
             CREATE EMITTER to_mongodb FROM notifications
             TO MONGODB mongodb_client COLLECTION my_collection
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         ] {
             let tokens = to_tokens(input);
@@ -1211,14 +1247,12 @@ mod tests {
                 FROM notifications
                 TO POSTGRES postgres_client INSERT TO TABLE my_table
                 VALUES {
-                    "postgres_user_id" = notifications.user_id,
+                    "postgres_user_id" = input.user_id,
                     "postgres_now" = NOW() AS STRING,
-                    "postgres_action" = LOWER(notifications.action)
+                    "postgres_action" = LOWER(input.action)
                 }
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1235,15 +1269,15 @@ mod tests {
                 values: vec![
                     ClickHouseValueMapping {
                         column: "postgres_user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: expression("input.user_id"),
                     },
                     ClickHouseValueMapping {
                         column: "postgres_now".to_string(),
-                        expression: "NOW ( ) AS STRING".to_string(),
+                        expression: expression("NOW ( ) AS STRING"),
                     },
                     ClickHouseValueMapping {
                         column: "postgres_action".to_string(),
-                        expression: "LOWER ( notifications.action )".to_string(),
+                        expression: expression("LOWER ( input.action )"),
                     },
                 ],
                 conflict_action: PostgresConflictAction::None,
@@ -1260,14 +1294,12 @@ mod tests {
                 FROM notifications
                 TO POSTGRES postgres_client INSERT TO TABLE my_table
                 VALUES {
-                    "postgres_user_id" = notifications.user_id,
-                    "postgres_action" = LOWER(notifications.action)
+                    "postgres_user_id" = input.user_id,
+                    "postgres_action" = LOWER(input.action)
                 }
                 ON CONFLICT ("postgres_user_id") DO UPDATE
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
@@ -1292,14 +1324,12 @@ mod tests {
                 FROM notifications
                 TO POSTGRES postgres_client INSERT TO TABLE my_table
                 VALUES {
-                    "postgres_user_id" = notifications.user_id,
-                    "postgres_action" = LOWER(notifications.action)
+                    "postgres_user_id" = input.user_id,
+                    "postgres_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO NOTHING
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
@@ -1322,14 +1352,12 @@ mod tests {
                 FROM notifications
                 TO POSTGRES postgres_client INSERT TO TABLE my_table
                 VALUES {
-                    "postgres_user_id" = notifications.user_id,
-                    "postgres_action" = LOWER(notifications.action)
+                    "postgres_user_id" = input.user_id,
+                    "postgres_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO UPDATE
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse must fail");
@@ -1349,7 +1377,7 @@ mod tests {
     #[test]
     fn suggests_postgres_conflict_clause_before_max_batch() {
         let input = "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT \
-                     TO TABLE my_table VALUES { \"postgres_user_id\" = notifications.user_id } ";
+                     TO TABLE my_table VALUES { \"postgres_user_id\" = input.user_id } ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"ON".to_string()));
@@ -1359,9 +1387,8 @@ mod tests {
     #[test]
     fn suggests_postgres_conflict_actions_after_do() {
         let input = "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT \
-                     TO TABLE my_table VALUES { \"postgres_user_id\" = notifications.user_id, \
-                     \"postgres_action\" = notifications.action } ON CONFLICT \
-                     (\"postgres_user_id\") DO ";
+                     TO TABLE my_table VALUES { \"postgres_user_id\" = input.user_id, \
+                     \"postgres_action\" = input.action } ON CONFLICT (\"postgres_user_id\") DO ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"UPDATE".to_string()));
@@ -1374,8 +1401,8 @@ mod tests {
             r#"
             CREATE EMITTER to_pg FROM notifications
             TO POSTGRES postgres_client INSERT TO TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+            VALUES { "user_id" = input.user_id }
+            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1392,7 +1419,7 @@ mod tests {
             r#"
             CREATE EMITTER to_pg FROM notifications
             TO POSTGRES postgres_client INSERT TO TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
@@ -1411,9 +1438,9 @@ mod tests {
             r#"
             CREATE EMITTER to_pg FROM notifications
             TO POSTGRES postgres_client INSERT TO TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 0
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1432,14 +1459,12 @@ mod tests {
                 FROM notifications
                 TO MYSQL mysql_client INSERT TO TABLE my_table
                 VALUES {
-                    "mysql_user_id" = notifications.user_id,
+                    "mysql_user_id" = input.user_id,
                     "mysql_now" = NOW() AS STRING,
-                    "mysql_action" = LOWER(notifications.action)
+                    "mysql_action" = LOWER(input.action)
                 }
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1456,15 +1481,15 @@ mod tests {
                 values: vec![
                     ClickHouseValueMapping {
                         column: "mysql_user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: expression("input.user_id"),
                     },
                     ClickHouseValueMapping {
                         column: "mysql_now".to_string(),
-                        expression: "NOW ( ) AS STRING".to_string(),
+                        expression: expression("NOW ( ) AS STRING"),
                     },
                     ClickHouseValueMapping {
                         column: "mysql_action".to_string(),
-                        expression: "LOWER ( notifications.action )".to_string(),
+                        expression: expression("LOWER ( input.action )"),
                     },
                 ],
                 conflict_action: MySqlConflictAction::None,
@@ -1481,14 +1506,12 @@ mod tests {
                 FROM notifications
                 TO MYSQL mysql_client INSERT TO TABLE my_table
                 VALUES {
-                    "mysql_user_id" = notifications.user_id,
-                    "mysql_action" = LOWER(notifications.action)
+                    "mysql_user_id" = input.user_id,
+                    "mysql_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO UPDATE
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
@@ -1508,14 +1531,12 @@ mod tests {
                 FROM notifications
                 TO MYSQL mysql_client INSERT TO TABLE my_table
                 VALUES {
-                    "mysql_user_id" = notifications.user_id,
-                    "mysql_action" = LOWER(notifications.action)
+                    "mysql_user_id" = input.user_id,
+                    "mysql_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO NOTHING
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
@@ -1534,12 +1555,10 @@ mod tests {
             CREATE EMITTER to_mysql
                 FROM notifications
                 TO MYSQL mysql_client INSERT TO TABLE my_table
-                VALUES { "mysql_user_id" = notifications.user_id }
+                VALUES { "mysql_user_id" = input.user_id }
                 ON CONFLICT ("mysql_user_id") DO UPDATE
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         parse_create_emitter(input).expect_err("mysql conflict target must fail");
@@ -1548,7 +1567,7 @@ mod tests {
     #[test]
     fn suggests_mysql_conflict_clause_before_max_batch() {
         let input = "CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO \
-                     TABLE my_table VALUES { \"mysql_user_id\" = notifications.user_id } ";
+                     TABLE my_table VALUES { \"mysql_user_id\" = input.user_id } ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"ON".to_string()));
@@ -1558,8 +1577,7 @@ mod tests {
     #[test]
     fn suggests_mysql_conflict_actions_after_do() {
         let input = "CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO \
-                     TABLE my_table VALUES { \"mysql_user_id\" = notifications.user_id } ON \
-                     CONFLICT DO ";
+                     TABLE my_table VALUES { \"mysql_user_id\" = input.user_id } ON CONFLICT DO ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"UPDATE".to_string()));
@@ -1572,8 +1590,8 @@ mod tests {
             r#"
             CREATE EMITTER to_mysql FROM notifications
             TO MYSQL mysql_client INSERT TO TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+            VALUES { "user_id" = input.user_id }
+            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1590,7 +1608,7 @@ mod tests {
             r#"
             CREATE EMITTER to_mysql FROM notifications
             TO MYSQL mysql_client INSERT TO TABLE my_table
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
@@ -1610,14 +1628,12 @@ mod tests {
                 FROM notifications
                 TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
                 VALUES {
-                    "mongodb_user_id" = notifications.user_id,
+                    "mongodb_user_id" = input.user_id,
                     "mongodb_now" = NOW() AS STRING,
-                    "mongodb_action" = LOWER(notifications.action)
+                    "mongodb_action" = LOWER(input.action)
                 }
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1634,15 +1650,15 @@ mod tests {
                 values: vec![
                     ClickHouseValueMapping {
                         column: "mongodb_user_id".to_string(),
-                        expression: "notifications.user_id".to_string(),
+                        expression: expression("input.user_id"),
                     },
                     ClickHouseValueMapping {
                         column: "mongodb_now".to_string(),
-                        expression: "NOW ( ) AS STRING".to_string(),
+                        expression: expression("NOW ( ) AS STRING"),
                     },
                     ClickHouseValueMapping {
                         column: "mongodb_action".to_string(),
-                        expression: "LOWER ( notifications.action )".to_string(),
+                        expression: expression("LOWER ( input.action )"),
                     },
                 ],
                 conflict_action: MongoDbConflictAction::None,
@@ -1659,14 +1675,12 @@ mod tests {
                 FROM notifications
                 TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
                 VALUES {
-                    "mongodb_user_id" = notifications.user_id,
-                    "mongodb_action" = LOWER(notifications.action)
+                    "mongodb_user_id" = input.user_id,
+                    "mongodb_action" = LOWER(input.action)
                 }
                 ON CONFLICT ("mongodb_user_id") DO UPDATE
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
@@ -1691,14 +1705,12 @@ mod tests {
                 FROM notifications
                 TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
                 VALUES {
-                    "mongodb_user_id" = notifications.user_id,
-                    "mongodb_action" = LOWER(notifications.action)
+                    "mongodb_user_id" = input.user_id,
+                    "mongodb_action" = LOWER(input.action)
                 }
                 ON CONFLICT ("mongodb_user_id") DO NOTHING
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
@@ -1723,14 +1735,12 @@ mod tests {
                 FROM notifications
                 TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
                 VALUES {
-                    "mongodb_user_id" = notifications.user_id,
-                    "mongodb_action" = LOWER(notifications.action)
+                    "mongodb_user_id" = input.user_id,
+                    "mongodb_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO UPDATE
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         parse_create_emitter(input).expect_err("mongodb conflict target must fail");
@@ -1743,13 +1753,11 @@ mod tests {
                 FROM notifications
                 TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
                 VALUES {
-                    "mongodb_action" = LOWER(notifications.action)
+                    "mongodb_action" = LOWER(input.action)
                 }
                 ON CONFLICT ("mongodb_user_id") DO UPDATE
                 WITH MAX BATCH 25
-                ON MESSAGE ERROR LOG
-                ON GENERAL ERROR LOG
-                FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+                FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse must fail");
@@ -1770,7 +1778,7 @@ mod tests {
     fn suggests_mongodb_conflict_clause_before_max_batch() {
         let input = "CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client \
                      INSERT TO COLLECTION my_collection VALUES { \"mongodb_user_id\" = \
-                     notifications.user_id } ";
+                     input.user_id } ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"ON".to_string()));
@@ -1781,8 +1789,8 @@ mod tests {
     fn suggests_mongodb_conflict_actions_after_do() {
         let input = "CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client \
                      INSERT TO COLLECTION my_collection VALUES { \"mongodb_user_id\" = \
-                     notifications.user_id, \"mongodb_action\" = notifications.action } ON \
-                     CONFLICT (\"mongodb_user_id\") DO ";
+                     input.user_id, \"mongodb_action\" = input.action } ON CONFLICT \
+                     (\"mongodb_user_id\") DO ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"UPDATE".to_string()));
@@ -1795,7 +1803,7 @@ mod tests {
             r#"
             CREATE EMITTER to_mongodb FROM notifications
             TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-            VALUES { "user_id" = notifications.user_id }
+            VALUES { "user_id" = input.user_id }
             WITH MAX BATCH 25
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
@@ -1814,8 +1822,8 @@ mod tests {
             r#"
             CREATE EMITTER to_mongodb FROM notifications
             TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-            VALUES { "user_id" = notifications.user_id }
-            ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 10s MAX BATCH SIZE 1MiB;
+            VALUES { "user_id" = input.user_id }
+            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -1868,7 +1876,7 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO PULSAR pulsar1 TOPIC topic ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO PULSAR pulsar1 TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1891,7 +1899,7 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO KINESIS kinesis_main RELAY events ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO KINESIS kinesis_main RELAY events FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1914,7 +1922,7 @@ mod tests {
             CREATE DETACHED EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO KAFKA broker1 TOPIC topic ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO KAFKA broker1 TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -1946,8 +1954,7 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 TO KAFKA broker1 TOPIC topic
-                ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
-                FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
         let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
@@ -2010,7 +2017,7 @@ mod tests {
             CREATE ATTACHED EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO MQTT broker1 TOPIC topic ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO MQTT broker1 TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2033,7 +2040,7 @@ mod tests {
             CREATE ATTACHED EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO NATS nats_main SUBJECT notifications ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO NATS nats_main SUBJECT notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2056,7 +2063,7 @@ mod tests {
             CREATE ATTACHED EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO RABBITMQ broker1 QUEUE queue1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO RABBITMQ broker1 QUEUE queue1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2079,7 +2086,7 @@ mod tests {
             CREATE ATTACHED EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO REDIS PUBSUB broker1 CHANNEL out ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO REDIS PUBSUB broker1 CHANNEL out FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2103,7 +2110,7 @@ mod tests {
             CREATE ATTACHED EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO REDIS broker1 CHANNEL out ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO REDIS broker1 CHANNEL out FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
@@ -2126,7 +2133,7 @@ mod tests {
             CREATE ATTACHED EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO ZEROMQ zmq_out ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO ZEROMQ zmq_out FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2147,7 +2154,7 @@ mod tests {
             CREATE ATTACHED EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
-                TO SQS sqs_main QUEUE queue1 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                TO SQS sqs_main QUEUE queue1 FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
@@ -2165,53 +2172,52 @@ mod tests {
     }
 
     #[test]
-    fn parses_emitter_with_filter_map_program() {
+    fn parses_codec_emitter_route_construction() {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
                 TO KAFKA broker1 TOPIC topic
-                SET message.normalized = lower(message.name), message.score = message.score AS FLOAT64 UNSET message.raw WHERE message.active INVOKE write_header(lower("TENANT"), message.tenant), write_header("route", message.normalized) ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                INHERIT ALL EXCEPT raw
+                SET normalized = lower(input.name), score = input.score AS FLOAT64
+                WHERE output.active
+                INVOKE write_header(lower("TENANT"), input.tenant), write_header("route", output.normalized)
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
 
-        assert_eq!(
-            parsed.filter_map.as_deref(),
-            Some(
-                "SET message.normalized = lower ( message.name ) , message.score = message.score \
-                 AS FLOAT64 UNSET message.raw WHERE message.active INVOKE write_header ( lower ( \
-                 \"TENANT\" ) , message.tenant ) , write_header ( \"route\" , message.normalized )"
-            )
-        );
+        assert!(matches!(
+            parsed.construction.inherit,
+            Some(nervix_models::Inheritance::AllExcept(ref fields)) if fields.len() == 1
+        ));
+        assert_eq!(parsed.construction.assignments.len(), 2);
+        assert_eq!(parsed.construction.invocations.len(), 2);
     }
 
     #[test]
-    fn parses_emitter_with_invoke_only_filter_map_program() {
+    fn parses_emitter_with_invoke_only_route() {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
                 TO KAFKA broker1 TOPIC topic
-                INVOKE write_header("route", p99.route)
-                ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                INVOKE write_header("route", input.route)
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let parsed = parse_create_emitter(input).expect("parse should succeed");
-        assert_eq!(
-            parsed.filter_map.as_deref(),
-            Some("INVOKE write_header ( \"route\" , p99.route )")
-        );
+        assert_eq!(parsed.construction.invocations.len(), 1);
     }
 
     #[test]
-    fn rejects_invalid_emitter_filter_map_program() {
+    fn rejects_invalid_emitter_route_construction() {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
                 ENCODE USING my_codec
                 TO KAFKA broker1 TOPIC topic
-                SET p99.normalized = ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+                SET normalized = FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse should fail");

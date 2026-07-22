@@ -6,7 +6,7 @@ It is responsible for:
 
 - receiving records from ingestors
 - decoding payloads through codecs
-- running optional node-local filter-map programs
+- evaluating structured filters, construction expressions, and side-effect invocations
 - grouping records into isolated execution branches
 - batching rows into Arrow record batches at node boundaries
 - moving Arrow batches across processors and relays
@@ -25,9 +25,19 @@ Nervix has three separate persistence boundaries:
 
 Nervix is not a durable event log for every in-flight row. If hot-path message or ACK state is lost, sources and ingestors react according to their delivery mode, offsets, and retry policy.
 
-Branch grouping is native runtime isolation based on explicit `CREATE BRANCH` declarations. A branch declares the branch-key schema shape with `SCHEMA <schema>`, TTL, and optional eviction policy. The branch name is part of its identity: two differently named branches remain incompatible even when they reference the same schema. Ingestors and reingestors select that branch with `BRANCHED BY <branch> VALUES { ... }` to map output records to concrete branch keys. Relays and branch-preserving processors either select that exact branch with `BRANCHED BY <branch>` or declare `UNBRANCHED` execution. Each concrete branch instance is handled independently. Runtime relay instances, processor buffers, deduplicator state, window state, and materialized entries are scoped to that branch instance until an emitter drains records externally or a reingestor starts a new grouping.
+Branch grouping is native runtime isolation based on explicit `CREATE BRANCH` declarations. A
+branch declares the branch-key schema shape with `SCHEMA <schema>`, TTL, and optional eviction
+policy. The branch name is part of its identity: differently named branches remain incompatible
+even when they reference the same schema. Ingestor routes construct keys with `BRANCHED BY
+<branch> SET ...`; reingestor routes preserve the input key, construct another named branch, or
+become unbranched. Relays and branch-preserving processors use that exact named branch or declare
+`UNBRANCHED`. Runtime relay instances, processor buffers, deduplicator state, window state, and
+materialized entries remain scoped to one concrete branch.
 
-Filter-map programs are compiled from NSPL into a typed VM program before local graph instantiation. They are not distributed as bytecode. The leader validates them eagerly so invalid `SET` / `UNSET` / `WHERE` programs fail at command time instead of surfacing later during runtime startup.
+Structured Model expressions are compiled into typed VM programs before local graph instantiation.
+The leader validates them eagerly so invalid scopes, construction, types, nullability, sensitivity,
+or branch relationships fail at command time. Runtime nodes consume Models directly and never
+reparse stored NSPL.
 
 The current VM surface covers:
 

@@ -9,7 +9,7 @@ use std::{
 use ahash::RandomState;
 use dashmap::DashMap;
 use indexmap::IndexMap;
-use nervix_models::{Identifier, Timestamp};
+use nervix_models::{Expression, Identifier, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tokio::sync::Notify;
@@ -17,7 +17,6 @@ use tokio::sync::Notify;
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
     checked_add_duration_to_timestamp, compile_key_projection_program,
-    split_reorder_by_expressions,
 };
 
 #[derive(Debug, Clone)]
@@ -54,11 +53,10 @@ struct DeduplicatorEntrySnapshot {
 pub(super) fn compile_deduplicator_key_program(
     processor: &Identifier,
     input_relays: &[Identifier],
-    deduplicate_on: &str,
+    deduplicate_on: &[Expression],
     input_schema: StdArc<arrow_schema::Schema>,
 ) -> Result<CompiledDeduplicatorKeyProgram, String> {
-    let expressions = split_reorder_by_expressions(deduplicate_on);
-    if expressions.is_empty() {
+    if deduplicate_on.is_empty() {
         return Err(format!(
             "deduplicator '{}' requires at least one DEDUPLICATE ON expression",
             processor.as_str()
@@ -69,12 +67,12 @@ pub(super) fn compile_deduplicator_key_program(
         processor,
         "DEDUPLICATE ON",
         input_relays,
-        &expressions,
+        deduplicate_on,
         input_schema,
     )?;
     Ok(CompiledDeduplicatorKeyProgram {
         key_column_offset: 0,
-        key_count: expressions.len(),
+        key_count: deduplicate_on.len(),
         program: compiled,
     })
 }

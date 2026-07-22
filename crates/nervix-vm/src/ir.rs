@@ -251,10 +251,21 @@ pub enum ScalarValue {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum AssignmentFallback {
+    Uninitialized(DataType),
+    Register(RegisterRef),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum InstructionKind {
     Move {
         dst: RegisterRef,
         input: RegisterRef,
+    },
+    Assign {
+        dst: RegisterRef,
+        input: RegisterRef,
+        fallback: AssignmentFallback,
     },
     Literal {
         dst: RegisterRef,

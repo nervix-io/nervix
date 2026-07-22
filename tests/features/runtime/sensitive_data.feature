@@ -34,11 +34,14 @@ Feature: Sensitive data
         TYPE HTTP;
 
       CREATE INGESTOR sensitive_notifications
-        TO notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
@@ -106,19 +109,24 @@ Feature: Sensitive data
         TYPE HTTP;
 
       CREATE INGESTOR sensitive_notifications
-        TO notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-
-      CREATE DEDUPLICATOR reveal_notifications
-        FROM notifications
-        TO public_notifications FLUSH IMMEDIATE
-          SET public_notifications.secret = leak_sensitive(notifications.secret) ON MESSAGE ERROR LOG
+      CREATE DEDUPLICATOR reveal_notifications FROM notifications
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
         UNBRANCHED
-        DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m;
+        TO public_notifications
+        INHERIT user_id, action
+        SET secret = leak_sensitive(input.secret)
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG;
 
       CREATE SUBSCRIPTION public_notifications_subscription TO public_notifications;
       START;
@@ -161,12 +169,14 @@ Feature: Sensitive data
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY public_notifications SCHEMA public_notification UNBRANCHED;
 
-      CREATE DEDUPLICATOR leak_notifications
-        FROM notifications
-        TO public_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+      CREATE DEDUPLICATOR leak_notifications FROM notifications
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
         UNBRANCHED
-        DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m;
+        TO public_notifications
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG;
       """
 
     Examples:
@@ -174,7 +184,7 @@ Feature: Sensitive data
       | 1            |
       | 3            |
 
-  Scenario Outline: Sensitive data may be emitted to an external sink without leak_sensitive
+  Scenario Outline: Sensitive external emission requires explicit leakage
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -220,11 +230,14 @@ Feature: Sensitive data
         TYPE HTTP;
 
       CREATE INGESTOR sensitive_notifications
-        TO notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT sensitive_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE CLIENT zeromq_main
         TYPE ZEROMQ
@@ -237,8 +250,11 @@ Feature: Sensitive data
         FROM notifications
         ENCODE USING emitted_notification_codec
         TO ZEROMQ zeromq_main
-        SET message.secret = notifications.secret
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        INHERIT user_id, action
+        SET secret = leak_sensitive(input.secret)
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       START;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/sensitive"

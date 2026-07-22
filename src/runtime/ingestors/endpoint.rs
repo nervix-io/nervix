@@ -49,8 +49,6 @@ impl EndpointIngestor {
             output_routes: dependencies.output_routes,
             filter_where: dependencies.filter_where,
             codec: dependencies.codec,
-            branching: dependencies.branching,
-            branch_value_mappings: dependencies.branch_value_mappings.clone(),
             branched_senders: branched_runtime.senders.clone(),
         };
 

@@ -20,7 +20,6 @@ Feature: Branched branch inheritance
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
@@ -31,18 +30,23 @@ Feature: Branched branch inheritance
           'client_id' = 'nervix-cucumber-branched-processor-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-
-        FROM MQTT mqtt_main
-        TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE DEDUPLICATOR passthrough
-        FROM notifications
-        TO projected_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG BRANCHED BY by_mqtt_notifications
-        DEDUPLICATE ON notifications.user_id
-        MAX TIME 10m;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE DEDUPLICATOR passthrough FROM notifications
+        DEDUPLICATE ON input.user_id
+        MAX TIME 10m
+        BRANCHED BY by_mqtt_notifications
+        TO projected_notifications
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION projected_notifications_subscription TO projected_notifications;
         START;
       """

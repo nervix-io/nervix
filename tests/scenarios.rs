@@ -240,8 +240,7 @@ impl IngestorLogicTransportFixture {
                 "FROM ENDPOINT logic_endpoint MODE NO_ACK SEQUENTIAL"
             }
             Self::Kafka => {
-                r#"TIMESTAMP NOW
-        FROM KAFKA logic_kafka
+                r#"FROM KAFKA logic_kafka
         TOPIC logic_notifications_{{test_id}}
         OFFSET BY DOMAIN
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms"#
@@ -637,6 +636,11 @@ fn build_ingestor_logic_commands(
     } else {
         String::new()
     };
+    let timestamp_clause = if let IngestorLogicTransportFixture::Kafka = transport {
+        "TIMESTAMP NOW"
+    } else {
+        ""
+    };
     let logic_program = logic_program.trim().trim_end_matches(';');
     format!(
         r#"
@@ -867,20 +871,24 @@ fn build_ingestor_logic_commands(
       CREATE RELAY logic_notifications SCHEMA {} BRANCHED BY by_logic_ingestor;
       {}
       CREATE INGESTOR logic_ingestor
-        TO logic_notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        {} ON MESSAGE ERROR LOG
+        {}
         DECODE USING {}
+        {}
+        TO logic_notifications
+        {}
         BRANCHED BY by_logic_ingestor
-        VALUES {{ tenant = logic_notifications.tenant }}
-
-        {} ON GENERAL ERROR LOG;
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       {}
 "#,
         output_schema.schema_name(),
         transport.setup_fragment(),
-        logic_program,
-        output_schema.input_codec_name(),
         transport.source_fragment(),
+        output_schema.input_codec_name(),
+        timestamp_clause,
+        logic_program,
         subscription_commands
     )
 }
@@ -7956,6 +7964,41 @@ async fn when_http_payload_is_posted_to_node(
         .expect("failed to post http payload");
 }
 
+#[when(
+    expr = "http payload is posted to node {string} with host {string} path {string} and header \
+            {string} value {string}"
+)]
+async fn when_http_payload_is_posted_to_node_with_header(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    header_name: String,
+    header_value: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let header_name = expand_placeholders(world, &header_name);
+    let header_value = expand_placeholders(world, &header_value);
+    append_cucumber_log_line(&format!(
+        "http publish: node={node_id} host={host} path={path} header={header_name} \
+         payload={payload}"
+    ));
+    world
+        .cluster()
+        .publish_http_with_headers(
+            &node_id,
+            &host,
+            &path,
+            &payload,
+            &[(header_name.as_str(), header_value.as_str())],
+        )
+        .await
+        .expect("failed to post http payload with header");
+}
+
 #[when(expr = "http payload is posted to node {string} with host {string} path {string} and fails")]
 async fn when_http_payload_is_posted_to_node_and_fails(
     world: &mut ScenarioWorld,
@@ -8704,6 +8747,81 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
             if *count == 0 {
                 remaining.remove(&fragment);
             }
+        }
+    }
+}
+
+#[then(
+    expr = "within {string} generated routes {string} value {int} and {string} value {int} share \
+            field {string}"
+)]
+async fn then_generated_routes_share_field(
+    world: &mut ScenarioWorld,
+    duration: String,
+    first_route: String,
+    first_value: i64,
+    second_route: String,
+    second_value: i64,
+    shared_field: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session with subscription must exist");
+    let deadline = Instant::now() + duration;
+    let mut routes_by_shared_value = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut observed = Vec::new();
+
+    loop {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for generated routes '{first_route}' and '{second_route}' to share \
+             field '{shared_field}'. observed {observed:?}"
+        );
+        let event = session
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for generated route payloads")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out waiting for generated routes '{first_route}' and '{second_route}' \
+                     to share field '{shared_field}'. observed {observed:?}"
+                )
+            });
+        let payload = event.payload;
+        world.last_subscription_payload = Some(payload.clone());
+        observed.push(payload.clone());
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        let Some(route) = value.get("route").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(route_value) = value.get("value").and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        let expected_value = if route == first_route {
+            first_value
+        } else if route == second_route {
+            second_value
+        } else {
+            continue;
+        };
+        if route_value != expected_value {
+            continue;
+        }
+        let Some(shared_value) = value.get(&shared_field) else {
+            continue;
+        };
+        let shared_value = shared_value.to_string();
+        let routes = routes_by_shared_value.entry(shared_value).or_default();
+        routes.insert(route.to_string());
+        if routes.contains(&first_route) && routes.contains(&second_route) {
+            return;
         }
     }
 }

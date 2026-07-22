@@ -772,6 +772,41 @@ impl Instruction {
                 let output = registers.read_array(*input)?;
                 registers.set_array(*dst, output)
             }
+            InstructionKind::Assign {
+                dst,
+                input,
+                fallback,
+            } => {
+                let input = registers.read_array(*input)?;
+                let failed = row_errors
+                    .iter()
+                    .map(|errors| {
+                        errors.iter().any(|error| {
+                            error.span.start >= self.span.start && error.span.end <= self.span.end
+                        })
+                    })
+                    .collect::<BooleanArray>();
+                if failed.true_count() == 0 {
+                    return registers.set_array(*dst, input);
+                }
+                let success = not(&failed)
+                    .map_err(|error| arrow_kernel_error("assignment mask failed", error))?;
+                let previous = match fallback {
+                    crate::ir::AssignmentFallback::Uninitialized(data_type) => {
+                        TypedArray::uninitialized(data_type.clone(), row_count)
+                    }
+                    crate::ir::AssignmentFallback::Register(previous) => {
+                        registers.read_array(*previous)?
+                    }
+                };
+                let input = typed_array_to_array_ref(input);
+                let previous = typed_array_to_array_ref(previous);
+                let input = input.as_ref();
+                let previous = previous.as_ref();
+                let output = zip(&success, &input as &dyn Datum, &previous as &dyn Datum)
+                    .map_err(|error| arrow_kernel_error("assignment fallback failed", error))?;
+                registers.set_array(*dst, array_ref_to_typed_array(output)?)
+            }
             InstructionKind::Literal { dst, value } => {
                 write_literal(registers, *dst, value, row_count)
             }

@@ -28,11 +28,15 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -86,11 +90,15 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR metrics_ingestor
-        TO metrics_stream FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING metrics_codec
-        BRANCHED BY by_metrics_ingestor VALUES { device = metrics_stream.device }
-
-        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO metrics_stream
+        INHERIT ALL
+        BRANCHED BY by_metrics_ingestor
+        SET device = message.device
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION metrics_stream_subscription TO metrics_stream;
         START;
       """
@@ -140,11 +148,14 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
       CREATE INGESTOR shaped_metrics_ingestor
-        TO shaped_metrics_stream FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT shaped_metrics_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING shaped_metrics_codec
+        TO shaped_metrics_stream
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT shaped_metrics_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION shaped_metrics_stream_subscription TO shaped_metrics_stream;
       START;
       """
@@ -210,18 +221,24 @@ Feature: HTTP codec ingestion
         TYPE HTTP;
 
       CREATE INGESTOR strict_notifications_source
-        TO strict_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT strict_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING strict_notification_codec
+        TO strict_notifications
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT strict_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE INGESTOR loose_notifications_source
-        TO loose_notifications FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING loose_notification_codec
+        TO loose_notifications
+        INHERIT ALL
         UNBRANCHED
-
-        FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
 
       CREATE SUBSCRIPTION strict_notifications_subscription TO strict_notifications;
       CREATE SUBSCRIPTION loose_notifications_subscription TO loose_notifications;
@@ -276,11 +293,15 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR metrics_ingestor
-        TO metrics_stream FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING metrics_codec
-        BRANCHED BY by_metrics_ingestor VALUES { device = metrics_stream.device }
-
-        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO metrics_stream
+        INHERIT ALL
+        BRANCHED BY by_metrics_ingestor
+        SET device = message.device
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION metrics_stream_subscription TO metrics_stream;
         START;
       """
@@ -325,11 +346,15 @@ Feature: HTTP codec ingestion
         PATH '/ingest'
         TYPE HTTP;
         CREATE INGESTOR http_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_http_notifications VALUES { tenant = notifications.tenant, user_id = notifications.user_id }
-
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_http_notifications
+        SET tenant = message.tenant, user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

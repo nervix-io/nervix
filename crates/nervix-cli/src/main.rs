@@ -75,9 +75,9 @@ enum Command {
         /// Optional per-arrival batch sample rate from 0.0 through 1.0
         #[arg(long)]
         batch_sample_rate: Option<String>,
-        /// Optional session-level FILTER-MAP program applied to delivered records
-        #[arg(long)]
-        filter_map: Option<String>,
+        /// Optional NSPL predicate applied to delivered records
+        #[arg(long = "where")]
+        where_clause: Option<String>,
     },
     /// Remove a node from the cluster membership
     RemoveNode {
@@ -125,6 +125,8 @@ enum ClientError {
     ReadLine,
     #[error("failed to read password")]
     ReadPassword,
+    #[error("invalid subscription WHERE expression: {reason}")]
+    InvalidSubscriptionWhere { reason: String },
 }
 
 impl Completer for GrpcCompleter {
@@ -196,7 +198,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             dropping,
             blocking,
             batch_sample_rate,
-            filter_map,
+            where_clause,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
             return run_subscribe_mode(
@@ -213,7 +215,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                     SubscriptionDeliveryBehavior::Blocking
                 },
                 batch_sample_rate,
-                filter_map,
+                where_clause,
             )
             .await;
         }
@@ -466,7 +468,7 @@ async fn run_subscribe_mode(
     relay: String,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<String>,
-    filter_map: Option<String>,
+    where_clause: Option<String>,
 ) -> Result<(), StackReport<ClientError>> {
     let client = Client::connect_with_options(server, domain, connect_options)
         .await
@@ -477,8 +479,9 @@ async fn run_subscribe_mode(
         &relay,
         delivery_behavior,
         batch_sample_rate.as_deref(),
-        filter_map.as_deref(),
-    );
+        where_clause.as_deref(),
+    )
+    .map_err(|reason| StackReport::new(ClientError::InvalidSubscriptionWhere { reason }))?;
     let query = request.to_query();
     let result = client
         .subscribe(&request)
@@ -762,8 +765,8 @@ fn subscribe_request(
     relay: &str,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<&str>,
-    filter_map: Option<&str>,
-) -> SubscriptionRequest {
+    where_clause: Option<&str>,
+) -> Result<SubscriptionRequest, String> {
     let request = match delivery_behavior {
         SubscriptionDeliveryBehavior::Blocking => SubscriptionRequest::new(name, relay).blocking(),
         SubscriptionDeliveryBehavior::Dropping => SubscriptionRequest::new(name, relay).dropping(),
@@ -772,10 +775,14 @@ fn subscribe_request(
         Some(batch_sample_rate) => request.with_batch_sample_rate(batch_sample_rate),
         None => request,
     };
-    match filter_map {
-        Some(filter_map) => request.with_filter_map(filter_map),
-        None => request,
-    }
+    where_clause
+        .map(nervix_nspl::parse_expression)
+        .transpose()
+        .map_err(|error| format!("invalid subscription WHERE expression: {error:?}"))
+        .map(|where_clause| match where_clause {
+            Some(where_clause) => request.with_where_clause(where_clause),
+            None => request,
+        })
 }
 
 fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) {
@@ -861,14 +868,14 @@ mod tests {
                 dropping,
                 blocking,
                 batch_sample_rate,
-                filter_map,
+                where_clause,
             }) => {
                 assert_eq!(name, "live_events");
                 assert_eq!(relay, "events");
                 assert!(!dropping);
                 assert!(!blocking);
                 assert_eq!(batch_sample_rate, None);
-                assert_eq!(filter_map, None);
+                assert_eq!(where_clause, None);
             }
             other => panic!("unexpected subcommand: {other:?}"),
         }
@@ -920,6 +927,7 @@ mod tests {
                 None,
                 None
             )
+            .expect("subscription request should build")
             .to_query(),
             "CREATE SUBSCRIPTION live_myss TO myss;"
         );
@@ -929,10 +937,11 @@ mod tests {
                 "myss",
                 SubscriptionDeliveryBehavior::Blocking,
                 None,
-                Some("SET seen = true WHERE tenant = \"acme\"")
+                Some("input.tenant = \"acme\"")
             )
+            .expect("subscription request should build")
             .to_query(),
-            "CREATE SUBSCRIPTION live_myss TO myss SET seen = true WHERE tenant = \"acme\";"
+            "CREATE SUBSCRIPTION live_myss TO myss WHERE (input.tenant = 'acme');"
         );
         assert_eq!(
             subscribe_request(
@@ -940,11 +949,12 @@ mod tests {
                 "myss",
                 SubscriptionDeliveryBehavior::Dropping,
                 Some("0.1"),
-                Some("WHERE tenant = \"acme\"")
+                Some("input.tenant = \"acme\"")
             )
+            .expect("subscription request should build")
             .to_query(),
-            "CREATE SUBSCRIPTION sampled_myss TO myss DROPPING BATCH SAMPLE RATE 0.1 WHERE tenant \
-             = \"acme\";"
+            "CREATE SUBSCRIPTION sampled_myss TO myss DROPPING BATCH SAMPLE RATE 0.1 WHERE \
+             (input.tenant = 'acme');"
         );
     }
 
@@ -1126,35 +1136,33 @@ mod tests {
             SubscriptionDeliveryBehavior::Blocking,
             None,
             None,
-        );
+        )
+        .expect("subscription request should build");
         assert_eq!(request.name, "live_events");
         assert_eq!(request.relay, "events");
-        assert_eq!(request.filter_map, None);
+        assert_eq!(request.where_clause, None);
     }
 
     #[test]
-    fn subscribe_command_parses_filter_map() {
+    fn subscribe_command_parses_where_clause() {
         let args = Args::parse_from([
             "nervix-cli",
             "subscribe",
             "live_events",
             "events",
-            "--filter-map",
-            "SET seen = true WHERE tenant = \"acme\"",
+            "--where",
+            "input.tenant = \"acme\"",
         ]);
         match args.subcommand {
             Some(Command::Subscribe {
                 name,
                 relay,
-                filter_map,
+                where_clause,
                 ..
             }) => {
                 assert_eq!(name, "live_events");
                 assert_eq!(relay, "events");
-                assert_eq!(
-                    filter_map.as_deref(),
-                    Some("SET seen = true WHERE tenant = \"acme\"")
-                );
+                assert_eq!(where_clause.as_deref(), Some("input.tenant = \"acme\""));
             }
             other => panic!("unexpected subcommand: {other:?}"),
         }

@@ -471,19 +471,11 @@ impl WasmOutputColumnRef {
     }
 
     pub const fn is_input(&self) -> bool {
-        if let Self::Input { .. } = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Input { .. })
     }
 
     pub const fn is_uninitialized(&self) -> bool {
-        if let Self::Uninitialized = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Uninitialized)
     }
 }
 

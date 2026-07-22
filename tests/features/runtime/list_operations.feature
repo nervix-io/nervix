@@ -8,16 +8,16 @@ Feature: List operations
       """
     When the ingestor logic fixture "http_endpoint" starts with output schema "list_operations" and program
       """
-      SET logic_notifications.total = sum(message.values),
-          logic_notifications.first_value = first(message.values),
-          logic_notifications.last_value = last(message.values),
-          logic_notifications.second_value = nth(message.values, 1),
-          logic_notifications.value_count = count(message.values),
-          logic_notifications.fixed_first = first(message.fixed),
-          logic_notifications.fixed_last = last(message.fixed),
-          logic_notifications.first_label = first(message.labels),
-          logic_notifications.last_label = last(message.labels)
-      UNSET logic_notifications.values, logic_notifications.fixed, logic_notifications.labels
+      INHERIT ALL EXCEPT values, fixed, labels
+      SET total = sum(input.values),
+          first_value = first(input.values),
+          last_value = last(input.values),
+          second_value = nth(input.values, 1),
+          value_count = count(input.values),
+          fixed_first = first(input.fixed),
+          fixed_last = last(input.fixed),
+          first_label = first(input.labels),
+          last_label = last(input.labels)
       """
     And the ingestor logic transport "http_endpoint" delivers payload fixture "list_operations_message"
     Then the relay subscription receives a payload

@@ -4,12 +4,12 @@ use chumsky::prelude::*;
 use nervix_models::{AckMode, CreateStatement, CreateWindowProcessor, WindowBound};
 
 use crate::{
-    lexer::{Identifier, Token, Word},
+    lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        duration_lit, filter_where_clause, from_relay_clauses, if_not_exists_clause,
-        into_parse_error, kw, lex_input, processor_outputs, suggestions_from_errors, tok,
-        window_processor_name,
+        duration_lit, explicit_processor_outputs, filter_where_clause, from_relay_clauses,
+        if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
+        suggestions_from_errors, tok, window_processor_name,
     },
 };
 
@@ -116,86 +116,6 @@ fn validate_step<'src>(
     Ok(())
 }
 
-fn aggregate_boundary_token(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Semicolon
-            | Token::Word(Word::KnownWord {
-                iden: Identifier::On,
-                ..
-            })
-    )
-}
-
-fn token_to_source(token: &Token) -> String {
-    match token {
-        Token::Word(Word::KnownWord { raw, .. }) => raw.clone(),
-        Token::Word(Word::UnknownWord(raw)) => raw.clone(),
-        Token::StringLiteral(value) => {
-            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-        }
-        Token::NumberLiteral(value) => value.clone(),
-        Token::LBrace => "{".to_string(),
-        Token::RBrace => "}".to_string(),
-        Token::LBracket => "[".to_string(),
-        Token::RBracket => "]".to_string(),
-        Token::LParen => "(".to_string(),
-        Token::RParen => ")".to_string(),
-        Token::Comma => ",".to_string(),
-        Token::Semicolon => ";".to_string(),
-        Token::Colon => ":".to_string(),
-        Token::Dot => ".".to_string(),
-        Token::Hyphen => "-".to_string(),
-        Token::Eq => "=".to_string(),
-        Token::NotEq => "!=".to_string(),
-        Token::Gt => ">".to_string(),
-        Token::Lt => "<".to_string(),
-        Token::GtEq => ">=".to_string(),
-        Token::LtEq => "<=".to_string(),
-        Token::Plus => "+".to_string(),
-        Token::Star => "*".to_string(),
-        Token::Slash => "/".to_string(),
-        Token::Percent => "%".to_string(),
-    }
-}
-
-fn render_aggregate_tokens(tokens: &[Token]) -> String {
-    let mut rendered = String::new();
-    for (index, token) in tokens.iter().enumerate() {
-        let needs_space = if index == 0 {
-            false
-        } else {
-            let previous = &tokens[index - 1];
-            let previous_blocks_space =
-                matches!(previous, Token::Dot | Token::LParen | Token::LBracket);
-            let token_blocks_space = matches!(
-                token,
-                Token::Dot | Token::Comma | Token::RParen | Token::RBracket
-            );
-            !previous_blocks_space && !token_blocks_space
-        };
-        if needs_space {
-            rendered.push(' ');
-        }
-        rendered.push_str(&token_to_source(token));
-    }
-    rendered
-}
-
-fn aggregate_block<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Aggregate)
-        .ignore_then(
-            any()
-                .filter(|token: &Token| !aggregate_boundary_token(token))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
-        .map(|tokens| render_aggregate_tokens(&tokens))
-        .labelled("aggregate_block")
-}
-
 pub fn create_window_processor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateWindowProcessor>, extra::Err<ParseError<'src>>>
 + Clone {
@@ -208,27 +128,27 @@ pub fn create_window_processor_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
-        .then(processor_outputs())
-        .then(branch_selection())
         .then_ignore(kw(Identifier::Width))
         .then(window_bound())
         .then_ignore(kw(Identifier::Step))
         .then(window_bound())
-        .then(aggregate_block())
+        .then(branch_selection())
+        .then(materialized_state_dependencies())
+        .then(explicit_processor_outputs())
         .then_ignore(tok(Token::Semicolon).or_not())
         .try_map(
             |(
                 (
                     (
                         (
-                            (((((if_not_exists, mode), name), from_input), filter_where), outputs),
-                            branched_by,
+                            (((((if_not_exists, mode), name), from_input), filter_where), width),
+                            step,
                         ),
-                        width,
+                        branched_by,
                     ),
-                    step,
+                    materialized_state,
                 ),
-                aggregate,
+                outputs,
             ),
              span| {
                 validate_step(&width, &step, span)?;
@@ -240,9 +160,9 @@ pub fn create_window_processor_parser<'src>()
                         branched_by,
                         width,
                         step,
-                        aggregate,
                         mode: mode.unwrap_or(AckMode::Attached),
                         filter_where,
+                        materialized_state,
                     },
                     if_not_exists,
                 ))
@@ -311,15 +231,14 @@ mod tests {
         let input = r#"
             CREATE WINDOW PROCESSOR latency_window
                 FROM s1
-                TO s2 ON MESSAGE ERROR LOG
-                BRANCHED BY tenant
                 WIDTH 100 MESSAGES 10s DURATION
                 STEP 10 MESSAGES 1s DURATION
-                AGGREGATE
-                    s2.latency_p99 = PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 99, 2048, 0, 10000, '2s'),
-                    s2.time = MAX(s1.timestamp),
-                    s2.started_at = FIRST(s1.timestamp),
-                    s2.latencies = [PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 90, 2048, 0, 10000, '2s'), PERCENTILE_LINEAR_HISTOGRAM(s1.latency, 95, 2048, 0, 10000, '2s')];
+                BRANCHED BY tenant
+                TO s2
+                SET latency_p99 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 2048, 0, 10000, '2s'),
+                    time = MAX(input.timestamp),
+                    started_at = FIRST(input.timestamp)
+                ON MESSAGE ERROR LOG;
         "#;
 
         let parsed =
@@ -340,19 +259,23 @@ mod tests {
         assert_eq!(parsed.width.duration.as_deref(), Some("10s"));
         assert_eq!(parsed.step.messages, Some(10));
         assert_eq!(parsed.step.duration.as_deref(), Some("1s"));
-        assert!(parsed.aggregate.contains("PERCENTILE_LINEAR_HISTOGRAM"));
-        assert!(parsed.aggregate.contains("[PERCENTILE"));
+        assert!(
+            !parsed.output_routes.routes[0]
+                .construction
+                .assignments
+                .is_empty()
+        );
     }
 
     #[test]
     fn parses_tumbling_message_window() {
         let input = r#"
             CREATE DETACHED WINDOW PROCESSOR counts
-                FROM s1 TO s2 ON MESSAGE ERROR LOG
-                BRANCHED BY tenant
+                FROM s1
                 WIDTH 100 MESSAGES
                 STEP 100 MESSAGES
-                AGGREGATE s2.count = COUNT(s1.value);
+                BRANCHED BY tenant
+                TO s2 SET count = COUNT(input.value) ON MESSAGE ERROR LOG;
         "#;
 
         let parsed =
@@ -368,11 +291,11 @@ mod tests {
     fn rejects_step_larger_than_width() {
         let input = r#"
             CREATE WINDOW PROCESSOR bad
-                FROM s1 TO s2 ON MESSAGE ERROR LOG
-                BRANCHED BY tenant
+                FROM s1
                 WIDTH 100 MESSAGES
                 STEP 101 MESSAGES
-                AGGREGATE s2.count = COUNT(s1.value);
+                BRANCHED BY tenant
+                TO s2 SET count = COUNT(input.value) ON MESSAGE ERROR LOG;
         "#;
         assert!(parse_create_window_processor_tokens(&to_tokens(input)).is_err());
     }
@@ -381,19 +304,18 @@ mod tests {
     fn rejects_step_dimension_missing_from_width() {
         let input = r#"
             CREATE WINDOW PROCESSOR bad
-                FROM s1 TO s2 ON MESSAGE ERROR LOG
-                BRANCHED BY tenant
+                FROM s1
                 WIDTH 100 MESSAGES
                 STEP 1s DURATION
-                AGGREGATE s2.count = COUNT(s1.value);
+                BRANCHED BY tenant
+                TO s2 SET count = COUNT(input.value) ON MESSAGE ERROR LOG;
         "#;
         assert!(parse_create_window_processor_tokens(&to_tokens(input)).is_err());
     }
 
     #[test]
     fn suggests_window_processor_keywords() {
-        let input =
-            "CREATE WINDOW PROCESSOR p FROM s1 TO s2 ON MESSAGE ERROR LOG BRANCHED BY tenant ";
+        let input = "CREATE WINDOW PROCESSOR p FROM s1 ";
         let suggestions = suggest_create_window_processor(input, input.len());
         assert!(suggestions.contains(&"WIDTH".to_string()));
     }

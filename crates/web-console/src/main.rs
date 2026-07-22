@@ -1217,7 +1217,7 @@ fn subscribe_session_command(
     let filter = filter.trim();
     if !filter.is_empty() {
         command.push(' ');
-        command.push_str(&subscription_filter_map_clause(filter));
+        command.push_str(&subscription_where_clause(filter));
     }
     command.push(';');
     command
@@ -1236,15 +1236,12 @@ fn subscription_tab_title(relay: &str, filter: &str) -> String {
     }
 }
 
-fn subscription_filter_map_clause(filter: &str) -> String {
+fn subscription_where_clause(filter: &str) -> String {
     let trimmed = filter.trim();
     let Some(first_word) = trimmed.split_ascii_whitespace().next() else {
         return String::new();
     };
-    if first_word.eq_ignore_ascii_case("SET")
-        || first_word.eq_ignore_ascii_case("UNSET")
-        || first_word.eq_ignore_ascii_case("WHERE")
-    {
+    if first_word.eq_ignore_ascii_case("WHERE") {
         trimmed.to_string()
     } else {
         format!("WHERE {trimmed}")
@@ -3084,7 +3081,6 @@ fn GraphPanel(
                                 each=move || selected_relay.get().map(|relay| relay.schema_fields).unwrap_or_default()
                                 key=|field| field.name.clone()
                                 children={move |field| {
-                                    let selected_relay = selected_relay;
                                     let subscribe_filter = subscribe_filter;
                                     let field_name = field.name.clone();
                                     let ty = schema_field_type_label(&field);
@@ -3093,10 +3089,8 @@ fn GraphPanel(
                                             type="button"
                                             class="schema-row schema-field-button"
                                             on:click=move |_| {
-                                                if let Some(relay) = selected_relay.get() {
-                                                    let reference = format!("{}.{}", relay.label, field_name);
-                                                    append_filter_reference(subscribe_filter, &reference);
-                                                }
+                                                let reference = format!("input.{field_name}");
+                                                append_filter_reference(subscribe_filter, &reference);
                                             }
                                         >
                                             <span>{field.name}</span>
@@ -4153,54 +4147,59 @@ impl GraphView {
             .collect::<BTreeMap<_, _>>();
         let mut candidates = Vec::<GraphBranchGroupCandidate>::new();
         for start in self.nodes.iter().filter(|node| node.starts_branch_group()) {
-            let Some(schema) = &start.branching_schema else {
-                continue;
-            };
-            let mut members = BTreeSet::<String>::new();
-            let mut finalizers = Vec::<GraphAnchor>::new();
-            let mut metric_node_ids = BTreeSet::<String>::from([start.id.clone()]);
-            let mut boundary_nodes = BTreeSet::<String>::from([start.id.clone()]);
-            let mut visited = BTreeSet::<String>::new();
-            let mut pending = adjacency
+            let start_relays = adjacency
                 .get(start.id.as_str())
                 .into_iter()
                 .flatten()
-                .copied()
-                .collect::<VecDeque<_>>();
-            while let Some(id) = pending.pop_front() {
-                if !visited.insert(id.to_string()) {
-                    continue;
-                }
-                if let Some(relay) = relay_by_id.get(id) {
-                    if relay.branching_schema.as_ref() != Some(schema) {
+                .filter_map(|id| relay_by_id.get(id).copied())
+                .filter_map(|relay| {
+                    relay
+                        .branching_schema
+                        .as_ref()
+                        .map(|schema| (relay, schema))
+                });
+            for (start_relay, schema) in start_relays {
+                let mut members = BTreeSet::<String>::new();
+                let mut finalizers = Vec::<GraphAnchor>::new();
+                let mut metric_node_ids = BTreeSet::<String>::from([start.id.clone()]);
+                let mut boundary_nodes = BTreeSet::<String>::from([start.id.clone()]);
+                let mut visited = BTreeSet::<String>::new();
+                let mut pending = VecDeque::from([start_relay.id.as_str()]);
+                while let Some(id) = pending.pop_front() {
+                    if !visited.insert(id.to_string()) {
                         continue;
                     }
-                    metric_node_ids.insert(relay.id.clone());
-                    members.insert(relay.id.clone());
+                    if let Some(relay) = relay_by_id.get(id) {
+                        if relay.branching_schema.as_ref() != Some(schema) {
+                            continue;
+                        }
+                        metric_node_ids.insert(relay.id.clone());
+                        members.insert(relay.id.clone());
+                        pending.extend(adjacency.get(id).into_iter().flatten().copied());
+                        continue;
+                    }
+                    let Some(node) = node_by_id.get(id) else {
+                        continue;
+                    };
+                    if node.ends_branch_group() {
+                        boundary_nodes.insert(node.id.clone());
+                        finalizers.push(GraphAnchor::incoming_node(node));
+                        continue;
+                    }
+                    metric_node_ids.insert(node.id.clone());
+                    members.insert(node.id.clone());
                     pending.extend(adjacency.get(id).into_iter().flatten().copied());
-                    continue;
                 }
-                let Some(node) = node_by_id.get(id) else {
-                    continue;
-                };
-                if node.ends_branch_group() {
-                    boundary_nodes.insert(node.id.clone());
-                    finalizers.push(GraphAnchor::incoming_node(node));
-                    continue;
-                }
-                metric_node_ids.insert(node.id.clone());
-                members.insert(node.id.clone());
-                pending.extend(adjacency.get(id).into_iter().flatten().copied());
+                candidates.push(GraphBranchGroupCandidate {
+                    schema: schema.clone(),
+                    start_id: start.id.clone(),
+                    members,
+                    metric_node_ids,
+                    boundary_nodes,
+                    initiator: GraphAnchor::outgoing_node(start),
+                    finalizers,
+                });
             }
-            candidates.push(GraphBranchGroupCandidate {
-                schema: schema.clone(),
-                start_id: start.id.clone(),
-                members,
-                metric_node_ids,
-                boundary_nodes,
-                initiator: GraphAnchor::outgoing_node(start),
-                finalizers,
-            });
         }
         GraphBranchGroupCandidate::merge(candidates)
             .into_iter()
@@ -6518,21 +6517,19 @@ mod tests {
             domain: "iot_demo".to_string(),
             statistics: DataflowStatistics::default(),
             nodes: vec![
-                node(
+                unbranched_node(
                     "ingestor:mqtt_primary",
                     "mqtt_primary",
                     DataflowNodeKind::Ingestor,
                     "MQTT",
-                    "site_branch",
                     0,
                     40,
                 ),
-                node(
+                unbranched_node(
                     "ingestor:mqtt_backup",
                     "mqtt_backup",
                     DataflowNodeKind::Ingestor,
                     "MQTT",
-                    "site_branch",
                     0,
                     180,
                 ),
@@ -7453,11 +7450,10 @@ mod tests {
             subscribe_session_command(
                 "live_notifications",
                 "notifications",
-                "WHERE notifications.user_id = 42",
+                "WHERE input.user_id = 42",
                 0,
             ),
-            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE notifications.user_id \
-             = 42;"
+            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE input.user_id = 42;"
         );
     }
 
@@ -7467,26 +7463,24 @@ mod tests {
             subscribe_session_command(
                 "live_notifications",
                 "notifications",
-                "notifications.user_id = 42",
+                "input.user_id = 42",
                 0,
             ),
-            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE notifications.user_id \
-             = 42;"
+            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE input.user_id = 42;"
         );
     }
 
     #[test]
-    fn subscription_command_preserves_set_clause() {
+    fn subscription_command_keeps_non_filter_syntax_inside_where_scope() {
         assert_eq!(
             subscribe_session_command(
                 "live_notifications",
                 "notifications",
-                "SET notifications.normalized = notifications.user_id WHERE notifications.user_id \
-                 = 42",
+                "SET normalized = input.user_id",
                 0,
             ),
-            "CREATE SUBSCRIPTION live_notifications TO notifications SET notifications.normalized \
-             = notifications.user_id WHERE notifications.user_id = 42;"
+            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE SET normalized = \
+             input.user_id;"
         );
     }
 

@@ -1,3 +1,4 @@
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
@@ -106,7 +107,15 @@ pub enum AvroType {
     Fixed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    __S::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
 pub enum ParseAsType {
     U8,
     I8,
@@ -121,6 +130,13 @@ pub enum ParseAsType {
     Datetime,
     F32,
     F64,
-    Array { element: Box<ParseAsType>, len: u32 },
-    Vec { element: Box<ParseAsType> },
+    Array {
+        #[rkyv(omit_bounds)]
+        element: Box<ParseAsType>,
+        len: u32,
+    },
+    Vec {
+        #[rkyv(omit_bounds)]
+        element: Box<ParseAsType>,
+    },
 }

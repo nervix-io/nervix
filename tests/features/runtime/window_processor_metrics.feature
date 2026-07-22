@@ -25,26 +25,28 @@ Feature: Window processor metrics
         FROM WIRE JSON SCHEMA metric_wire
         TO SCHEMA metric;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_window_metrics_source SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics_input SCHEMA metric BRANCHED BY by_window_metrics_source;
         CREATE RELAY metrics_summary SCHEMA metric_summary BRANCHED BY by_window_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT window_metrics_ingress ON edge PATH '/window-metrics' TYPE HTTP;
         CREATE INGESTOR window_metrics_source
-        TO metrics_input FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM ENDPOINT window_metrics_ingress MODE NO_ACK SEQUENTIAL
         DECODE USING metric_codec
-        BRANCHED BY by_window_metrics_source VALUES { tenant = metrics_input.tenant }
-
-        FROM ENDPOINT window_metrics_ingress MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
-        CREATE WINDOW PROCESSOR window_metrics_node
-        FROM metrics_input
-        TO metrics_summary ON MESSAGE ERROR LOG BRANCHED BY by_window_metrics_source
+        TO metrics_input
+        INHERIT ALL
+        BRANCHED BY by_window_metrics_source
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE WINDOW PROCESSOR window_metrics_node FROM metrics_input
         WIDTH 3 MESSAGES
         STEP 3 MESSAGES
-        AGGREGATE
-          metrics_summary.tenant = FIRST(metrics_input.tenant),
-          metrics_summary.sample_count = COUNT(metrics_input.latency);
+        BRANCHED BY by_window_metrics_source
+        TO metrics_summary
+        SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency)
+        ON MESSAGE ERROR LOG;
         CREATE SUBSCRIPTION metrics_summary_subscription TO metrics_summary;
         START;
       """

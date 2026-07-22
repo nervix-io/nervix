@@ -177,20 +177,6 @@ impl ProtobufCodecCompileConfig {
 }
 
 impl Runtime {
-    pub(in crate::runtime) fn vm_program_error(
-        error: nervix_nspl::vm_program::ParseFromSourceError,
-    ) -> String {
-        match error {
-            nervix_nspl::vm_program::ParseFromSourceError::Lex { diagnostics, .. }
-            | nervix_nspl::vm_program::ParseFromSourceError::Parse { diagnostics, .. } => {
-                diagnostics
-                    .first()
-                    .map(|diagnostic| diagnostic.message.clone())
-                    .unwrap_or_else(|| "unknown FILTER-MAP parse error".to_string())
-            }
-        }
-    }
-
     async fn compile_domain_codec(
         &self,
         domain: &Domain,
@@ -349,6 +335,7 @@ impl Runtime {
             replicated_deduplicator_states: Arc::new(DashMap::default()),
             replicated_kafka_offset_states: Arc::new(DashMap::default()),
             replicated_materialized_stream_states: Arc::new(DashMap::default()),
+            materialized_state_changed: Arc::new(Notify::new()),
             replicated_window_processor_states: Arc::new(DashMap::default()),
             replicated_wasm_processor_states: Arc::new(DashMap::default()),
             replicated_branch_aggregated_states: Arc::new(DashMap::default()),
@@ -1243,7 +1230,9 @@ impl Runtime {
             return Ok(());
         };
         self.persist_materialized_stream_snapshot(state, lsm, &payload)
-            .await
+            .await?;
+        self.materialized_state_changed.notify_waiters();
+        Ok(())
     }
 
     pub(in crate::runtime) async fn delete_materialized_stream_key(
@@ -1258,7 +1247,9 @@ impl Runtime {
             return Ok(());
         };
         self.persist_materialized_stream_snapshot(state, lsm, &payload)
-            .await
+            .await?;
+        self.materialized_state_changed.notify_waiters();
+        Ok(())
     }
 
     pub(in crate::runtime) fn replicated_deduplicator_state(
@@ -2350,14 +2341,24 @@ impl Runtime {
         message: RelayMessage,
         reason: String,
     ) {
-        self.handle_message_error_with_policy(
+        self.handle_structured_message_error(MessageErrorHandling {
             domain,
             node_kind,
             node,
-            &policies.message,
+            source_route: None,
+            policy: &policies.message,
             message,
-            reason,
-        )
+            error: structured_message_error(
+                MessageErrorCode::External,
+                reason,
+                MessageErrorOperation::Publish,
+                None,
+                std::iter::empty(),
+            ),
+            partial_output: None,
+            materialized_state: HashMap::default(),
+            ingest_metadata: None,
+        })
         .await;
     }
 
@@ -2369,7 +2370,45 @@ impl Runtime {
         policy: &MessageErrorPolicy,
         message: RelayMessage,
         reason: String,
+        operation: MessageErrorOperation,
     ) {
+        self.handle_structured_message_error(MessageErrorHandling {
+            domain,
+            node_kind,
+            node,
+            source_route: None,
+            policy,
+            message,
+            error: structured_message_error(
+                MessageErrorCode::External,
+                reason,
+                operation,
+                None,
+                std::iter::empty(),
+            ),
+            partial_output: None,
+            materialized_state: HashMap::default(),
+            ingest_metadata: None,
+        })
+        .await;
+    }
+
+    pub(in crate::runtime) async fn handle_structured_message_error(
+        &self,
+        handling: MessageErrorHandling<'_>,
+    ) {
+        let MessageErrorHandling {
+            domain,
+            node_kind,
+            node,
+            source_route,
+            policy,
+            message,
+            error,
+            partial_output,
+            materialized_state,
+            ingest_metadata,
+        } = handling;
         match policy {
             MessageErrorPolicy::Ignore => {
                 message.acks.ack_success();
@@ -2380,43 +2419,53 @@ impl Runtime {
                     node_kind,
                     node.as_str(),
                     domain.as_str(),
-                    reason
+                    error.message
                 )));
                 warn!(
                     domain = domain.as_str(),
                     node_kind,
                     node = node.as_str(),
-                    reason = %reason,
+                    error_reference = %error.reference,
+                    error_code = error.code.as_ref(),
+                    error_operation = error.operation.as_ref(),
+                    reason = %error.message,
                     "runtime node handled message error"
                 );
-                message.acks.no_ack(reason);
+                message.acks.no_ack(error.message);
             }
-            MessageErrorPolicy::Dlq { relay, mappings } => {
+            MessageErrorPolicy::Dlq { relay, assignments } => {
                 let context = MessageErrorContext {
                     domain,
                     node_kind,
                     node,
+                    source_route,
                     message: &message,
-                    reason: &reason,
+                    error: &error,
+                    partial_output: partial_output.as_ref(),
+                    materialized_state: &materialized_state,
+                    ingest_metadata,
                 };
-                if let Err(error) = self
-                    .dispatch_message_error_to_dlq(context, relay, mappings)
+                if let Err(dispatch_error) = self
+                    .dispatch_message_error_to_dlq(context, relay, assignments)
                     .await
                 {
                     let _ = self.events.send(RuntimeEvent::Error(format!(
-                        "{} '{}' failed to dispatch message error to DLQ '{}' in domain '{}': {}",
+                        "{} '{}' failed to dispatch message error {} to DLQ '{}' in domain '{}': \
+                         {}",
                         node_kind,
                         node.as_str(),
+                        error.reference,
                         relay.as_str(),
                         domain.as_str(),
-                        error
+                        dispatch_error
                     )));
                     message.acks.no_ack(format!(
-                        "{} '{}' failed to dispatch message error to DLQ '{}': {}",
+                        "{} '{}' failed to dispatch message error {} to DLQ '{}': {}",
                         node_kind,
                         node.as_str(),
+                        error.reference,
                         relay.as_str(),
-                        error
+                        dispatch_error
                     ));
                     return;
                 }
@@ -2499,14 +2548,18 @@ impl Runtime {
         errors: Vec<PlannedMessageError>,
     ) {
         for error in errors {
-            self.handle_message_error(
+            self.handle_structured_message_error(MessageErrorHandling {
                 domain,
                 node_kind,
                 node,
-                policies,
-                error.message,
-                error.reason,
-            )
+                source_route: None,
+                policy: &policies.message,
+                message: error.message,
+                error: error.error,
+                partial_output: error.partial_output,
+                materialized_state: error.materialized_state,
+                ingest_metadata: None,
+            })
             .await;
         }
     }
@@ -2516,18 +2569,23 @@ impl Runtime {
         domain: &Domain,
         node_kind: &str,
         node: &Identifier,
+        source_route: Option<&Identifier>,
         policy: &MessageErrorPolicy,
         errors: Vec<PlannedMessageError>,
     ) {
         for error in errors {
-            self.handle_message_error_with_policy(
+            self.handle_structured_message_error(MessageErrorHandling {
                 domain,
                 node_kind,
                 node,
+                source_route,
                 policy,
-                error.message,
-                error.reason,
-            )
+                message: error.message,
+                error: error.error,
+                partial_output: error.partial_output,
+                materialized_state: error.materialized_state,
+                ingest_metadata: None,
+            })
             .await;
         }
     }
@@ -2536,65 +2594,95 @@ impl Runtime {
         &self,
         context: MessageErrorContext<'_>,
         relay: &Identifier,
-        mappings: &[ErrorFieldMapping],
+        assignments: &[Assignment],
     ) -> Result<(), String> {
         let MessageErrorContext {
             domain,
             node_kind,
             node,
+            source_route,
             message,
-            reason,
+            error,
+            partial_output,
+            materialized_state,
+            ingest_metadata,
         } = context;
-        let Some(execution) = self.executions.get(domain) else {
-            return Err(format!("domain '{}' is not instantiated", domain.as_str()));
+        let (schema, registry, services, branching, program) = {
+            let Some(execution) = self.executions.get(domain) else {
+                return Err(format!("domain '{}' is not instantiated", domain.as_str()));
+            };
+            let schema = execution.relay_schemas.get(relay).cloned().ok_or_else(|| {
+                format!(
+                    "DLQ relay '{}' schema is not instantiated in domain '{}'",
+                    relay.as_str(),
+                    domain.as_str()
+                )
+            })?;
+            let registry = execution
+                .relay_registries
+                .get(relay)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "DLQ relay '{}' is not instantiated in domain '{}'",
+                        relay.as_str(),
+                        domain.as_str()
+                    )
+                })?;
+            let services = execution
+                .relay_services
+                .get(relay)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "DLQ relay '{}' services are not instantiated in domain '{}'",
+                        relay.as_str(),
+                        domain.as_str()
+                    )
+                })?;
+            let branching = execution
+                .relay_branchings
+                .get(relay)
+                .cloned()
+                .unwrap_or_default();
+            let schemas = Self::message_error_compile_schemas(
+                &execution,
+                node_kind,
+                node,
+                source_route,
+                relay,
+                assignments,
+            )?;
+            let program = compile_message_error_set_program(
+                domain,
+                node,
+                assignments,
+                schema.clone(),
+                schemas,
+                RuntimeVmCompileContext {
+                    available_materialized_streams: &execution.materialized_stream_specs,
+                    available_lookups: &execution.lookups,
+                    current_branching: &branching,
+                    current_branch_schema: None,
+                    current_branch_sensitivity: None,
+                },
+            )?;
+            (schema, registry, services, branching, program)
         };
-        let Some(schema) = execution.relay_schemas.get(relay).cloned() else {
-            return Err(format!(
-                "DLQ relay '{}' schema is not instantiated in domain '{}'",
-                relay.as_str(),
-                domain.as_str()
-            ));
-        };
-        let Some(registry) = execution.relay_registries.get(relay).cloned() else {
-            return Err(format!(
-                "DLQ relay '{}' is not instantiated in domain '{}'",
-                relay.as_str(),
-                domain.as_str()
-            ));
-        };
-        let Some(services) = execution.relay_services.get(relay).cloned() else {
-            return Err(format!(
-                "DLQ relay '{}' services are not instantiated in domain '{}'",
-                relay.as_str(),
-                domain.as_str()
-            ));
-        };
-        let branching = execution
-            .relay_branchings
-            .get(relay)
-            .cloned()
-            .unwrap_or_default();
-        drop(execution);
-
-        let dlq_record = DecodedRecord::from_fields(mappings.iter().map(|mapping| {
-            (
-                mapping.field.as_str().to_string(),
-                self.message_error_mapping_value(
-                    domain,
-                    node_kind,
-                    node,
-                    message,
-                    reason,
-                    &mapping.value,
-                ),
-            )
-        }))
-        .into_runtime_record(message.record.metadata().clone());
-        let key = if branching.is_empty() {
-            None
-        } else {
-            resolve_concrete_branch(&dlq_record, &branching, node)?.into_relay_key()
-        };
+        let dlq_record = Self::execute_message_error_set_program(
+            &program,
+            message,
+            error,
+            partial_output,
+            materialized_state,
+            ingest_metadata,
+            self.current_stream_expiration_time(domain)
+                .ok()
+                .flatten()
+                .unwrap_or_else(current_timestamp),
+        )
+        .await?;
+        let key = preserved_message_error_branch(&branching, &message.key, relay, error.reference)?;
         let batch = RelayRecordBatch::single(schema, key, dlq_record, AckSet::empty())?;
         self.ingest_stream_boundary_message(domain, relay, &registry, &services, &batch)
             .await
@@ -2609,26 +2697,328 @@ impl Runtime {
         Ok(())
     }
 
-    pub(in crate::runtime) fn message_error_mapping_value(
-        &self,
-        domain: &Domain,
+    fn message_error_compile_schemas(
+        execution: &DomainExecution,
         node_kind: &str,
         node: &Identifier,
-        message: &RelayMessage,
-        reason: &str,
-        value: &str,
-    ) -> RuntimeValue {
-        match value {
-            "message_error.message" => RuntimeValue::String(reason.to_string()),
-            "message_error.domain" => RuntimeValue::String(domain.as_str().to_string()),
-            "message_error.node" => RuntimeValue::String(node.as_str().to_string()),
-            "message_error.node_kind" => RuntimeValue::String(node_kind.to_string()),
-            "message_error.key" => {
-                RuntimeValue::String(branch_key_display(&message.key).to_string())
-            }
-            "message_error.record" => RuntimeValue::String(message.record.to_json_string()),
-            other => RuntimeValue::String(other.to_string()),
+        source_route: Option<&Identifier>,
+        error_relay: &Identifier,
+        assignments: &[Assignment],
+    ) -> Result<MessageErrorCompileSchemas, String> {
+        fn matching_output<'a>(
+            outputs: &'a nervix_models::ProcessorOutputs,
+            source_route: Option<&Identifier>,
+            error_relay: &Identifier,
+            assignments: &[Assignment],
+        ) -> Option<&'a ProcessorOutput> {
+            source_route
+                .and_then(|route| outputs.routes.iter().find(|output| &output.relay == route))
+                .or_else(|| {
+                    outputs.routes.iter().find(|output| {
+                        matches!(
+                            &output.message_error_policy,
+                            MessageErrorPolicy::Dlq {
+                                relay,
+                                assignments: configured,
+                            } if relay == error_relay && configured == assignments
+                        )
+                    })
+                })
         }
+
+        let scheduled = execution
+            .schedule
+            .nodes
+            .iter()
+            .find(|scheduled| &scheduled.identifier == node && scheduled.kind.as_str() == node_kind)
+            .ok_or_else(|| {
+                format!(
+                    "runtime model for {node_kind} '{}' is unavailable",
+                    node.as_str()
+                )
+            })?;
+        let relay_schema = |relay: &Identifier| {
+            execution.relay_schemas.get(relay).cloned().ok_or_else(|| {
+                format!(
+                    "runtime schema for relay '{}' is unavailable",
+                    relay.as_str()
+                )
+            })
+        };
+        let mut schemas = MessageErrorCompileSchemas {
+            input: None,
+            left: None,
+            right: None,
+            partial_output: None,
+            current_branching: Vec::new(),
+            allow_header_reads: false,
+        };
+        let mut current_branch_relay = None;
+        match scheduled.config.as_ref() {
+            Model::Ingestor(model) => {
+                schemas.input = execution
+                    .codecs
+                    .get(&model.decode_using_codec)
+                    .map(|codec| codec.schema())
+                    .ok_or_else(|| {
+                        format!(
+                            "runtime codec '{}' is unavailable",
+                            model.decode_using_codec.as_str()
+                        )
+                    })?
+                    .into();
+                schemas.allow_header_reads = ingest_source_supports_headers(&model.source);
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::Reingestor(model) => {
+                let input = model.from.first().ok_or_else(|| {
+                    format!("reingestor '{}' has no input relay", model.name.as_str())
+                })?;
+                schemas.input = Some(relay_schema(input)?);
+                current_branch_relay = Some(input.clone());
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::Junction(model) => {
+                let input = model.from.first().ok_or_else(|| {
+                    format!("junction '{}' has no input relay", model.name.as_str())
+                })?;
+                schemas.input = Some(relay_schema(input)?);
+                current_branch_relay = Some(input.clone());
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::Deduplicator(model) => {
+                let input = model.from.first().ok_or_else(|| {
+                    format!("deduplicator '{}' has no input relay", model.name.as_str())
+                })?;
+                schemas.input = Some(relay_schema(input)?);
+                current_branch_relay = Some(input.clone());
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::Reorderer(model) => {
+                let input = model.from.first().ok_or_else(|| {
+                    format!("reorderer '{}' has no input relay", model.name.as_str())
+                })?;
+                schemas.input = Some(relay_schema(input)?);
+                current_branch_relay = Some(input.clone());
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::WindowProcessor(model) => {
+                current_branch_relay = model.from.first().cloned();
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::Generator(model) => {
+                current_branch_relay = Some(model.materialized_relay.clone());
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::Inferencer(model) => {
+                let input = model.from.first().ok_or_else(|| {
+                    format!("inferencer '{}' has no input relay", model.name.as_str())
+                })?;
+                schemas.input = Some(relay_schema(input)?);
+                current_branch_relay = Some(input.clone());
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::WasmProcessor(model) => {
+                let input = model.from.first().ok_or_else(|| {
+                    format!(
+                        "WASM processor '{}' has no input relay",
+                        model.name.as_str()
+                    )
+                })?;
+                schemas.input = Some(relay_schema(input)?);
+                current_branch_relay = Some(input.clone());
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::Correlator(model) => {
+                let left = model.left.first().ok_or_else(|| {
+                    format!("correlator '{}' has no left relay", model.name.as_str())
+                })?;
+                let right = model.right.first().ok_or_else(|| {
+                    format!("correlator '{}' has no right relay", model.name.as_str())
+                })?;
+                schemas.left = Some(relay_schema(left)?);
+                schemas.right = Some(relay_schema(right)?);
+                current_branch_relay = Some(left.clone());
+                schemas.partial_output =
+                    matching_output(&model.output_routes, source_route, error_relay, assignments)
+                        .map(|output| relay_schema(&output.relay))
+                        .transpose()?;
+            }
+            Model::Emitter(model) => {
+                schemas.input = Some(relay_schema(&model.from_relay)?);
+                current_branch_relay = Some(model.from_relay.clone());
+                schemas.partial_output = model
+                    .encode_using_codec
+                    .as_ref()
+                    .map(|codec| {
+                        execution
+                            .codecs
+                            .get(codec)
+                            .map(|compiled| compiled.schema())
+                            .ok_or_else(|| {
+                                format!("runtime codec '{}' is unavailable", codec.as_str())
+                            })
+                    })
+                    .transpose()?;
+            }
+            other => {
+                return Err(format!(
+                    "{} '{}' cannot own a message-error route",
+                    other.kind().as_str(),
+                    node.as_str()
+                ));
+            }
+        }
+        if let Some(relay) = current_branch_relay {
+            schemas.current_branching = execution
+                .relay_branchings
+                .get(&relay)
+                .cloned()
+                .unwrap_or_default();
+        }
+        Ok(schemas)
+    }
+
+    pub(in crate::runtime) async fn execute_message_error_set_program(
+        program: &CompiledProgramWithMaterializedInterest,
+        message: &RelayMessage,
+        error: &StructuredMessageError,
+        partial_output: Option<&RuntimeRecord>,
+        materialized_state: &HashMap<String, RuntimeValue>,
+        ingest_metadata: Option<&IngestFilterMapMetadata>,
+        execution_now: Timestamp,
+    ) -> Result<RuntimeRecord, String> {
+        let mut fields = message
+            .record
+            .fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        if let Some(partial_output) = partial_output {
+            for (name, value) in partial_output.fields() {
+                fields.insert(format!("partial_output.{name}"), value.clone());
+            }
+        }
+        fields.extend(
+            materialized_state
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        fields.insert(
+            "error.reference".to_string(),
+            RuntimeValue::String(error.reference.to_string()),
+        );
+        fields.insert(
+            "error.code".to_string(),
+            RuntimeValue::String(error.code.as_ref().to_string()),
+        );
+        fields.insert(
+            "error.message".to_string(),
+            RuntimeValue::String(error.message.clone()),
+        );
+        fields.insert(
+            "error.operation".to_string(),
+            RuntimeValue::String(error.operation.as_ref().to_string()),
+        );
+        if let Some(operation_index) = error.operation_index {
+            fields.insert(
+                "error.operation_index".to_string(),
+                RuntimeValue::U32(operation_index),
+            );
+        }
+        fields.insert(
+            "error.fields".to_string(),
+            RuntimeValue::Vec(
+                error
+                    .fields
+                    .iter()
+                    .map(|field| RuntimeValue::String(field.as_str().to_string()))
+                    .collect(),
+            ),
+        );
+        fields.insert(
+            "error.occurred_at".to_string(),
+            RuntimeValue::Datetime(error.occurred_at.as_datetime().fixed_offset()),
+        );
+        let record =
+            RuntimeRecord::from_fields_with_metadata(fields, message.record.metadata().clone());
+        let record =
+            augment_runtime_records_with_lookup_hash_maps(vec![record], program, execution_now)
+                .await?
+                .into_iter()
+                .next()
+                .expect("one message-error input record must remain");
+        let uninitialized = VmUninitializedInput {
+            fields: program
+                .compiled
+                .input_schema
+                .fields()
+                .iter()
+                .filter(|field| field.name().starts_with("error_output."))
+                .map(|field| field.name().clone())
+                .collect(),
+        };
+        let batch = vm_typed_batch_from_runtime_records_with_metadata_and_uninitialized(
+            std::slice::from_ref(&record),
+            ingest_metadata.map(std::slice::from_ref),
+            &program.compiled.input_schema,
+            Some(&uninitialized),
+        )?;
+        let result = execute_program_with_selection_in_context(
+            program.compiled.as_ref(),
+            &batch,
+            &VmExecutionContext {
+                now: execution_now,
+                injector: Some(IngestHeaderFunctionInjector::from_metadata(
+                    ingest_metadata.map(std::slice::from_ref),
+                    batch.row_count(),
+                )),
+            },
+        )
+        .await
+        .map_err(|error| format!("message-error SET execution failed: {error}"))?;
+        if result.batch.row_count() != 1 {
+            return Err(format!(
+                "message-error SET produced {} rows for one error",
+                result.batch.row_count()
+            ));
+        }
+        if let Some(side_error) = result.batch.errors()[0].first() {
+            return Err(format!(
+                "message-error SET failed with {}: {} at {}",
+                side_error.code.as_str(),
+                side_error.message,
+                side_error.span
+            ));
+        }
+        vm_output_row_to_decoded_record(&result.batch, 0)
+            .map(|record| record.into_runtime_record(message.record.metadata().clone()))
     }
 
     pub(in crate::runtime) async fn dispatch_ingested_record(
@@ -2642,12 +3032,7 @@ impl Runtime {
             ),
         );
         if let Some(filter_where) = dispatch.filter_where {
-            let branch_key = if let Some(mappings) = dispatch.branch_value_mappings {
-                resolve_concrete_branch_from_mappings(&record, None, mappings, dispatch.ingestor)?
-            } else {
-                resolve_concrete_branch(&record, dispatch.branching, dispatch.ingestor)?
-            }
-            .into_relay_key();
+            let branch_key = None;
             let side_inputs = self
                 .load_materialized_side_inputs(
                     dispatch.domain,
@@ -2665,19 +3050,60 @@ impl Runtime {
                 .ok()
                 .flatten()
                 .unwrap_or_else(current_timestamp);
-            let Some(transformed) = execute_filter_map_on_record(
+            let outcome = evaluate_filter_map_on_record(
                 filter_where,
-                augment_runtime_record_with_side_inputs(record, &side_inputs),
+                augment_runtime_record_with_side_inputs(record.clone(), &side_inputs),
                 None,
                 dispatch.filter_map_metadata.as_ref(),
                 execution_now,
             )
-            .await?
-            else {
-                dispatch.acks.ack_success();
-                return Ok(());
-            };
-            record = transformed;
+            .await?;
+            match outcome {
+                SingleRecordFilterMapOutcome::Filtered => {
+                    dispatch.acks.ack_success();
+                    return Ok(());
+                }
+                SingleRecordFilterMapOutcome::Output(transformed) => record = transformed,
+                SingleRecordFilterMapOutcome::MessageError {
+                    error,
+                    materialized_state,
+                    ..
+                } => {
+                    let route_count = dispatch.output_routes.routes.len();
+                    if route_count == 0 {
+                        dispatch.acks.no_ack(error.message);
+                        return Ok(());
+                    }
+                    let mut ack_queue = VecDeque::with_capacity(route_count);
+                    for _ in 1..route_count {
+                        ack_queue.push_back(dispatch.acks.attached());
+                    }
+                    ack_queue.push_front(dispatch.acks);
+                    for output in &dispatch.output_routes.routes {
+                        let acks = ack_queue
+                            .pop_front()
+                            .expect("ack queue must match ingestor output routes");
+                        self.handle_structured_message_error(MessageErrorHandling {
+                            domain: dispatch.domain,
+                            node_kind: ModelKind::Ingestor.as_str(),
+                            node: dispatch.ingestor,
+                            source_route: Some(&output.relay),
+                            policy: &output.message_error_policy,
+                            message: RelayMessage {
+                                key: None,
+                                record: record.clone(),
+                                acks,
+                            },
+                            error: error.clone(),
+                            partial_output: None,
+                            materialized_state: materialized_state.clone(),
+                            ingest_metadata: dispatch.filter_map_metadata.as_ref(),
+                        })
+                        .await;
+                    }
+                    return Ok(());
+                }
+            }
         }
         let event_timestamp = self.resolve_ingested_record_timestamp(
             dispatch.domain,
@@ -2697,7 +3123,6 @@ impl Runtime {
         let relay_schemas = execution.relay_schemas.clone();
         let relay_registries = execution.relay_registries.clone();
         let relay_services = execution.relay_services.clone();
-        let relay_branchings = execution.relay_branchings.clone();
         let owner_nodes = execution.materialized_stream_owner_nodes.clone();
         drop(execution);
         self.metrics
@@ -2716,25 +3141,10 @@ impl Runtime {
             dispatch.ingestor,
         );
         let mut routed_records = Vec::new();
-        for output in &dispatch.output_routes.routes {
-            let output_record = if let Some(filter_map) = output.compiled_program.as_ref() {
-                let empty_branching = Vec::new();
-                let output_branching = relay_branchings
-                    .get(&output.relay)
-                    .unwrap_or(&empty_branching);
-                let branch_key = if output_branching.is_empty() {
-                    ConcreteBranch::Root
-                } else if let Some(mappings) = dispatch.branch_value_mappings {
-                    resolve_concrete_branch_from_mappings(
-                        &record,
-                        None,
-                        mappings,
-                        dispatch.ingestor,
-                    )?
-                } else {
-                    resolve_concrete_branch(&record, output_branching, dispatch.ingestor)?
-                }
-                .into_relay_key();
+        let mut route_errors = Vec::new();
+        for (output_index, output) in dispatch.output_routes.routes.iter().enumerate() {
+            let outcome = if let Some(filter_map) = output.compiled_program.as_ref() {
+                let branch_key = None;
                 let side_inputs = self
                     .load_materialized_side_inputs(
                         dispatch.domain,
@@ -2748,7 +3158,7 @@ impl Runtime {
                     .ok()
                     .flatten()
                     .unwrap_or_else(current_timestamp);
-                execute_filter_map_on_record(
+                evaluate_filter_map_on_record(
                     filter_map,
                     augment_runtime_record_with_side_inputs(record.clone(), &side_inputs),
                     None,
@@ -2757,42 +3167,122 @@ impl Runtime {
                 )
                 .await?
             } else {
-                Some(record.clone())
+                SingleRecordFilterMapOutcome::Output(record.clone())
             };
-            if let Some(output_record) = output_record {
-                routed_records.push((output.relay.clone(), output_record));
+            match outcome {
+                SingleRecordFilterMapOutcome::Filtered => {}
+                SingleRecordFilterMapOutcome::Output(output_record) => {
+                    routed_records.push((output_index, output_record));
+                }
+                SingleRecordFilterMapOutcome::MessageError {
+                    error,
+                    partial_output,
+                    materialized_state,
+                } => route_errors.push((output_index, error, partial_output, materialized_state)),
             }
         }
-        if routed_records.is_empty() {
+        let routed_count = routed_records.len() + route_errors.len();
+        if routed_count == 0 {
             dispatch.acks.ack_success();
             return Ok(());
         }
-        let mut ack_queue = VecDeque::with_capacity(routed_records.len());
-        for _ in 1..routed_records.len() {
+        let mut ack_queue = VecDeque::with_capacity(routed_count);
+        for _ in 1..routed_count {
             ack_queue.push_back(dispatch.acks.attached());
         }
         ack_queue.push_front(dispatch.acks);
-        for (relay, output_record) in routed_records {
+        for (output_index, error, partial_output, materialized_state) in route_errors {
             let acks = ack_queue
                 .pop_front()
-                .expect("ack queue must match routed output count");
+                .expect("ack queue must match ingestor route outcomes");
+            let output = &dispatch.output_routes.routes[output_index];
+            self.handle_structured_message_error(MessageErrorHandling {
+                domain: dispatch.domain,
+                node_kind: ModelKind::Ingestor.as_str(),
+                node: dispatch.ingestor,
+                source_route: Some(&output.relay),
+                policy: &output.message_error_policy,
+                message: RelayMessage {
+                    key: None,
+                    record: record.clone(),
+                    acks,
+                },
+                error,
+                partial_output,
+                materialized_state,
+                ingest_metadata: dispatch.filter_map_metadata.as_ref(),
+            })
+            .await;
+        }
+        for (output_index, output_record) in routed_records {
+            let acks = ack_queue
+                .pop_front()
+                .expect("ack queue must match ingestor route outcomes");
+            let output = &dispatch.output_routes.routes[output_index];
+            let relay = output.relay.clone();
+            let key = match output.branch.as_ref().ok_or_else(|| {
+                format!(
+                    "ingestor '{}' output '{}' has no branch declaration",
+                    dispatch.ingestor.as_str(),
+                    relay.as_str()
+                )
+            })? {
+                nervix_models::OutputBranch::Unbranched => None,
+                nervix_models::OutputBranch::BranchedBy { assignments, .. } => {
+                    match resolve_concrete_branch_from_assignments(
+                        &output_record,
+                        Some(&record),
+                        None,
+                        assignments,
+                        dispatch.ingestor,
+                    ) {
+                        Ok(branch) => branch.into_relay_key(),
+                        Err(reason) => {
+                            self.handle_structured_message_error(MessageErrorHandling {
+                                domain: dispatch.domain,
+                                node_kind: ModelKind::Ingestor.as_str(),
+                                node: dispatch.ingestor,
+                                source_route: Some(&relay),
+                                policy: &output.message_error_policy,
+                                message: RelayMessage {
+                                    key: None,
+                                    record: record.clone(),
+                                    acks,
+                                },
+                                error: structured_message_error(
+                                    MessageErrorCode::Evaluation,
+                                    reason,
+                                    MessageErrorOperation::BranchSet,
+                                    None,
+                                    std::iter::empty(),
+                                ),
+                                partial_output: Some(output_record),
+                                materialized_state: HashMap::default(),
+                                ingest_metadata: dispatch.filter_map_metadata.as_ref(),
+                            })
+                            .await;
+                            continue;
+                        }
+                    }
+                }
+            };
+            let Some(schema) = relay_schemas.get(&relay).cloned() else {
+                return Err(format!(
+                    "stream '{}' schema is not instantiated in domain '{}'",
+                    relay.as_str(),
+                    dispatch.domain.as_str()
+                ));
+            };
+            let batch = RelayRecordBatch::single(schema, key, output_record, acks)?;
             if let Some(sender) = dispatch.branched_senders.get(&relay) {
-                if let Err(error) = sender
-                    .send(BranchedEntrypointInput::UnresolvedRecord {
-                        record: output_record,
-                        acks,
-                    })
-                    .await
-                {
-                    let BranchedEntrypointInput::UnresolvedRecord { acks, .. } = error.0 else {
-                        continue;
-                    };
+                if let Err(error) = sender.send(batch).await {
+                    let batch = error.0;
                     self.handle_general_error_for_acks(
                         dispatch.domain,
                         ModelKind::Ingestor.as_str(),
                         dispatch.ingestor,
                         &ErrorPolicies::handled_by_log(),
-                        std::iter::once(&acks),
+                        batch.acks.iter(),
                         format!(
                             "ingestor '{}' failed to forward record to branch entrypoint for \
                              relay '{}'",
@@ -2803,29 +3293,6 @@ impl Runtime {
                 }
                 continue;
             }
-            let empty_branching = Vec::new();
-            let output_branching = relay_branchings.get(&relay).unwrap_or(&empty_branching);
-            let key = if output_branching.is_empty() {
-                ConcreteBranch::Root
-            } else if let Some(mappings) = dispatch.branch_value_mappings {
-                resolve_concrete_branch_from_mappings(
-                    &output_record,
-                    None,
-                    mappings,
-                    dispatch.ingestor,
-                )?
-            } else {
-                resolve_concrete_branch(&output_record, output_branching, dispatch.ingestor)?
-            }
-            .into_relay_key();
-            let Some(schema) = relay_schemas.get(&relay).cloned() else {
-                return Err(format!(
-                    "stream '{}' schema is not instantiated in domain '{}'",
-                    relay.as_str(),
-                    dispatch.domain.as_str()
-                ));
-            };
-            let batch = RelayRecordBatch::single(schema, key, output_record, acks)?;
             if let Some(branch_key) = batch.key.as_ref() {
                 self.metrics.observe_branch_node_without_stream_received(
                     branch_key.as_str(),
@@ -2883,96 +3350,55 @@ impl Runtime {
         let Some(filter_where) = selection.filter_where else {
             return Ok((0..selection.records.len()).collect());
         };
-        let Some(execution) = self.executions.get(selection.domain) else {
-            return Err(format!(
-                "domain '{}' is not instantiated",
-                selection.domain.as_str()
-            ));
-        };
-        let owner_nodes = execution.materialized_stream_owner_nodes.clone();
-        drop(execution);
-
-        let mut rows_by_branch = HashMap::<Option<BranchKey>, Vec<usize>>::default();
-        for (row, record) in selection.records.iter().enumerate() {
-            let branch_key = if let Some(mappings) = selection.branch_value_mappings {
-                resolve_concrete_branch_from_mappings(record, None, mappings, selection.ingestor)?
-            } else {
-                resolve_concrete_branch(record, selection.branching, selection.ingestor)?
-            }
-            .into_relay_key();
-            rows_by_branch.entry(branch_key).or_default().push(row);
+        if !filter_where.materialized_interest.relays.is_empty() {
+            return Err("ingestor FILTER WHERE cannot access materialized state".to_string());
         }
 
+        let execution_now = self
+            .current_stream_expiration_time(selection.domain)
+            .ok()
+            .flatten()
+            .unwrap_or_else(current_timestamp);
+        let input_records = augment_runtime_records_with_lookup_hash_maps(
+            selection.records.to_vec(),
+            filter_where,
+            execution_now,
+        )
+        .await?;
+        let vm_batch = vm_typed_batch_from_runtime_records_with_metadata(
+            &input_records,
+            selection.filter_map_metadata,
+            &filter_where.compiled.input_schema,
+        )?;
+        let result = execute_program_with_selection_in_context(
+            filter_where.compiled.as_ref(),
+            &vm_batch,
+            &VmExecutionContext {
+                now: execution_now,
+                injector: Some(IngestHeaderFunctionInjector::from_metadata(
+                    selection.filter_map_metadata,
+                    vm_batch.row_count(),
+                )),
+            },
+        )
+        .await
+        .map_err(|error| format!("FILTER WHERE execution failed: {error}"))?;
         let mut selected_rows = HashSet::default();
-        for (branch_key, rows) in rows_by_branch {
-            tokio::task::consume_budget().await;
-            let side_inputs = self
-                .load_materialized_side_inputs(
-                    selection.domain,
-                    &branch_key,
-                    &filter_where.materialized_interest,
-                    &owner_nodes,
-                )
-                .await?;
-            let execution_now = self
-                .current_stream_expiration_time(selection.domain)
-                .ok()
-                .flatten()
-                .unwrap_or_else(current_timestamp);
-            let input_records = rows
-                .iter()
-                .map(|row| selection.records[*row].clone())
-                .collect::<Vec<_>>();
-            let input_records =
-                augment_runtime_records_with_side_inputs(input_records, &side_inputs);
-            let branch_keys = rows.iter().map(|_| branch_key.clone()).collect::<Vec<_>>();
-            let input_records =
-                augment_runtime_records_with_branch_keys(input_records, &branch_keys)?;
-            let input_records = augment_runtime_records_with_lookup_hash_maps(
-                input_records,
-                filter_where,
-                execution_now,
-            )
-            .await?;
-            let filter_map_metadata = selection.filter_map_metadata.map(|metadata| {
-                rows.iter()
-                    .map(|row| metadata[*row].clone())
-                    .collect::<Vec<_>>()
-            });
-            let vm_batch = vm_typed_batch_from_runtime_records_with_metadata(
-                &input_records,
-                filter_map_metadata.as_deref(),
-                &filter_where.compiled.input_schema,
-            )?;
-            let result = execute_program_with_selection_in_context(
-                filter_where.compiled.as_ref(),
-                &vm_batch,
-                &VmExecutionContext {
-                    now: execution_now,
-                    injector: Some(IngestHeaderFunctionInjector::from_metadata(
-                        filter_map_metadata.as_deref(),
-                        vm_batch.row_count(),
-                    )),
-                },
-            )
-            .await
-            .map_err(|error| format!("FILTER WHERE execution failed: {error}"))?;
-            for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
-                if let Some(side_error) = result.batch.errors()[output_row].first() {
-                    return Err(format!(
-                        "FILTER WHERE side error {}: {} at {}",
-                        side_error.code.as_str(),
-                        side_error.message,
-                        side_error.span
-                    ));
-                }
-                let Some(original_row) = rows.get(input_row).copied() else {
-                    return Err(format!(
-                        "FILTER WHERE selected row {input_row} outside input batch"
-                    ));
-                };
-                selected_rows.insert(original_row);
+        for (output_row, &input_row) in result.selected_rows.iter().enumerate() {
+            if let Some(side_error) = result.batch.errors()[output_row].first() {
+                return Err(format!(
+                    "FILTER WHERE side error {}: {} at {}",
+                    side_error.code.as_str(),
+                    side_error.message,
+                    side_error.span
+                ));
             }
+            if input_row >= selection.records.len() {
+                return Err(format!(
+                    "FILTER WHERE selected row {input_row} outside input batch"
+                ));
+            }
+            selected_rows.insert(input_row);
         }
 
         Ok(selected_rows)
@@ -3763,65 +4189,48 @@ impl Runtime {
                 }
                 Model::Materializer(_) => {}
                 Model::Generator(generator) if node.executes_on(local_node_id) => {
-                    let Some(output_schema) = relay_schemas.get(&generator.into_relay).cloned()
+                    let Some(source_schema) =
+                        relay_schemas.get(&generator.materialized_relay).cloned()
                     else {
                         return Err(RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
-                                "missing generator output relay schema '{}'",
-                                generator.into_relay.as_str()
+                                "missing generator materialized relay schema '{}'",
+                                generator.materialized_relay
                             ),
                         });
                     };
-                    let output_branching = relay_branchings
-                        .get(&generator.into_relay)
+                    let source_branch_schema = relay_branching_schemas
+                        .get(&generator.materialized_relay)
+                        .cloned()
+                        .flatten();
+                    let source_branching = relay_branchings
+                        .get(&generator.materialized_relay)
                         .cloned()
                         .unwrap_or_default();
-                    let source_streams = generator_source_streams(
-                        &generator.name,
-                        &generator.set,
-                        &generator.into_relay,
-                    )
-                    .map_err(|reason| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason,
-                    })?;
-                    if source_streams.is_empty() {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "generator '{}' must reference at least one materialized relay",
-                                generator.name.as_str()
-                            ),
-                        });
-                    }
-                    let mut source_schemas = Vec::with_capacity(source_streams.len());
-                    for source_stream in &source_streams {
-                        let Some(source_schema) = relay_schemas.get(source_stream).cloned() else {
+                    let mut routes = Vec::new();
+                    for output in generator.output_routes.outputs() {
+                        let Some(output_schema) = relay_schemas.get(&output.relay).cloned() else {
                             return Err(RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: format!(
-                                    "missing generator source relay schema '{}'",
-                                    source_stream.as_str()
+                                    "missing generator output relay schema '{}'",
+                                    output.relay
                                 ),
                             });
                         };
-                        source_schemas.push((source_stream.clone(), source_schema.arrow_schema()));
+                        let program = compile_generator_set_program(
+                            domain,
+                            generator,
+                            output,
+                            output_schema.arrow_schema(),
+                            output_schema.vm_sensitivity(),
+                            source_schema.arrow_schema(),
+                            source_branch_schema.clone(),
+                        )?;
+                        routes.push((output.clone(), program, output_schema));
                     }
-                    let program = compile_generator_set_program(
-                        domain,
-                        generator,
-                        output_schema.arrow_schema(),
-                        output_schema.vm_sensitivity(),
-                        &source_schemas,
-                    )?;
-                    generator_specs.push((
-                        generator.clone(),
-                        program,
-                        source_streams,
-                        output_branching,
-                        output_schema,
-                    ));
+                    generator_specs.push((generator.clone(), source_branching, routes));
                 }
                 Model::Lookup(lookup) => {
                     let Some(codec) = codecs.get(&lookup.decode_using_codec).cloned() else {
@@ -4167,37 +4576,40 @@ impl Runtime {
             lookups: &lookup_runtimes,
         };
 
-        for (generator, program, source_streams, output_branching, output_schema) in generator_specs
-        {
-            let Some(output_registry) = relay_registries.get(&generator.into_relay).cloned() else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "missing generator output relay '{}'",
-                        generator.into_relay.as_str()
-                    ),
+        for (generator, source_branching, route_specs) in generator_specs {
+            let mut routes = Vec::with_capacity(route_specs.len());
+            for (output, program, output_schema) in route_specs {
+                let Some(output_registry) = relay_registries.get(&output.relay).cloned() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!("missing generator output relay '{}'", output.relay),
+                    });
+                };
+                let Some(output_services) = relay_services.get(&output.relay).cloned() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing generator output relay services '{}'",
+                            output.relay
+                        ),
+                    });
+                };
+                routes.push(GeneratorTaskRouteSpec {
+                    output,
+                    program,
+                    output_schema,
+                    output_registry,
+                    output_services,
                 });
-            };
-            let Some(output_services) = relay_services.get(&generator.into_relay).cloned() else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "missing generator output relay services '{}'",
-                        generator.into_relay.as_str()
-                    ),
-                });
-            };
+            }
             tasks.push(self.spawn_generator_task(
                 domain,
                 &shutdown_tx,
                 GeneratorTaskSpec {
+                    source_relay: generator.materialized_relay.clone(),
                     generator,
-                    program,
-                    source_relays: source_streams,
-                    output_branching,
-                    output_schema,
-                    output_registry,
-                    output_services,
+                    source_branching,
+                    routes,
                 },
             )?);
         }
@@ -4334,8 +4746,6 @@ impl Runtime {
                             domain: &binding.domain,
                             ingestor: &binding.ingestor,
                             timestamp_source: binding.timestamp_source.as_ref(),
-                            branching: &binding.branching,
-                            branch_value_mappings: Some(&binding.branch_value_mappings),
                             output_routes: &mut output_routes,
                             filter_where: binding.filter_where.as_ref(),
                             branched_senders: &binding.branched_senders,
@@ -5008,13 +5418,204 @@ impl Runtime {
                     continue;
                 };
                 values.insert(
-                    format!("{}.{}", relay_interest.relay.as_str(), field),
+                    format!("relay_state.{}.{}", relay_interest.relay.as_str(), field),
                     value.clone(),
                 );
             }
         }
 
         Ok(values)
+    }
+
+    pub(crate) async fn load_materialized_dependency_values(
+        &self,
+        domain: &Domain,
+        branch_key: &Option<BranchKey>,
+        relay: &Identifier,
+        owner_nodes: &HashMap<Identifier, Option<String>>,
+    ) -> Result<Option<HashMap<String, RuntimeValue>>, String> {
+        let Some(execution) = self.executions.get(domain) else {
+            return Err(format!("domain '{}' is not instantiated", domain));
+        };
+        let Some(spec) = execution.materialized_stream_specs.get(relay).cloned() else {
+            return Err(format!(
+                "materialized relay '{}' is not instantiated in domain '{}'",
+                relay, domain
+            ));
+        };
+        drop(execution);
+
+        let (placement_branch_key, lookup_key) = if spec.branching.is_empty() {
+            (None, None)
+        } else {
+            let Some(key) = branch_key.as_ref() else {
+                return Err(format!(
+                    "materialized relay '{}' requires a current branch key",
+                    relay
+                ));
+            };
+            (Some(key.clone()), Some(key.as_str().to_string()))
+        };
+        let owner = owner_nodes
+            .get(relay)
+            .and_then(|node| node.as_ref())
+            .cloned();
+        let local_node_id = self.local_node_id.read().clone();
+        let entries = if let Some(owner) = owner {
+            if local_node_id.as_deref() == Some(owner.as_str()) {
+                self.local_materialized_stream_state_for_branch(
+                    domain,
+                    relay,
+                    &placement_branch_key,
+                )
+            } else {
+                self.remote_materialized_stream_state_for_branch(
+                    &owner,
+                    domain,
+                    relay,
+                    &placement_branch_key,
+                )
+                .await
+            }
+        } else {
+            self.local_materialized_stream_state_for_branch(domain, relay, &placement_branch_key)
+        }?;
+        let Some(record) = materialized_record_from_entries(entries, lookup_key.as_deref()) else {
+            return Ok(None);
+        };
+        let values = spec
+            .schema
+            .fields()
+            .iter()
+            .filter_map(|field| {
+                record.value(field.name()).cloned().map(|value| {
+                    (
+                        format!("relay_state.{}.{}", relay.as_str(), field.name()),
+                        value,
+                    )
+                })
+            })
+            .collect();
+        Ok(Some(values))
+    }
+
+    pub(in crate::runtime) async fn resolve_materialized_dependencies(
+        &self,
+        domain: &Domain,
+        branch_key: &Option<BranchKey>,
+        dependencies: &[nervix_models::MaterializedStateDependency],
+    ) -> Result<MaterializedDependencyResolution, String> {
+        let owner_nodes = self
+            .executions
+            .get(domain)
+            .map(|execution| execution.materialized_stream_owner_nodes.clone())
+            .unwrap_or_default();
+        let mut resolved = HashMap::default();
+        for dependency in dependencies {
+            tokio::task::consume_budget().await;
+            if let Some(values) = self
+                .load_materialized_dependency_values(
+                    domain,
+                    branch_key,
+                    &dependency.relay,
+                    &owner_nodes,
+                )
+                .await?
+            {
+                resolved.extend(values);
+                continue;
+            }
+            match &dependency.policy {
+                MaterializedStatePolicy::RequiredSkip => {
+                    return Ok(MaterializedDependencyResolution::Skip);
+                }
+                MaterializedStatePolicy::RequiredWait => {
+                    return Ok(MaterializedDependencyResolution::Wait);
+                }
+                MaterializedStatePolicy::Default(assignments) => {
+                    for assignment in assignments {
+                        if matches!(
+                            assignment.value,
+                            nervix_models::Expression::Literal(ModelLiteral::Null)
+                        ) {
+                            continue;
+                        }
+                        let lowered = nervix_nspl::vm_program::lower_expression(
+                            &assignment.value,
+                            "__invalid_default_field",
+                        )?;
+                        let value = evaluate_runtime_expr(&lowered.inner, None)?;
+                        resolved.insert(
+                            format!(
+                                "relay_state.{}.{}",
+                                dependency.relay, assignment.target.field
+                            ),
+                            value,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(MaterializedDependencyResolution::Ready(resolved))
+    }
+
+    pub(in crate::runtime) async fn resolve_materialized_dependencies_for_batch(
+        &self,
+        domain: &Domain,
+        input_relay: &Identifier,
+        dependencies: &[nervix_models::MaterializedStateDependency],
+        mut batch: RelayRecordBatch,
+        shutdown_rx: &mut watch::Receiver<bool>,
+    ) -> Result<Option<RelayRecordBatch>, String> {
+        loop {
+            tokio::task::consume_budget().await;
+            let changed = self.materialized_state_changed.notified();
+            match self
+                .resolve_materialized_dependencies(domain, &batch.key, dependencies)
+                .await?
+            {
+                MaterializedDependencyResolution::Ready(values) => {
+                    batch.records =
+                        augment_runtime_records_with_side_inputs(batch.records, &values);
+                    return Ok(Some(batch));
+                }
+                MaterializedDependencyResolution::Skip => {
+                    for ack in batch.acks.iter() {
+                        ack.ack_success();
+                    }
+                    return Ok(None);
+                }
+                MaterializedDependencyResolution::Wait => {
+                    if let Some(branch_key) = batch.key.as_ref()
+                        && self
+                            .executions
+                            .get(domain)
+                            .and_then(|execution| {
+                                execution.relay_registries.get(input_relay).cloned()
+                            })
+                            .is_some_and(|registry| !registry.contains_key(&batch.key))
+                    {
+                        for ack in batch.acks.iter() {
+                            ack.no_ack(format!(
+                                "branch was evicted while waiting for materialized state at {} \
+                                 '{}'",
+                                input_relay, branch_key
+                            ));
+                        }
+                        return Ok(None);
+                    }
+                    tokio::select! {
+                        _ = changed => {}
+                        _ = sleep(self.state_replication_poll_interval) => {}
+                        result = shutdown_rx.changed() => {
+                            if result.is_err() || *shutdown_rx.borrow() {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn describe_local_lookup(
@@ -5417,65 +6018,48 @@ impl Runtime {
                     lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
                 }
                 Model::Generator(generator) => {
-                    let Some(output_schema) = relay_schemas.get(&generator.into_relay).cloned()
+                    let Some(source_schema) =
+                        relay_schemas.get(&generator.materialized_relay).cloned()
                     else {
                         return Err(RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
-                                "missing generator output relay schema '{}'",
-                                generator.into_relay.as_str()
+                                "missing generator materialized relay schema '{}'",
+                                generator.materialized_relay
                             ),
                         });
                     };
-                    let output_branching = relay_branchings
-                        .get(&generator.into_relay)
+                    let source_branch_schema = relay_branching_schemas
+                        .get(&generator.materialized_relay)
+                        .cloned()
+                        .flatten();
+                    let source_branching = relay_branchings
+                        .get(&generator.materialized_relay)
                         .cloned()
                         .unwrap_or_default();
-                    let source_streams = generator_source_streams(
-                        &generator.name,
-                        &generator.set,
-                        &generator.into_relay,
-                    )
-                    .map_err(|reason| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason,
-                    })?;
-                    if source_streams.is_empty() {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "generator '{}' must reference at least one materialized relay",
-                                generator.name.as_str()
-                            ),
-                        });
-                    }
-                    let mut source_schemas = Vec::with_capacity(source_streams.len());
-                    for source_stream in &source_streams {
-                        let Some(source_schema) = relay_schemas.get(source_stream).cloned() else {
+                    let mut routes = Vec::new();
+                    for output in generator.output_routes.outputs() {
+                        let Some(output_schema) = relay_schemas.get(&output.relay).cloned() else {
                             return Err(RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: format!(
-                                    "missing generator source relay schema '{}'",
-                                    source_stream.as_str()
+                                    "missing generator output relay schema '{}'",
+                                    output.relay
                                 ),
                             });
                         };
-                        source_schemas.push((source_stream.clone(), source_schema.arrow_schema()));
+                        let program = compile_generator_set_program(
+                            domain,
+                            generator,
+                            output,
+                            output_schema.arrow_schema(),
+                            output_schema.vm_sensitivity(),
+                            source_schema.arrow_schema(),
+                            source_branch_schema.clone(),
+                        )?;
+                        routes.push((output.clone(), program, output_schema));
                     }
-                    let program = compile_generator_set_program(
-                        domain,
-                        generator,
-                        output_schema.arrow_schema(),
-                        output_schema.vm_sensitivity(),
-                        &source_schemas,
-                    )?;
-                    generator_specs.push((
-                        generator.clone(),
-                        program,
-                        source_streams,
-                        output_branching,
-                        output_schema,
-                    ));
+                    generator_specs.push((generator.clone(), source_branching, routes));
                 }
                 Model::Junction(junction) => {
                     if handled_processors.contains(&node.identifier) {
@@ -5614,37 +6198,40 @@ impl Runtime {
             lookups: &lookup_runtimes,
         };
 
-        for (generator, program, source_streams, output_branching, output_schema) in generator_specs
-        {
-            let Some(output_registry) = relay_registries.get(&generator.into_relay).cloned() else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "missing generator output relay '{}'",
-                        generator.into_relay.as_str()
-                    ),
+        for (generator, source_branching, route_specs) in generator_specs {
+            let mut routes = Vec::with_capacity(route_specs.len());
+            for (output, program, output_schema) in route_specs {
+                let Some(output_registry) = relay_registries.get(&output.relay).cloned() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!("missing generator output relay '{}'", output.relay),
+                    });
+                };
+                let Some(output_services) = relay_services.get(&output.relay).cloned() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing generator output relay services '{}'",
+                            output.relay
+                        ),
+                    });
+                };
+                routes.push(GeneratorTaskRouteSpec {
+                    output,
+                    program,
+                    output_schema,
+                    output_registry,
+                    output_services,
                 });
-            };
-            let Some(output_services) = relay_services.get(&generator.into_relay).cloned() else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "missing generator output relay services '{}'",
-                        generator.into_relay.as_str()
-                    ),
-                });
-            };
+            }
             tasks.push(self.spawn_generator_task(
                 domain,
                 &shutdown_tx,
                 GeneratorTaskSpec {
+                    source_relay: generator.materialized_relay.clone(),
                     generator,
-                    program,
-                    source_relays: source_streams,
-                    output_branching,
-                    output_schema,
-                    output_registry,
-                    output_services,
+                    source_branching,
+                    routes,
                 },
             )?);
         }
@@ -5891,12 +6478,9 @@ impl Runtime {
     ) -> Result<JoinHandle<()>, RuntimeError> {
         let GeneratorTaskSpec {
             generator,
-            program,
-            source_relays: source_streams,
-            output_branching,
-            output_schema,
-            output_registry,
-            output_services,
+            source_relay,
+            source_branching,
+            routes,
         } = spec;
         let interval = Self::parse_runtime_node_duration_setting(
             domain,
@@ -5905,18 +6489,30 @@ impl Runtime {
             "each",
             &generator.each,
         )?;
-        let flush_each = Self::parse_runtime_node_flush_policy(
-            domain,
-            "generator",
-            &generator.name,
-            &generator.flush_each,
-            generator.max_batch_size.as_deref(),
-        )?;
+        let routes = routes
+            .into_iter()
+            .map(|route| {
+                let policy = route.output.flush_policy.as_ref().ok_or_else(|| {
+                    RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "generator '{}' output '{}' has no flush policy",
+                            generator.name, route.output.relay
+                        ),
+                    }
+                })?;
+                let flush_policy = Self::parse_runtime_node_flush_policy(
+                    domain,
+                    "generator",
+                    &generator.name,
+                    &policy.flush_each,
+                    policy.max_batch_size.as_deref(),
+                )?;
+                Ok((route, flush_policy))
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
         let task_domain = domain.clone();
         let task_generator = generator.name.clone();
-        let task_output_relay = generator.into_relay.clone();
-        let task_source_streams = source_streams;
-        let task_output_branching = output_branching;
         let mut shutdown_rx = shutdown_tx.subscribe();
         let runtime = self.clone();
         let task_events = self.events.clone();
@@ -5945,7 +6541,9 @@ impl Runtime {
                         next_state_refresh = None;
                         for state in branch_states.values_mut() {
                             state.next_generation = None;
-                            state.next_flush = None;
+                            for route in &mut state.routes {
+                                route.next_flush = None;
+                            }
                         }
                         tokio::select! {
                             changed = shutdown_rx.changed() => {
@@ -5996,13 +6594,6 @@ impl Runtime {
                     did_scheduled_work = true;
 
                     let local_node_id = runtime.local_node_id.read().clone();
-                    let mut source_state_by_branch = HashMap::<
-                        Option<BranchKey>,
-                        (
-                            HashMap<Identifier, HashMap<String, RuntimeRecord>>,
-                            BTreeSet<String>,
-                        ),
-                    >::default();
                     let mut state_load_failed = false;
                     let remote_dispatcher = { runtime.remote_dispatcher.read().clone() };
                     let remote_nodes = if let Some(dispatcher) = remote_dispatcher {
@@ -6010,26 +6601,24 @@ impl Runtime {
                     } else {
                         Vec::new()
                     };
-
-                    for source_stream in &task_source_streams {
-                        tokio::task::consume_budget().await;
-                        let mut state = match runtime
-                            .local_materialized_stream_state(&task_domain, source_stream)
-                        {
-                            Ok(state) => state,
-                            Err(error) => {
-                                state_load_failed = true;
-                                let _ = task_events.send(RuntimeEvent::Error(format!(
-                                    "failed to read materialized state for generator '{}' from \
-                                     relay '{}' in domain '{}': {}",
-                                    task_generator.as_str(),
-                                    source_stream.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                )));
-                                break;
-                            }
-                        };
+                    let mut state = match runtime
+                        .local_materialized_stream_state(&task_domain, &source_relay)
+                    {
+                        Ok(state) => state,
+                        Err(error) => {
+                            state_load_failed = true;
+                            let _ = task_events.send(RuntimeEvent::Error(format!(
+                                "failed to read materialized state for generator '{}' from relay \
+                                 '{}' in domain '{}': {}",
+                                task_generator.as_str(),
+                                source_relay.as_str(),
+                                task_domain.as_str(),
+                                error
+                            )));
+                            Vec::new()
+                        }
+                    };
+                    if !state_load_failed {
                         for remote_node in &remote_nodes {
                             tokio::task::consume_budget().await;
                             if local_node_id.as_deref() == Some(remote_node.as_str()) {
@@ -6039,7 +6628,7 @@ impl Runtime {
                                 .remote_materialized_stream_state(
                                     remote_node,
                                     &task_domain,
-                                    source_stream,
+                                    &source_relay,
                                 )
                                 .await
                             {
@@ -6050,7 +6639,7 @@ impl Runtime {
                                         "failed to read materialized state for generator '{}' \
                                          from relay '{}' on node '{}' in domain '{}': {}",
                                         task_generator.as_str(),
-                                        source_stream.as_str(),
+                                        source_relay.as_str(),
                                         remote_node,
                                         task_domain.as_str(),
                                         error
@@ -6059,9 +6648,11 @@ impl Runtime {
                                 }
                             }
                         }
-                        if state_load_failed {
-                            break;
-                        }
+                    }
+
+                    let mut source_state_by_branch =
+                        HashMap::<Option<BranchKey>, Vec<RuntimeRecord>>::default();
+                    if !state_load_failed {
                         let mut latest_state = HashMap::<String, RuntimeRecord>::default();
                         for (key, record) in state {
                             let replace = latest_state.get(&key).is_none_or(|existing| {
@@ -6078,19 +6669,18 @@ impl Runtime {
                                 latest_state.insert(key, record);
                             }
                         }
-                        for (key, record) in latest_state {
-                            let branch_key = if task_output_branching.is_empty() {
+                        for record in latest_state.into_values() {
+                            let branch_key = if source_branching.is_empty() {
                                 None
                             } else {
-                                match BranchKey::from_record(&record, task_output_branching.iter())
-                                {
+                                match BranchKey::from_record(&record, source_branching.iter()) {
                                     Ok(Some(key)) => Some(key),
                                     Ok(None) => {
                                         let _ = task_events.send(RuntimeEvent::Error(format!(
                                             "generator '{}' source relay '{}' record is missing \
                                              concrete branch fields",
                                             task_generator.as_str(),
-                                            source_stream.as_str(),
+                                            source_relay.as_str(),
                                         )));
                                         continue;
                                     }
@@ -6099,21 +6689,17 @@ impl Runtime {
                                             "generator '{}' source relay '{}' has invalid \
                                              concrete branch fields: {}",
                                             task_generator.as_str(),
-                                            source_stream.as_str(),
+                                            source_relay.as_str(),
                                             error,
                                         )));
                                         continue;
                                     }
                                 }
                             };
-                            let (state_by_stream, source_keys) = source_state_by_branch
+                            source_state_by_branch
                                 .entry(branch_key)
-                                .or_insert_with(|| (HashMap::default(), BTreeSet::new()));
-                            source_keys.insert(key.clone());
-                            state_by_stream
-                                .entry(source_stream.clone())
                                 .or_default()
-                                .insert(key, record);
+                                .push(record);
                         }
                     }
 
@@ -6122,29 +6708,37 @@ impl Runtime {
                             .keys()
                             .cloned()
                             .collect::<HashSet<_>>();
-                        for (branch_key, branch_state) in &mut branch_states {
-                            if !active_branch_keys.contains(branch_key) {
-                                branch_state.next_generation = None;
-                            }
-                        }
-                        for (branch_key, (source_state_by_stream, source_keys)) in
-                            source_state_by_branch
-                        {
+                        branch_states
+                            .retain(|branch_key, _| active_branch_keys.contains(branch_key));
+                        for (branch_key, records) in source_state_by_branch {
                             tokio::task::consume_budget().await;
-                            let branch_state = branch_states.entry(branch_key.clone()).or_default();
+                            let branch_state = branch_states
+                                .entry(branch_key.clone())
+                                .or_insert_with(|| GeneratorBranchTaskState {
+                                    next_generation: None,
+                                    routes: routes
+                                        .iter()
+                                        .map(|_| GeneratorRouteBranchTaskState::default())
+                                        .collect(),
+                                });
                             if branch_state.next_generation.is_none() {
                                 branch_state.next_generation = Some(execution_now);
                             }
-                            if branch_state.next_flush.is_none()
-                                && let RuntimeFlushPolicy::Each {
-                                    interval: flush_each,
-                                    ..
-                                } = flush_each
+                            for (route_state, (_, flush_policy)) in
+                                branch_state.routes.iter_mut().zip(&routes)
                             {
-                                branch_state.next_flush = Some(checked_add_duration_to_timestamp(
-                                    execution_now,
-                                    flush_each,
-                                ));
+                                if route_state.next_flush.is_none()
+                                    && let RuntimeFlushPolicy::Each {
+                                        interval: flush_each,
+                                        ..
+                                    } = flush_policy
+                                {
+                                    route_state.next_flush =
+                                        Some(checked_add_duration_to_timestamp(
+                                            execution_now,
+                                            *flush_each,
+                                        ));
+                                }
                             }
                             if !branch_state
                                 .next_generation
@@ -6159,32 +6753,46 @@ impl Runtime {
                             );
                             generated_branches.insert(branch_key.clone());
 
-                            for key in source_keys {
+                            for source_record in records {
                                 tokio::task::consume_budget().await;
                                 let mut values = HashMap::default();
-                                for source_stream in &task_source_streams {
-                                    let Some(record) = source_state_by_stream
-                                        .get(source_stream)
-                                        .and_then(|entries| entries.get(&key))
-                                    else {
-                                        continue;
-                                    };
-                                    for field in record.to_remote().fields {
+                                for field in source_record.to_remote().fields {
+                                    values.insert(
+                                        format!(
+                                            "relay_state.{}.{}",
+                                            source_relay.as_str(),
+                                            field.name
+                                        ),
+                                        RuntimeValue::from_remote(field.value),
+                                    );
+                                }
+                                if let Some(branch_key) = branch_key.as_ref() {
+                                    for (field, value) in branch_key.fields() {
                                         values.insert(
-                                            format!("{}.{}", source_stream.as_str(), field.name),
-                                            RuntimeValue::from_remote(field.value),
+                                            format!("branch.{}", field.as_str()),
+                                            value.clone(),
                                         );
                                     }
                                 }
+                                let materialized_state = values
+                                    .iter()
+                                    .filter(|(name, _)| name.starts_with("relay_state."))
+                                    .map(|(name, value)| (name.clone(), value.clone()))
+                                    .collect::<HashMap<_, _>>();
 
-                                let input =
-                                    match generator_context_batch(&program.input_schema, &values) {
+                                for (route_index, (route, _)) in routes.iter().enumerate() {
+                                    tokio::task::consume_budget().await;
+                                    let input = match generator_context_batch(
+                                        &route.program.compiled.input_schema,
+                                        &values,
+                                    ) {
                                         Ok(input) => input,
                                         Err(error) => {
                                             let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                "failed to prepare generator input for '{}' in \
-                                                 domain '{}' branch '{}': {}",
+                                                "failed to prepare generator '{}' route '{}' \
+                                                 input in domain '{}' branch '{}': {}",
                                                 task_generator.as_str(),
+                                                route.output.relay.as_str(),
                                                 task_domain.as_str(),
                                                 branch_key_display(&branch_key),
                                                 error
@@ -6192,124 +6800,118 @@ impl Runtime {
                                             continue;
                                         }
                                     };
-                                let record = match execute_generator_program_on_context(
-                                    &program,
-                                    &input,
-                                    execution_now,
-                                )
-                                .await
-                                {
-                                    Ok(Some(record)) => record,
-                                    Ok(None) => continue,
-                                    Err(error) => {
-                                        let _ = task_events.send(RuntimeEvent::Error(format!(
-                                            "failed to execute generator '{}' in domain '{}' \
-                                             branch '{}': {}",
-                                            task_generator.as_str(),
-                                            task_domain.as_str(),
-                                            branch_key_display(&branch_key),
-                                            error
-                                        )));
-                                        continue;
-                                    }
-                                };
-                                let output_key = if task_output_branching.is_empty() {
-                                    None
-                                } else {
-                                    match BranchKey::from_record(
-                                        &record,
-                                        task_output_branching.iter(),
-                                    ) {
-                                        Ok(Some(key)) => Some(key),
-                                        Ok(None) => {
-                                            let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                "generator '{}' produced record missing \
-                                                 destination branching for relay '{}'",
-                                                task_generator.as_str(),
-                                                task_output_relay.as_str(),
-                                            )));
-                                            continue;
+                                    match execute_generator_program_on_context(
+                                        &route.program,
+                                        &input,
+                                        execution_now,
+                                        &materialized_state,
+                                    )
+                                    .await
+                                    {
+                                        Ok(SingleRecordFilterMapOutcome::Filtered) => {}
+                                        Ok(SingleRecordFilterMapOutcome::Output(record)) => {
+                                            branch_state.routes[route_index].pending.push(
+                                                RelayMessage {
+                                                    key: branch_key.clone(),
+                                                    record,
+                                                    acks: AckSet::empty(),
+                                                },
+                                            );
+                                        }
+                                        Ok(SingleRecordFilterMapOutcome::MessageError {
+                                            error,
+                                            partial_output,
+                                            materialized_state,
+                                        }) => {
+                                            runtime
+                                                .handle_structured_message_error(
+                                                    MessageErrorHandling {
+                                                        domain: &task_domain,
+                                                        node_kind: "generator",
+                                                        node: &task_generator,
+                                                        source_route: Some(&route.output.relay),
+                                                        policy: &route.output.message_error_policy,
+                                                        message: RelayMessage {
+                                                            key: branch_key.clone(),
+                                                            record: source_record.clone(),
+                                                            acks: AckSet::empty(),
+                                                        },
+                                                        error,
+                                                        partial_output,
+                                                        materialized_state,
+                                                        ingest_metadata: None,
+                                                    },
+                                                )
+                                                .await;
                                         }
                                         Err(error) => {
                                             let _ = task_events.send(RuntimeEvent::Error(format!(
-                                                "generator '{}' produced invalid destination \
-                                                 branching for relay '{}': {}",
+                                                "failed to execute generator '{}' route '{}' in \
+                                                 domain '{}' branch '{}': {}",
                                                 task_generator.as_str(),
-                                                task_output_relay.as_str(),
+                                                route.output.relay.as_str(),
+                                                task_domain.as_str(),
+                                                branch_key_display(&branch_key),
                                                 error
                                             )));
-                                            continue;
                                         }
                                     }
-                                };
-                                if output_key != branch_key {
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
-                                        "generator '{}' attempted to cross concrete branch '{}' \
-                                         into '{}'",
-                                        task_generator.as_str(),
-                                        branch_key_display(&branch_key),
-                                        branch_key_display(&output_key),
-                                    )));
-                                    continue;
                                 }
-                                branch_state.pending.push(RelayMessage {
-                                    key: branch_key.clone(),
-                                    record,
-                                    acks: AckSet::empty(),
-                                });
                             }
                         }
-                        branch_states.retain(|branch_key, branch_state| {
-                            active_branch_keys.contains(branch_key)
-                                || !branch_state.pending.is_empty()
-                        });
                     }
                 }
 
                 let mut flushed_any_branch = false;
                 for (branch_key, branch_state) in &mut branch_states {
                     tokio::task::consume_budget().await;
-                    let should_flush = match flush_each {
-                        RuntimeFlushPolicy::Immediate => generated_branches.contains(branch_key),
-                        RuntimeFlushPolicy::Each { .. } => branch_state
-                            .next_flush
-                            .is_some_and(|next| execution_now >= next),
-                    };
-                    if !should_flush {
-                        continue;
-                    }
-                    if let RuntimeFlushPolicy::Each {
-                        interval: flush_each,
-                        ..
-                    } = flush_each
+                    for ((route, flush_policy), route_state) in
+                        routes.iter().zip(&mut branch_state.routes)
                     {
-                        advance_scheduled_timestamp(
-                            &mut branch_state.next_flush,
-                            flush_each,
-                            execution_now,
-                        );
+                        let should_flush = match flush_policy {
+                            RuntimeFlushPolicy::Immediate => {
+                                generated_branches.contains(branch_key)
+                            }
+                            RuntimeFlushPolicy::Each { .. } => route_state
+                                .next_flush
+                                .is_some_and(|next| execution_now >= next),
+                        };
+                        if !should_flush {
+                            continue;
+                        }
+                        if let RuntimeFlushPolicy::Each {
+                            interval: flush_each,
+                            ..
+                        } = flush_policy
+                        {
+                            advance_scheduled_timestamp(
+                                &mut route_state.next_flush,
+                                *flush_each,
+                                execution_now,
+                            );
+                        }
+                        if !route_state.pending.is_empty() {
+                            let mut pending_group = vec![(
+                                branch_key.clone(),
+                                std::mem::take(&mut route_state.pending),
+                            )];
+                            flush_generator_groups(
+                                GeneratorFlushContext {
+                                    runtime: &runtime,
+                                    domain: &task_domain,
+                                    generator: &task_generator,
+                                    output_relay: &route.output.relay,
+                                    output_schema: &route.output_schema,
+                                    output_registry: &route.output_registry,
+                                    output_services: &route.output_services,
+                                    task_events: &task_events,
+                                },
+                                &mut pending_group,
+                            )
+                            .await;
+                        }
+                        flushed_any_branch = true;
                     }
-                    if !branch_state.pending.is_empty() {
-                        let mut pending_group = vec![(
-                            branch_key.clone(),
-                            std::mem::take(&mut branch_state.pending),
-                        )];
-                        flush_generator_groups(
-                            GeneratorFlushContext {
-                                runtime: &runtime,
-                                domain: &task_domain,
-                                generator: &task_generator,
-                                output_relay: &task_output_relay,
-                                output_schema: &output_schema,
-                                output_registry: &output_registry,
-                                output_services: &output_services,
-                                task_events: &task_events,
-                            },
-                            &mut pending_group,
-                        )
-                        .await;
-                    }
-                    flushed_any_branch = true;
                 }
                 did_scheduled_work |= flushed_any_branch;
 
@@ -6317,15 +6919,18 @@ impl Runtime {
                     continue;
                 }
 
-                let next_deadline = next_state_refresh
-                    .into_iter()
-                    .chain(
-                        branch_states
-                            .values()
-                            .filter_map(|state| state.next_generation),
-                    )
-                    .chain(branch_states.values().filter_map(|state| state.next_flush))
-                    .min();
+                let next_deadline =
+                    next_state_refresh
+                        .into_iter()
+                        .chain(
+                            branch_states
+                                .values()
+                                .filter_map(|state| state.next_generation),
+                        )
+                        .chain(branch_states.values().flat_map(|state| {
+                            state.routes.iter().filter_map(|route| route.next_flush)
+                        }))
+                        .min();
                 let sleep_duration = next_deadline
                     .map(|next| {
                         if is_paced {
@@ -6371,7 +6976,7 @@ impl Runtime {
         ),
         PlannedGeneralError,
     > {
-        if output.compiled_program.is_none() && output.filter_map.is_some() {
+        if output.compiled_program.is_none() {
             let (
                 input_schema,
                 output_schema,
@@ -6432,7 +7037,7 @@ impl Runtime {
                 reingestor,
                 std::slice::from_ref(from_relay),
                 &output.relay,
-                output.filter_map.as_deref(),
+                &output.construction,
                 batch.arrow_schema(),
                 input_schema.vm_sensitivity(),
                 None,
@@ -6549,32 +7154,34 @@ impl Runtime {
             batch.acks.clone(),
         )
         .await?;
-        let output_batch = vm_typed_batch_to_runtime_batch(&executed.batch).map_err(|error| {
-            PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "reingestor '{}' failed to materialize FILTER-MAP output batch: {}",
-                    reingestor.as_str(),
-                    error
-                ),
-            }
-        })?;
         let mut success_output_rows = Vec::new();
         let mut success_input_rows = Vec::new();
         let mut errors = Vec::new();
         for (output_row, &input_row) in executed.selected_rows.iter().enumerate() {
             if let Some(side_error) = executed.batch.errors()[output_row].first() {
+                let partial_output = vm_partial_output_row_to_runtime_record(
+                    &executed.batch,
+                    output_row,
+                    batch.records[input_row].metadata().clone(),
+                )
+                .ok();
                 errors.push(PendingProcessorOutputMessageError {
                     row: input_row,
                     key: batch.keys[input_row].clone(),
                     record: batch.records[input_row].clone(),
-                    reason: format!(
-                        "reingestor '{}' FILTER-MAP side error {}: {} at {}",
-                        reingestor.as_str(),
-                        side_error.code.as_str(),
-                        side_error.message,
-                        side_error.span
+                    error: program.structured_side_error(
+                        format!(
+                            "reingestor '{}' FILTER-MAP side error {}: {} at {}",
+                            reingestor.as_str(),
+                            side_error.code.as_str(),
+                            side_error.message,
+                            side_error.span
+                        ),
+                        side_error.span,
+                        MessageErrorOperation::Set,
                     ),
+                    partial_output,
+                    materialized_state: materialized_state_snapshot(&input_records[input_row]),
                 });
                 continue;
             }
@@ -6584,26 +7191,18 @@ impl Runtime {
         let output_batches = if success_output_rows.is_empty() {
             Vec::new()
         } else {
-            let output_batch = if success_output_rows.len() == executed.batch.row_count() {
-                output_batch
-            } else {
-                let success_output_rows =
-                    success_output_rows.iter().copied().collect::<HashSet<_>>();
-                let keep = BooleanArray::from_iter(
-                    (0..executed.batch.row_count())
-                        .map(|row| Some(success_output_rows.contains(&row))),
-                );
-                output_batch
-                    .filter(&keep)
-                    .map_err(|error| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: format!(
-                            "reingestor '{}' failed to filter FILTER-MAP output batch: {}",
-                            reingestor.as_str(),
-                            error
-                        ),
-                    })?
-            };
+            let output_batch = vm_typed_batch_selected_rows_to_runtime_batch(
+                &executed.batch,
+                &success_output_rows,
+            )
+            .map_err(|error| PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason: format!(
+                    "reingestor '{}' failed to materialize successful FILTER-MAP rows: {}",
+                    reingestor.as_str(),
+                    error
+                ),
+            })?;
             let records = output_schema
                 .decoded_records_from_arrow_batch(&output_batch)
                 .map_err(|error| PlannedGeneralError {
@@ -6642,7 +7241,7 @@ impl Runtime {
         domain: &Domain,
         reingestor: &Identifier,
         from_relay: &Identifier,
-        from_where: Option<&str>,
+        from_where: Option<&nervix_models::Expression>,
         compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
         mode: AckMode,
         error_policies: &ErrorPolicies,
@@ -6794,18 +7393,22 @@ impl Runtime {
             let Some(acks) = ack_queues[error.row].pop_front() else {
                 continue;
             };
-            self.handle_message_error_with_policy(
+            self.handle_structured_message_error(MessageErrorHandling {
                 domain,
-                "reingestor",
-                reingestor,
-                &output_routes.routes[output_index].message_error_policy,
-                RelayMessage {
+                node_kind: "reingestor",
+                node: reingestor,
+                source_route: Some(&output_routes.routes[output_index].relay),
+                policy: &output_routes.routes[output_index].message_error_policy,
+                message: RelayMessage {
                     key: error.key,
                     record: error.record,
                     acks,
                 },
-                error.reason,
-            )
+                error: error.error,
+                partial_output: error.partial_output,
+                materialized_state: error.materialized_state,
+                ingest_metadata: None,
+            })
             .await;
         }
 
@@ -6908,15 +7511,10 @@ impl Runtime {
                     continue;
                 }
             };
-            match branched_sender
-                .send(BranchedEntrypointInput::PendingBranchingBatch(forwarded))
-                .await
-            {
+            match branched_sender.send(forwarded).await {
                 Ok(()) => {}
                 Err(error) => {
-                    let BranchedEntrypointInput::PendingBranchingBatch(batch) = error.0 else {
-                        continue;
-                    };
+                    let batch = error.0;
                     if mode == AckMode::Detached {
                         for ack in batch.acks {
                             ack.ack_success();
@@ -6946,7 +7544,7 @@ impl Runtime {
         domain: &Domain,
         reingestor: &Identifier,
         from_relay: &Identifier,
-        from_where: Option<&str>,
+        from_where: Option<&nervix_models::Expression>,
         compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
         error_policies: &ErrorPolicies,
         batch: RelayRecordBatch,
@@ -7008,16 +7606,14 @@ impl Runtime {
                         .flatten(),
                 )
             };
-            match compile_filter_map_program(
+            match compile_expression_filter_program(
                 domain,
                 reingestor,
-                std::slice::from_ref(from_relay),
                 Some(from_where),
                 batch.arrow_schema(),
                 input_schema.vm_sensitivity(),
-                input_schema.arrow_schema(),
-                input_schema.vm_sensitivity(),
                 false,
+                MessageErrorOperation::SourceWhere,
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &available_lookups,
@@ -7145,7 +7741,8 @@ impl Runtime {
                         .transpose()?;
                     Ok(RelayProcessorOutputNode {
                         relay: output.relay.clone(),
-                        filter_map: output.filter_map.clone(),
+                        construction: output.construction.clone(),
+                        branch: output.branch.clone(),
                         flush_policy,
                         message_error_policy: output.message_error_policy.clone(),
                         pending: Vec::new(),
@@ -7177,6 +7774,7 @@ impl Runtime {
             .iter()
             .find(|source_filter| source_filter.relay == task_from_relay)
             .map(|source_filter| source_filter.where_clause.clone());
+        let task_materialized_state = reingestor.materialized_state.clone();
         let task_mode = reingestor.mode;
         let task_error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
         let runtime = self.clone();
@@ -7235,12 +7833,41 @@ impl Runtime {
                                 &task_reingestor,
                             );
                         }
+                        let dependency_error_acks = batch.acks.clone();
+                        let batch = match runtime
+                            .resolve_materialized_dependencies_for_batch(
+                                &task_domain,
+                                &task_from_relay,
+                                &task_materialized_state,
+                                batch,
+                                &mut shutdown_rx,
+                            )
+                            .await
+                        {
+                            Ok(Some(batch)) => batch,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                runtime.handle_internal_processor_error_for_acks(
+                                    &task_domain,
+                                    "reingestor",
+                                    &task_reingestor,
+                                    &task_error_policies,
+                                    dependency_error_acks.iter(),
+                                    format!(
+                                        "reingestor '{}' failed to resolve materialized \
+                                         dependencies: {error}",
+                                        task_reingestor.as_str()
+                                    ),
+                                );
+                                continue;
+                            }
+                        };
                         runtime
                             .dispatch_reingestor_outputs(
                                 &task_domain,
                                 &task_reingestor,
                                 &task_from_relay,
-                                task_from_where.as_deref(),
+                                task_from_where.as_ref(),
                                 &mut compiled_from_where,
                                 task_mode,
                                 &task_error_policies,
@@ -8011,19 +8638,15 @@ impl Runtime {
                 codec: ingestor.decode_using_codec.as_str().to_string(),
             });
         };
-        let message_namespace =
-            Identifier::parse(INGEST_MESSAGE_NAMESPACE).expect("static namespace is valid");
         let empty_branching = Vec::new();
-        let filter_where = compile_filter_map_program(
+        let filter_where = compile_expression_filter_program(
             domain,
             &ingestor.name,
-            &[message_namespace],
-            ingestor.filter_where.as_deref(),
-            codec.schema().arrow_schema(),
-            codec.schema().vm_sensitivity(),
+            ingestor.filter_where.as_ref(),
             codec.schema().arrow_schema(),
             codec.schema().vm_sensitivity(),
             ingest_source_supports_headers(&ingestor.source),
+            MessageErrorOperation::FilterWhere,
             RuntimeVmCompileContext {
                 available_materialized_streams: &execution.materialized_stream_specs,
                 available_lookups: &execution.lookups,
@@ -8053,9 +8676,8 @@ impl Runtime {
             let compiled_program = compile_ingestor_filter_map_program(
                 domain,
                 &ingestor.name,
-                &output.relay,
                 &ingestor.source,
-                output.filter_map.as_deref(),
+                &output.construction,
                 RuntimeVmSchemaPair {
                     input: codec.schema().arrow_schema(),
                     input_sensitivity: codec.schema().vm_sensitivity(),
@@ -8089,7 +8711,8 @@ impl Runtime {
                 .transpose()?;
             output_routes.routes.push(RelayProcessorOutputNode {
                 relay: output.relay.clone(),
-                filter_map: output.filter_map.clone(),
+                construction: output.construction.clone(),
+                branch: output.branch.clone(),
                 flush_policy,
                 message_error_policy: output.message_error_policy.clone(),
                 pending: Vec::new(),
@@ -8097,7 +8720,7 @@ impl Runtime {
                 compiled_program,
             });
         }
-        let Some(base_output_relay) = output_routes.base_relay() else {
+        if output_routes.base_relay().is_none() {
             return Err(RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
@@ -8105,19 +8728,13 @@ impl Runtime {
                     ingestor.name.as_str()
                 ),
             });
-        };
-        let branching = execution
-            .relay_branchings
-            .get(&base_output_relay)
-            .cloned()
-            .unwrap_or_default();
+        }
         let model_index = execution
             .schedule
             .nodes
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let branch_value_mappings = ingestor.branched_by.values().to_vec();
         let mut branched_templates = HashMap::default();
         if let Some(specs) = execution.branched_ingestors.get(&ingestor.name) {
             for spec in specs {
@@ -8147,8 +8764,6 @@ impl Runtime {
             output_routes,
             filter_where,
             codec,
-            branching,
-            branch_value_mappings,
             branched_templates,
         })
     }

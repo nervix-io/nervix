@@ -10,8 +10,9 @@ use nervix_nspl::vm_program::{
 use crate::{
     error::CompileError,
     ir::{
-        CompiledProgram, InputBinding, Instruction, InstructionKind, InvocationBinding,
-        OutputBinding, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
+        AssignmentFallback, CompiledProgram, InputBinding, Instruction, InstructionKind,
+        InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef, RegisterSpace,
+        RegisterType, ScalarValue,
     },
     semantics::{
         BuiltinLowering, binary_descriptor, binary_output_type, builtin_descriptor,
@@ -678,22 +679,6 @@ impl Compiler {
             })
     }
 
-    fn passthrough_field_names(&self) -> Vec<String> {
-        let mut names = self
-            .columns
-            .keys()
-            .filter_map(|field_ref| {
-                let BoundFieldRef::User(field_ref) = field_ref else {
-                    return None;
-                };
-                (field_ref.relay == self.default_passthrough_namespace)
-                    .then(|| field_ref.field.clone())
-            })
-            .collect::<Vec<_>>();
-        names.sort();
-        names
-    }
-
     fn register_type_for_data_type(
         data_type: &DataType,
         span: Span,
@@ -1319,6 +1304,23 @@ impl Compiler {
             });
         }
     }
+
+    fn emit_assignment(
+        &mut self,
+        dst: RegisterRef,
+        input: RegisterRef,
+        fallback: AssignmentFallback,
+        span: Span,
+    ) {
+        self.instructions.push(Instruction {
+            kind: InstructionKind::Assign {
+                dst,
+                input,
+                fallback,
+            },
+            span,
+        });
+    }
 }
 
 impl ExprKey {
@@ -1931,79 +1933,6 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         }
     }
 
-    let mut unset = HashSet::new();
-    for field_ref in &program.inner.unset {
-        if let OutputMode::ExplicitOnly = options.output_mode {
-            return Err(CompileError {
-                code: "invalid_unset",
-                message: "UNSET is not valid for explicit-output programs".to_string(),
-                span: program.span,
-            });
-        }
-        let name = compiler.validate_target_field_ref(field_ref, program.span)?;
-        if !unset.insert(name.to_string()) {
-            return Err(CompileError {
-                code: "duplicate_unset",
-                message: format!("UNSET field '{name}' is listed more than once"),
-                span: program.span,
-            });
-        }
-        if output_field_names.contains(name) {
-            return Err(CompileError {
-                code: "invalid_unset",
-                message: format!(
-                    "UNSET field '{name}' is declared in the output schema and cannot be dropped"
-                ),
-                span: program.span,
-            });
-        }
-        if compiler
-            .passthrough_binding_for_output_field(name, program.span)
-            .is_err()
-        {
-            return Err(CompileError {
-                code: "unknown_unset",
-                message: format!(
-                    "UNSET field '{name}' is not present in source namespace '{}'",
-                    compiler.default_passthrough_namespace
-                ),
-                span: program.span,
-            });
-        }
-    }
-    if let OutputMode::PassthroughByName = options.output_mode {
-        for name in compiler.passthrough_field_names() {
-            if !output_field_names.contains(&name) && !unset.contains(name.as_str()) {
-                return Err(CompileError {
-                    code: "missing_unset",
-                    message: format!(
-                        "source field '{}.{}' is not declared in the output schema and must be \
-                         listed in UNSET",
-                        compiler.default_passthrough_namespace, name
-                    ),
-                    span: program.span,
-                });
-            }
-        }
-    }
-
-    let filter = if let Some(filter_expr) = &program.inner.filter {
-        let filter_type = compiler.infer_expr_type(filter_expr)?;
-        if filter_type != DataType::Boolean {
-            return Err(CompileError {
-                code: "invalid_filter",
-                message: "WHERE expression must evaluate to Boolean".to_string(),
-                span: filter_expr.span,
-            });
-        }
-        let filter_reg = compiler.alloc_condition(RegisterType::Boolean);
-        let compiled = compiler.compile_expr(filter_expr)?;
-        compiler.emit_move(filter_reg, compiled, filter_expr.span);
-        Some(filter_reg)
-    } else {
-        None
-    };
-
     compiler.enter_set_scope(&output_schema, &output_sensitivity);
     if let OutputMode::PassthroughByName = options.output_mode {
         for field in output_schema.fields() {
@@ -2030,9 +1959,30 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
             options.allow_sensitive_output,
         )?;
         let nullable = compiler.expr_may_be_null(expr)?;
+        let previous_binding = compiler.validate_field_ref(field_ref, expr.span)?.clone();
+        let fallback = match previous_binding.value {
+            ColumnValue::Initialized(reg) => AssignmentFallback::Register(reg),
+            ColumnValue::Uninitialized => {
+                AssignmentFallback::Uninitialized(previous_binding.data_type.clone())
+            }
+            ColumnValue::Unsupported => {
+                return Err(CompileError {
+                    code: "unsupported_assignment_target",
+                    message: format!(
+                        "SET target '{}.{}' has unsupported type {:?}",
+                        field_ref.relay, field_ref.field, previous_binding.data_type
+                    ),
+                    span: expr.span,
+                });
+            }
+        };
         let compiled = compiler.compile_assignment_expr(expr, field.data_type())?;
         let reg = compiler.alloc_output(compiled.ty);
-        compiler.emit_move(reg, compiled, expr.span);
+        if expr_semantics(expr).is_some_and(|semantics| semantics.can_error) {
+            compiler.emit_assignment(reg, compiled, fallback, expr.span);
+        } else {
+            compiler.emit_move(reg, compiled, expr.span);
+        }
         compiler.update_writable_field(
             field.name(),
             ColumnBinding {
@@ -2043,6 +1993,23 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
             },
         );
     }
+
+    let filter = if let Some(filter_expr) = &program.inner.filter {
+        let filter_type = compiler.infer_expr_type(filter_expr)?;
+        if filter_type != DataType::Boolean {
+            return Err(CompileError {
+                code: "invalid_filter",
+                message: "WHERE expression must evaluate to Boolean".to_string(),
+                span: filter_expr.span,
+            });
+        }
+        let filter_reg = compiler.alloc_condition(RegisterType::Boolean);
+        let compiled = compiler.compile_expr(filter_expr)?;
+        compiler.emit_move(filter_reg, compiled, filter_expr.span);
+        Some(filter_reg)
+    } else {
+        None
+    };
 
     let invocations = program
         .inner
@@ -2294,6 +2261,7 @@ fn collect_register_definitions(instructions: &[Instruction]) -> HashMap<Registe
 fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
     match kind {
         InstructionKind::Move { .. }
+        | InstructionKind::Assign { .. }
         | InstructionKind::Literal { .. }
         | InstructionKind::NullLiteral { .. }
         | InstructionKind::Uninitialized { .. } => true,
@@ -2370,6 +2338,15 @@ fn instruction_inputs(kind: &InstructionKind) -> Vec<RegisterRef> {
         InstructionKind::Move { input, .. }
         | InstructionKind::Unary { input, .. }
         | InstructionKind::Cast { input, .. } => vec![*input],
+        InstructionKind::Assign {
+            input, fallback, ..
+        } => {
+            let mut inputs = vec![*input];
+            if let AssignmentFallback::Register(previous) = fallback {
+                inputs.push(*previous);
+            }
+            inputs
+        }
         InstructionKind::Literal { .. }
         | InstructionKind::NullLiteral { .. }
         | InstructionKind::Uninitialized { .. } => Vec::new(),
@@ -2383,6 +2360,7 @@ fn instruction_inputs(kind: &InstructionKind) -> Vec<RegisterRef> {
 fn instruction_output(kind: &InstructionKind) -> RegisterRef {
     match kind {
         InstructionKind::Move { dst, .. }
+        | InstructionKind::Assign { dst, .. }
         | InstructionKind::Literal { dst, .. }
         | InstructionKind::NullLiteral { dst, .. }
         | InstructionKind::Uninitialized { dst, .. }
@@ -2397,6 +2375,7 @@ fn instruction_output(kind: &InstructionKind) -> RegisterRef {
 fn rewrite_instruction_output(kind: &mut InstructionKind, dst: RegisterRef) {
     match kind {
         InstructionKind::Move { dst: output, .. }
+        | InstructionKind::Assign { dst: output, .. }
         | InstructionKind::Literal { dst: output, .. }
         | InstructionKind::NullLiteral { dst: output, .. }
         | InstructionKind::Uninitialized { dst: output, .. }
@@ -2419,6 +2398,14 @@ fn rewrite_temp_input(kind: &mut InstructionKind, from: RegisterRef, to_index: u
         InstructionKind::Move { input, .. }
         | InstructionKind::Unary { input, .. }
         | InstructionKind::Cast { input, .. } => rewrite(input),
+        InstructionKind::Assign {
+            input, fallback, ..
+        } => {
+            rewrite(input);
+            if let AssignmentFallback::Register(previous) = fallback {
+                rewrite(previous);
+            }
+        }
         InstructionKind::Literal { .. }
         | InstructionKind::NullLiteral { .. }
         | InstructionKind::Uninitialized { .. } => {}
@@ -2437,6 +2424,7 @@ fn rewrite_temp_input(kind: &mut InstructionKind, from: RegisterRef, to_index: u
 fn rewrite_temp_output(kind: &mut InstructionKind, to_index: usize) {
     let output = match kind {
         InstructionKind::Move { dst, .. }
+        | InstructionKind::Assign { dst, .. }
         | InstructionKind::Literal { dst, .. }
         | InstructionKind::NullLiteral { dst, .. }
         | InstructionKind::Uninitialized { dst, .. }
@@ -2600,7 +2588,6 @@ mod tests {
                         span: (0..0).into(),
                     },
                 )],
-                unset: Vec::new(),
                 invoke: Vec::new(),
             },
             span: (0..0).into(),
@@ -2736,33 +2723,8 @@ mod tests {
     }
 
     #[test]
-    fn requires_unset_for_input_field_missing_from_declared_output_schema() {
+    fn allows_declared_target_only_field_without_legacy_unset() {
         let program = parse_program("SET input.total = input.value;").expect("must parse");
-        let input_schema = Arc::new(Schema::new(vec![
-            Field::new("value", DataType::Int64, true),
-            Field::new("legacy", DataType::Utf8, true),
-        ]));
-        let output_schema = Arc::new(Schema::new(vec![Field::new(
-            "total",
-            DataType::Int64,
-            true,
-        )]));
-
-        let error = compile_program_for_bindings(
-            &program,
-            output_schema,
-            [CompileBinding::writable("input", input_schema)],
-        )
-        .expect_err("source-only fields must be explicitly unset");
-
-        assert_eq!(error.code, "missing_unset");
-    }
-
-    #[test]
-    fn allows_declared_target_only_field_when_source_fields_are_unset() {
-        let program =
-            parse_program("SET input.total = input.value UNSET input.value, input.legacy;")
-                .expect("must parse");
         let input_schema = Arc::new(Schema::new(vec![
             Field::new("value", DataType::Int64, true),
             Field::new("legacy", DataType::Utf8, true),
@@ -2778,7 +2740,7 @@ mod tests {
             output_schema,
             [CompileBinding::writable("input", input_schema)],
         )
-        .expect("declared computed output with explicit source drops must compile");
+        .expect("declared computed output must compile without legacy source-drop syntax");
 
         assert!(compiled.output_schema.field_with_name("total").is_ok());
     }
@@ -2786,8 +2748,7 @@ mod tests {
     #[test]
     fn rejects_sensitive_field_assignment_to_non_sensitive_output() {
         let program =
-            parse_program("SET input.public_value = lower(input.secret) UNSET input.secret;")
-                .expect("must parse");
+            parse_program("SET input.public_value = lower(input.secret);").expect("must parse");
         let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
         let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
 
@@ -2810,7 +2771,6 @@ mod tests {
                 filter: None,
                 branch_filters: Vec::new(),
                 set: Vec::new(),
-                unset: Vec::new(),
                 invoke: Vec::new(),
             },
             span: (0..0).into(),
@@ -2832,8 +2792,7 @@ mod tests {
 
     #[test]
     fn allows_sensitive_output_when_compile_option_permits_external_output() {
-        let program = parse_program("SET input.public_value = input.secret UNSET input.secret;")
-            .expect("must parse");
+        let program = parse_program("SET input.public_value = input.secret;").expect("must parse");
         let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
         let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
 
@@ -2854,7 +2813,7 @@ mod tests {
     #[test]
     fn allows_sensitive_output_and_explicit_leak_sensitive_downgrade() {
         let sensitive_program =
-            parse_program("SET input.copy = input.secret UNSET input.secret;").expect("must parse");
+            parse_program("SET input.copy = input.secret;").expect("must parse");
         let input_schema = schema(vec![Field::new("secret", DataType::Utf8, true)]);
         let output_schema = schema(vec![Field::new("copy", DataType::Utf8, true)]);
         compile_program_with_sensitive_output(
@@ -2866,10 +2825,8 @@ mod tests {
         )
         .expect("sensitive value may flow into sensitive output");
 
-        let leak_program = parse_program(
-            "SET input.public_value = leak_sensitive(input.secret) UNSET input.secret;",
-        )
-        .expect("must parse");
+        let leak_program = parse_program("SET input.public_value = leak_sensitive(input.secret);")
+            .expect("must parse");
         let output_schema = schema(vec![Field::new("public_value", DataType::Utf8, true)]);
         compile_program_with_sensitive_output(
             &leak_program,

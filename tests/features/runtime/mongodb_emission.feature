@@ -30,31 +30,25 @@ Feature: MongoDB emission
           'client_id' = 'nervix-cucumber-mongodb-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC mongodb_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC mongodb_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT mongodb_client
         TYPE MONGODB
         CONFIG {
           'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb
-        FROM notifications
-        TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}}
-        VALUES {
-          "mongodb_user_id" = notifications.user_id,
-          "mongodb_now" = NOW() AS STRING,
-          "mongodb_action" = LOWER(notifications.action)
-        }
-        WITH MAX BATCH 2
+        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } WITH MAX BATCH 2
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
@@ -114,32 +108,25 @@ Feature: MongoDB emission
           'client_id' = 'nervix-cucumber-mongodb-conflict-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
-        TO notifications FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        FROM MQTT mqtt_ingress TOPIC mongodb_conflict_notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
-        BRANCHED BY by_mqtt_notifications VALUES { user_id = notifications.user_id }
-
-        FROM MQTT mqtt_ingress
-        TOPIC mongodb_conflict_notifications_in_{{test_id}}
-        MODE NO_ACK SEQUENTIAL ON GENERAL ERROR LOG;
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
         CREATE CLIENT mongodb_client
         TYPE MONGODB
         CONFIG {
           'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb
-        FROM notifications
-        TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_conflict_{{test_id}}
-        VALUES {
-          "mongodb_user_id" = notifications.user_id,
-          "mongodb_now" = NOW() AS STRING,
-          "mongodb_action" = LOWER(notifications.action)
-        }
-        ON CONFLICT ("mongodb_user_id") <conflict_action>
-        WITH MAX BATCH 2
+        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_conflict_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } ON CONFLICT ("mongodb_user_id") <conflict_action> WITH MAX BATCH 2
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB;
+        ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """

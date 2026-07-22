@@ -83,7 +83,7 @@ fn nervix_type<'src>()
         let array = kw(Identifier::Array).ignore_then(
             ty.clone()
                 .then_ignore(tok(Token::Comma))
-                .then(array_len.clone())
+                .then(array_len)
                 .then(
                     tok(Token::Comma)
                         .ignore_then(array_len)
