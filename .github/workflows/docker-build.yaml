@@ -72,6 +72,11 @@ jobs:
         with:
           tool: just,toml-cli
 
+      - name: Install rclone
+        run: |
+            sudo apt-get update
+            sudo apt-get install --yes rclone
+
       - name: Login to GHCR
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@v3
