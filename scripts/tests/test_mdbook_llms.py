@@ -140,6 +140,7 @@ class RenderLlmsTests(unittest.TestCase):
             "e6c02a5742ea9d4de588eb9b9de7bed43dc17011552186bed3e98b2c5958ff4a",
         )
         self.assertEqual(environment["RCLONE_CONFIG_R2_NO_CHECK_BUCKET"], "true")
+        self.assertNotIn("RCLONE_CONFIG_R2_ACL", environment)
         self.assertNotIn("token-value", environment.values())
 
 

@@ -45,7 +45,6 @@ def r2_environment(account_id: str, token_id: str, api_token: str) -> dict[str, 
         "RCLONE_CONFIG_R2_ENDPOINT": (
             f"https://{account_id}.r2.cloudflarestorage.com"
         ),
-        "RCLONE_CONFIG_R2_ACL": "private",
         "RCLONE_CONFIG_R2_NO_CHECK_BUCKET": "true",
     }
 
