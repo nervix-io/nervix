@@ -1,7 +1,7 @@
 [package]
 build = "build.rs"
 edition.workspace = true
-name = "nervix"
+name = "nervix-server"
 version.workspace = true
 
 [lints]
@@ -303,7 +303,6 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 ] }
 multer = "3"
 mysql_async = "0.36.2"
-nervix = { path = "" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
@@ -313,6 +312,7 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
 ] }
 nervix-proto = { package = "nervix-proto", path = "crates/proto" }
+nervix-server = { path = "" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }

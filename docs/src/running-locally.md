@@ -10,6 +10,9 @@ Install:
 
 ## Start The Server
 
+The server crate and executable are both named `nervix-server`. The `just server` recipe runs that
+dedicated server binary.
+
 ```bash
 NERVIX_INIT_DEFAULT_USER_PASSWORD='nervix' just server
 ```
@@ -92,6 +95,8 @@ already initialized with a different password, run `just reset-local-dashboard-s
 fresh.
 
 ## Start The Interactive Client
+
+The separate interactive client crate and executable are both named `nervix-cli`.
 
 ```bash
 just client

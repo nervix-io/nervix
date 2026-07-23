@@ -32,6 +32,9 @@ guidance to select the relevant Markdown entries from the public index.
 
 ## Assemble the graph
 
+Run the control plane with `nervix-server` and submit configuration through the separate
+`nervix-cli` client.
+
 Build configuration in dependency order:
 
 1. Create the domain, then select it with `USE <domain>;` as a separate client command.
