@@ -39,6 +39,41 @@ pub enum Expression {
         arguments: Vec<Self>,
     },
     Array(#[rkyv(omit_bounds)] Vec<Self>),
+    If {
+        #[rkyv(omit_bounds)]
+        condition: Box<Self>,
+        #[rkyv(omit_bounds)]
+        then_result: Box<Self>,
+        #[rkyv(omit_bounds)]
+        else_result: Box<Self>,
+    },
+    Case {
+        #[rkyv(omit_bounds)]
+        operand: Option<Box<Self>>,
+        #[rkyv(omit_bounds)]
+        branches: Vec<CaseBranch>,
+        #[rkyv(omit_bounds)]
+        else_result: Option<Box<Self>>,
+    },
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    __S::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(bounds(
+    __C: rkyv::validation::ArchiveContext,
+    __C::Error: rkyv::rancor::Source,
+)))]
+pub struct CaseBranch {
+    #[rkyv(omit_bounds)]
+    pub when: Expression,
+    #[rkyv(omit_bounds)]
+    pub result: Expression,
 }
 
 impl Expression {
@@ -61,6 +96,31 @@ impl Expression {
             Self::Array(items) => {
                 for item in items {
                     item.visit_fields(visitor);
+                }
+            }
+            Self::If {
+                condition,
+                then_result,
+                else_result,
+            } => {
+                condition.visit_fields(visitor);
+                then_result.visit_fields(visitor);
+                else_result.visit_fields(visitor);
+            }
+            Self::Case {
+                operand,
+                branches,
+                else_result,
+            } => {
+                if let Some(operand) = operand {
+                    operand.visit_fields(visitor);
+                }
+                for branch in branches {
+                    branch.when.visit_fields(visitor);
+                    branch.result.visit_fields(visitor);
+                }
+                if let Some(else_result) = else_result {
+                    else_result.visit_fields(visitor);
                 }
             }
         }

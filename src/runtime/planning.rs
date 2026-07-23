@@ -1100,6 +1100,62 @@ fn evaluate_branch_expression(
                 )),
             }
         }
+        Expression::If {
+            condition,
+            then_result,
+            else_result,
+        } => {
+            let condition = evaluate_branch_expression(condition, output, input, initialized)?;
+            match condition {
+                RuntimeValue::Bool(true) => {
+                    evaluate_branch_expression(then_result, output, input, initialized)
+                }
+                RuntimeValue::Bool(false) => {
+                    evaluate_branch_expression(else_result, output, input, initialized)
+                }
+                other => Err(format!(
+                    "IF condition expects BOOL, found {}",
+                    runtime_value_type_name(&other)
+                )),
+            }
+        }
+        Expression::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            let operand = operand
+                .as_ref()
+                .map(|operand| evaluate_branch_expression(operand, output, input, initialized))
+                .transpose()?;
+            for branch in branches {
+                let when = evaluate_branch_expression(&branch.when, output, input, initialized)?;
+                let matches = if let Some(operand) = &operand {
+                    operand == &when
+                } else {
+                    match when {
+                        RuntimeValue::Bool(value) => value,
+                        other => {
+                            return Err(format!(
+                                "CASE WHEN condition expects BOOL, found {}",
+                                runtime_value_type_name(&other)
+                            ));
+                        }
+                    }
+                };
+                if matches {
+                    return evaluate_branch_expression(&branch.result, output, input, initialized);
+                }
+            }
+            else_result
+                .as_ref()
+                .ok_or_else(|| {
+                    "CASE without ELSE produced NULL during branch construction".to_string()
+                })
+                .and_then(|else_result| {
+                    evaluate_branch_expression(else_result, output, input, initialized)
+                })
+        }
         Expression::Array(_) => {
             Err("array expressions are unavailable during branch construction".to_string())
         }

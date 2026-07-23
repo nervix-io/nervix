@@ -26,6 +26,12 @@ pub enum Token {
     True,
     False,
     Null,
+    If,
+    Case,
+    When,
+    Then,
+    Else,
+    End,
     Identifier(String),
     Integer(i64),
     Float(f64),
@@ -67,6 +73,12 @@ fn classify_identifier(raw: &str) -> Token {
         "TRUE" => Token::True,
         "FALSE" => Token::False,
         "NULL" => Token::Null,
+        "IF" => Token::If,
+        "CASE" => Token::Case,
+        "WHEN" => Token::When,
+        "THEN" => Token::Then,
+        "ELSE" => Token::Else,
+        "END" => Token::End,
         _ => Token::Identifier(raw.to_string()),
     }
 }
@@ -193,4 +205,28 @@ pub fn lex(input: &str) -> Result<Vec<SpannedToken>, Vec<LexError<'_>>> {
         .then_ignore(end())
         .parse(input)
         .into_result()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexes_conditional_keywords_case_insensitively() {
+        let tokens = lex("if CASE when Then ELSE end").expect("keywords must lex");
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::If,
+                Token::Case,
+                Token::When,
+                Token::Then,
+                Token::Else,
+                Token::End,
+            ]
+        );
+    }
 }

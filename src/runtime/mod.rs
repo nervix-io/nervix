@@ -56,7 +56,7 @@ use nervix_models::{
 };
 use nervix_nspl::{
     vm_program::{
-        BinaryOp, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
+        BinaryOp, CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
         SemanticNamespaces, Span as VmSpan, SpannedExpr, UnaryOp, lower_finalized_output_filter,
         lower_generated_route, lower_route_construction, lower_set_only_route,
         lower_transforming_route,
@@ -6289,6 +6289,22 @@ fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>)
                 collect_expr_field_refs(arg, refs);
             }
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                collect_expr_field_refs(operand, refs);
+            }
+            for branch in branches {
+                collect_expr_field_refs(&branch.when, refs);
+                collect_expr_field_refs(&branch.result, refs);
+            }
+            if let Some(else_result) = else_result {
+                collect_expr_field_refs(else_result, refs);
+            }
+        }
     }
 }
 
@@ -6345,6 +6361,22 @@ fn expr_contains_lookup_hash_map(expr: &SpannedExpr) -> bool {
                 return true;
             }
             args.iter().any(expr_contains_lookup_hash_map)
+        }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            operand
+                .as_deref()
+                .is_some_and(expr_contains_lookup_hash_map)
+                || branches.iter().any(|branch| {
+                    expr_contains_lookup_hash_map(&branch.when)
+                        || expr_contains_lookup_hash_map(&branch.result)
+                })
+                || else_result
+                    .as_deref()
+                    .is_some_and(expr_contains_lookup_hash_map)
         }
     }
 }
@@ -6406,6 +6438,39 @@ fn expr_same_without_spans(left: &SpannedExpr, right: &SpannedExpr) -> bool {
                     .zip(right_args)
                     .all(|(left, right)| expr_same_without_spans(left, right))
         }
+        (
+            Expr::Case {
+                operand: left_operand,
+                branches: left_branches,
+                else_result: left_else,
+            },
+            Expr::Case {
+                operand: right_operand,
+                branches: right_branches,
+                else_result: right_else,
+            },
+        ) => {
+            let operands_match = match (left_operand, right_operand) {
+                (Some(left), Some(right)) => expr_same_without_spans(left, right),
+                (None, None) => true,
+                _ => false,
+            };
+            let else_results_match = match (left_else, right_else) {
+                (Some(left), Some(right)) => expr_same_without_spans(left, right),
+                (None, None) => true,
+                _ => false,
+            };
+            operands_match
+                && else_results_match
+                && left_branches.len() == right_branches.len()
+                && left_branches
+                    .iter()
+                    .zip(right_branches)
+                    .all(|(left, right)| {
+                        expr_same_without_spans(&left.when, &right.when)
+                            && expr_same_without_spans(&left.result, &right.result)
+                    })
+        }
         _ => false,
     }
 }
@@ -6455,6 +6520,46 @@ fn rewrite_lookup_hash_map_expr(
                     pending_calls,
                 )?),
                 data_type: data_type.clone(),
+            },
+            span: expr.span,
+        },
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => nervix_nspl::vm_program::SpannedNode {
+            inner: Expr::Case {
+                operand: operand
+                    .as_ref()
+                    .map(|operand| {
+                        rewrite_lookup_hash_map_expr(operand, available_lookups, pending_calls)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+                branches: branches
+                    .iter()
+                    .map(|branch| {
+                        Ok(CaseArm {
+                            when: rewrite_lookup_hash_map_expr(
+                                &branch.when,
+                                available_lookups,
+                                pending_calls,
+                            )?,
+                            result: rewrite_lookup_hash_map_expr(
+                                &branch.result,
+                                available_lookups,
+                                pending_calls,
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+                else_result: else_result
+                    .as_ref()
+                    .map(|else_result| {
+                        rewrite_lookup_hash_map_expr(else_result, available_lookups, pending_calls)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
             },
             span: expr.span,
         },
@@ -6809,6 +6914,22 @@ fn collect_expression_field_paths(expression: &SpannedExpr, fields: &mut Vec<Fie
         Expr::Call { args, .. } => {
             for argument in args {
                 collect_expression_field_paths(argument, fields);
+            }
+        }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                collect_expression_field_paths(operand, fields);
+            }
+            for branch in branches {
+                collect_expression_field_paths(&branch.when, fields);
+                collect_expression_field_paths(&branch.result, fields);
+            }
+            if let Some(else_result) = else_result {
+                collect_expression_field_paths(else_result, fields);
             }
         }
         Expr::Literal(_) => {}
@@ -9191,6 +9312,31 @@ fn expression_reads_sensitive_source(
         nervix_models::Expression::Array(items) => items
             .iter()
             .any(|item| expression_reads_sensitive_source(item, sensitivity)),
+        nervix_models::Expression::If {
+            condition,
+            then_result,
+            else_result,
+        } => {
+            expression_reads_sensitive_source(condition, sensitivity)
+                || expression_reads_sensitive_source(then_result, sensitivity)
+                || expression_reads_sensitive_source(else_result, sensitivity)
+        }
+        nervix_models::Expression::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            operand
+                .as_deref()
+                .is_some_and(|operand| expression_reads_sensitive_source(operand, sensitivity))
+                || branches.iter().any(|branch| {
+                    expression_reads_sensitive_source(&branch.when, sensitivity)
+                        || expression_reads_sensitive_source(&branch.result, sensitivity)
+                })
+                || else_result.as_deref().is_some_and(|else_result| {
+                    expression_reads_sensitive_source(else_result, sensitivity)
+                })
+        }
     }
 }
 
@@ -11761,6 +11907,39 @@ fn evaluate_runtime_expr(
             cast_runtime_value(value, data_type)
         }
         Expr::Call { function, args } => evaluate_runtime_function(function, args, record),
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            let operand = operand
+                .as_ref()
+                .map(|operand| evaluate_runtime_expr(&operand.inner, record))
+                .transpose()?;
+            for branch in branches {
+                let when = evaluate_runtime_expr(&branch.when.inner, record)?;
+                let matches = if let Some(operand) = &operand {
+                    operand == &when
+                } else {
+                    match when {
+                        RuntimeValue::Bool(value) => value,
+                        other => {
+                            return Err(format!(
+                                "CASE WHEN condition expects BOOL, found {}",
+                                runtime_value_type_name(&other)
+                            ));
+                        }
+                    }
+                };
+                if matches {
+                    return evaluate_runtime_expr(&branch.result.inner, record);
+                }
+            }
+            else_result
+                .as_ref()
+                .ok_or_else(|| "CASE without ELSE produced NULL in aggregate input".to_string())
+                .and_then(|else_result| evaluate_runtime_expr(&else_result.inner, record))
+        }
     }
 }
 

@@ -30,6 +30,39 @@ General rules:
 - `NOW()` returns the execution-local domain time as `DATETIME`
 - `UUID_V7()` uses that same execution-local domain time when building the UUID
 
+## Conditional Expressions
+
+NSPL provides three self-delimited conditional forms:
+
+```nspl
+IF <bool-condition> THEN <result> ELSE <result> END
+
+CASE
+  WHEN <bool-condition> THEN <result>
+  [WHEN <bool-condition> THEN <result> ...]
+  [ELSE <result>]
+END
+
+CASE <operand>
+  WHEN <match-value> THEN <result>
+  [WHEN <match-value> THEN <result> ...]
+  [ELSE <result>]
+END
+```
+
+Every form uses first-match-wins ordering. A null condition is not a match, and a null operand never
+equals a simple-`CASE` match value. All non-null results must have the same exact type; implicit
+casts are not inserted. An omitted `ELSE` is a typed null and therefore requires an optional
+destination. An `IF` always includes `ELSE`.
+
+Conditional values are computed in the columnar batch engine. Per-message evaluation errors are
+observed only for the selected result arm, so an error in an unselected arm does not activate
+`ON MESSAGE ERROR`. Context-injected operations such as window aggregates and header reads retain
+their existing batch-level failure behavior.
+
+The words `IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, and `END` are reserved in expressions, including
+after a field scope such as `input.<field>`.
+
 ## Header Functions
 
 | Function | Returns | Notes |

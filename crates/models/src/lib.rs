@@ -10,10 +10,10 @@ mod timestamp;
 
 pub use canonical::{CanonicalNsplError, expression_to_nspl};
 pub use expression::{
-    Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, Expression, ExternalValue,
-    FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField, Invocation, Literal,
-    MaterializedStateDependency, MaterializedStatePolicy, OutputBranch, RouteConstruction,
-    UnaryOperator,
+    Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
+    ExternalValue, FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField,
+    Invocation, Literal, MaterializedStateDependency, MaterializedStatePolicy, OutputBranch,
+    RouteConstruction, UnaryOperator,
 };
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,

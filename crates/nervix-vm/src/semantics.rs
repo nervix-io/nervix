@@ -1093,6 +1093,37 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
                     .collect::<Option<Vec<_>>>()?,
             ))
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            let mut children = Vec::with_capacity(
+                usize::from(operand.is_some())
+                    + branches.len() * 2
+                    + usize::from(else_result.is_some()),
+            );
+            if let Some(operand) = operand {
+                children.push(expr_semantics(operand)?);
+            }
+            for branch in branches {
+                children.push(expr_semantics(&branch.when)?);
+                children.push(expr_semantics(&branch.result)?);
+            }
+            if let Some(else_result) = else_result {
+                children.push(expr_semantics(else_result)?);
+            }
+            Some(ExpressionSemantics::from_operation(
+                OperationSemantics {
+                    volatility: Volatility::Immutable,
+                    dependency_scope: DependencyScope::Constant,
+                    has_side_effects: false,
+                    can_error: false,
+                    null_propagation: NullPropagation::Custom,
+                },
+                children,
+            ))
+        }
     }
 }
 

@@ -160,8 +160,21 @@ Supported expression surface:
 - arithmetic: `+`, `-`, `*`, `/`, `%`
 - comparisons: `=`, `!=`, `>`, `<`, `>=`, `<=`
 - boolean logic: `AND`, `OR`, `NOT`
+- conditionals: `IF condition THEN value ELSE value END`, searched
+  `CASE WHEN condition THEN value ... [ELSE value] END`, and simple
+  `CASE operand WHEN match THEN value ... [ELSE value] END`
 - parentheses for nesting and precedence control
 - explicit casts only: `expr AS TYPE`
+
+Conditional result arms must have one exact type. Searched `CASE` conditions and the `IF` condition
+must be `BOOL`; simple `CASE` match values must have the operand's exact type. Arms are tested in
+written order and the first match wins. A null condition or null simple-`CASE` comparison does not
+match. Omitting `ELSE` produces a typed null, so the destination must be optional. `IF` always
+requires `ELSE`.
+
+`IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, and `END` are reserved in structured expressions. A schema
+may still declare a field with one of these names, but that field cannot be referenced by an NSPL
+expression.
 
 Supported filter-map types match the full Nervix internal schema type set:
 
