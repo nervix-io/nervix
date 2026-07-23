@@ -196,27 +196,25 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             name,
             relay,
             dropping,
-            blocking,
+            blocking: _,
             batch_sample_rate,
             where_clause,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
-            return run_subscribe_mode(
-                &args.server,
+            return run_subscribe_mode(SubscribeModeOptions {
+                server: args.server,
                 connect_options,
-                args.domain,
+                domain: args.domain,
                 name,
                 relay,
-                if dropping {
+                delivery_behavior: if dropping {
                     SubscriptionDeliveryBehavior::Dropping
-                } else if blocking {
-                    SubscriptionDeliveryBehavior::Blocking
                 } else {
                     SubscriptionDeliveryBehavior::Blocking
                 },
                 batch_sample_rate,
                 where_clause,
-            )
+            })
             .await;
         }
         Some(Command::RemoveNode { node_id }) => {
@@ -407,13 +405,12 @@ fn complete_local_upload_paths(
             }
             let value = if uses_home_prefix(path_fragment) {
                 let relative_base = strip_home_prefix(&base_dir)?;
-                let relative = if relative_base.as_os_str().is_empty() {
+                if relative_base.as_os_str().is_empty() {
                     format!("~/{name}")
                 } else {
                     format!("~/{}/{}", relative_base.display(), name)
-                };
-                relative
-            } else if base_dir == PathBuf::from(".") {
+                }
+            } else if base_dir == Path::new(".") {
                 name.clone()
             } else {
                 base_dir.join(&name).display().to_string()
@@ -443,10 +440,10 @@ fn expand_user_path(path: impl AsRef<Path>) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| path.to_path_buf());
     }
-    if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(stripped);
-        }
+    if let Some(stripped) = raw.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(stripped);
     }
     path.to_path_buf()
 }
@@ -460,8 +457,8 @@ fn strip_home_prefix(path: &Path) -> Option<PathBuf> {
     path.strip_prefix(home).ok().map(Path::to_path_buf)
 }
 
-async fn run_subscribe_mode(
-    server: &str,
+struct SubscribeModeOptions {
+    server: String,
     connect_options: ConnectOptions,
     domain: String,
     name: String,
@@ -469,17 +466,20 @@ async fn run_subscribe_mode(
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<String>,
     where_clause: Option<String>,
-) -> Result<(), StackReport<ClientError>> {
-    let client = Client::connect_with_options(server, domain, connect_options)
-        .await
-        .map_err(|err| StackReport::new(ClientError::from(err)))?;
+}
+
+async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackReport<ClientError>> {
+    let client =
+        Client::connect_with_options(&options.server, options.domain, options.connect_options)
+            .await
+            .map_err(|err| StackReport::new(ClientError::from(err)))?;
     spawn_event_loggers(client.clone());
     let request = subscribe_request(
-        &name,
-        &relay,
-        delivery_behavior,
-        batch_sample_rate.as_deref(),
-        where_clause.as_deref(),
+        &options.name,
+        &options.relay,
+        options.delivery_behavior,
+        options.batch_sample_rate.as_deref(),
+        options.where_clause.as_deref(),
     )
     .map_err(|reason| StackReport::new(ClientError::InvalidSubscriptionWhere { reason }))?;
     let query = request.to_query();
@@ -498,7 +498,10 @@ async fn run_subscribe_mode(
     }
 
     println!("{}", result.message);
-    println!("listening for events from relay '{relay}'. Press Ctrl-C to stop.");
+    println!(
+        "listening for events from relay '{}'. Press Ctrl-C to stop.",
+        options.relay
+    );
     signal::ctrl_c()
         .await
         .map_err(|_| StackReport::new(ClientError::from(CoreClientError::SessionClosed)))?;

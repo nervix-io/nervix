@@ -910,7 +910,7 @@ impl IcebergEmitter {
 
 impl IcebergEmitterClient {
     async fn write_batch(&mut self, batch: RecordBatch) -> IcebergEmitterResult<()> {
-        let location_generator = DefaultLocationGenerator::new(self.table.metadata().clone())
+        let location_generator = DefaultLocationGenerator::new(self.table.metadata())
             .change_context(IcebergEmitterError::Commit)?;
         self.data_file_sequence = self.data_file_sequence.saturating_add(1);
         let file_name_generator = DefaultFileNameGenerator::new(

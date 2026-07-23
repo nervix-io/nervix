@@ -214,7 +214,6 @@ apache-avro = "0.21.0"
 arc-swap = "1.9.1"
 argon2 = "0.5"
 ariadne = "0.5"
-# The pinned Iceberg revision uses Arrow/Parquet 58 types; keep every direct Arrow crate aligned.
 arrow-arith = "58"
 arrow-array = "58"
 arrow-cast = "58"
@@ -278,11 +277,9 @@ humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"
 hyper-util = "0.1"
-# Pin the last trunk revision with OpenDAL 0.56/reqsign 3 before Iceberg enabled
-# Ring-backed Parquet encryption unconditionally.
-iceberg = { git = "https://github.com/apache/iceberg-rust.git", rev = "9c70b9795e8112f59682d87b71bd86fc69787108" }
-iceberg-catalog-rest = { git = "https://github.com/apache/iceberg-rust.git", rev = "9c70b9795e8112f59682d87b71bd86fc69787108" }
-iceberg-storage-opendal = { git = "https://github.com/apache/iceberg-rust.git", rev = "9c70b9795e8112f59682d87b71bd86fc69787108", features = [
+iceberg = "0.10"
+iceberg-catalog-rest = "0.10"
+iceberg-storage-opendal = { version = "0.10", features = [
   "opendal-s3",
   "opendal-gcs",
   "opendal-azdls",

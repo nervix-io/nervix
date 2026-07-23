@@ -375,13 +375,11 @@ mod tests {
         )
         .expect("parse should succeed");
         assert_eq!(parsed.len(), 2);
-        assert!(parsed.iter().all(|statement| {
-            if let ClientStatement::Server(_) = statement {
-                true
-            } else {
-                false
-            }
-        }));
+        assert!(
+            parsed
+                .iter()
+                .all(|statement| matches!(statement, ClientStatement::Server(_)))
+        );
     }
 
     #[test]

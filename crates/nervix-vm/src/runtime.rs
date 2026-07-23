@@ -4253,8 +4253,8 @@ mod tests {
 
         assert_eq!(neg.value(0), -5);
         assert!(neg.is_null(1));
-        assert_eq!(lt.value(0), true);
-        assert_eq!(lt.value(1), false);
+        assert!(lt.value(0));
+        assert!(!lt.value(1));
         assert_eq!(output.errors()[1].len(), 1);
         assert_eq!(output.errors()[1][0].code, ErrorCode::Overflow);
     }
@@ -4307,7 +4307,7 @@ mod tests {
 
         assert_eq!(lit.value(0), 41);
         assert_eq!(lit.value(1), 41);
-        assert_eq!(notted.value(0), false);
+        assert!(!notted.value(0));
         assert!(notted.is_null(1));
         assert_eq!(diff.value(0), 4);
         assert!(diff.is_null(1));
@@ -4391,13 +4391,13 @@ mod tests {
         assert_eq!(neg.value(0), -2.5);
         assert!(neg.is_null(1));
         assert_eq!(total.value(0), 3.5);
-        assert_eq!(cmp.value(0), true);
-        assert_eq!(both.value(0), false);
-        assert_eq!(both.value(1), true);
+        assert!(cmp.value(0));
+        assert!(!both.value(0));
+        assert!(both.value(1));
         assert_eq!(uppered.value(0), "  ABC ");
         assert_eq!(trimmed.value(0), "AbC");
         assert_eq!(len.value(0), 6);
-        assert_eq!(lexical.value(0), false);
+        assert!(!lexical.value(0));
         assert!(uppered.is_null(1));
     }
 
@@ -4486,11 +4486,11 @@ mod tests {
         assert_eq!(s_from_i.value(0), "1");
         assert_eq!(s_from_f.value(0), "1");
         assert_eq!(s_from_b.value(0), "true");
-        assert_eq!(b_from_i.value(0), true);
-        assert_eq!(b_from_i.value(1), true);
-        assert_eq!(b_from_f.value(0), true);
-        assert_eq!(b_from_f.value(1), true);
-        assert_eq!(b_from_s.value(0), true);
+        assert!(b_from_i.value(0));
+        assert!(b_from_i.value(1));
+        assert!(b_from_f.value(0));
+        assert!(b_from_f.value(1));
+        assert!(b_from_s.value(0));
         assert!(b_from_s.is_null(1));
         assert!(f_from_s.is_null(0));
         assert!(f_from_s.value(1).is_nan());
@@ -4573,20 +4573,20 @@ mod tests {
         assert_eq!(chosen.value(0), "backup");
         assert_eq!(chosen.value(1), "same");
         assert_eq!(chosen.value(2), "keep");
-        assert_eq!(was_null.value(0), true);
-        assert_eq!(was_null.value(1), false);
-        assert_eq!(was_null.value(2), false);
+        assert!(was_null.value(0));
+        assert!(!was_null.value(1));
+        assert!(!was_null.value(2));
         assert!(maybe.is_null(0));
         assert!(maybe.is_null(1));
         assert_eq!(maybe.value(2), "keep");
-        assert_eq!(has.value(0), true);
-        assert_eq!(has.value(1), true);
+        assert!(has.value(0));
+        assert!(has.value(1));
         assert!(has.is_null(2));
-        assert_eq!(starts.value(0), true);
-        assert_eq!(starts.value(1), true);
+        assert!(starts.value(0));
+        assert!(starts.value(1));
         assert!(starts.is_null(2));
-        assert_eq!(ends.value(0), true);
-        assert_eq!(ends.value(1), true);
+        assert!(ends.value(0));
+        assert!(ends.value(1));
         assert!(ends.is_null(2));
         assert!(output.errors().iter().all(Vec::is_empty));
     }
@@ -4795,20 +4795,20 @@ mod tests {
             panic!("f32_lte must be Boolean");
         };
 
-        assert_eq!(u8_eq.value(0), true);
-        assert_eq!(u8_eq.value(1), false);
+        assert!(u8_eq.value(0));
+        assert!(!u8_eq.value(1));
         assert_eq!(u16_sum.value(0), 10);
         assert_eq!(u16_sum.value(1), 11);
         assert_eq!(i16_rem.value(0), 2);
         assert_eq!(i16_rem.value(1), -1);
-        assert_eq!(i32_gte.value(0), true);
-        assert_eq!(i32_gte.value(1), false);
+        assert!(i32_gte.value(0));
+        assert!(!i32_gte.value(1));
         assert_eq!(u32_product.value(0), 21);
         assert_eq!(u32_product.value(1), 33);
-        assert_eq!(u64_lt.value(0), true);
-        assert_eq!(u64_lt.value(1), false);
-        assert_eq!(f32_lte.value(0), true);
-        assert_eq!(f32_lte.value(1), false);
+        assert!(u64_lt.value(0));
+        assert!(!u64_lt.value(1));
+        assert!(f32_lte.value(0));
+        assert!(!f32_lte.value(1));
         assert!(output.errors().iter().all(Vec::is_empty));
     }
 
@@ -5120,14 +5120,14 @@ mod tests {
         assert_eq!(rpaded.value(0), "hexyxyx");
         assert_eq!(rtrimmed.value(0), "  hello.world");
         assert_eq!(part.value(0), "beta");
-        assert_eq!(starts.value(0), true);
+        assert!(starts.value(0));
         assert_eq!(pos.value(0), 1);
         assert_eq!(piece.value(0), "ell");
         assert_eq!(hexed.value(0), "ff");
         assert_eq!(translated.value(0), "HE");
         assert_eq!(trimmed2.value(0), "hello.world");
         assert_eq!(uppered.value(0), "HE");
-        assert_eq!(regex_ok.value(0), true);
+        assert!(regex_ok.value(0));
         assert_eq!(regex_replaced.value(0), "XX");
         assert_eq!(regex_piece.value(0), "hello");
         assert!(output.errors()[0].is_empty());

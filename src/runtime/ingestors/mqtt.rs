@@ -43,7 +43,7 @@ struct MqttBatchEntry {
 }
 
 enum MqttNextPublish {
-    Publish(Publish),
+    Publish(Box<Publish>),
     Shutdown,
     Reconnect,
 }
@@ -325,7 +325,7 @@ impl MqttIngestor {
                         )
                         .await
                         {
-                            MqttNextPublish::Publish(publish) => publish,
+                            MqttNextPublish::Publish(publish) => *publish,
                             MqttNextPublish::Shutdown => break 'outer,
                             MqttNextPublish::Reconnect => break,
                         };
@@ -370,7 +370,7 @@ impl MqttIngestor {
                                         next = Self::next_publish(&mut eventloop, &mut shutdown_rx, &task_context) => {
                                             match next {
                                                 MqttNextPublish::Publish(publish) => {
-                                                    if let Some(entry) = Self::decode_publish(&task_context, publish).await {
+                                                    if let Some(entry) = Self::decode_publish(&task_context, *publish).await {
                                                         batch.push(entry);
                                                     } else {
                                                         if !backoff.wait(&mut shutdown_rx).await {
@@ -561,7 +561,7 @@ impl MqttIngestor {
                 event = eventloop.poll() => {
                     match event {
                         Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                            return MqttNextPublish::Publish(publish);
+                            return MqttNextPublish::Publish(Box::new(publish));
                         }
                         Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {}
                         Err(error) => {

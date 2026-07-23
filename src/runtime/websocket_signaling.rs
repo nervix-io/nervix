@@ -15,8 +15,8 @@ use triomphe::Arc;
 #[derive(Debug)]
 pub(crate) enum WebsocketSignalingError {
     InvalidTimeout(String),
-    Send(WebSocketError),
-    Receive(WebSocketError),
+    Send(Box<WebSocketError>),
+    Receive(Box<WebSocketError>),
     Timeout(Duration),
     Closed,
 }
@@ -64,7 +64,7 @@ impl WebsocketSignalingSession {
             websocket
                 .send(Message::Text(body.clone()))
                 .await
-                .map_err(WebsocketSignalingError::Send)?;
+                .map_err(|error| WebsocketSignalingError::Send(Box::new(error)))?;
         }
 
         time::timeout(self.timeout, self.wait_for_bodies(websocket))
@@ -87,7 +87,8 @@ impl WebsocketSignalingSession {
             let Some(message) = websocket.next().await else {
                 return Err(WebsocketSignalingError::Closed);
             };
-            let message = message.map_err(WebsocketSignalingError::Receive)?;
+            let message =
+                message.map_err(|error| WebsocketSignalingError::Receive(Box::new(error)))?;
             match message {
                 Message::Text(text) => {
                     let text = text.to_string();
@@ -110,7 +111,7 @@ impl WebsocketSignalingSession {
                     websocket
                         .send(Message::Pong(payload))
                         .await
-                        .map_err(WebsocketSignalingError::Send)?;
+                        .map_err(|error| WebsocketSignalingError::Send(Box::new(error)))?;
                 }
                 Message::Close(_) => return Err(WebsocketSignalingError::Closed),
                 Message::Pong(_) | Message::Frame(_) => {}

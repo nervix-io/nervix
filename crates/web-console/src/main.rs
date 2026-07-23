@@ -51,6 +51,23 @@ struct WebConsoleSession {
     auth_token: RwSignal<Option<String>>,
 }
 
+#[derive(Clone, Copy)]
+struct WebConsoleSignals {
+    terminal_lines: RwSignal<Vec<TermLine>>,
+    suggestions: RwSignal<Vec<String>>,
+    domain_snapshots: RwSignal<Vec<DomainSnapshotView>>,
+    active_domain: RwSignal<Option<String>>,
+    transaction_active: RwSignal<bool>,
+    domains: RwSignal<Vec<DomainView>>,
+    resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
+    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
+    active_subscription_tab: RwSignal<Option<u64>>,
+    domains_loaded: RwSignal<bool>,
+    user_selected_domain: RwSignal<bool>,
+    auth_token: RwSignal<Option<String>>,
+    auth_error: RwSignal<Option<String>>,
+}
+
 #[derive(Clone)]
 enum QueuedRequest {
     Command {
@@ -248,7 +265,7 @@ fn App() -> impl IntoView {
     let user_selected_domain = RwSignal::new(false);
     let auth_token = RwSignal::new(web_console_auth_token_from_location());
     let auth_error = RwSignal::new(None::<String>);
-    let web_console_session = use_websocket_session(
+    let web_console_session = use_websocket_session(WebConsoleSignals {
         terminal_lines,
         suggestions,
         domain_snapshots,
@@ -262,7 +279,7 @@ fn App() -> impl IntoView {
         user_selected_domain,
         auth_token,
         auth_error,
-    );
+    });
 
     let active_domain_name = move || active_domain.get().unwrap_or_default();
     let active_graph = move || {
@@ -316,10 +333,10 @@ fn App() -> impl IntoView {
             )),
         };
         let queued = QueuedRequest::Suggest { request };
-        if let Some(request_tx) = suggestion_session.request_tx.get_untracked() {
-            if request_tx.unbounded_send(queued).is_err() {
-                suggestions.set(Vec::new());
-            }
+        if let Some(request_tx) = suggestion_session.request_tx.get_untracked()
+            && request_tx.unbounded_send(queued).is_err()
+        {
+            suggestions.set(Vec::new());
         }
     };
 
@@ -360,12 +377,12 @@ fn App() -> impl IntoView {
                 query: command.clone(),
                 request,
             };
-            if let Some(request_tx) = web_console_session.request_tx.get_untracked() {
-                if request_tx.unbounded_send(queued).is_err() {
-                    terminal_lines.update(|lines| {
-                        lines.push(TermLine::error("websocket command channel is closed"));
-                    });
-                }
+            if let Some(request_tx) = web_console_session.request_tx.get_untracked()
+                && request_tx.unbounded_send(queued).is_err()
+            {
+                terminal_lines.update(|lines| {
+                    lines.push(TermLine::error("websocket command channel is closed"));
+                });
             }
         } else if let Ok(domain) = parse_use_domain(&command) {
             if transaction_active.get_untracked() {
@@ -627,21 +644,15 @@ fn AuthPanel(
     }
 }
 
-fn use_websocket_session(
-    terminal_lines: RwSignal<Vec<TermLine>>,
-    suggestions: RwSignal<Vec<String>>,
-    domain_snapshots: RwSignal<Vec<DomainSnapshotView>>,
-    active_domain: RwSignal<Option<String>>,
-    transaction_active: RwSignal<bool>,
-    domains: RwSignal<Vec<DomainView>>,
-    resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
-    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
-    active_subscription_tab: RwSignal<Option<u64>>,
-    domains_loaded: RwSignal<bool>,
-    user_selected_domain: RwSignal<bool>,
-    auth_token: RwSignal<Option<String>>,
-    auth_error: RwSignal<Option<String>>,
-) -> WebConsoleSession {
+fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
+    let WebConsoleSignals {
+        terminal_lines,
+        active_domain,
+        domains_loaded,
+        auth_token,
+        auth_error,
+        ..
+    } = signals;
     let state = RwSignal::new(ConsoleConnectionState::Connecting);
     let request_tx = RwSignal::new(None);
     let upload_base_url = RwSignal::new(web_console_http_base_url());
@@ -771,17 +782,7 @@ fn use_websocket_session(
                                             ) {
                                                 Ok(response) => {
                                                     match handle_session_response(
-                                                        terminal_lines,
-                                                        suggestions,
-                                                        domain_snapshots,
-                                                        active_domain,
-                                                        transaction_active,
-                                                        domains,
-                                                        resource_details,
-                                                        subscription_tabs,
-                                                        active_subscription_tab,
-                                                        domains_loaded,
-                                                        user_selected_domain,
+                                                        signals,
                                                         response,
                                                         &mut pending_requests,
                                                     ) {
@@ -966,20 +967,24 @@ fn active_domain_graph_missing(
 }
 
 fn handle_session_response(
-    terminal_lines: RwSignal<Vec<TermLine>>,
-    suggestions: RwSignal<Vec<String>>,
-    domain_snapshots: RwSignal<Vec<DomainSnapshotView>>,
-    active_domain: RwSignal<Option<String>>,
-    transaction_active: RwSignal<bool>,
-    domains: RwSignal<Vec<DomainView>>,
-    resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
-    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
-    active_subscription_tab: RwSignal<Option<u64>>,
-    domains_loaded: RwSignal<bool>,
-    user_selected_domain: RwSignal<bool>,
+    signals: WebConsoleSignals,
     response: nervix_proto::SessionResponse,
     pending_requests: &mut VecDeque<PendingRequest>,
 ) -> SessionResponseAction {
+    let WebConsoleSignals {
+        terminal_lines,
+        suggestions,
+        domain_snapshots,
+        active_domain,
+        transaction_active,
+        domains,
+        resource_details,
+        subscription_tabs,
+        active_subscription_tab,
+        domains_loaded,
+        user_selected_domain,
+        ..
+    } = signals;
     match response.event {
         Some(nervix_proto::session_response::Event::Result(result)) => {
             if let Some(leader_url) = leader_web_console_redirect_url(&result) {
@@ -1059,12 +1064,12 @@ fn handle_session_response(
             {
                 active_domain.set(next_domains.first().map(|domain| domain.id.clone()));
             }
-            if response.response_to_request {
-                if let Some(PendingRequest::Command(_)) = pending_requests.pop_front() {
-                    terminal_lines.update(|lines| {
-                        lines.extend(domain_list_lines(&next_domains));
-                    });
-                }
+            if response.response_to_request
+                && let Some(PendingRequest::Command(_)) = pending_requests.pop_front()
+            {
+                terminal_lines.update(|lines| {
+                    lines.extend(domain_list_lines(&next_domains));
+                });
             }
         }
         Some(nervix_proto::session_response::Event::Snapshot(snapshot)) => {
@@ -2432,7 +2437,7 @@ fn GraphPanel(
         topology_graph_state
             .get()
             .filter(|graph| graph.id == selected_domain)
-            .or_else(|| visible_graph())
+            .or_else(&visible_graph)
     };
     let current_graph =
         move || visible_graph().expect("graph view must exist when graph is visible");
@@ -4077,8 +4082,8 @@ impl GraphView {
         peers.sort_by(|left, right| {
             left.base_y
                 .cmp(&right.base_y)
-                .then_with(|| left.source.cmp(&right.source))
-                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.source.cmp(right.source))
+                .then_with(|| left.target.cmp(right.target))
                 .then_with(|| left.kind.cmp(&right.kind))
         });
         let index = peers
@@ -4203,18 +4208,7 @@ impl GraphView {
         }
         GraphBranchGroupCandidate::merge(candidates)
             .into_iter()
-            .filter_map(|candidate| {
-                GraphBranchGroup::from_members(
-                    &candidate.schema,
-                    &candidate.start_id,
-                    &candidate.members,
-                    &candidate.metric_node_ids,
-                    &candidate.boundary_nodes,
-                    &candidate.initiators,
-                    &candidate.finalizers,
-                    self,
-                )
-            })
+            .filter_map(|candidate| GraphBranchGroup::from_candidate(&candidate, self))
             .collect()
     }
 
@@ -4779,16 +4773,19 @@ impl GraphBranchGroup {
         !(source_member || target_member || (source_boundary && target_boundary))
     }
 
-    fn from_members(
-        schema: &str,
-        start_id: &str,
-        members: &BTreeSet<String>,
-        metric_node_ids: &BTreeSet<String>,
-        boundary_nodes: &BTreeSet<String>,
-        initiators: &[GraphAnchor],
-        finalizers: &[GraphAnchor],
+    fn from_candidate(
+        candidate: &MergedGraphBranchGroupCandidate,
         graph: &GraphView,
     ) -> Option<Self> {
+        let MergedGraphBranchGroupCandidate {
+            schema,
+            start_id,
+            members,
+            metric_node_ids,
+            boundary_nodes,
+            initiators,
+            finalizers,
+        } = candidate;
         let mut left = i32::MAX;
         let mut top = i32::MAX;
         let mut right = i32::MIN;
@@ -5709,8 +5706,7 @@ fn route_graph_edge(
                 start,
                 end,
                 next_direction,
-                canvas_width,
-                canvas_height,
+                (canvas_width, canvas_height),
                 preferred_lane,
             );
             let next_point = point_index(next_x, next_y);
@@ -5772,10 +5768,10 @@ fn route_flow_penalty(
     start: GraphRoutePoint,
     end: GraphRoutePoint,
     next_direction: usize,
-    canvas_width: i32,
-    canvas_height: i32,
+    canvas_size: (i32, i32),
     preferred_lane: Option<i32>,
 ) -> i32 {
+    let (canvas_width, canvas_height) = canvas_size;
     let mut penalty = 0_i32;
     let flow_direction = (end.x - start.x).signum();
     if flow_direction != 0 {
@@ -6571,8 +6567,7 @@ mod tests {
                     DataflowNodeKind::Ingestor,
                     "MQTT",
                     "site_branch",
-                    0,
-                    40,
+                    (0, 40),
                     &["site=iad-1", "site=sfo-1"],
                 ),
                 node_with_branches(
@@ -6581,8 +6576,7 @@ mod tests {
                     DataflowNodeKind::Ingestor,
                     "MQTT",
                     "site_branch",
-                    0,
-                    180,
+                    (0, 180),
                     &["site=sfo-1"],
                 ),
                 node_with_branches(
@@ -6591,8 +6585,7 @@ mod tests {
                     DataflowNodeKind::Relay,
                     "relay",
                     "site_branch",
-                    320,
-                    110,
+                    (320, 110),
                     &["site=lhr-1"],
                 ),
             ],
@@ -7528,11 +7521,10 @@ mod tests {
         kind: DataflowNodeKind,
         subtype: &str,
         schema: &str,
-        x: i32,
-        y: i32,
+        position: (i32, i32),
         branches: &[&str],
     ) -> DataflowNode {
-        node(id, label, kind, subtype, schema, x, y).with_branches(
+        node(id, label, kind, subtype, schema, position.0, position.1).with_branches(
             branches
                 .iter()
                 .map(|branch| DataflowBranchStatistics {

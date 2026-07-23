@@ -4,6 +4,19 @@ use super::super::*;
 
 pub(in crate::runtime) struct WebsocketsIngestor;
 
+#[derive(Clone, Copy)]
+struct WebsocketDispatchContext<'a> {
+    runtime: &'a Runtime,
+    domain: &'a Domain,
+    ingestor: &'a Identifier,
+    timestamp_source: Option<&'a IngestTimestampSource>,
+    output_routes: &'a RelayProcessorOutputsNode,
+    filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+    codec: &'a Arc<CompiledCodec>,
+    events: &'a broadcast::Sender<RuntimeEvent>,
+}
+
 impl WebsocketsIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
@@ -119,6 +132,17 @@ impl WebsocketsIngestor {
         let task_client_mounts = resolved_client.mounts.clone();
         let task = tokio::spawn(async move {
             let _client_mounts = task_client_mounts;
+            let dispatch_context = WebsocketDispatchContext {
+                runtime: &task_runtime,
+                domain: &task_domain,
+                ingestor: &task_ingestor,
+                timestamp_source: task_timestamp_source.as_ref(),
+                output_routes: &output_routes,
+                filter_where: filter_where.as_ref(),
+                branched_senders: &branched_senders,
+                codec: &codec,
+                events: &task_events,
+            };
             let mut backoff = RuntimeReconnectBackoff::default();
             info!(
                 domain = task_domain.as_str(),
@@ -228,16 +252,8 @@ impl WebsocketsIngestor {
                                 backoff.reset();
                                 for payload in buffered_payloads {
                                     Self::dispatch_payload(
-                                        &task_runtime,
-                                        &task_domain,
-                                        &task_ingestor,
-                                        task_timestamp_source.as_ref(),
-                                        &output_routes,
-                                        filter_where.as_ref(),
-                                        &branched_senders,
-                                        codec.clone(),
+                                        &dispatch_context,
                                         payload.as_slice(),
-                                        &task_events,
                                     )
                                     .await;
                                 }
@@ -271,16 +287,8 @@ impl WebsocketsIngestor {
                                                     };
 
                                                     Self::dispatch_payload(
-                                                        &task_runtime,
-                                                        &task_domain,
-                                                        &task_ingestor,
-                                                        task_timestamp_source.as_ref(),
-                                                        &output_routes,
-                                                        filter_where.as_ref(),
-                                                        &branched_senders,
-                                                        codec.clone(),
+                                                        &dispatch_context,
                                                         &payload,
-                                                        &task_events,
                                                     )
                                                     .await;
                                                 }
@@ -357,19 +365,19 @@ impl WebsocketsIngestor {
         Ok(())
     }
 
-    async fn dispatch_payload(
-        runtime: &Runtime,
-        domain: &Domain,
-        ingestor: &Identifier,
-        timestamp_source: Option<&IngestTimestampSource>,
-        output_routes: &RelayProcessorOutputsNode,
-        filter_where: Option<&CompiledProgramWithMaterializedInterest>,
-        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
-        codec: Arc<CompiledCodec>,
-        payload: &[u8],
-        events: &broadcast::Sender<RuntimeEvent>,
-    ) {
-        match decode_ingested_payload(codec, payload).await {
+    async fn dispatch_payload(context: &WebsocketDispatchContext<'_>, payload: &[u8]) {
+        let WebsocketDispatchContext {
+            runtime,
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            branched_senders,
+            codec,
+            events,
+        } = *context;
+        match decode_ingested_payload(codec.clone(), payload).await {
             Ok(record) => {
                 let mut output_routes = output_routes.clone();
                 if let Err(error) = runtime

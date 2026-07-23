@@ -444,7 +444,7 @@ pub(super) struct CompiledWindowAggregateAssignment {
 
 #[derive(Debug, Clone)]
 pub(super) enum CompiledWindowAggregateExpr {
-    Scalar(VmCompiledProgram),
+    Scalar(Box<VmCompiledProgram>),
     Array {
         items: Vec<CompiledWindowAggregateExpr>,
         fixed_size: bool,
@@ -575,7 +575,7 @@ impl CompiledWindowAggregateProgram {
                         ..VmCompileOptions::default()
                     },
                 )
-                .map(CompiledWindowAggregateExpr::Scalar)
+                .map(|program| CompiledWindowAggregateExpr::Scalar(Box::new(program)))
                 .map_err(|error| format!("window aggregate VM compile failed: {}", error.message))
             }
             WindowAggregateExpr::Array(items) => {

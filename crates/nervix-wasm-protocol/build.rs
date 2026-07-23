@@ -40,16 +40,29 @@ fn main() {
 fn normalize_bindings(path: &Path) {
     let generated = fs::read_to_string(path).expect("failed to read generated FlatBuffers binding");
 
-    // Older compatible flatc releases emit unused imports at the file root and
-    // omit explicit lifetimes from four root accessors. Newer output is already
-    // normalized, so these replacements leave it unchanged.
+    // Older compatible flatc releases emit unused imports at the file root,
+    // omit explicit lifetimes from root accessors, and attach unused lifetimes
+    // to enum verification and lifetime-free argument implementations. Newer
+    // output is already normalized, so these replacements leave it unchanged.
     let normalized = generated
         .replacen(REDUNDANT_ROOT_IMPORTS, "", 1)
         .replace(
             "Result<Message, flatbuffers::InvalidFlatbuffer>",
             "Result<Message<'_>, flatbuffers::InvalidFlatbuffer>",
         )
-        .replace("(buf: &[u8]) -> Message {", "(buf: &[u8]) -> Message<'_> {");
+        .replace("(buf: &[u8]) -> Message {", "(buf: &[u8]) -> Message<'_> {")
+        .replace(
+            "impl<'a> flatbuffers::Verifiable for ",
+            "impl flatbuffers::Verifiable for ",
+        )
+        .replace(
+            "impl<'a> Default for OutputColumnRefArgs {",
+            "impl Default for OutputColumnRefArgs {",
+        )
+        .replace(
+            "impl<'a> Default for MessageArgs {",
+            "impl Default for MessageArgs {",
+        );
 
     fs::write(path, normalized).expect("failed to normalize generated FlatBuffers binding");
 }

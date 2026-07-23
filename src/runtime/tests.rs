@@ -6832,8 +6832,10 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         ],
     }));
     let program = super::compile_processor_output_filter_map_program(
-        &domain("default"),
-        &identifier("project_titles"),
+        super::RuntimeCompileTarget {
+            domain: &domain("default"),
+            identifier: &identifier("project_titles"),
+        },
         &[identifier("incoming_logs")],
         &identifier("projected_titles"),
         &construction(
@@ -6843,11 +6845,13 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
              WHERE NOT is_null(LOOKUP_HASH_MAP(\"titles_by_normalized\", lower(input.title), \
              \"city_name\"))",
         ),
-        input_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmSchemaPair {
+            input: input_schema.arrow_schema(),
+            input_sensitivity: super::VmSchemaSensitivity::default(),
+            output: output_schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+        },
         None,
-        output_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &lookups,
@@ -6927,19 +6931,23 @@ async fn filter_map_can_read_branch_namespace() {
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
     let program = super::compile_processor_output_filter_map_program(
-        &domain("default"),
-        &identifier("project_notifications"),
+        super::RuntimeCompileTarget {
+            domain: &domain("default"),
+            identifier: &identifier("project_notifications"),
+        },
         &[identifier("notifications")],
         &identifier("projected_notifications"),
         &construction(
             "INHERIT ALL SET branch_tenant = branch.tenant, amount = amount + 1 WHERE \
              branch.tenant = output.tenant",
         ),
-        input_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmSchemaPair {
+            input: input_schema.arrow_schema(),
+            input_sensitivity: super::VmSchemaSensitivity::default(),
+            output: input_schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+        },
         None,
-        input_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -7024,19 +7032,23 @@ async fn projection_can_read_branch_namespace() {
     ]);
     let branch_schema = test_schema(&[("tenant", ParseAsType::String)]).arrow_schema();
     let program = super::compile_processor_output_filter_map_program(
-        &domain("default"),
-        &identifier("project_notifications"),
+        super::RuntimeCompileTarget {
+            domain: &domain("default"),
+            identifier: &identifier("project_notifications"),
+        },
         &[identifier("notifications")],
         &identifier("projected_notifications"),
         &construction(
             "INHERIT tenant, amount SET branch_tenant = branch.tenant, amount = amount + 1 WHERE \
              branch.tenant = output.tenant",
         ),
-        input_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmSchemaPair {
+            input: input_schema.arrow_schema(),
+            input_sensitivity: super::VmSchemaSensitivity::default(),
+            output: output_schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+        },
         None,
-        output_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -7118,16 +7130,20 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
         },
     )]);
     let program = super::compile_processor_output_filter_map_program(
-        &domain("default"),
-        &identifier("copy_vectors"),
+        super::RuntimeCompileTarget {
+            domain: &domain("default"),
+            identifier: &identifier("copy_vectors"),
+        },
         &[identifier("vectors")],
         &identifier("copied_vectors"),
         &construction("INHERIT ALL"),
-        schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmSchemaPair {
+            input: schema.arrow_schema(),
+            input_sensitivity: super::VmSchemaSensitivity::default(),
+            output: schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+        },
         None,
-        schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -7179,16 +7195,20 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
     ]);
     let output_schema = test_schema(&[("amount", ParseAsType::I64)]);
     let program = super::compile_processor_output_filter_map_program(
-        &domain("default"),
-        &identifier("calculate_amount"),
+        super::RuntimeCompileTarget {
+            domain: &domain("default"),
+            identifier: &identifier("calculate_amount"),
+        },
         &[identifier("amounts")],
         &identifier("calculated_amounts"),
         &construction("SET amount = input.amount, amount = amount / input.denominator"),
-        input_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmSchemaPair {
+            input: input_schema.arrow_schema(),
+            input_sensitivity: super::VmSchemaSensitivity::default(),
+            output: output_schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+        },
         None,
-        output_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -7274,16 +7294,20 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
 fn filter_map_rejects_branch_namespace_without_branch_schema() {
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
     let error = super::compile_processor_output_filter_map_program(
-        &domain("default"),
-        &identifier("project_notifications"),
+        super::RuntimeCompileTarget {
+            domain: &domain("default"),
+            identifier: &identifier("project_notifications"),
+        },
         &[identifier("notifications")],
         &identifier("projected_notifications"),
         &construction("INHERIT ALL WHERE branch.tenant = output.tenant"),
-        schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmSchemaPair {
+            input: schema.arrow_schema(),
+            input_sensitivity: super::VmSchemaSensitivity::default(),
+            output: schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+        },
         None,
-        schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -7306,16 +7330,20 @@ fn filter_map_rejects_missing_branch_key() {
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
     let branch_schema = test_schema(&[("region", ParseAsType::String)]).arrow_schema();
     let error = super::compile_processor_output_filter_map_program(
-        &domain("default"),
-        &identifier("project_notifications"),
+        super::RuntimeCompileTarget {
+            domain: &domain("default"),
+            identifier: &identifier("project_notifications"),
+        },
         &[identifier("notifications")],
         &identifier("projected_notifications"),
         &construction("INHERIT ALL WHERE branch.tenant = output.tenant"),
-        schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmSchemaPair {
+            input: schema.arrow_schema(),
+            input_sensitivity: super::VmSchemaSensitivity::default(),
+            output: schema.arrow_schema(),
+            output_sensitivity: super::VmSchemaSensitivity::default(),
+        },
         None,
-        schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
         super::RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
@@ -8092,14 +8120,18 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
     assert_eq!(output.value("total"), Some(&RuntimeValue::I64(2)));
 
     let top_filter = super::compile_expression_filter_program(
-        &domain("default"),
-        &identifier("header_ingestor"),
+        super::RuntimeCompileTarget {
+            domain: &domain("default"),
+            identifier: &identifier("header_ingestor"),
+        },
         Some(&expression(
             "read_header(lower(input.header_name)) = \"primary\" AND \
              count(read_headers(\"missing\")) = 0",
         )),
-        input_schema.arrow_schema(),
-        super::VmSchemaSensitivity::default(),
+        super::RuntimeVmSchema {
+            schema: input_schema.arrow_schema(),
+            sensitivity: super::VmSchemaSensitivity::default(),
+        },
         true,
         MessageErrorOperation::FilterWhere,
         super::RuntimeVmCompileContext {

@@ -2928,7 +2928,7 @@ async fn publish_kafka_record(
                             OwnedHeaders::new_with_capacity(headers.len()),
                             |owned_headers, (key, value)| {
                                 owned_headers.insert(KafkaHeader {
-                                    key: *key,
+                                    key,
                                     value: Some(*value),
                                 })
                             },
