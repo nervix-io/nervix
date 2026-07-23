@@ -20,8 +20,9 @@ the public GitHub repository, and the installed skill uses the public Nervix doc
 The skill becomes installable directly from the public repository as soon as it is merged into
 the default branch. A separate package upload, repository clone, or GitHub release is not required.
 
-GitHub CLI 2.90.0 or newer provides the preview `gh skill` commands. Inspect the complete skill
-before installing it:
+GitHub CLI 2.90.0 or newer provides the preview `gh skill` commands. If `gh skill` is unavailable,
+[install or update GitHub CLI](https://github.com/cli/cli/blob/trunk/docs/install_linux.md) before
+continuing. Then inspect the complete skill before installing it:
 
 ```bash
 gh skill preview nervix-io/nervix nspl --allow-hidden-dirs
