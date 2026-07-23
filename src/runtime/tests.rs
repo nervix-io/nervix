@@ -208,12 +208,7 @@ fn branch_model_tuple(
     schema: &str,
     relay: &str,
     _fields: &[&str],
-) -> (
-    ModelKind,
-    Identifier,
-    nervix_models::Model,
-    Option<Vec<Identifier>>,
-) {
+) -> (ModelKind, Identifier, nervix_models::Model) {
     let branch = identifier(&format!("by_{relay}"));
     (
         ModelKind::Branch,
@@ -224,7 +219,6 @@ fn branch_model_tuple(
             ttl: "5m".to_string(),
             eviction: None,
         }),
-        None,
     )
 }
 
@@ -2510,114 +2504,232 @@ async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
 }
 
 #[tokio::test]
-async fn branch_preserving_processors_reject_standalone_schedule_nodes() {
-    let cases = [
-        (
-            ModelKind::Deduplicator,
-            identifier("dedup_orders"),
-            nervix_models::Model::Deduplicator(CreateDeduplicator {
-                name: identifier("dedup_orders"),
-                from: ProcessorInputs::single(identifier("orders")),
-                output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                branched_by: processor_branched_by("orders", &["tenant"]),
-                deduplicate_on: vec![expression("input.order_id")],
-                max_time: "10m".to_string(),
-                mode: AckMode::Attached,
-                filter_where: None,
-                materialized_state: Vec::new(),
+async fn branch_preserving_processors_build_standalone_schedule_nodes() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let order_schema = identifier("order_event");
+    let order_relay = |name: &str| {
+        scheduled_model(
+            ModelKind::Relay,
+            identifier(name),
+            nervix_models::Model::Relay(CreateRelay {
+                name: identifier(name),
+                schema: order_schema.clone(),
+                buffer: 2,
+                branching: RelayBranching::unbranched(),
+                materialized_state: None,
             }),
-            "deduplicator 'dedup_orders' is not attached to a branch root",
-        ),
-        (
-            ModelKind::Junction,
-            identifier("join_orders"),
-            nervix_models::Model::Junction(CreateJunction {
-                name: identifier("join_orders"),
-                from: ProcessorInputs::new(
-                    vec![identifier("left_orders"), identifier("right_orders")],
-                    Vec::new(),
-                ),
-                output_routes: (ProcessorOutputs::single(identifier("joined_orders")))
-                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
-                branched_by: processor_branched_by("left_orders", &["tenant"]),
-                mode: AckMode::Attached,
-                filter_where: None,
-                materialized_state: Vec::new(),
-            }),
-            "junction 'join_orders' is not attached to a branch root",
-        ),
-        (
-            ModelKind::WindowProcessor,
-            identifier("orders_window"),
-            nervix_models::Model::WindowProcessor(CreateWindowProcessor {
-                name: identifier("orders_window"),
-                from: ProcessorInputs::single(identifier("orders")),
-                output_routes: window_outputs("order_summaries", "SET count = COUNT(input.amount)"),
-                branched_by: processor_branched_by("orders", &["tenant"]),
-                width: WindowBound {
-                    messages: Some(10),
-                    duration: None,
-                },
-                step: WindowBound {
-                    messages: Some(10),
-                    duration: None,
-                },
-                mode: AckMode::Attached,
-                filter_where: None,
-                materialized_state: Vec::new(),
-            }),
-            "window processor 'orders_window' is not attached to a branch root",
-        ),
-        (
-            ModelKind::Inferencer,
-            identifier("score_orders"),
-            nervix_models::Model::Inferencer(CreateInferencer {
-                name: identifier("score_orders"),
-                from: ProcessorInputs::single(identifier("orders")),
-                output_routes: (ProcessorOutputs::single(identifier("scores")))
-                    .with_flush_policy("IMMEDIATE".to_string(), None),
-                branched_by: processor_branched_by("orders", &["tenant"]),
-                resource: identifier("score_model"),
-                resource_version: None,
-                file: "models/score.onnx".to_string(),
-                inputs: vec![InferencerTensorMapping {
-                    tensor: "features".to_string(),
-                    schema: inferencer_tensor_schema(2),
-                    expression: expression("input.features"),
-                }],
-                output_schema: vec![InferencerTensorDeclaration {
-                    tensor: "score".to_string(),
-                    schema: inferencer_tensor_schema(1),
-                }],
-                mode: AckMode::Attached,
-                filter_where: None,
-                materialized_state: Vec::new(),
-            }),
-            "inferencer 'score_orders' is not attached to a branch root",
-        ),
-    ];
-
-    for (kind, identifier, model, expected) in cases {
-        let runtime = super::Runtime::default();
-        let domain = domain("default");
-        let err = runtime
-            .rebuild_domain_from_schedule(
-                "node-1",
-                &domain,
-                Some(DomainSchedule {
-                    domain: domain.clone(),
-                    nodes: vec![scheduled_model(kind, identifier, model)],
+        )
+    };
+    let schedule = DomainSchedule {
+        domain: domain.clone(),
+        nodes: vec![
+            scheduled_model(
+                ModelKind::Schema,
+                order_schema.clone(),
+                nervix_models::Model::Schema(CreateSchema {
+                    name: order_schema.clone(),
+                    fields: vec![SchemaField {
+                        name: identifier("order_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
                 }),
-            )
-            .await
-            .expect_err("standalone branch-preserving processor must fail");
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains(expected),
-            "expected {rendered:?} to contain {expected:?}"
+            ),
+            order_relay("orders"),
+            order_relay("projected_orders"),
+            order_relay("left_orders"),
+            order_relay("right_orders"),
+            order_relay("joined_orders"),
+            scheduled_model(
+                ModelKind::Deduplicator,
+                identifier("dedup_orders"),
+                nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    name: identifier("dedup_orders"),
+                    from: ProcessorInputs::single(identifier("orders")),
+                    output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    branched_by: BranchSelection::unbranched(),
+                    deduplicate_on: vec![expression("input.order_id")],
+                    max_time: "10m".to_string(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                }),
+            ),
+            scheduled_model(
+                ModelKind::Junction,
+                identifier("join_orders"),
+                nervix_models::Model::Junction(CreateJunction {
+                    name: identifier("join_orders"),
+                    from: ProcessorInputs::new(
+                        vec![identifier("left_orders"), identifier("right_orders")],
+                        Vec::new(),
+                    ),
+                    output_routes: (ProcessorOutputs::single(identifier("joined_orders")))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    branched_by: BranchSelection::unbranched(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                }),
+            ),
+        ],
+    };
+
+    runtime
+        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule))
+        .await
+        .expect("standalone branch-preserving processors must build");
+    runtime
+        .rebuild_domain_from_schedule("node-1", &domain, None)
+        .await
+        .expect("domain teardown must stop processor runtimes");
+}
+
+#[tokio::test]
+async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let graph: super::SharedActiveGraph = StdArc::new(ArcSwapOption::from(None));
+    let schema = Arc::new(compile_schema(&CreateSchema {
+        name: identifier("notification"),
+        fields: vec![SchemaField {
+            name: identifier("user_id"),
+            ty: ParseAsType::I64,
+            optional: false,
+            sensitive: false,
+        }],
+    }));
+    let template = super::BranchInstanceTemplate {
+        source_kind: ModelKind::Deduplicator,
+        source: identifier("dedup_users"),
+        root_relay: identifier("orders"),
+        branch_ttl: None,
+        branch_max_instances: None,
+        entrypoint_branch_assignments: Vec::new(),
+        entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Preserve,
+        entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
+        error_policies: ErrorPolicies::handled_by_log(),
+        relays: [(
+            identifier("projected_orders"),
+            super::RelayProcessorRelayTemplate {
+                registry: super::RelayRegistry::new(),
+                services: test_relay_boundary_services(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        materialized_streams: HashSet::default(),
+        processors: [(
+            identifier("dedup_users"),
+            super::RelayProcessorTemplate {
+                kind: ModelKind::Deduplicator,
+                processor: identifier("dedup_users"),
+                input_relays: vec![identifier("orders")],
+                error_policies: ErrorPolicies::handled_by_log(),
+                from_where: HashMap::default(),
+                filter_where: None,
+                materialized_state: Vec::new(),
+                operation: super::RelayProcessorOperationTemplate::Deduplicator {
+                    output_routes: super::RelayProcessorOutputsTemplate {
+                        routes: vec![super::RelayProcessorOutputTemplate {
+                            output_relay: identifier("projected_orders"),
+                            construction: nervix_models::RouteConstruction {
+                                inherit: Some(nervix_models::Inheritance::All),
+                                ..nervix_models::RouteConstruction::default()
+                            },
+                            flush_policy: Some(super::RuntimeFlushPolicy::Immediate),
+                            message_error_policy: MessageErrorPolicy::Log,
+                        }],
+                    },
+                    deduplicate_on: vec![expression("input.user_id")],
+                    max_time: Duration::from_secs(600),
+                },
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let mut instances =
+        super::BranchInstanceRegistry::<Option<super::BranchKey>, super::ProcessorBranchTask>::new(
         );
-    }
+    let now = super::current_timestamp();
+    let branch_batch = |user_id: i64, tenant: &str| {
+        super::RelayRecordBatch::from_messages(
+            schema.clone(),
+            vec![RelayMessage {
+                key: string_branch_key("tenant", tenant),
+                record: RuntimeRecord::from_fields([(
+                    "user_id".to_string(),
+                    RuntimeValue::I64(user_id),
+                )]),
+                acks: AckSet::empty(),
+            }],
+        )
+        .expect("branch batch should build")
+    };
+
+    super::dispatch_processor_node_input(
+        super::ProcessorNodeDispatchContext {
+            runtime_handle: &runtime,
+            domain: &domain,
+            graph: &graph,
+            template: &template,
+            now,
+        },
+        &mut instances,
+        identifier("orders"),
+        branch_batch(42, "acme"),
+    )
+    .await;
+    let mut states = instances.states();
+    assert_eq!(states.len(), 1);
+    let first = states.pop().expect("first branch task must exist");
+
+    super::dispatch_processor_node_input(
+        super::ProcessorNodeDispatchContext {
+            runtime_handle: &runtime,
+            domain: &domain,
+            graph: &graph,
+            template: &template,
+            now,
+        },
+        &mut instances,
+        identifier("orders"),
+        branch_batch(43, "acme"),
+    )
+    .await;
+    let states = instances.states();
+    assert_eq!(states.len(), 1);
+    assert!(
+        Arc::ptr_eq(&first, &states[0]),
+        "same branch key must reuse the existing processor branch task"
+    );
+
+    super::dispatch_processor_node_input(
+        super::ProcessorNodeDispatchContext {
+            runtime_handle: &runtime,
+            domain: &domain,
+            graph: &graph,
+            template: &template,
+            now,
+        },
+        &mut instances,
+        identifier("orders"),
+        branch_batch(7, "beta"),
+    )
+    .await;
+    assert_eq!(instances.states().len(), 2);
+
+    super::shutdown_all_processor_branch_instances(
+        &domain,
+        &identifier("dedup_users"),
+        &mut instances,
+    )
+    .await;
+    assert!(instances.states().is_empty());
 }
 
 #[test]
@@ -5208,7 +5320,6 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5225,7 +5336,6 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5242,7 +5352,6 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Emitter,
@@ -5261,20 +5370,23 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                     construction: nervix_models::RouteConstruction::default(),
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    let spec = &specs[0];
+    assert_eq!(specs.entrypoints.len(), 1);
+    let spec = &specs.entrypoints[0];
     assert_eq!(spec.identifier, identifier("orders_ingestor"));
     assert_eq!(spec.root_relay, identifier("orders"));
-    assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("dedup_orders"));
+    assert_eq!(specs.processors.len(), 2);
+    let dedup_orders = &specs.processors[0];
+    assert_eq!(dedup_orders.spec.processor, identifier("dedup_orders"));
+    assert_eq!(dedup_orders.spec.input_relays, vec![identifier("orders")]);
+    assert_eq!(dedup_orders.branch_ttl.as_deref(), Some("5m"));
+    assert_eq!(dedup_orders.branch_max_instances, None);
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
-        &spec.roots[0].operation
+        &dedup_orders.spec.operation
     else {
         panic!("expected deduplicator output");
     };
@@ -5282,11 +5394,17 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
         .routes
         .first()
         .expect("deduplicator should have output route");
-    assert_eq!(output.children.len(), 1);
+    assert_eq!(output.relay, identifier("projected_orders"));
+    let dedup_projected = &specs.processors[1];
     assert_eq!(
-        output.children[0].processor,
+        dedup_projected.spec.processor,
         identifier("dedup_projected_orders")
     );
+    assert_eq!(
+        dedup_projected.spec.input_relays,
+        vec![identifier("projected_orders")]
+    );
+    assert_eq!(dedup_projected.branch_ttl.as_deref(), Some("5m"));
 }
 
 #[test]
@@ -5312,7 +5430,6 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
-                Some(vec![identifier("host")]),
             ),
             (
                 ModelKind::WindowProcessor,
@@ -5337,7 +5454,6 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("host")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5354,22 +5470,25 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("host")]),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    let spec = &specs[0];
+    assert_eq!(specs.entrypoints.len(), 1);
+    let spec = &specs.entrypoints[0];
     assert_eq!(spec.root_relay, identifier("metrics"));
-    assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("metric_window"));
+    assert_eq!(specs.processors.len(), 2);
+    let window = specs
+        .processors
+        .iter()
+        .find(|node| node.spec.processor == identifier("metric_window"))
+        .expect("window processor spec must exist");
     let BranchedProcessorOperationSpec::WindowProcessor {
         output_routes,
         width,
         step,
-    } = &spec.roots[0].operation
+    } = &window.spec.operation
     else {
         panic!("expected window processor branch node");
     };
@@ -5378,11 +5497,16 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
         .first()
         .expect("window processor should have output route");
     assert_eq!(output.relay, identifier("metric_summary"));
-    assert_eq!(output.children.len(), 1);
-    assert_eq!(output.children[0].processor, identifier("dedup_summary"));
     assert_eq!(width.messages, Some(100));
     assert_eq!(step.messages, Some(10));
     assert_eq!(output.construction.assignments.len(), 1);
+    assert!(
+        specs
+            .processors
+            .iter()
+            .any(|node| node.spec.processor == identifier("dedup_summary")
+                && node.spec.input_relays == vec![identifier("metric_summary")])
+    );
 }
 
 #[test]
@@ -5408,7 +5532,6 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Inferencer,
@@ -5435,7 +5558,6 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                     filter_where: Some(expression("input.active")),
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5452,17 +5574,20 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    let spec = &specs[0];
+    assert_eq!(specs.entrypoints.len(), 1);
+    let spec = &specs.entrypoints[0];
     assert_eq!(spec.root_relay, identifier("features"));
-    assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("score_model"));
+    assert_eq!(specs.processors.len(), 2);
+    let inferencer = specs
+        .processors
+        .iter()
+        .find(|node| node.spec.processor == identifier("score_model"))
+        .expect("inferencer spec must exist");
     let BranchedProcessorOperationSpec::Inferencer {
         output_routes,
         resource,
@@ -5471,7 +5596,7 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
         inputs,
         output_schema,
         ..
-    } = &spec.roots[0].operation
+    } = &inferencer.spec.operation
     else {
         panic!("expected inferencer branch node");
     };
@@ -5480,15 +5605,23 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
         .first()
         .expect("inferencer should have output route");
     assert_eq!(output.relay, identifier("scores"));
-    assert_eq!(output.children.len(), 1);
-    assert_eq!(output.children[0].processor, identifier("dedup_scores"));
     assert_eq!(resource, &identifier("fraud_model"));
     assert_eq!(*resource_version, Some(3));
     assert_eq!(file, "models/fraud.onnx");
     assert_eq!(inputs.len(), 1);
     assert_eq!(output_schema.len(), 1);
     assert_eq!(output.flush_each.as_deref(), Some("IMMEDIATE"));
-    assert_eq!(spec.roots[0].filter_where, Some(expression("input.active")));
+    assert_eq!(
+        inferencer.spec.filter_where,
+        Some(expression("input.active"))
+    );
+    assert!(
+        specs
+            .processors
+            .iter()
+            .any(|node| node.spec.processor == identifier("dedup_scores")
+                && node.spec.input_relays == vec![identifier("scores")])
+    );
 }
 
 #[test]
@@ -5511,7 +5644,6 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5528,19 +5660,26 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    let spec = &specs[0];
+    assert_eq!(specs.entrypoints.len(), 1);
+    let spec = &specs.entrypoints[0];
     assert_eq!(spec.kind, ModelKind::Reingestor);
     assert_eq!(spec.identifier, identifier("tenant_partition"));
     assert_eq!(spec.root_relay, identifier("tenant_orders"));
-    assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("dedup_orders"));
+    assert_eq!(specs.processors.len(), 1);
+    assert_eq!(
+        specs.processors[0].spec.processor,
+        identifier("dedup_orders")
+    );
+    assert_eq!(
+        specs.processors[0].spec.input_relays,
+        vec![identifier("tenant_orders")]
+    );
+    assert_eq!(specs.processors[0].branch_ttl.as_deref(), Some("5m"));
 }
 
 #[test]
@@ -5567,7 +5706,6 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5602,7 +5740,6 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                     filter_where: Some(expression("input.active")),
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5619,7 +5756,6 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5636,38 +5772,44 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    let spec = &specs[0];
-    assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("orders_splitter"));
+    assert_eq!(specs.entrypoints.len(), 1);
+    assert_eq!(specs.processors.len(), 3);
+    let splitter = specs
+        .processors
+        .iter()
+        .find(|node| node.spec.processor == identifier("orders_splitter"))
+        .expect("splitter spec must exist");
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
-        &spec.roots[0].operation
+        &splitter.spec.operation
     else {
         panic!("expected deduplicator output routes");
     };
-    assert_eq!(spec.roots[0].filter_where, Some(expression("input.active")));
+    assert_eq!(splitter.spec.filter_where, Some(expression("input.active")));
     assert_eq!(output_routes.routes.len(), 2);
     assert_eq!(
         output_routes.routes[0].construction.where_clause,
         Some(expression("output.urgent"))
     );
-    assert_eq!(output_routes.routes[0].children.len(), 1);
-    assert_eq!(
-        output_routes.routes[0].children[0].processor,
-        identifier("dedup_urgent")
-    );
-    assert_eq!(output_routes.routes.len(), 2);
+    assert_eq!(output_routes.routes[0].relay, identifier("urgent_orders"));
     assert_eq!(output_routes.routes[1].relay, identifier("default_orders"));
-    assert_eq!(output_routes.routes[1].children.len(), 1);
-    assert_eq!(
-        output_routes.routes[1].children[0].processor,
-        identifier("dedup_default")
+    assert!(
+        specs
+            .processors
+            .iter()
+            .any(|node| node.spec.processor == identifier("dedup_urgent")
+                && node.spec.input_relays == vec![identifier("urgent_orders")])
+    );
+    assert!(
+        specs
+            .processors
+            .iter()
+            .any(|node| node.spec.processor == identifier("dedup_default")
+                && node.spec.input_relays == vec![identifier("default_orders")])
     );
 }
 
@@ -5696,7 +5838,6 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
 
                     filter_where: None,
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Ingestor,
@@ -5716,7 +5857,6 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
 
                     filter_where: None,
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Junction,
@@ -5734,7 +5874,6 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5751,45 +5890,44 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 2);
-    for spec in &specs {
-        assert_eq!(
-            spec.processors
-                .iter()
-                .filter(|processor| processor.processor == identifier("join_streams"))
-                .count(),
-            1
-        );
-        let junction = spec
+    assert_eq!(specs.entrypoints.len(), 2);
+    assert_eq!(
+        specs
             .processors
             .iter()
-            .find(|processor| processor.processor == identifier("join_streams"))
-            .expect("junction should be reachable");
-        assert_eq!(
-            junction.input_relays,
-            vec![identifier("left_stream"), identifier("right_stream")]
-        );
-        let BranchedProcessorOperationSpec::Junction { output_routes, .. } = &junction.operation
-        else {
-            panic!("expected junction processor");
-        };
-        let output = output_routes
-            .routes
-            .first()
-            .expect("junction should have output route");
-        assert_eq!(output.relay, identifier("joined_stream"));
-        assert!(
-            spec.processors
-                .iter()
-                .any(|processor| processor.processor == identifier("dedup_joined"))
-        );
-    }
+            .filter(|node| node.spec.processor == identifier("join_streams"))
+            .count(),
+        1
+    );
+    let junction = specs
+        .processors
+        .iter()
+        .find(|node| node.spec.processor == identifier("join_streams"))
+        .expect("junction spec must exist");
+    assert_eq!(
+        junction.spec.input_relays,
+        vec![identifier("left_stream"), identifier("right_stream")]
+    );
+    let BranchedProcessorOperationSpec::Junction { output_routes, .. } = &junction.spec.operation
+    else {
+        panic!("expected junction processor");
+    };
+    let output = output_routes
+        .routes
+        .first()
+        .expect("junction should have output route");
+    assert_eq!(output.relay, identifier("joined_stream"));
+    assert!(
+        specs
+            .processors
+            .iter()
+            .any(|node| node.spec.processor == identifier("dedup_joined"))
+    );
 }
 
 #[test]
@@ -5816,7 +5954,6 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
 
                     filter_where: None,
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5839,7 +5976,6 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
                     filter_where: Some(expression("input.active")),
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5856,35 +5992,41 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(vec![identifier("tenant")]),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    let spec = &specs[0];
-    assert_eq!(spec.roots.len(), 1);
-    assert_eq!(spec.roots[0].processor, identifier("orders_filter"));
+    assert_eq!(specs.entrypoints.len(), 1);
+    let orders_filter = specs
+        .processors
+        .iter()
+        .find(|node| node.spec.processor == identifier("orders_filter"))
+        .expect("orders filter spec must exist");
     assert_eq!(
-        spec.roots[0].from_where.get(&identifier("orders")),
+        orders_filter.spec.from_where.get(&identifier("orders")),
         Some(&expression("input.active"))
     );
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
-        &spec.roots[0].operation
+        &orders_filter.spec.operation
     else {
         panic!("expected processor output routes");
     };
-    assert_eq!(spec.roots[0].filter_where, Some(expression("input.active")));
+    assert_eq!(
+        orders_filter.spec.filter_where,
+        Some(expression("input.active"))
+    );
     assert_eq!(output_routes.routes.len(), 1);
     assert_eq!(
         output_routes.routes[0].relay,
         identifier("projected_orders")
     );
-    assert_eq!(output_routes.routes[0].children.len(), 1);
-    assert_eq!(
-        output_routes.routes[0].children[0].processor,
-        identifier("dedup_projected")
+    assert!(
+        specs
+            .processors
+            .iter()
+            .any(|node| node.spec.processor == identifier("dedup_projected")
+                && node.spec.input_relays == vec![identifier("projected_orders")])
     );
 }
 
@@ -5910,7 +6052,6 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
 
                     filter_where: None,
                 }),
-                Some(Vec::new()),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5927,21 +6068,29 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(Vec::new()),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].identifier, identifier("orders_ingestor"));
-    assert_eq!(specs[0].root_relay, identifier("orders"));
-    assert_eq!(specs[0].roots.len(), 1);
-    assert_eq!(specs[0].roots[0].processor, identifier("dedup_orders"));
+    assert_eq!(specs.entrypoints.len(), 1);
+    assert_eq!(
+        specs.entrypoints[0].identifier,
+        identifier("orders_ingestor")
+    );
+    assert_eq!(specs.entrypoints[0].root_relay, identifier("orders"));
+    assert_eq!(specs.entrypoints[0].branch_ttl, None);
+    assert_eq!(specs.processors.len(), 1);
+    assert_eq!(
+        specs.processors[0].spec.processor,
+        identifier("dedup_orders")
+    );
+    assert_eq!(specs.processors[0].branch_ttl, None);
+    assert_eq!(specs.processors[0].branch_max_instances, None);
 }
 
 #[test]
-fn branched_ingestor_specs_use_explicit_unbranched_relay_as_root() {
+fn branched_processor_specs_do_not_require_an_entrypoint() {
     let specs = super::branched_ingestor_specs_from_models(
         [
             (
@@ -5954,7 +6103,6 @@ fn branched_ingestor_specs_use_explicit_unbranched_relay_as_root() {
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
-                Some(Vec::new()),
             ),
             (
                 ModelKind::Deduplicator,
@@ -5971,18 +6119,22 @@ fn branched_ingestor_specs_use_explicit_unbranched_relay_as_root() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(Vec::new()),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].kind, ModelKind::Relay);
-    assert_eq!(specs[0].identifier, identifier("orders"));
-    assert_eq!(specs[0].root_relay, identifier("orders"));
-    assert_eq!(specs[0].roots.len(), 1);
-    assert_eq!(specs[0].roots[0].processor, identifier("dedup_orders"));
+    assert!(specs.entrypoints.is_empty());
+    assert_eq!(specs.processors.len(), 1);
+    assert_eq!(
+        specs.processors[0].spec.processor,
+        identifier("dedup_orders")
+    );
+    assert_eq!(
+        specs.processors[0].spec.input_relays,
+        vec![identifier("orders")]
+    );
+    assert_eq!(specs.processors[0].branch_ttl, None);
 }
 
 #[test]
@@ -5999,7 +6151,6 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                     branching: RelayBranching::unbranched(),
                     materialized_state: None,
                 }),
-                Some(Vec::new()),
             ),
             (
                 ModelKind::WasmProcessor,
@@ -6017,20 +6168,18 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                Some(Vec::new()),
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].roots.len(), 1);
+    assert_eq!(specs.processors.len(), 1);
     assert_eq!(
-        specs[0].roots[0].error_policies.general,
+        specs.processors[0].spec.error_policies.general,
         GeneralErrorPolicy::Ignore
     );
     assert_eq!(
-        specs[0].roots[0].error_policies.message,
+        specs.processors[0].spec.error_policies.message,
         MessageErrorPolicy::Log
     );
 }
@@ -6053,15 +6202,20 @@ fn branched_ingestor_specs_include_reingestor_with_declared_branching() {
                     filter_where: None,
                     materialized_state: Vec::new(),
                 }),
-                None,
             ),
         ]
         .into_iter(),
     );
 
-    assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].identifier, identifier("tenant_partition"));
-    assert_eq!(specs[0].root_relay, identifier("tenant_notifications"));
+    assert_eq!(specs.entrypoints.len(), 1);
+    assert_eq!(
+        specs.entrypoints[0].identifier,
+        identifier("tenant_partition")
+    );
+    assert_eq!(
+        specs.entrypoints[0].root_relay,
+        identifier("tenant_notifications")
+    );
 }
 
 #[tokio::test]
@@ -6100,7 +6254,6 @@ async fn branched_root_without_children_acks_success() {
         .collect(),
         materializers: HashMap::default(),
         processors: HashMap::default(),
-        processors_by_input: HashMap::default(),
     };
     let graph = StdArc::new(ArcSwapOption::from(None));
     let (acks, completion) = AckSet::root();
@@ -6168,7 +6321,6 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         .collect(),
         materialized_streams: HashSet::default(),
         processors: HashMap::default(),
-        processors_by_input: HashMap::default(),
     };
     let input = super::RelayRecordBatch::from_messages(
         schema.clone(),
@@ -6279,7 +6431,6 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         .collect(),
         materialized_streams: HashSet::default(),
         processors: HashMap::default(),
-        processors_by_input: HashMap::default(),
     };
     let graph = StdArc::new(ArcSwapOption::from(None));
     let mut instances =
@@ -6392,7 +6543,6 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             .collect(),
             materialized_streams: HashSet::default(),
             processors: HashMap::default(),
-            processors_by_input: HashMap::default(),
         },
         Duration::from_secs(30),
     );
@@ -6566,7 +6716,6 @@ fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_st
         .collect(),
         materializers: [(relay, materialized_state.clone())].into_iter().collect(),
         processors: HashMap::default(),
-        processors_by_input: HashMap::default(),
         error_policies: ErrorPolicies::handled_by_log(),
     };
 
@@ -6609,7 +6758,6 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
             .collect(),
             materialized_streams: HashSet::default(),
             processors: HashMap::default(),
-            processors_by_input: HashMap::default(),
         },
         Duration::from_secs(30),
     );
@@ -6690,7 +6838,6 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
         .collect(),
         materialized_streams: HashSet::default(),
         processors: HashMap::default(),
-        processors_by_input: HashMap::default(),
     };
     let inputs = (0..8)
         .map(|index| {

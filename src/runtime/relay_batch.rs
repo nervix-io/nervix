@@ -276,6 +276,21 @@ impl RelayRecordBatch {
         }
     }
 
+    pub(super) fn attached_for_receivers(&self, receivers: usize) -> Self {
+        Self {
+            key: self.key.clone(),
+            keys: self.keys.clone(),
+            batch: self.batch.clone(),
+            records: self.records.clone(),
+            metadata: self.metadata.clone(),
+            acks: self
+                .acks
+                .iter()
+                .map(|acks| acks.attached_for_receivers(receivers))
+                .collect::<Vec<_>>(),
+        }
+    }
+
     pub(super) fn into_attached_fanout(self, output_count: usize) -> Vec<Self> {
         if output_count == 0 {
             self.ack_success();

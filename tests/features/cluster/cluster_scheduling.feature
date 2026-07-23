@@ -270,6 +270,141 @@ Feature: Cluster scheduling
       messages_total received relay=incoming_logs physical_node={{deduplicator_owner}} total=1
       """
 
+  Scenario: Deduplicator executes on its scheduled owner separate from its upstream ingestor
+    Given a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-1" eventually reports interconnect to "node-3" as "connected"
+    And node "node-2" eventually reports interconnect to "node-3" as "connected"
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        id I64,
+        level STRING
+      );
+
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        id integer,
+        level string
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+
+      CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
+
+      CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
+
+      CREATE RELAY incoming_logs SCHEMA notification BRANCHED BY by_source_logs;
+
+      CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
+
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '127.0.0.1:9092'
+        };
+
+      CREATE INGESTOR source_logs
+        FROM KAFKA kafka_main TOPIC scheduled_dedup_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_scheduled_dedup_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        DECODE USING notification_codec
+        TO incoming_logs
+        INHERIT ALL
+        BRANCHED BY by_source_logs
+        SET id = message.id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      DRAIN NODE node-1;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-1;
+      CORDON NODE node-2;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE DEDUPLICATOR remote_deduplicator FROM incoming_logs
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
+        BRANCHED BY by_source_logs
+        TO routed_logs
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      """
+    And the last command output contains
+      """
+      - domain={{domain}} kind=deduplicator name=remote_deduplicator owner=node-1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      START;
+      """
+    And these NSPL commands are executed on node "node-3"
+      """
+      CREATE SUBSCRIPTION routed_logs_subscription TO routed_logs;
+      """
+    And Kafka message is published to topic "scheduled_dedup_{{test_id}}"
+      """
+      {"id":42,"level":"error"}
+      """
+    Then the relay subscription receives a payload
+      """
+      "id":42
+      """
+    When Kafka message is published to topic "scheduled_dedup_{{test_id}}"
+      """
+      {"id":7,"level":"info"}
+      """
+    Then the relay subscription receives a payload
+      """
+      "id":7
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE DEDUPLICATOR remote_deduplicator;
+      """
+    Then the last command output contains
+      """
+      owner: node-1
+      """
+    And the last command output contains
+      """
+      messages_total received relay=incoming_logs physical_node=node-1 total=2
+      """
+    And the last command output does not contain
+      """
+      physical_node=node-2
+      """
+
   Scenario: All nodes report describe relay for a branched HTTP relay
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -526,4 +661,149 @@ Feature: Cluster scheduling
     Then the observed broker receives a payload
       """
       "user_id":42
+      """
+
+  Scenario: Deduplicator schedule movement resumes processing on the new owner
+    Given a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-1" eventually reports interconnect to "node-3" as "connected"
+    And node "node-2" eventually reports interconnect to "node-3" as "connected"
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        id I64,
+        level STRING
+      );
+
+      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        id integer,
+        level string
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+
+      CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
+
+      CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
+
+      CREATE RELAY incoming_logs SCHEMA notification BRANCHED BY by_source_logs;
+
+      CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
+
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '127.0.0.1:9092'
+        };
+
+      CREATE INGESTOR source_logs
+        FROM KAFKA kafka_main TOPIC moved_dedup_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_moved_dedup_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        DECODE USING notification_codec
+        TO incoming_logs
+        INHERIT ALL
+        BRANCHED BY by_source_logs
+        SET id = message.id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      DRAIN NODE node-1;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-1;
+      CORDON NODE node-2;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE DEDUPLICATOR remote_deduplicator FROM incoming_logs
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
+        BRANCHED BY by_source_logs
+        TO routed_logs
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=deduplicator name=remote_deduplicator owner=node-1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      START;
+      """
+    And these NSPL commands are executed on node "node-3"
+      """
+      CREATE SUBSCRIPTION routed_logs_subscription TO routed_logs;
+      """
+    And Kafka message is published to topic "moved_dedup_{{test_id}}"
+      """
+      {"id":42,"level":"error"}
+      """
+    Then the relay subscription receives a payload
+      """
+      "id":42
+      """
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-3;
+      DRAIN NODE node-1;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=source_logs owner=node-2
+      """
+    And the last command output contains
+      """
+      - domain={{domain}} kind=deduplicator name=remote_deduplicator owner=node-3
+      """
+    When these NSPL commands are executed on node "node-3"
+      """
+      CREATE SUBSCRIPTION routed_logs_after_move TO routed_logs;
+      """
+    And Kafka message is published to topic "moved_dedup_{{test_id}}"
+      """
+      {"id":99,"level":"info"}
+      """
+    Then the relay subscription receives a payload
+      """
+      "id":99
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE DEDUPLICATOR remote_deduplicator;
+      """
+    Then the last command output contains
+      """
+      owner: node-3
+      """
+    And the last command output contains
+      """
+      messages_total received relay=incoming_logs physical_node=node-3 total=1
       """

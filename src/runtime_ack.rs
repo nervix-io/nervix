@@ -93,6 +93,15 @@ impl AckHandle {
         self.clone()
     }
 
+    pub fn clone_attached_for_receivers(&self, receivers: usize) -> Self {
+        debug_assert!(
+            receivers > 0,
+            "attached clone requires at least one receiver"
+        );
+        self.0.pending.fetch_add(receivers, Ordering::AcqRel);
+        self.clone()
+    }
+
     pub fn ack_alive(&self) {
         if self.0.completed.load(Ordering::Acquire) {
             return;
@@ -150,6 +159,18 @@ impl AckSet {
     pub fn attached(&self) -> Self {
         Self {
             handles: self.handles.iter().map(AckHandle::clone_attached).collect(),
+        }
+    }
+
+    /// One shared attached clone delivered to `receivers` consumers, each of
+    /// which resolves its own share exactly once.
+    pub fn attached_for_receivers(&self, receivers: usize) -> Self {
+        Self {
+            handles: self
+                .handles
+                .iter()
+                .map(|handle| handle.clone_attached_for_receivers(receivers))
+                .collect(),
         }
     }
 

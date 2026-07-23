@@ -20,12 +20,19 @@ struct ReingestorDispatchContext<'a> {
     branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
 }
 
-fn branch_relays_from_branched_specs(specs: &[BranchedIngestorSpec]) -> HashSet<Identifier> {
-    specs
-        .iter()
-        .filter(|spec| spec.branch_ttl.is_some())
-        .flat_map(BranchedIngestorSpec::relay_ids)
-        .collect()
+fn branch_relays_from_branched_specs(specs: &BranchedNodeSpecs) -> HashSet<Identifier> {
+    let mut relays = HashSet::default();
+    for spec in &specs.entrypoints {
+        if spec.branch_ttl.is_some() {
+            relays.insert(spec.root_relay.clone());
+        }
+    }
+    for node_spec in &specs.processors {
+        if node_spec.branch_ttl.is_some() {
+            relays.extend(node_spec.spec.relay_ids());
+        }
+    }
+    relays
 }
 
 fn relay_branching_schema_for_runtime(
@@ -350,7 +357,6 @@ impl Runtime {
             replicated_window_processor_states: Arc::new(DashMap::default()),
             replicated_wasm_processor_states: Arc::new(DashMap::default()),
             replicated_branch_aggregated_states: Arc::new(DashMap::default()),
-            correlator_states: Arc::new(DashMap::default()),
             wasm_runtime: Arc::new(
                 WasmRuntime::new(WasmRuntimeConfig::default())
                     .expect("wasm runtime should initialize"),
@@ -1287,18 +1293,6 @@ impl Runtime {
         self.replicated_deduplicator_states
             .insert(placement, state.clone());
         Ok(state)
-    }
-
-    pub(in crate::runtime) fn correlator_state(
-        &self,
-        placement: RuntimeStatePlacement,
-    ) -> SharedCorrelatorBranchState {
-        if let Some(existing) = self.correlator_states.get(&placement) {
-            return existing.clone();
-        }
-        let state = Arc::new(ParkingMutex::new(CorrelatorBranchState::default()));
-        self.correlator_states.insert(placement, state.clone());
-        state
     }
 
     pub(in crate::runtime) fn replicated_kafka_offset_state(
@@ -3978,9 +3972,9 @@ impl Runtime {
             .collect::<HashMap<_, _>>();
         let all_branched_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
-        let handled_processors = branched_processor_ids(&all_branched_specs);
         let branched_specs = all_branched_specs
-            .into_iter()
+            .entrypoints
+            .iter()
             .filter(|spec| {
                 schedule
                     .nodes
@@ -3988,6 +3982,7 @@ impl Runtime {
                     .find(|node| node.kind == spec.kind && node.identifier == spec.identifier)
                     .is_some_and(|node| node.executes_on(local_node_id))
             })
+            .cloned()
             .collect::<Vec<_>>();
 
         for node in &schedule.nodes {
@@ -4174,30 +4169,6 @@ impl Runtime {
 
         for node in &schedule.nodes {
             match node.config.as_ref() {
-                Model::Deduplicator(deduplicator) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "deduplicator '{}' is not attached to a branch root",
-                            deduplicator.name.as_str()
-                        ),
-                    });
-                }
-                Model::Inferencer(processor) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "inferencer '{}' is not attached to a branch root",
-                            processor.name.as_str()
-                        ),
-                    });
-                }
                 Model::Materializer(_) => {}
                 Model::Generator(generator) if node.executes_on(local_node_id) => {
                     let Some(source_schema) =
@@ -4262,30 +4233,6 @@ impl Runtime {
                         })?;
                     lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
                 }
-                Model::Junction(junction) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "junction '{}' is not attached to a branch root",
-                            junction.name.as_str()
-                        ),
-                    });
-                }
-                Model::Reorderer(reorderer) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "reorderer '{}' is not attached to a branch root",
-                            reorderer.name.as_str()
-                        ),
-                    });
-                }
                 Model::Emitter(emitter) => {
                     let Some(relay) = relay_builders.get_mut(&emitter.from_relay) else {
                         return Err(RuntimeError::BuildDomainExecution {
@@ -4307,18 +4254,6 @@ impl Runtime {
                             emitter.mode,
                         );
                     }
-                }
-                Model::WindowProcessor(processor) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "window processor '{}' is not attached to a branch root",
-                            processor.name.as_str()
-                        ),
-                    });
                 }
                 Model::Reingestor(reingestor) => {
                     for from_relay in reingestor.from.relays() {
@@ -4422,6 +4357,46 @@ impl Runtime {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        let mut processor_input_specs = Vec::new();
+        for node_spec in &all_branched_specs.processors {
+            let Some(node) = schedule.nodes.iter().find(|node| {
+                node.kind == node_spec.spec.kind && node.identifier == node_spec.spec.processor
+            }) else {
+                continue;
+            };
+            let executes_locally = node.executes_on(local_node_id);
+            let mut inputs = Vec::new();
+            for input_relay in &node_spec.spec.input_relays {
+                let Some(relay) = relay_builders.get_mut(input_relay) else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing {} '{}' input relay '{}'",
+                            node_spec.spec.kind.as_str(),
+                            node_spec.spec.processor.as_str(),
+                            input_relay.as_str()
+                        ),
+                    });
+                };
+                if executes_locally {
+                    inputs.push((
+                        input_relay.clone(),
+                        relay.runtime_consumer_fan_in_for_mode(node_spec.spec.mode),
+                    ));
+                } else if let Some(assigned_node) = node.execution_node() {
+                    push_remote_runtime_consumer(
+                        &mut relay.remote_runtime_consumers,
+                        assigned_node,
+                        input_relay,
+                        node_spec.spec.mode,
+                    );
+                }
+            }
+            if executes_locally {
+                processor_input_specs.push((node_spec.clone(), inputs));
             }
         }
 
@@ -4544,8 +4519,33 @@ impl Runtime {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let mut template = materialize_branch_instance_template(
+            let template = materialize_branch_instance_template(
                 spec,
+                &model_index,
+                &relay_registries,
+                &relay_services,
+            )
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason,
+            })?;
+            let Some(runtime) = self.start_branched_entrypoint_runtime(
+                domain,
+                &spec.identifier,
+                Some((domain_graph.clone(), template)),
+            ) else {
+                continue;
+            };
+            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
+            branched_entrypoints
+                .entry(spec.identifier.clone())
+                .or_insert_with(Vec::new)
+                .push(runtime);
+        }
+
+        for (node_spec, inputs) in processor_input_specs {
+            let mut template = materialize_processor_instance_template(
+                &node_spec,
                 &model_index,
                 &relay_schemas,
                 &relay_registries,
@@ -4562,18 +4562,15 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason,
                 })?;
-            let Some(runtime) = self.start_branched_entrypoint_runtime(
-                domain,
-                &spec.identifier,
-                Some((domain_graph.clone(), template)),
-            ) else {
-                continue;
-            };
-            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            branched_entrypoints
-                .entry(spec.identifier.clone())
-                .or_insert_with(Vec::new)
-                .push(runtime);
+            tasks.push(spawn_processor_node_runtime(
+                self.clone(),
+                domain.clone(),
+                &shutdown_tx,
+                domain_graph.clone(),
+                template,
+                inputs,
+                self.branch_instance_expiration_scan_interval,
+            ));
         }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
@@ -5800,7 +5797,6 @@ impl Runtime {
             .into_iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let handled_processors = branched_processor_ids(&branched_specs);
 
         for node in graph.nodes() {
             match node.config.as_ref() {
@@ -5985,30 +5981,6 @@ impl Runtime {
 
         for node in graph.nodes() {
             match node.config.as_ref() {
-                Model::Deduplicator(deduplicator) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "deduplicator '{}' is not attached to a branch root",
-                            deduplicator.name.as_str()
-                        ),
-                    });
-                }
-                Model::Inferencer(processor) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "inferencer '{}' is not attached to a branch root",
-                            processor.name.as_str()
-                        ),
-                    });
-                }
                 Model::Lookup(lookup) => {
                     let Some(codec) = codecs.get(&lookup.decode_using_codec).cloned() else {
                         return Err(RuntimeError::BuildDomainExecution {
@@ -6072,30 +6044,6 @@ impl Runtime {
                     }
                     generator_specs.push((generator.clone(), source_branching, routes));
                 }
-                Model::Junction(junction) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "junction '{}' is not attached to a branch root",
-                            junction.name.as_str()
-                        ),
-                    });
-                }
-                Model::Reorderer(reorderer) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "reorderer '{}' is not attached to a branch root",
-                            reorderer.name.as_str()
-                        ),
-                    });
-                }
                 Model::Emitter(emitter) => {
                     let Some(relay) = relay_builders.get_mut(&emitter.from_relay) else {
                         return Err(RuntimeError::BuildDomainExecution {
@@ -6108,18 +6056,6 @@ impl Runtime {
                     };
                     let receiver = relay.runtime_consumer_fan_in_for_mode(emitter.mode);
                     emitter_specs.push((emitter.clone(), receiver));
-                }
-                Model::WindowProcessor(processor) => {
-                    if handled_processors.contains(&node.identifier) {
-                        continue;
-                    }
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "window processor '{}' is not attached to a branch root",
-                            processor.name.as_str()
-                        ),
-                    });
                 }
                 Model::Reingestor(reingestor) => {
                     for from_relay in reingestor.from.relays() {
@@ -6138,6 +6074,29 @@ impl Runtime {
                 }
                 _ => {}
             }
+        }
+
+        let mut processor_input_specs = Vec::new();
+        for node_spec in &branched_specs.processors {
+            let mut inputs = Vec::new();
+            for input_relay in &node_spec.spec.input_relays {
+                let Some(relay) = relay_builders.get_mut(input_relay) else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing {} '{}' input relay '{}'",
+                            node_spec.spec.kind.as_str(),
+                            node_spec.spec.processor.as_str(),
+                            input_relay.as_str()
+                        ),
+                    });
+                };
+                inputs.push((
+                    input_relay.clone(),
+                    relay.runtime_consumer_fan_in_for_mode(node_spec.spec.mode),
+                ));
+            }
+            processor_input_specs.push((node_spec.clone(), inputs));
         }
 
         let relay_registries = relay_builders
@@ -6162,12 +6121,37 @@ impl Runtime {
 
         let mut branched_entrypoints = HashMap::new();
         let mut branched_entrypoint_senders = HashMap::new();
-        for spec in &branched_specs {
+        for spec in &branched_specs.entrypoints {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let mut template = materialize_branch_instance_template(
+            let template = materialize_branch_instance_template(
                 spec,
+                &model_index,
+                &relay_registries,
+                &relay_services,
+            )
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason,
+            })?;
+            let Some(runtime) = self.start_branched_entrypoint_runtime(
+                domain,
+                &spec.identifier,
+                Some((domain_graph.clone(), template)),
+            ) else {
+                continue;
+            };
+            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
+            branched_entrypoints
+                .entry(spec.identifier.clone())
+                .or_insert_with(Vec::new)
+                .push(runtime);
+        }
+
+        for (node_spec, inputs) in processor_input_specs {
+            let mut template = materialize_processor_instance_template(
+                &node_spec,
                 &model_index,
                 &relay_schemas,
                 &relay_registries,
@@ -6184,18 +6168,15 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason,
                 })?;
-            let Some(runtime) = self.start_branched_entrypoint_runtime(
-                domain,
-                &spec.identifier,
-                Some((domain_graph.clone(), template)),
-            ) else {
-                continue;
-            };
-            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            branched_entrypoints
-                .entry(spec.identifier.clone())
-                .or_insert_with(Vec::new)
-                .push(runtime);
+            tasks.push(spawn_processor_node_runtime(
+                self.clone(),
+                domain.clone(),
+                &shutdown_tx,
+                domain_graph.clone(),
+                template,
+                inputs,
+                self.branch_instance_expiration_scan_interval,
+            ));
         }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
@@ -6303,7 +6284,7 @@ impl Runtime {
                 relay_branching_schemas,
                 materialized_stream_specs,
                 materialized_stream_owner_nodes,
-                branched_ingestors: Self::branched_specs_by_identifier(&branched_specs),
+                branched_ingestors: Self::branched_specs_by_identifier(&branched_specs.entrypoints),
                 branched_entrypoints,
                 codecs,
                 signaling_protocols,
@@ -8182,15 +8163,6 @@ impl Runtime {
         for placement in placements {
             self.replicated_branch_aggregated_states.remove(&placement);
         }
-        let placements = self
-            .correlator_states
-            .iter()
-            .map(|entry| entry.key().clone())
-            .filter(|placement| &placement.domain == domain)
-            .collect::<Vec<_>>();
-        for placement in placements {
-            self.correlator_states.remove(&placement);
-        }
     }
 
     async fn abort_domain_execution_start(&self, domain: &Domain) {
@@ -8243,7 +8215,6 @@ impl Runtime {
         self.replicated_materialized_stream_states.clear();
         self.replicated_window_processor_states.clear();
         self.replicated_branch_aggregated_states.clear();
-        self.correlator_states.clear();
     }
 
     pub(in crate::runtime) async fn await_ack_completion(
@@ -8764,10 +8735,9 @@ impl Runtime {
         let mut branched_templates = HashMap::default();
         if let Some(specs) = execution.branched_ingestors.get(&ingestor.name) {
             for spec in specs {
-                let mut template = materialize_branch_instance_template(
+                let template = materialize_branch_instance_template(
                     spec,
                     &model_index,
-                    &execution.relay_schemas,
                     &execution.relay_registries,
                     &execution.relay_services,
                 )
@@ -8775,13 +8745,6 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason,
                 })?;
-                template
-                    .prepare_wasm_processors(self)
-                    .await
-                    .map_err(|reason| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason,
-                    })?;
                 branched_templates
                     .insert(spec.root_relay.clone(), (execution.graph.clone(), template));
             }

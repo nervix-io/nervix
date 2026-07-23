@@ -85,7 +85,7 @@ use nervix_wasm::{
     WasmRuntimeConfig,
 };
 use ordered_float::OrderedFloat;
-use parking_lot::{Mutex as ParkingMutex, RwLock};
+use parking_lot::RwLock;
 use registry::{ActiveGraph, RuntimeChange, RuntimeChanges};
 use sorted_vec::SortedSet;
 use tempfile::TempDir;
@@ -164,20 +164,21 @@ use materialized_state::{
 use planning::resolve_concrete_branch;
 use planning::{
     branched_ingestor_specs_from_active_graph, branched_ingestor_specs_from_models,
-    branched_ingestor_specs_from_scheduled_nodes, branched_processor_ids, format_branched_by,
-    materialize_branch_instance_template, resolve_concrete_branch_from_assignments,
+    branched_ingestor_specs_from_scheduled_nodes, format_branched_by,
+    materialize_branch_instance_template, materialize_processor_instance_template,
+    resolve_concrete_branch_from_assignments,
 };
 use processors::{
-    BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec,
-    BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
-    BranchedProcessorSpec, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
-    CompiledReordererProgram, CompiledWindowAggregateExpr, CompiledWindowAggregateProgram,
-    CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
-    InferencerOutputBuffer, JunctionFlushContext, PlannedGeneralError, PlannedMessageError,
-    RelayProcessorNode, RelayProcessorOperationNode, RelayProcessorOperationTemplate,
-    RelayProcessorOutputNode, RelayProcessorOutputTemplate, RelayProcessorOutputsNode,
-    RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate, RelayProcessorTemplate,
-    ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage, SharedCorrelatorBranchState,
+    BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
+    BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
+    BranchedProcessorOutputsSpec, BranchedProcessorSpec, CompiledCorrelatorOutputProgram,
+    CompiledCorrelatorWhereProgram, CompiledReordererProgram, CompiledWindowAggregateExpr,
+    CompiledWindowAggregateProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
+    InferencerFlushContext, InferencerOutputBuffer, JunctionFlushContext, PlannedGeneralError,
+    PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
+    RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
+    RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
+    RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage,
     WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
     WindowFlushContext,
 };
@@ -1118,7 +1119,7 @@ impl RelayConsumerFanout {
             return Err(batch.clone());
         }
         if attached_receiver_count > 0 {
-            let attached = batch.attached();
+            let attached = batch.attached_for_receivers(attached_receiver_count);
             if let Err(error) = self
                 .runtime_consumer_broadcast_for_mode(AckMode::Attached)
                 .broadcast(attached)
@@ -1404,7 +1405,6 @@ struct BranchRuntime {
     relays: HashMap<Identifier, ConcreteRelayRuntime>,
     materializers: HashMap<Identifier, Arc<ReplicatedMaterializedRelayState>>,
     processors: HashMap<Identifier, RelayProcessorNode>,
-    processors_by_input: HashMap<Identifier, Vec<Identifier>>,
 }
 
 fn output_error_policies(
@@ -1928,8 +1928,6 @@ pub struct Runtime {
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedWasmProcessorState>, RandomState>>,
     replicated_branch_aggregated_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>>,
-    correlator_states:
-        Arc<DashMap<RuntimeStatePlacement, SharedCorrelatorBranchState, RandomState>>,
     wasm_runtime: Arc<WasmRuntime>,
     branch_instance_expiration_scan_interval: Duration,
     state_store: Option<Arc<RuntimeStateStore>>,
@@ -4051,7 +4049,6 @@ impl RelayProcessorNode {
                     ..
                 } => {
                     let timed_out = {
-                        let mut state = state.lock();
                         let mut timed_out = Vec::new();
 
                         let mut left_remaining = Vec::new();
@@ -4286,15 +4283,12 @@ impl RelayProcessorNode {
                 .min(),
             RelayProcessorOperationNode::Correlator {
                 max_time, state, ..
-            } => {
-                let state = state.lock();
-                state
-                    .pending_left
-                    .iter()
-                    .chain(state.pending_right.iter())
-                    .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
-                    .min()
-            }
+            } => state
+                .pending_left
+                .iter()
+                .chain(state.pending_right.iter())
+                .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
+                .min(),
             RelayProcessorOperationNode::Inferencer { .. } => None,
             RelayProcessorOperationNode::WasmProcessor { instance, .. } => {
                 wasm_instance_next_deadline(instance.as_deref())
@@ -4359,7 +4353,6 @@ impl RelayProcessorTemplate {
             kind: self.kind,
             processor: self.processor.clone(),
             input_relays: self.input_relays.clone(),
-            mode: self.mode,
             error_policies: self.error_policies.clone(),
             from_where: self.from_where.clone(),
             compiled_from_where: HashMap::default(),
@@ -4467,13 +4460,7 @@ impl RelayProcessorTemplate {
                         timeout_policy: timeout_policy.clone(),
                         compiled_where_program: None,
                         compiled_output_programs,
-                        state: runtime.correlator_state(RuntimeStatePlacement {
-                            domain: domain.clone(),
-                            state: RuntimeStateKind::Correlator,
-                            kind: self.kind,
-                            identifier: self.processor.clone(),
-                            branch_key: key.clone(),
-                        }),
+                        state: CorrelatorBranchState::default(),
                     }
                 }
                 RelayProcessorOperationTemplate::Junction { output_routes } => {
@@ -4631,7 +4618,6 @@ impl BranchInstanceTemplate {
             relays,
             materializers,
             processors,
-            processors_by_input: self.processors_by_input.clone(),
             error_policies: self.error_policies.clone(),
         }))
     }
@@ -4709,6 +4695,30 @@ impl BranchRuntime {
                 );
             }
         }
+    }
+
+    fn processor_has_pending_materialized(&self, processor_id: &Identifier) -> bool {
+        self.processors
+            .get(processor_id)
+            .is_some_and(|processor| !processor.pending_materialized.is_empty())
+    }
+
+    async fn retry_processor_pending_materialized(
+        &mut self,
+        graph: &SharedActiveGraph,
+        processor_id: &Identifier,
+    ) {
+        let Some(mut processor) = self.processors.remove(processor_id) else {
+            return;
+        };
+        let pending_count = processor.pending_materialized.len();
+        for _ in 0..pending_count {
+            let Some((incoming_relay, batch)) = processor.pending_materialized.pop_front() else {
+                break;
+            };
+            processor.execute(graph, self, &incoming_relay, batch).await;
+        }
+        self.processors.insert(processor_id.clone(), processor);
     }
 
     async fn retry_materialized_waiters(
@@ -4835,86 +4845,86 @@ impl BranchRuntime {
                 },
             );
 
-            let processor_ids = self
-                .processors_by_input
-                .get(relay)
-                .cloned()
-                .unwrap_or_default();
-            for processor_id in processor_ids {
-                let Some(mut processor) = self.processors.remove(&processor_id) else {
-                    continue;
-                };
-                self.runtime
-                    .metrics
-                    .observe_global_node_received(NodeBatchObservation {
-                        domain: &self.domain,
-                        kind: processor.kind,
-                        node: &processor.processor,
-                        relay,
-                        physical_node_id: self.runtime.local_node_id.read().as_deref(),
-                        messages: batch.message_count(),
-                        bytes: batch.estimated_bytes(),
-                        domain_timestamp: batch.domain_timestamp(),
-                    });
-                self.runtime.metrics.observe_branch_node_received(
-                    branch_key_display(&self.key),
-                    NodeBatchObservation {
-                        domain: &self.domain,
-                        kind: processor.kind,
-                        node: &processor.processor,
-                        relay,
-                        physical_node_id: self.runtime.local_node_id.read().as_deref(),
-                        messages: batch.message_count(),
-                        bytes: batch.estimated_bytes(),
-                        domain_timestamp: batch.domain_timestamp(),
-                    },
-                );
-                self.runtime.mark_branch_aggregated_metrics_updated(
-                    &self.domain,
-                    processor.kind,
-                    &processor.processor,
-                );
-                let delivery_latencies = batch.delivery_latency_seconds(current_timestamp());
-                for seconds in delivery_latencies {
-                    self.runtime
-                        .metrics
-                        .observe_global_delivery_latency_at_domain_time(NodeLatencyObservation {
-                            domain: &self.domain,
-                            kind: processor.kind,
-                            node: &processor.processor,
-                            relay,
-                            physical_node_id: self.runtime.local_node_id.read().as_deref(),
-                            seconds,
-                            domain_timestamp: batch.domain_timestamp(),
-                        });
-                    self.runtime.metrics.observe_branch_delivery_latency(
-                        branch_key_display(&self.key),
-                        NodeLatencyObservation {
-                            domain: &self.domain,
-                            kind: processor.kind,
-                            node: &processor.processor,
-                            relay,
-                            physical_node_id: self.runtime.local_node_id.read().as_deref(),
-                            seconds,
-                            domain_timestamp: batch.domain_timestamp(),
-                        },
-                    );
-                    self.runtime.mark_branch_aggregated_metrics_updated(
-                        &self.domain,
-                        processor.kind,
-                        &processor.processor,
-                    );
-                }
-                let child_message = match processor.mode {
-                    AckMode::Attached => batch.attached(),
-                    AckMode::Detached => batch.detached(),
-                };
-                processor.execute(graph, self, relay, child_message).await;
-                self.processors.insert(processor_id, processor);
-            }
-
             Ok(())
         })
+    }
+
+    async fn execute_processor_input(
+        &mut self,
+        graph: &SharedActiveGraph,
+        processor_id: &Identifier,
+        incoming_relay: &Identifier,
+        batch: RelayRecordBatch,
+    ) {
+        let Some(mut processor) = self.processors.remove(processor_id) else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("processor is not instantiated for this branch");
+            }
+            return;
+        };
+        self.runtime
+            .metrics
+            .observe_global_node_received(NodeBatchObservation {
+                domain: &self.domain,
+                kind: processor.kind,
+                node: &processor.processor,
+                relay: incoming_relay,
+                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                messages: batch.message_count(),
+                bytes: batch.estimated_bytes(),
+                domain_timestamp: batch.domain_timestamp(),
+            });
+        self.runtime.metrics.observe_branch_node_received(
+            branch_key_display(&self.key),
+            NodeBatchObservation {
+                domain: &self.domain,
+                kind: processor.kind,
+                node: &processor.processor,
+                relay: incoming_relay,
+                physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                messages: batch.message_count(),
+                bytes: batch.estimated_bytes(),
+                domain_timestamp: batch.domain_timestamp(),
+            },
+        );
+        self.runtime.mark_branch_aggregated_metrics_updated(
+            &self.domain,
+            processor.kind,
+            &processor.processor,
+        );
+        let delivery_latencies = batch.delivery_latency_seconds(current_timestamp());
+        for seconds in delivery_latencies {
+            self.runtime
+                .metrics
+                .observe_global_delivery_latency_at_domain_time(NodeLatencyObservation {
+                    domain: &self.domain,
+                    kind: processor.kind,
+                    node: &processor.processor,
+                    relay: incoming_relay,
+                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    seconds,
+                    domain_timestamp: batch.domain_timestamp(),
+                });
+            self.runtime.metrics.observe_branch_delivery_latency(
+                branch_key_display(&self.key),
+                NodeLatencyObservation {
+                    domain: &self.domain,
+                    kind: processor.kind,
+                    node: &processor.processor,
+                    relay: incoming_relay,
+                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    seconds,
+                    domain_timestamp: batch.domain_timestamp(),
+                },
+            );
+            self.runtime.mark_branch_aggregated_metrics_updated(
+                &self.domain,
+                processor.kind,
+                &processor.processor,
+            );
+        }
+        processor.execute(graph, self, incoming_relay, batch).await;
+        self.processors.insert(processor_id.clone(), processor);
     }
 
     async fn dispatch_output(
@@ -5634,11 +5644,11 @@ fn restore_branch_instance_lru_snapshot(
     Ok(snapshot.lsm)
 }
 
-fn persist_branch_instance_lru_snapshot(
+fn persist_branch_instance_lru_snapshot<V>(
     runtime: &Runtime,
     domain: &Domain,
     template: &BranchInstanceTemplate,
-    instances: &BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+    instances: &BranchInstanceRegistry<Option<BranchKey>, V>,
     last_persisted_lsm: &mut u64,
 ) -> Result<(), String> {
     let Some(store) = &runtime.state_store else {
@@ -5705,6 +5715,541 @@ fn wall_duration_until_domain_deadline(
         .as_ref()
         .and_then(|clock| wall_duration_until_logical_target(clock, now, deadline).ok())
         .unwrap_or(Duration::from_millis(100))
+}
+
+const PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+const PROCESSOR_BRANCH_TASK_IDLE_SLEEP: Duration = Duration::from_secs(86_400);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessorBranchStopMode {
+    Evict,
+    Detach,
+}
+
+struct ProcessorBranchTask {
+    input: mpsc::Sender<(Identifier, RelayRecordBatch)>,
+    stop: watch::Sender<Option<ProcessorBranchStopMode>>,
+    task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+}
+
+pub(in crate::runtime) fn spawn_processor_node_runtime(
+    runtime_handle: Runtime,
+    domain: Domain,
+    shutdown_tx: &watch::Sender<bool>,
+    graph: SharedActiveGraph,
+    template: BranchInstanceTemplate,
+    inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
+    expiration_scan_interval: Duration,
+) -> JoinHandle<()> {
+    let shutdown_rx = shutdown_tx.subscribe();
+    tokio::spawn(run_processor_node_runtime(
+        runtime_handle,
+        domain,
+        graph,
+        template,
+        inputs,
+        shutdown_rx,
+        expiration_scan_interval,
+    ))
+}
+
+async fn run_processor_node_runtime(
+    runtime_handle: Runtime,
+    domain: Domain,
+    graph: SharedActiveGraph,
+    template: BranchInstanceTemplate,
+    inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    expiration_scan_interval: Duration,
+) {
+    let processor = template.source.clone();
+    let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
+    let mut last_persisted_lru_lsm = match restore_processor_branch_lru_snapshot(
+        &runtime_handle,
+        &domain,
+        &graph,
+        &template,
+        &mut instances,
+    ) {
+        Ok(lsm) => lsm,
+        Err(error) => {
+            warn!(
+                domain = domain.as_str(),
+                processor = processor.as_str(),
+                error = %error,
+                "failed to restore processor branch lru snapshot"
+            );
+            0
+        }
+    };
+    if let Some(max_instances) = template.branch_max_instances {
+        evict_processor_branch_instances_to_capacity(
+            &domain,
+            &processor,
+            max_instances,
+            &mut instances,
+        )
+        .await;
+    }
+    let mut merged = futures_util::stream::select_all(inputs.into_iter().map(
+        |(relay, fan_in)| -> std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = (Identifier, RelayRecordBatch)> + Send>,
+        > {
+            Box::pin(futures_util::stream::unfold(
+                (relay, fan_in),
+                |(relay, mut fan_in)| async move {
+                    fan_in
+                        .recv()
+                        .await
+                        .map(|batch| ((relay.clone(), batch), (relay, fan_in)))
+                },
+            ))
+        },
+    ));
+    let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
+    let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
+
+    loop {
+        tokio::task::consume_budget().await;
+        let now = runtime_handle
+            .current_stream_expiration_time(&domain)
+            .ok()
+            .flatten()
+            .unwrap_or_else(current_timestamp);
+        let mut did_scheduled_work = false;
+        if Instant::now() >= next_expiration_scan {
+            if let Some(branch_ttl) = template.branch_ttl {
+                expire_processor_branch_instances(
+                    &domain,
+                    &processor,
+                    now,
+                    branch_ttl,
+                    &mut instances,
+                )
+                .await;
+            }
+            next_expiration_scan = Instant::now() + expiration_scan_interval;
+            did_scheduled_work = true;
+        }
+        if Instant::now() >= next_lru_snapshot {
+            if let Err(error) = persist_branch_instance_lru_snapshot(
+                &runtime_handle,
+                &domain,
+                &template,
+                &instances,
+                &mut last_persisted_lru_lsm,
+            ) {
+                warn!(
+                    domain = domain.as_str(),
+                    processor = processor.as_str(),
+                    error = %error,
+                    "failed to persist processor branch lru snapshot"
+                );
+            }
+            next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
+            did_scheduled_work = true;
+        }
+        if did_scheduled_work {
+            continue;
+        }
+
+        let sleep_duration = next_expiration_scan
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO)
+            .min(
+                next_lru_snapshot
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or(Duration::ZERO),
+            );
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            received = futures_util::StreamExt::next(&mut merged) => {
+                let Some((relay, batch)) = received else {
+                    break;
+                };
+                dispatch_processor_node_input(
+                    ProcessorNodeDispatchContext {
+                        runtime_handle: &runtime_handle,
+                        domain: &domain,
+                        graph: &graph,
+                        template: &template,
+                        now,
+                    },
+                    &mut instances,
+                    relay,
+                    batch,
+                )
+                .await;
+            }
+            _ = sleep(sleep_duration) => {}
+        }
+    }
+
+    if let Err(error) = persist_branch_instance_lru_snapshot(
+        &runtime_handle,
+        &domain,
+        &template,
+        &instances,
+        &mut last_persisted_lru_lsm,
+    ) {
+        warn!(
+            domain = domain.as_str(),
+            processor = processor.as_str(),
+            error = %error,
+            "failed to persist final processor branch lru snapshot"
+        );
+    }
+    shutdown_all_processor_branch_instances(&domain, &processor, &mut instances).await;
+}
+
+struct ProcessorNodeDispatchContext<'a> {
+    runtime_handle: &'a Runtime,
+    domain: &'a Domain,
+    graph: &'a SharedActiveGraph,
+    template: &'a BranchInstanceTemplate,
+    now: Timestamp,
+}
+
+async fn dispatch_processor_node_input(
+    context: ProcessorNodeDispatchContext<'_>,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    relay: Identifier,
+    batch: RelayRecordBatch,
+) {
+    let ProcessorNodeDispatchContext {
+        runtime_handle,
+        domain,
+        graph,
+        template,
+        now,
+    } = context;
+    let key = batch.key.clone();
+    let instance = match instances.get_or_try_create_with(key.clone(), now, |key| {
+        spawn_processor_branch_task(
+            runtime_handle.clone(),
+            domain.clone(),
+            graph.clone(),
+            template,
+            key.clone(),
+        )
+    }) {
+        Ok(instance) => instance,
+        Err(error) => {
+            runtime_handle.handle_internal_processor_error_for_acks(
+                domain,
+                template.source_kind.as_str(),
+                &template.source,
+                &template.error_policies,
+                batch.acks.iter(),
+                format!(
+                    "failed to instantiate processor branch '{}': {}",
+                    branch_key_display(&key),
+                    error
+                ),
+            );
+            return;
+        }
+    };
+    if instance.created {
+        debug!(
+            domain = domain.as_str(),
+            processor = template.source.as_str(),
+            key = branch_key_display(&key),
+            "created processor branch task"
+        );
+        if let Some(max_instances) = template.branch_max_instances {
+            evict_processor_branch_instances_to_capacity(
+                domain,
+                &template.source,
+                max_instances,
+                instances,
+            )
+            .await;
+        }
+    }
+    if let Err(mpsc::error::SendError((_, batch))) = instance.state.input.send((relay, batch)).await
+    {
+        runtime_handle.handle_internal_processor_error_for_acks(
+            domain,
+            template.source_kind.as_str(),
+            &template.source,
+            &template.error_policies,
+            batch.acks.iter(),
+            format!(
+                "processor branch task '{}' is unavailable",
+                branch_key_display(&key)
+            ),
+        );
+        if let Some(entry) = instances.remove(&key) {
+            stop_processor_branch_task(
+                domain,
+                &template.source,
+                &key,
+                entry,
+                ProcessorBranchStopMode::Detach,
+            )
+            .await;
+        }
+    }
+}
+
+fn spawn_processor_branch_task(
+    runtime_handle: Runtime,
+    domain: Domain,
+    graph: SharedActiveGraph,
+    template: &BranchInstanceTemplate,
+    key: Option<BranchKey>,
+) -> Result<ProcessorBranchTask, String> {
+    let branch = template
+        .instantiate(&runtime_handle, &domain, key)?
+        .into_inner();
+    let (input_tx, input_rx) = mpsc::channel(1);
+    let (stop_tx, stop_rx) = watch::channel(None);
+    let processor = template.source.clone();
+    let task = tokio::spawn(run_processor_branch_task(
+        runtime_handle,
+        domain,
+        graph,
+        processor,
+        branch,
+        input_rx,
+        stop_rx,
+    ));
+    Ok(ProcessorBranchTask {
+        input: input_tx,
+        stop: stop_tx,
+        task: parking_lot::Mutex::new(Some(task)),
+    })
+}
+
+async fn run_processor_branch_task(
+    runtime_handle: Runtime,
+    domain: Domain,
+    graph: SharedActiveGraph,
+    processor: Identifier,
+    mut branch: BranchRuntime,
+    mut input: mpsc::Receiver<(Identifier, RelayRecordBatch)>,
+    mut stop_rx: watch::Receiver<Option<ProcessorBranchStopMode>>,
+) {
+    let mut stop_mode;
+    loop {
+        tokio::task::consume_budget().await;
+        let now = runtime_handle
+            .current_stream_expiration_time(&domain)
+            .ok()
+            .flatten()
+            .unwrap_or_else(current_timestamp);
+        if branch
+            .next_deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            branch.tick(&graph, now).await;
+            continue;
+        }
+        let sleep_duration = branch
+            .next_deadline()
+            .map(|deadline| {
+                wall_duration_until_domain_deadline(&runtime_handle, &domain, now, deadline)
+            })
+            .unwrap_or(PROCESSOR_BRANCH_TASK_IDLE_SLEEP);
+        let has_pending_materialized = branch.processor_has_pending_materialized(&processor);
+        tokio::select! {
+            biased;
+            changed = stop_rx.changed() => {
+                if changed.is_err() {
+                    stop_mode = Some(ProcessorBranchStopMode::Detach);
+                } else {
+                    stop_mode = *stop_rx.borrow();
+                }
+                if stop_mode.is_some() {
+                    break;
+                }
+            }
+            received = input.recv() => {
+                match received {
+                    Some((relay, batch)) => {
+                        branch
+                            .execute_processor_input(&graph, &processor, &relay, batch)
+                            .await;
+                    }
+                    None => {
+                        stop_mode = Some(ProcessorBranchStopMode::Detach);
+                        break;
+                    }
+                }
+            }
+            _ = runtime_handle.materialized_state_changed.notified(), if has_pending_materialized => {
+                branch
+                    .retry_processor_pending_materialized(&graph, &processor)
+                    .await;
+            }
+            _ = sleep(sleep_duration) => {}
+        }
+    }
+    while let Ok((relay, batch)) = input.try_recv() {
+        branch
+            .execute_processor_input(&graph, &processor, &relay, batch)
+            .await;
+    }
+    match stop_mode {
+        Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
+        _ => branch.detach(),
+    }
+}
+
+async fn stop_processor_branch_task(
+    domain: &Domain,
+    processor: &Identifier,
+    key: &Option<BranchKey>,
+    entry: Arc<ProcessorBranchTask>,
+    mode: ProcessorBranchStopMode,
+) {
+    let _ = entry.stop.send(Some(mode));
+    let Some(mut task) = entry.task.lock().take() else {
+        return;
+    };
+    match tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            warn!(
+                domain = domain.as_str(),
+                processor = processor.as_str(),
+                key = branch_key_display(key),
+                error = %error,
+                "processor branch task join failed"
+            );
+        }
+        Err(_) => {
+            warn!(
+                domain = domain.as_str(),
+                processor = processor.as_str(),
+                key = branch_key_display(key),
+                grace_period = %humantime::format_duration(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
+                "processor branch task exceeded shutdown grace period; aborting"
+            );
+            task.abort();
+            if let Err(error) = task.await
+                && !error.is_cancelled()
+            {
+                warn!(
+                    domain = domain.as_str(),
+                    processor = processor.as_str(),
+                    key = branch_key_display(key),
+                    error = %error,
+                    "aborted processor branch task join failed"
+                );
+            }
+        }
+    }
+}
+
+async fn expire_processor_branch_instances(
+    domain: &Domain,
+    processor: &Identifier,
+    now: Timestamp,
+    expiration_after: Duration,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+) {
+    for (key, entry) in instances.expire(now, expiration_after) {
+        stop_processor_branch_task(
+            domain,
+            processor,
+            &key,
+            entry,
+            ProcessorBranchStopMode::Evict,
+        )
+        .await;
+        debug!(
+            domain = domain.as_str(),
+            processor = processor.as_str(),
+            key = branch_key_display(&key),
+            "expired processor branch task"
+        );
+    }
+}
+
+async fn evict_processor_branch_instances_to_capacity(
+    domain: &Domain,
+    processor: &Identifier,
+    max_instances: usize,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+) {
+    for (key, entry) in instances.evict_lru_to_capacity(max_instances) {
+        stop_processor_branch_task(
+            domain,
+            processor,
+            &key,
+            entry,
+            ProcessorBranchStopMode::Evict,
+        )
+        .await;
+        debug!(
+            domain = domain.as_str(),
+            processor = processor.as_str(),
+            key = branch_key_display(&key),
+            max_instances,
+            "evicted processor branch task by lru"
+        );
+    }
+}
+
+async fn shutdown_all_processor_branch_instances(
+    domain: &Domain,
+    processor: &Identifier,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+) {
+    for (key, entry) in instances.drain() {
+        stop_processor_branch_task(
+            domain,
+            processor,
+            &key,
+            entry,
+            ProcessorBranchStopMode::Detach,
+        )
+        .await;
+        debug!(
+            domain = domain.as_str(),
+            processor = processor.as_str(),
+            key = branch_key_display(&key),
+            "stopped processor branch task"
+        );
+    }
+}
+
+fn restore_processor_branch_lru_snapshot(
+    runtime: &Runtime,
+    domain: &Domain,
+    graph: &SharedActiveGraph,
+    template: &BranchInstanceTemplate,
+    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+) -> Result<u64, String> {
+    let Some(store) = &runtime.state_store else {
+        return Ok(0);
+    };
+    let placement = branch_lru_placement(domain, template);
+    let Some(snapshot) = store
+        .latest_snapshot(&placement)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(0);
+    };
+    for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
+        let entry = spawn_processor_branch_task(
+            runtime.clone(),
+            domain.clone(),
+            graph.clone(),
+            template,
+            key.clone(),
+        )?;
+        instances.insert_restored(key, last_ingestion, entry);
+    }
+    instances.set_version(snapshot.lsm);
+    Ok(snapshot.lsm)
 }
 
 #[derive(Debug, Clone)]
@@ -7688,10 +8233,9 @@ enum CorrelatorSide {
 }
 
 fn take_correlator_opposite_pending(
-    state: &SharedCorrelatorBranchState,
+    state: &mut CorrelatorBranchState,
     incoming_side: CorrelatorSide,
 ) -> Vec<CorrelatorPendingMessage> {
-    let mut state = state.lock();
     match incoming_side {
         CorrelatorSide::Left => std::mem::take(&mut state.pending_right),
         CorrelatorSide::Right => std::mem::take(&mut state.pending_left),
@@ -7699,11 +8243,10 @@ fn take_correlator_opposite_pending(
 }
 
 fn restore_correlator_opposite_pending(
-    state: &SharedCorrelatorBranchState,
+    state: &mut CorrelatorBranchState,
     incoming_side: CorrelatorSide,
     mut pending: Vec<CorrelatorPendingMessage>,
 ) {
-    let mut state = state.lock();
     match incoming_side {
         CorrelatorSide::Left => {
             pending.extend(std::mem::take(&mut state.pending_right));
@@ -7717,12 +8260,11 @@ fn restore_correlator_opposite_pending(
 }
 
 fn store_correlator_unmatched_incoming(
-    state: &SharedCorrelatorBranchState,
+    state: &mut CorrelatorBranchState,
     incoming_side: CorrelatorSide,
     incoming: CorrelatorPendingMessage,
     mut opposite_pending: Vec<CorrelatorPendingMessage>,
 ) {
-    let mut state = state.lock();
     match incoming_side {
         CorrelatorSide::Left => {
             opposite_pending.extend(std::mem::take(&mut state.pending_right));
@@ -7742,7 +8284,7 @@ async fn correlate_incoming_message(
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     match_policy: CorrelatorMatchPolicy,
-    state: &SharedCorrelatorBranchState,
+    state: &mut CorrelatorBranchState,
     incoming: CorrelatorPendingMessage,
     execution_now: Timestamp,
 ) -> Result<Option<(CorrelatorPendingMessage, CorrelatorPendingMessage)>, (String, Vec<AckSet>)> {
@@ -15346,37 +15888,43 @@ pub(crate) fn scheduled_branched_stream_owner_nodes(
     schedule: &DomainSchedule,
     relay: &Identifier,
 ) -> Vec<String> {
-    let specs = branched_ingestor_specs_from_models(schedule.nodes.iter().map(|node| {
-        (
-            node.kind,
-            node.identifier.clone(),
-            (*node.config).clone(),
-            node.effective_branching.clone(),
-        )
-    }));
-    let mut owners = BTreeSet::new();
-    for spec in specs {
-        if !spec.contains_stream(relay) {
-            continue;
-        }
-        let Some(ingestor_node) = schedule
+    let specs = branched_ingestor_specs_from_models(
+        schedule
             .nodes
             .iter()
-            .find(|node| node.kind == spec.kind && node.identifier == spec.identifier)
+            .map(|node| (node.kind, node.identifier.clone(), (*node.config).clone())),
+    );
+    let mut producers = Vec::new();
+    for spec in &specs.entrypoints {
+        if &spec.root_relay == relay {
+            producers.push((spec.kind, spec.identifier.clone()));
+        }
+    }
+    for node_spec in &specs.processors {
+        if node_spec.spec.output_relays().contains(relay) {
+            producers.push((node_spec.spec.kind, node_spec.spec.processor.clone()));
+        }
+    }
+    let mut owners = BTreeSet::new();
+    for (kind, identifier) in producers {
+        let Some(producer_node) = schedule
+            .nodes
+            .iter()
+            .find(|node| node.kind == kind && node.identifier == identifier)
         else {
             continue;
         };
-        match ingestor_node.config.as_ref() {
+        match producer_node.config.as_ref() {
             Model::Ingestor(CreateIngestor {
                 source: IngestSource::Endpoint { .. },
                 ..
             }) => {
-                for owner in &ingestor_node.assigned_nodes {
+                for owner in &producer_node.assigned_nodes {
                     owners.insert(owner.clone());
                 }
             }
             _ => {
-                if let Some(owner) = ingestor_node.execution_node() {
+                if let Some(owner) = producer_node.execution_node() {
                     owners.insert(owner.to_string());
                 }
             }

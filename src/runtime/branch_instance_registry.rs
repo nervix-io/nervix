@@ -133,6 +133,14 @@ where
         })
     }
 
+    pub(super) fn remove(&mut self, key: &K) -> Option<Arc<V>> {
+        let entry = self.entries.shift_remove(key);
+        if entry.is_some() {
+            self.bump_version();
+        }
+        entry.map(|entry| entry.state)
+    }
+
     pub(super) fn expire(&mut self, now: Timestamp, max_idle: Duration) -> Vec<(K, Arc<V>)> {
         let mut expired = Vec::new();
         while let Some((key, entry)) = self.entries.get_index(0) {
