@@ -13,7 +13,9 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: write
   packages: write
+  issues: write
 
 jobs:
   meta:
@@ -135,3 +137,94 @@ jobs:
             -t "${base}:${{ matrix.image }}-latest" \
             "${base}:${ts}-${{ matrix.image }}-amd64" \
             "${base}:${ts}-${{ matrix.image }}-arm64"
+
+  build-book:
+    name: build-book
+    needs: [meta, build-arch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.4.40"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli
+
+      - name: Compute docs target
+        id: docs
+        run: |
+            docs_target="pr-${{ github.event.pull_request.number }}-${{ github.sha }}"
+            docs_url="https://docs.nervix.io/${docs_target}/"
+            llms_url="https://docs.nervix.io/${docs_target}/llms.txt"
+            echo "target=${docs_target}" >> "$GITHUB_OUTPUT"
+            echo "url=${docs_url}" >> "$GITHUB_OUTPUT"
+            echo "llms_url=${llms_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Book
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+            just publish-book pr-${{ github.event.pull_request.number }}-${{ github.sha }} "$CLOUDFLARE_ZONE_ID"
+
+      - name: Publish docs link to build summary
+        run: |
+            {
+              echo "## Documentation Preview"
+              echo
+              echo "- Target: \`${{ steps.docs.outputs.target }}\`"
+              echo "- Book: ${{ steps.docs.outputs.url }}"
+              echo "- NSPL agent index: ${{ steps.docs.outputs.llms_url }}"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment docs link on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- nervix-docs-preview -->';
+            const body = `${marker}
+            Documentation preview for this PR:
+
+            - Target: \`${{ steps.docs.outputs.target }}\`
+            - Book: ${{ steps.docs.outputs.url }}
+            - NSPL agent index: ${{ steps.docs.outputs.llms_url }}`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 }
+            );
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.type === 'Bot' &&
+                comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
