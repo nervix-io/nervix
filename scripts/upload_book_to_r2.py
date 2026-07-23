@@ -4,23 +4,22 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import hmac
 import json
 import mimetypes
 import os
-import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote
+from typing import Protocol
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 
 PARALLEL_UPLOADS = 16
 MAX_UPLOAD_ATTEMPTS = 4
-RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 @dataclass(frozen=True)
@@ -38,6 +37,10 @@ class UploadEntry:
 
 class UploadError(RuntimeError):
     pass
+
+
+class S3Client(Protocol):
+    def put_object(self, **kwargs: object) -> object: ...
 
 
 def r2_credentials(token_id: str, api_token: str) -> R2Credentials:
@@ -81,141 +84,55 @@ def content_type_for(path: Path) -> str:
     return guessed
 
 
-def build_put_request(
+def create_r2_client(
     account_id: str,
-    bucket: str,
-    object_key: str,
-    payload: bytes,
-    content_type: str,
     credentials: R2Credentials,
-    now: datetime,
-) -> urllib.request.Request:
-    host = f"{account_id}.r2.cloudflarestorage.com"
-    canonical_uri = (
-        f"/{quote(bucket, safe='-_.~')}/{quote(object_key, safe='/-_.~')}"
-    )
-    request_time = now.astimezone(UTC)
-    date_stamp = request_time.strftime("%Y%m%d")
-    amz_date = request_time.strftime("%Y%m%dT%H%M%SZ")
-    payload_hash = hashlib.sha256(payload).hexdigest()
-    signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date"
-    canonical_headers = (
-        f"content-type:{content_type}\n"
-        f"host:{host}\n"
-        f"x-amz-content-sha256:{payload_hash}\n"
-        f"x-amz-date:{amz_date}\n"
-    )
-    canonical_request = "\n".join(
-        [
-            "PUT",
-            canonical_uri,
-            "",
-            canonical_headers,
-            signed_headers,
-            payload_hash,
-        ]
-    )
-    credential_scope = f"{date_stamp}/auto/s3/aws4_request"
-    string_to_sign = "\n".join(
-        [
-            "AWS4-HMAC-SHA256",
-            amz_date,
-            credential_scope,
-            hashlib.sha256(canonical_request.encode()).hexdigest(),
-        ]
-    )
-    date_key = hmac.new(
-        f"AWS4{credentials.secret_access_key}".encode(),
-        date_stamp.encode(),
-        hashlib.sha256,
-    ).digest()
-    region_key = hmac.new(date_key, b"auto", hashlib.sha256).digest()
-    service_key = hmac.new(region_key, b"s3", hashlib.sha256).digest()
-    signing_key = hmac.new(service_key, b"aws4_request", hashlib.sha256).digest()
-    signature = hmac.new(
-        signing_key, string_to_sign.encode(), hashlib.sha256
-    ).hexdigest()
-    authorization = (
-        "AWS4-HMAC-SHA256 "
-        f"Credential={credentials.access_key_id}/{credential_scope}, "
-        f"SignedHeaders={signed_headers}, Signature={signature}"
-    )
-    return urllib.request.Request(
-        f"https://{host}{canonical_uri}",
-        data=payload,
-        headers={
-            "Authorization": authorization,
-            "Content-Type": content_type,
-            "Host": host,
-            "X-Amz-Content-Sha256": payload_hash,
-            "X-Amz-Date": amz_date,
-        },
-        method="PUT",
+) -> S3Client:
+    return boto3.client(
+        service_name="s3",
+        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+        aws_access_key_id=credentials.access_key_id,
+        aws_secret_access_key=credentials.secret_access_key,
+        region_name="auto",
+        config=Config(
+            max_pool_connections=PARALLEL_UPLOADS,
+            retries={
+                "mode": "standard",
+                "total_max_attempts": MAX_UPLOAD_ATTEMPTS,
+            },
+        ),
     )
 
 
 def put_object(
-    account_id: str,
+    client: S3Client,
     bucket: str,
     object_key: str,
     payload: bytes,
     content_type: str,
-    credentials: R2Credentials,
-    *,
-    open_request: Callable[..., object] = urllib.request.urlopen,
-    wait: Callable[[float], None] = time.sleep,
 ) -> None:
-    for attempt in range(MAX_UPLOAD_ATTEMPTS):
-        request = build_put_request(
-            account_id=account_id,
-            bucket=bucket,
-            object_key=object_key,
-            payload=payload,
-            content_type=content_type,
-            credentials=credentials,
-            now=datetime.now(UTC),
+    try:
+        client.put_object(
+            Bucket=bucket,
+            Key=object_key,
+            Body=payload,
+            ContentType=content_type,
         )
-        try:
-            with open_request(request, timeout=60) as response:
-                if 200 <= response.status < 300:
-                    return
-                raise UploadError(f"{object_key}: R2 returned HTTP {response.status}")
-        except urllib.error.HTTPError as error:
-            error.close()
-            if (
-                error.code not in RETRYABLE_HTTP_STATUSES
-                or attempt + 1 == MAX_UPLOAD_ATTEMPTS
-            ):
-                raise UploadError(
-                    f"{object_key}: R2 returned HTTP {error.code} {error.reason}"
-                ) from error
-        except (urllib.error.URLError, TimeoutError) as error:
-            if attempt + 1 == MAX_UPLOAD_ATTEMPTS:
-                reason = getattr(error, "reason", error)
-                raise UploadError(
-                    f"{object_key}: R2 upload request failed: {reason}"
-                ) from error
-        wait(2**attempt)
+    except (BotoCoreError, ClientError) as error:
+        raise UploadError(f"{object_key}: R2 upload failed: {error}") from error
 
 
 def upload_entry(
-    account_id: str,
+    client: S3Client,
     bucket: str,
     entry: UploadEntry,
-    credentials: R2Credentials,
-    *,
-    open_request: Callable[..., object] = urllib.request.urlopen,
-    wait: Callable[[float], None] = time.sleep,
 ) -> None:
     put_object(
-        account_id=account_id,
+        client=client,
         bucket=bucket,
         object_key=entry.object_key,
         payload=entry.path.read_bytes(),
         content_type=entry.content_type,
-        credentials=credentials,
-        open_request=open_request,
-        wait=wait,
     )
 
 
@@ -242,20 +159,18 @@ def collect_upload_entries(root: Path, prefix: str) -> list[UploadEntry]:
 
 
 def upload_directory(
-    account_id: str,
+    client: S3Client,
     bucket: str,
     entries: list[UploadEntry],
-    credentials: R2Credentials,
 ) -> None:
     failures = []
     with ThreadPoolExecutor(max_workers=PARALLEL_UPLOADS) as executor:
         pending = {
             executor.submit(
                 upload_entry,
-                account_id,
+                client,
                 bucket,
                 entry,
-                credentials,
             ): entry.object_key
             for entry in entries
         }
@@ -335,12 +250,15 @@ def main() -> int:
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
 
+    client = create_r2_client(
+        account_id,
+        r2_credentials(token_id, api_token),
+    )
     try:
         upload_directory(
-            account_id=account_id,
+            client=client,
             bucket=args.bucket,
             entries=entries,
-            credentials=r2_credentials(token_id, api_token),
         )
     except UploadError as error:
         raise SystemExit(str(error)) from error

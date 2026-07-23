@@ -14,34 +14,31 @@ else:
 
 
 def upload_tree(
-    account_id: str,
+    client: upload_book_to_r2.S3Client,
     bucket: str,
     target: str,
     source: Path,
-    credentials: upload_book_to_r2.R2Credentials,
 ) -> None:
     entries = upload_book_to_r2.collect_upload_entries(source, target)
     print(
         f"Uploading {len(entries)} files to R2 with "
         f"{upload_book_to_r2.PARALLEL_UPLOADS} parallel requests"
     )
-    upload_book_to_r2.upload_directory(account_id, bucket, entries, credentials)
+    upload_book_to_r2.upload_directory(client, bucket, entries)
 
 
 def update_alias(
-    account_id: str,
+    client: upload_book_to_r2.S3Client,
     bucket: str,
     alias: str,
     target: str,
-    credentials: upload_book_to_r2.R2Credentials,
 ) -> None:
     upload_book_to_r2.put_object(
-        account_id=account_id,
+        client=client,
         bucket=bucket,
         object_key=f"meta/{alias}.txt",
         payload=f"{target.rstrip('/')}\n".encode(),
         content_type="text/plain; charset=utf-8",
-        credentials=credentials,
     )
 
 
@@ -75,13 +72,13 @@ def main() -> int:
             upload_book_to_r2.cloudflare_token_id(account_id, api_token),
             api_token,
         )
-        upload_tree(account_id, args.bucket, args.target, source, credentials)
+        client = upload_book_to_r2.create_r2_client(account_id, credentials)
+        upload_tree(client, args.bucket, args.target, source)
         update_alias(
-            account_id,
+            client,
             args.bucket,
             args.alias,
             args.target,
-            credentials,
         )
     except RuntimeError as error:
         raise SystemExit(str(error)) from error

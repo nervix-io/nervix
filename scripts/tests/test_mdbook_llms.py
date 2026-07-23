@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from urllib.error import HTTPError
+from unittest.mock import Mock, patch
 
 from scripts.mdbook_llms import render_llms
 from scripts.upload_book_to_r2 import (
+    MAX_UPLOAD_ATTEMPTS,
+    PARALLEL_UPLOADS,
     R2Credentials,
     UploadEntry,
-    build_put_request,
     content_type_for,
+    create_r2_client,
     r2_credentials,
     upload_entry,
 )
@@ -118,43 +119,34 @@ class RenderLlmsTests(unittest.TestCase):
             "[NSPL Overview](markdown/nspl-overview.md)", render_llms(context)
         )
 
-    def test_book_upload_builds_a_signed_s3_put_request(self) -> None:
-        request = build_put_request(
-            account_id="account-id",
-            bucket="nervix-docs",
-            object_key="pr-42-deadbeef/markdown/NSPL overview.md",
-            payload=b"hello",
-            content_type="text/markdown; charset=utf-8",
-            credentials=R2Credentials(
-                access_key_id="token-id",
-                secret_access_key="secret-key",
-            ),
-            now=datetime(2026, 7, 23, 20, 30, tzinfo=UTC),
+    def test_book_upload_configures_boto3_for_r2(self) -> None:
+        credentials = R2Credentials(
+            access_key_id="token-id",
+            secret_access_key="secret-key",
         )
+        with patch("scripts.upload_book_to_r2.boto3.client") as client_factory:
+            client = create_r2_client("account-id", credentials)
 
+        self.assertIs(client, client_factory.return_value)
+        client_factory.assert_called_once()
+        options = client_factory.call_args.kwargs
+        self.assertEqual(options["service_name"], "s3")
         self.assertEqual(
-            request.full_url,
-            "https://account-id.r2.cloudflarestorage.com/nervix-docs/"
-            "pr-42-deadbeef/markdown/NSPL%20overview.md",
+            options["endpoint_url"],
+            "https://account-id.r2.cloudflarestorage.com",
         )
-        self.assertEqual(request.method, "PUT")
+        self.assertEqual(options["aws_access_key_id"], "token-id")
+        self.assertEqual(options["aws_secret_access_key"], "secret-key")
+        self.assertEqual(options["region_name"], "auto")
+        config = options["config"]
+        self.assertEqual(config.max_pool_connections, PARALLEL_UPLOADS)
         self.assertEqual(
-            request.get_header("Content-type"), "text/markdown; charset=utf-8"
+            config.retries,
+            {
+                "mode": "standard",
+                "total_max_attempts": MAX_UPLOAD_ATTEMPTS,
+            },
         )
-        self.assertEqual(
-            request.get_header("X-amz-content-sha256"),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-        )
-        authorization = request.get_header("Authorization")
-        self.assertIsNotNone(authorization)
-        self.assertIn(
-            "Credential=token-id/20260723/auto/s3/aws4_request", authorization
-        )
-        self.assertIn(
-            "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date",
-            authorization,
-        )
-        self.assertIsNone(request.get_header("X-amz-acl"))
 
     def test_s3_credentials_are_derived_from_cloudflare_token(self) -> None:
         credentials = r2_credentials(
@@ -174,43 +166,27 @@ class RenderLlmsTests(unittest.TestCase):
             "text/markdown; charset=utf-8",
         )
 
-    def test_direct_upload_retries_transient_s3_errors(self) -> None:
-        attempts = []
-        delays = []
-
-        class SuccessfulResponse:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-        def open_request(request, *, timeout):
-            attempts.append((request, timeout))
-            if len(attempts) == 1:
-                raise HTTPError(request.full_url, 503, "Unavailable", None, None)
-            return SuccessfulResponse()
-
+    def test_upload_uses_boto3_put_object_with_content_type(self) -> None:
+        client = Mock()
         with TemporaryDirectory() as directory:
             path = Path(directory) / "index.html"
             path.write_text("hello", encoding="utf-8")
             upload_entry(
-                account_id="account-id",
+                client=client,
                 bucket="nervix-docs",
                 entry=UploadEntry(
                     path=path,
                     object_key="preview/index.html",
                     content_type="text/html; charset=utf-8",
                 ),
-                credentials=R2Credentials("token-id", "secret-key"),
-                open_request=open_request,
-                wait=delays.append,
             )
 
-        self.assertEqual(len(attempts), 2)
-        self.assertEqual(delays, [1])
+        client.put_object.assert_called_once_with(
+            Bucket="nervix-docs",
+            Key="preview/index.html",
+            Body=b"hello",
+            ContentType="text/html; charset=utf-8",
+        )
 
 
 if __name__ == "__main__":
