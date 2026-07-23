@@ -6,9 +6,10 @@ license: FCL-1.0-ALv2
 
 # Configure Nervix with NSPL
 
-Turn a user's streaming requirements into an explicit, deployable Nervix graph. Use the public
-[Nervix documentation](https://docs.nervix.io/) as the authority; never reconstruct clause order
-or connector options from memory.
+Turn a user's streaming requirements into an explicit, deployable Nervix graph. Open the public
+[Nervix NSPL documentation index](https://docs.nervix.io/llms.txt), then read the linked Markdown
+needed for the request. Treat that versioned documentation as the authority; never reconstruct
+clause order or connector options from memory.
 
 ## Gather the configuration contract
 
@@ -26,8 +27,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, and session
   subscriptions.
 
-Read [references/configuring-nervix.md](references/configuring-nervix.md), then read every public
-document it routes to for the requested source, processor, sink, or operational feature.
+Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
+guidance to select the relevant Markdown entries from the public index.
 
 ## Assemble the graph
 

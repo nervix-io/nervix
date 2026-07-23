@@ -7,7 +7,13 @@ export default {
     const redirectTarget = await resolveAliasRedirect(pathname, env);
     if (redirectTarget !== null) {
       url.pathname = `/${redirectTarget}`;
-      return Response.redirect(url.toString(), 307);
+      return new Response(null, {
+        status: 307,
+        headers: {
+          "cache-control": "public, max-age=300",
+          location: url.toString(),
+        },
+      });
     }
 
     let key = normalizeStorageKey(pathname);
@@ -55,12 +61,20 @@ async function resolveAliasRedirect(pathname, env) {
     return "snapshot/";
   }
 
+  if (pathname === "llms.txt") {
+    return resolveAliasTarget("latest", "llms.txt", env);
+  }
+
   const segments = pathname.split("/");
   const alias = segments[0];
   if (!ALIAS_PREFIXES.has(alias)) {
     return null;
   }
 
+  return resolveAliasTarget(alias, segments.slice(1).join("/"), env);
+}
+
+async function resolveAliasTarget(alias, rest, env) {
   const aliasObject = await env.DOCS_BUCKET.get(`meta/${alias}.txt`);
   if (aliasObject === null) {
     return null;
@@ -73,7 +87,6 @@ async function resolveAliasRedirect(pathname, env) {
     return null;
   }
 
-  const rest = segments.slice(1).join("/");
   if (rest === "") {
     return `${targetPrefix}/`;
   }
