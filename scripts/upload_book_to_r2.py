@@ -3,67 +3,83 @@
 from __future__ import annotations
 
 import argparse
-import mimetypes
+import hashlib
+import json
 import os
+import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 
+PARALLEL_TRANSFERS = 16
 
-def content_type_for(path: Path) -> str:
-    # Rely on explicit overrides instead of host defaults so browsers get
-    # correct asset types from R2.
-    explicit_types = {
-        ".css": "text/css",
-        ".js": "application/javascript",
-        ".json": "application/json",
-        ".svg": "image/svg+xml",
-        ".woff": "font/woff",
-        ".woff2": "font/woff2",
-        ".eot": "application/vnd.ms-fontobject",
-        ".ttf": "font/ttf",
-        ".otf": "font/otf",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".ico": "image/x-icon",
-        ".md": "text/markdown; charset=utf-8",
-        ".txt": "text/plain; charset=utf-8",
-        ".html": "text/html; charset=utf-8",
-        ".xml": "application/xml",
+def upload_command(bucket: str, prefix: str, root: Path) -> list[str]:
+    target = f"r2:{bucket}/{prefix.strip('/')}"
+    return [
+        "rclone",
+        "copy",
+        str(root),
+        target,
+        "--transfers",
+        str(PARALLEL_TRANSFERS),
+        "--checkers",
+        str(PARALLEL_TRANSFERS),
+        "--no-check-dest",
+        "--s3-no-check-bucket",
+        "--stats",
+        "10s",
+        "--stats-one-line",
+    ]
+
+
+def r2_environment(account_id: str, token_id: str, api_token: str) -> dict[str, str]:
+    # Cloudflare defines an R2 S3 access key as the API token ID and its secret
+    # as the SHA-256 digest of the token value.
+    secret_access_key = hashlib.sha256(api_token.encode()).hexdigest()
+    return {
+        "RCLONE_CONFIG_R2_TYPE": "s3",
+        "RCLONE_CONFIG_R2_PROVIDER": "Cloudflare",
+        "RCLONE_CONFIG_R2_ACCESS_KEY_ID": token_id,
+        "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY": secret_access_key,
+        "RCLONE_CONFIG_R2_ENDPOINT": (
+            f"https://{account_id}.r2.cloudflarestorage.com"
+        ),
+        "RCLONE_CONFIG_R2_ACL": "private",
+        "RCLONE_CONFIG_R2_NO_CHECK_BUCKET": "true",
     }
-    if path.suffix in explicit_types:
-        return explicit_types[path.suffix]
-    guessed, _ = mimetypes.guess_type(str(path))
-    if guessed is None:
-        return "application/octet-stream"
-    if guessed.startswith("text/"):
-        return f"{guessed}; charset=utf-8"
-    return guessed
 
 
-def upload_file(bucket: str, prefix: str, file_path: Path, root: Path) -> None:
-    rel = file_path.relative_to(root).as_posix()
-    object_key = f"{bucket}/{prefix.rstrip('/')}/{rel}"
-    content_type = content_type_for(file_path)
-    subprocess.run(
-        [
-            "npx",
-            "--yes",
-            "wrangler",
-            "r2",
-            "object",
-            "put",
-            "--remote",
-            object_key,
-            "--file",
-            str(file_path),
-            "--content-type",
-            content_type,
-        ],
-        check=True,
-    )
+def cloudflare_token_id(account_id: str, api_token: str) -> str:
+    endpoints = [
+        f"https://api.cloudflare.com/client/v4/accounts/{account_id}/tokens/verify",
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+    ]
+    failures: list[str] = []
+    for endpoint in endpoints:
+        request = urllib.request.Request(
+            endpoint,
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.load(response)
+        except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as error:
+            failures.append(str(error))
+            continue
+
+        result = payload.get("result")
+        if (
+            payload.get("success") is True
+            and isinstance(result, dict)
+            and result.get("status") == "active"
+            and isinstance(result.get("id"), str)
+        ):
+            return result["id"]
+        failures.append("Cloudflare did not return an active token")
+
+    details = "; ".join(failures)
+    raise RuntimeError(f"failed to resolve Cloudflare API token ID: {details}")
 
 
 def main() -> int:
@@ -79,15 +95,35 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if "CLOUDFLARE_API_TOKEN" not in os.environ:
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    if api_token is None:
         raise SystemExit("CLOUDFLARE_API_TOKEN must be set for remote uploads")
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    if account_id is None:
+        raise SystemExit("CLOUDFLARE_ACCOUNT_ID must be set for remote uploads")
+    if shutil.which("rclone") is None:
+        raise SystemExit("rclone must be installed for remote uploads")
 
     root = Path(args.source)
     if not root.is_dir():
         raise SystemExit(f"book output directory does not exist: {root}")
 
-    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
-        upload_file(args.bucket, args.prefix, path, root)
+    file_count = sum(1 for candidate in root.rglob("*") if candidate.is_file())
+    print(
+        f"Uploading {file_count} files to R2 with {PARALLEL_TRANSFERS} parallel transfers"
+    )
+    try:
+        token_id = cloudflare_token_id(account_id, api_token)
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+
+    environment = os.environ.copy()
+    environment.update(r2_environment(account_id, token_id, api_token))
+    subprocess.run(
+        upload_command(args.bucket, args.prefix, root),
+        check=True,
+        env=environment,
+    )
 
     return 0
 

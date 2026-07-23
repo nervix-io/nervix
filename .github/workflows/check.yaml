@@ -276,6 +276,11 @@ jobs:
         with:
           tool: just,toml-cli
 
+      - name: Install rclone
+        run: |
+            sudo apt-get update
+            sudo apt-get install --yes rclone
+
       - name: Compute docs target
         id: docs
         run: |
