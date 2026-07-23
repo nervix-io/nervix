@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from urllib.error import HTTPError
 
 from scripts.mdbook_llms import render_llms
-from scripts.upload_book_to_r2 import r2_environment, upload_command
+from scripts.upload_book_to_r2 import (
+    R2Credentials,
+    UploadEntry,
+    build_put_request,
+    content_type_for,
+    r2_credentials,
+    upload_entry,
+)
 
 
 class RenderLlmsTests(unittest.TestCase):
@@ -108,40 +118,99 @@ class RenderLlmsTests(unittest.TestCase):
             "[NSPL Overview](markdown/nspl-overview.md)", render_llms(context)
         )
 
-    def test_book_upload_uses_one_parallel_rclone_copy(self) -> None:
-        command = upload_command(
-            "nervix-docs",
-            "/pr-42-deadbeef/",
-            Path("docs/book"),
+    def test_book_upload_builds_a_signed_s3_put_request(self) -> None:
+        request = build_put_request(
+            account_id="account-id",
+            bucket="nervix-docs",
+            object_key="pr-42-deadbeef/markdown/NSPL overview.md",
+            payload=b"hello",
+            content_type="text/markdown; charset=utf-8",
+            credentials=R2Credentials(
+                access_key_id="token-id",
+                secret_access_key="secret-key",
+            ),
+            now=datetime(2026, 7, 23, 20, 30, tzinfo=UTC),
         )
 
-        self.assertEqual(command[:2], ["rclone", "copy"])
-        self.assertEqual(command[2:4], ["docs/book", "r2:nervix-docs/pr-42-deadbeef"])
-        self.assertIn("--no-check-dest", command)
-        self.assertEqual(command[command.index("--transfers") + 1], "16")
-        self.assertNotIn("wrangler", command)
+        self.assertEqual(
+            request.full_url,
+            "https://account-id.r2.cloudflarestorage.com/nervix-docs/"
+            "pr-42-deadbeef/markdown/NSPL%20overview.md",
+        )
+        self.assertEqual(request.method, "PUT")
+        self.assertEqual(
+            request.get_header("Content-type"), "text/markdown; charset=utf-8"
+        )
+        self.assertEqual(
+            request.get_header("X-amz-content-sha256"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        )
+        authorization = request.get_header("Authorization")
+        self.assertIsNotNone(authorization)
+        self.assertIn(
+            "Credential=token-id/20260723/auto/s3/aws4_request", authorization
+        )
+        self.assertIn(
+            "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date",
+            authorization,
+        )
+        self.assertIsNone(request.get_header("X-amz-acl"))
 
-    def test_rclone_uses_s3_credentials_derived_from_cloudflare_token(self) -> None:
-        environment = r2_environment(
-            account_id="account-id",
+    def test_s3_credentials_are_derived_from_cloudflare_token(self) -> None:
+        credentials = r2_credentials(
             token_id="token-id",
             api_token="token-value",
         )
 
-        self.assertEqual(environment["RCLONE_CONFIG_R2_TYPE"], "s3")
-        self.assertEqual(environment["RCLONE_CONFIG_R2_PROVIDER"], "Cloudflare")
+        self.assertEqual(credentials.access_key_id, "token-id")
         self.assertEqual(
-            environment["RCLONE_CONFIG_R2_ENDPOINT"],
-            "https://account-id.r2.cloudflarestorage.com",
-        )
-        self.assertEqual(environment["RCLONE_CONFIG_R2_ACCESS_KEY_ID"], "token-id")
-        self.assertEqual(
-            environment["RCLONE_CONFIG_R2_SECRET_ACCESS_KEY"],
+            credentials.secret_access_key,
             "e6c02a5742ea9d4de588eb9b9de7bed43dc17011552186bed3e98b2c5958ff4a",
         )
-        self.assertEqual(environment["RCLONE_CONFIG_R2_NO_CHECK_BUCKET"], "true")
-        self.assertNotIn("RCLONE_CONFIG_R2_ACL", environment)
-        self.assertNotIn("token-value", environment.values())
+
+    def test_markdown_upload_uses_registered_media_type(self) -> None:
+        self.assertEqual(
+            content_type_for(Path("markdown/nspl-overview.md")),
+            "text/markdown; charset=utf-8",
+        )
+
+    def test_direct_upload_retries_transient_s3_errors(self) -> None:
+        attempts = []
+        delays = []
+
+        class SuccessfulResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def open_request(request, *, timeout):
+            attempts.append((request, timeout))
+            if len(attempts) == 1:
+                raise HTTPError(request.full_url, 503, "Unavailable", None, None)
+            return SuccessfulResponse()
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "index.html"
+            path.write_text("hello", encoding="utf-8")
+            upload_entry(
+                account_id="account-id",
+                bucket="nervix-docs",
+                entry=UploadEntry(
+                    path=path,
+                    object_key="preview/index.html",
+                    content_type="text/html; charset=utf-8",
+                ),
+                credentials=R2Credentials("token-id", "secret-key"),
+                open_request=open_request,
+                wait=delays.append,
+            )
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(delays, [1])
 
 
 if __name__ == "__main__":

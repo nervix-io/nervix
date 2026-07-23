@@ -4,53 +4,45 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
-import tempfile
 from pathlib import Path
 
+if __package__:
+    from . import purge_cloudflare_cache, upload_book_to_r2
+else:
+    import purge_cloudflare_cache
+    import upload_book_to_r2
 
-def run(args: list[str]) -> None:
-    subprocess.run(args, check=True)
 
-
-def upload_tree(bucket: str, target: str, source: Path) -> None:
-    run(
-        [
-            "python",
-            "scripts/upload_book_to_r2.py",
-            "--bucket",
-            bucket,
-            "--prefix",
-            target,
-            "--source",
-            str(source),
-        ]
+def upload_tree(
+    account_id: str,
+    bucket: str,
+    target: str,
+    source: Path,
+    credentials: upload_book_to_r2.R2Credentials,
+) -> None:
+    entries = upload_book_to_r2.collect_upload_entries(source, target)
+    print(
+        f"Uploading {len(entries)} files to R2 with "
+        f"{upload_book_to_r2.PARALLEL_UPLOADS} parallel requests"
     )
+    upload_book_to_r2.upload_directory(account_id, bucket, entries, credentials)
 
 
-def update_alias(bucket: str, alias: str, target: str) -> None:
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as tmp:
-        tmp.write(f"{target.rstrip('/')}\n")
-        temp_name = tmp.name
-    try:
-        run(
-            [
-                "npx",
-                "--yes",
-                "wrangler",
-                "r2",
-                "object",
-                "put",
-                "--remote",
-                f"{bucket}/meta/{alias}.txt",
-                "--file",
-                temp_name,
-                "--content-type",
-                "text/plain; charset=utf-8",
-            ]
-        )
-    finally:
-        os.unlink(temp_name)
+def update_alias(
+    account_id: str,
+    bucket: str,
+    alias: str,
+    target: str,
+    credentials: upload_book_to_r2.R2Credentials,
+) -> None:
+    upload_book_to_r2.put_object(
+        account_id=account_id,
+        bucket=bucket,
+        object_key=f"meta/{alias}.txt",
+        payload=f"{target.rstrip('/')}\n".encode(),
+        content_type="text/plain; charset=utf-8",
+        credentials=credentials,
+    )
 
 
 def main() -> int:
@@ -70,21 +62,31 @@ def main() -> int:
     api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
     if api_token is None:
         raise SystemExit("CLOUDFLARE_API_TOKEN must be set")
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    if account_id is None:
+        raise SystemExit("CLOUDFLARE_ACCOUNT_ID must be set")
 
     source = Path(args.source)
     if not source.is_dir():
         raise SystemExit(f"source directory does not exist: {source}")
 
-    upload_tree(args.bucket, args.target, source)
-    update_alias(args.bucket, args.alias, args.target)
-    run(
-        [
-            "python",
-            "scripts/purge_cloudflare_cache.py",
-            "--zone-id",
-            args.zone_id,
-        ]
-    )
+    try:
+        credentials = upload_book_to_r2.r2_credentials(
+            upload_book_to_r2.cloudflare_token_id(account_id, api_token),
+            api_token,
+        )
+        upload_tree(account_id, args.bucket, args.target, source, credentials)
+        update_alias(
+            account_id,
+            args.bucket,
+            args.alias,
+            args.target,
+            credentials,
+        )
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+
+    purge_cloudflare_cache.purge_everything(args.zone_id, api_token)
     return 0
 
 
