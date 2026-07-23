@@ -96,7 +96,11 @@ validate: fmt lint validate-skill
 
 validate-ci: fmt-check lint validate-skill
 
-book version="":
+test-docs:
+    python -m unittest discover -s scripts/tests -p "test_*.py"
+    node --test cloudflare/docs-worker/src/index.test.js
+
+book version="": test-docs
     python scripts/build_book.py --version {{ version }}
 
 validate-skill:

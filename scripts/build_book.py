@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,27 +24,8 @@ FONT_AWESOME_CSS = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/cs
 NERVIX_LOGO_SVG = "theme/nervix-mark.svg"
 
 
-def render_title(version: str | None) -> str:
-    if version is None or version == "":
-        return "The Nervix Book"
+def render_title(version: str) -> str:
     return f"The Nervix Book ({version})"
-
-
-def patch_book_toml(content: str, version: str | None) -> str:
-    title = render_title(version)
-    original_match = re.search(r'^title = "(.*)"$', content, flags=re.MULTILINE)
-    if original_match is None:
-        raise SystemExit("failed to locate title in docs/book.toml")
-    if original_match.group(1) == title:
-        return content
-    patched = re.sub(
-        r'^title = ".*"$',
-        f'title = "{title}"',
-        content,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    return patched
 
 
 def rewrite_external_assets(book_dir: Path) -> None:
@@ -82,6 +65,25 @@ def copy_theme_assets(source_theme_dir: Path, book_dir: Path) -> None:
             shutil.copy2(source_file, output_theme_dir / source_file.name)
 
 
+def verify_publication(publication_dir: Path) -> None:
+    llms_path = publication_dir / "llms.txt"
+    if not llms_path.is_file():
+        raise SystemExit("mdBook did not generate llms.txt")
+    markdown_dir = publication_dir / "markdown"
+    if not markdown_dir.is_dir():
+        raise SystemExit("mdBook did not generate Markdown output")
+
+    link_targets = re.findall(r"\]\(([^)]+)\)", llms_path.read_text(encoding="utf-8"))
+    if not link_targets:
+        raise SystemExit("llms.txt does not contain any documentation links")
+    for link_target in link_targets:
+        relative_target = Path(link_target.split("#", 1)[0])
+        if relative_target.is_absolute() or ".." in relative_target.parts:
+            raise SystemExit(f"llms.txt contains an unsafe link: {link_target}")
+        if not (publication_dir / relative_target).is_file():
+            raise SystemExit(f"llms.txt links to missing output: {link_target}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build the Nervix mdBook with an optional version label.")
     parser.add_argument("--version", required=True, help="Version label to embed into the rendered book title")
@@ -90,27 +92,31 @@ def main() -> int:
         raise SystemExit("--version must be non-empty")
 
     with tempfile.TemporaryDirectory(prefix="nervix-book-") as tmp_dir:
-        temp_docs_dir = Path(tmp_dir) / "docs"
-        shutil.copytree(DOCS_DIR, temp_docs_dir)
-
-        temp_book_toml = temp_docs_dir / "book.toml"
-        temp_book_toml.write_text(
-            patch_book_toml(temp_book_toml.read_text(), args.version),
-            encoding="utf-8",
-        )
+        rendered_dir = Path(tmp_dir) / "rendered"
+        publication_dir = Path(tmp_dir) / "publication"
+        build_env = os.environ.copy()
+        build_env["MDBOOK_BOOK__TITLE"] = json.dumps(render_title(args.version))
+        build_env["MDBOOK_OUTPUT__LLMS__VERSION"] = json.dumps(args.version)
 
         subprocess.run(
-            ["mdbook", "build", str(temp_docs_dir)],
+            ["mdbook", "build", str(DOCS_DIR), "--dest-dir", str(rendered_dir)],
             check=True,
             cwd=ROOT,
+            env=build_env,
         )
 
-        built_output_dir = temp_docs_dir / "book"
-        copy_theme_assets(temp_docs_dir / "theme", built_output_dir)
-        rewrite_external_assets(built_output_dir)
+        html_dir = rendered_dir / "html"
+        markdown_dir = rendered_dir / "markdown"
+        llms_path = rendered_dir / "llms" / "llms.txt"
+        copy_theme_assets(DOCS_DIR / "theme", html_dir)
+        rewrite_external_assets(html_dir)
+        shutil.copytree(html_dir, publication_dir)
+        shutil.copytree(markdown_dir, publication_dir / "markdown")
+        shutil.copy2(llms_path, publication_dir / "llms.txt")
+        verify_publication(publication_dir)
         if OUTPUT_DIR.exists():
             shutil.rmtree(OUTPUT_DIR)
-        shutil.copytree(built_output_dir, OUTPUT_DIR)
+        shutil.copytree(publication_dir, OUTPUT_DIR)
 
     return 0
 

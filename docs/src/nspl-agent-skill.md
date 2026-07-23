@@ -10,6 +10,12 @@ before installing it, just as you would review any third-party instructions supp
 It is distributed under the repository's
 [FCL-1.0-ALv2 license](https://github.com/nervix-io/nervix/blob/main/LICENSE.md).
 
+The skill discovers public language documentation through the versioned
+[`llms.txt`](https://docs.nervix.io/llms.txt) index. That endpoint selects the latest published
+documentation version, whose relative Markdown links remain pinned to the same immutable build.
+The index intentionally covers the public NSPL configuration surface rather than Nervix internals
+or local-development instructions.
+
 You do not need to clone the Nervix repository. The installer downloads the skill directly from
 the public GitHub repository, and the installed skill uses the public Nervix documentation.
 

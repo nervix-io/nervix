@@ -281,8 +281,10 @@ jobs:
         run: |
             docs_target="pr-${{ github.event.pull_request.number }}-${{ github.sha }}"
             docs_url="https://docs.nervix.io/${docs_target}/"
+            llms_url="https://docs.nervix.io/${docs_target}/llms.txt"
             echo "target=${docs_target}" >> "$GITHUB_OUTPUT"
             echo "url=${docs_url}" >> "$GITHUB_OUTPUT"
+            echo "llms_url=${llms_url}" >> "$GITHUB_OUTPUT"
 
       - name: Publish Book
         env:
@@ -298,7 +300,8 @@ jobs:
               echo "## Documentation Preview"
               echo
               echo "- Target: \`${{ steps.docs.outputs.target }}\`"
-              echo "- URL: ${{ steps.docs.outputs.url }}"
+              echo "- Book: ${{ steps.docs.outputs.url }}"
+              echo "- NSPL agent index: ${{ steps.docs.outputs.llms_url }}"
             } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment docs link on PR
@@ -310,7 +313,8 @@ jobs:
             Documentation preview for this PR:
 
             - Target: \`${{ steps.docs.outputs.target }}\`
-            - URL: ${{ steps.docs.outputs.url }}`;
+            - Book: ${{ steps.docs.outputs.url }}
+            - NSPL agent index: ${{ steps.docs.outputs.llms_url }}`;
 
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;

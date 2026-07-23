@@ -240,6 +240,9 @@ language or interface changes.
 - Use `just validate-skill` to validate the public NSPL skill against the Agent Skills publication
   checks. CI runs this validation but does not create GitHub releases; the public default branch is
   the install source.
+- `docs/book.toml` owns the curated public NSPL chapter allowlist rendered into the versioned
+  `llms.txt` agent index. Keep that list focused on user-facing NSPL configuration and exclude
+  architecture, repository-development, and local-operation material.
 - Use `just test` for the full suite so repository-required environment is configured.
 - Use the repository's scenario task for targeted cucumber runs. Add a focused task when a needed
   invocation is not already represented instead of bypassing the configured test environment.

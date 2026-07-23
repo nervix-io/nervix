@@ -1,8 +1,9 @@
 # Configuring Nervix with NSPL
 
-Use this reference to turn a deployment request into a complete Nervix configuration. Read the
-linked public documents for exact syntax and connector-specific options; examples here describe
-the configuration process, not a second grammar.
+Use this reference to turn a deployment request into a complete Nervix configuration. Open the
+public NSPL documentation index linked from `SKILL.md` and read its relevant Markdown entries for
+exact syntax and connector-specific options. Examples here describe the configuration process,
+not a second grammar.
 
 ## Contents
 
@@ -15,28 +16,27 @@ the configuration process, not a second grammar.
 
 ## Public documentation routes
 
-Always read the [NSPL Overview](https://docs.nervix.io/nspl-overview.html). Add the documents
-relevant to the requested graph:
+Always read `NSPL Overview`. Add the indexed topics relevant to the requested graph:
 
-| User need | Public documentation |
+| User need | Documentation index entry |
 | --- | --- |
-| Domain timing and lifecycle | [Domains And Time](https://docs.nervix.io/domains-and-time.html) |
-| Internal/wire schemas, codecs, JAQ, Protobuf, and type mapping | [Schemas And Codecs](https://docs.nervix.io/schemas-and-codecs.html) |
-| Expressions, casts, and built-in functions | [Expression Functions](https://docs.nervix.io/filter-map-functions.html) |
-| Branches, relays, capacity, TTL, and materialized state | [Streams And State](https://docs.nervix.io/relay.html) |
-| Resources, uploads, mounts, and TLS files | [Resources](https://docs.nervix.io/resources.html) |
-| Source transports, delivery modes, headers, and ingestor routes | [Ingestors](https://docs.nervix.io/ingestors.html) |
-| Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | [Runtime Nodes](https://docs.nervix.io/processors.html) |
-| Timed generation from materialized state | [NSPL Overview](https://docs.nervix.io/nspl-overview.html), [Examples](https://docs.nervix.io/examples.html) |
-| Sink transports, headers, direct values, flush/commit, and ACK behavior | [Emitters](https://docs.nervix.io/emitters.html) |
-| Hash maps and lookup expressions | [Lookups](https://docs.nervix.io/lookups.html) |
-| Session subscriptions | [Sessions](https://docs.nervix.io/sessions.html) |
-| Metrics and runtime inspection | [Metrics And Observability](https://docs.nervix.io/metrics-and-observability.html) |
-| Full graph examples | [Examples](https://docs.nervix.io/examples.html) and the [repository examples](https://github.com/nervix-io/nervix/tree/main/examples) |
-| WASM guest ABI and output timing | [WASM Processor Guests](https://docs.nervix.io/wasm-processor-guests.html) |
+| Domain timing and lifecycle | `Domains And Time` |
+| Internal/wire schemas, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` |
+| Expressions, casts, and built-in functions | `Filter-Map Functions` |
+| Branches, relays, capacity, TTL, and materialized state | `Relay` |
+| Resources, uploads, mounts, and TLS files | `Resources` |
+| Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
+| Timed generation from materialized state | `NSPL Overview` and `Examples` |
+| Sink transports, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| Hash maps and lookup expressions | `Lookups` |
+| Session subscriptions | `Sessions` |
+| Metrics and runtime inspection | `Metrics And Observability` |
+| Full graph examples | `Examples` |
+| WASM guest ABI and output timing | `WASM Processor Guests` |
 
-Use the public book navigation to find newer chapters. Prefer the narrow feature document over an
-old copied snippet.
+Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
+selected by the documentation index when following related material.
 
 ## Configuration decisions
 

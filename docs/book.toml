@@ -18,5 +18,29 @@ favicon-svg = "theme/nervix-mark.svg"
 git-repository-url = "https://github.com/nervix-io/nervix"
 preferred-dark-theme = "navy"
 
+[output.markdown]
+
+[output.llms]
+command = "../scripts/mdbook_llms.py"
+description = "Public NSPL configuration reference for Nervix."
+include = [
+  "nspl-overview.md",
+  "domains-and-time.md",
+  "schemas-and-codecs.md",
+  "resources.md",
+  "relay.md",
+  "ingestors.md",
+  "processors.md",
+  "wasm-processor-guests.md",
+  "emitters.md",
+  "filter-map-functions.md",
+  "lookups.md",
+  "sessions.md",
+  "metrics-and-observability.md",
+  "client-library.md",
+  "examples.md",
+]
+title = "Nervix NSPL Documentation"
+
 # [output.pandoc]
 # profile.pdf = {}
