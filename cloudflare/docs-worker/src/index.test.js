@@ -29,9 +29,9 @@ class FakeBucket {
   }
 }
 
-test("root llms.txt redirects to the immutable latest version", async () => {
+test("root llms.txt redirects through the published snapshot alias", async () => {
   const bucket = new FakeBucket(
-    new Map([["meta/latest.txt", new FakeObject("v1.2.3\n")]]),
+    new Map([["meta/snapshot.txt", new FakeObject("v1.2.3\n")]]),
   );
 
   const response = await worker.fetch(

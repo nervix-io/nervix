@@ -62,7 +62,7 @@ async function resolveAliasRedirect(pathname, env) {
   }
 
   if (pathname === "llms.txt") {
-    return resolveAliasTarget("latest", "llms.txt", env);
+    return resolveAliasTarget("snapshot", "llms.txt", env);
   }
 
   const segments = pathname.split("/");
