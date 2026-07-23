@@ -1,7 +1,6 @@
 use nervix_models::{
-    Assignment, CorrelationTimeoutAction, CreateBranch, OutputBranch, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
-    ProcessorOutputs as ModelProcessorOutputs,
+    Assignment, CreateBranch, OutputBranch, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs,
 };
 
 use super::*;
@@ -19,7 +18,6 @@ fn branched_output(output: &ModelProcessorOutput) -> BranchedProcessorOutputSpec
             .as_ref()
             .and_then(|policy| policy.max_batch_size.clone()),
         message_error_policy: output.message_error_policy.clone(),
-        children: Vec::new(),
     }
 }
 
@@ -55,63 +53,78 @@ struct BranchEntrypoint {
     assignments: Vec<Assignment>,
 }
 
-fn branch_entrypoint(
-    branch_action: &OutputBranch,
+fn branch_policy(
+    branch_ref: Option<&Identifier>,
     branches: &HashMap<Identifier, CreateBranch>,
-) -> BranchEntrypoint {
-    let Some(branch_ref) = branch_action.branch() else {
-        return BranchEntrypoint {
-            ttl: None,
-            max_instances: None,
-            assignments: Vec::new(),
-        };
+) -> (Option<String>, Option<u64>) {
+    let Some(branch_ref) = branch_ref else {
+        return (None, None);
     };
     let branch = branches
         .get(branch_ref)
         .expect("branch references must be validated before runtime planning");
-    BranchEntrypoint {
-        ttl: Some(branch.ttl.clone()),
-        max_instances: branch
+    (
+        Some(branch.ttl.clone()),
+        branch
             .eviction
             .as_ref()
             .map(|eviction| eviction.max_instances()),
+    )
+}
+
+fn branch_entrypoint(
+    branch_action: &OutputBranch,
+    branches: &HashMap<Identifier, CreateBranch>,
+) -> BranchEntrypoint {
+    let (ttl, max_instances) = branch_policy(branch_action.branch(), branches);
+    BranchEntrypoint {
+        ttl,
+        max_instances,
         assignments: branch_action.assignments().to_vec(),
+    }
+}
+
+fn processor_node_spec(
+    spec: BranchedProcessorSpec,
+    branched_by: &nervix_models::BranchSelection,
+    branches: &HashMap<Identifier, CreateBranch>,
+) -> BranchedProcessorNodeSpec {
+    let (branch_ttl, branch_max_instances) = branch_policy(branched_by.branch(), branches);
+    BranchedProcessorNodeSpec {
+        spec,
+        branch_ttl,
+        branch_max_instances,
     }
 }
 
 pub(in crate::runtime) fn branched_ingestor_specs_from_scheduled_nodes(
     nodes: &[ScheduledNode],
-) -> Vec<BranchedIngestorSpec> {
-    branched_ingestor_specs_from_models(nodes.iter().map(|node| {
-        (
-            node.kind,
-            node.identifier.clone(),
-            (*node.config).clone(),
-            node.effective_branching.clone(),
-        )
-    }))
+) -> BranchedNodeSpecs {
+    branched_ingestor_specs_from_models(
+        nodes
+            .iter()
+            .map(|node| (node.kind, node.identifier.clone(), (*node.config).clone())),
+    )
 }
 
 pub(in crate::runtime) fn branched_ingestor_specs_from_active_graph(
     graph: &ActiveGraph,
-) -> Vec<BranchedIngestorSpec> {
-    branched_ingestor_specs_from_models(graph.nodes().into_iter().map(|node| {
-        (
-            node.kind,
-            node.identifier,
-            (*node.config).clone(),
-            node.effective_branching,
-        )
-    }))
+) -> BranchedNodeSpecs {
+    branched_ingestor_specs_from_models(
+        graph
+            .nodes()
+            .into_iter()
+            .map(|node| (node.kind, node.identifier, (*node.config).clone())),
+    )
 }
 
 pub(in crate::runtime) fn branched_ingestor_specs_from_models(
-    nodes: impl Iterator<Item = (ModelKind, Identifier, Model, Option<Vec<Identifier>>)>,
-) -> Vec<BranchedIngestorSpec> {
+    nodes: impl Iterator<Item = (ModelKind, Identifier, Model)>,
+) -> BranchedNodeSpecs {
     let nodes = nodes.collect::<Vec<_>>();
     let branches = nodes
         .iter()
-        .filter_map(|(_, _, model, _)| {
+        .filter_map(|(_, _, model)| {
             if let Model::Branch(branch) = model {
                 Some((branch.name.clone(), branch.clone()))
             } else {
@@ -119,11 +132,10 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
             }
         })
         .collect::<HashMap<_, _>>();
-    let mut processors_by_input = HashMap::<Identifier, Vec<BranchedProcessorSpec>>::new();
+    let mut processors = Vec::new();
     let mut ingestors = Vec::new();
-    let mut relay_roots = Vec::new();
 
-    for (kind, identifier, model, effective_branching) in nodes {
+    for (kind, identifier, model) in nodes {
         match &model {
             Model::Deduplicator(deduplicator) => {
                 if deduplicator.from.first().is_none() {
@@ -144,12 +156,11 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         max_time: deduplicator.max_time.clone(),
                     },
                 };
-                for from_relay in deduplicator.from.relays() {
-                    processors_by_input
-                        .entry(from_relay.clone())
-                        .or_default()
-                        .push(spec.clone());
-                }
+                processors.push(processor_node_spec(
+                    spec,
+                    &deduplicator.branched_by,
+                    &branches,
+                ));
             }
             Model::Reorderer(reorderer) => {
                 if reorderer.from.first().is_none() {
@@ -170,12 +181,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         max_time: reorderer.max_time.clone(),
                     },
                 };
-                for from_relay in reorderer.from.relays() {
-                    processors_by_input
-                        .entry(from_relay.clone())
-                        .or_default()
-                        .push(spec.clone());
-                }
+                processors.push(processor_node_spec(spec, &reorderer.branched_by, &branches));
             }
             Model::Correlator(correlator) => {
                 let mut input_relays = Vec::with_capacity(
@@ -188,7 +194,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                 let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
-                    input_relays: input_relays.clone(),
+                    input_relays,
                     mode: correlator.mode,
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where,
@@ -204,12 +210,11 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         timeout_policy: correlator.timeout_policy.clone(),
                     },
                 };
-                for input_relay in input_relays {
-                    processors_by_input
-                        .entry(input_relay)
-                        .or_default()
-                        .push(spec.clone());
-                }
+                processors.push(processor_node_spec(
+                    spec,
+                    &correlator.branched_by,
+                    &branches,
+                ));
             }
             Model::WindowProcessor(window_processor) => {
                 if window_processor.from.first().is_none() {
@@ -230,12 +235,11 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         step: window_processor.step.clone(),
                     },
                 };
-                for from_relay in window_processor.from.relays() {
-                    processors_by_input
-                        .entry(from_relay.clone())
-                        .or_default()
-                        .push(spec.clone());
-                }
+                processors.push(processor_node_spec(
+                    spec,
+                    &window_processor.branched_by,
+                    &branches,
+                ));
             }
             Model::Junction(junction) => {
                 if junction.from.first().is_none() {
@@ -254,12 +258,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         output_routes: branched_outputs(&junction.output_routes),
                     },
                 };
-                for from_relay in junction.from.relays() {
-                    processors_by_input
-                        .entry(from_relay.clone())
-                        .or_default()
-                        .push(spec.clone());
-                }
+                processors.push(processor_node_spec(spec, &junction.branched_by, &branches));
             }
             Model::Inferencer(inferencer) => {
                 if inferencer.from.first().is_none() {
@@ -283,12 +282,11 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         output_schema: inferencer.output_schema.clone(),
                     },
                 };
-                for from_relay in inferencer.from.relays() {
-                    processors_by_input
-                        .entry(from_relay.clone())
-                        .or_default()
-                        .push(spec.clone());
-                }
+                processors.push(processor_node_spec(
+                    spec,
+                    &inferencer.branched_by,
+                    &branches,
+                ));
             }
             Model::WasmProcessor(processor) => {
                 if processor.from.first().is_none() {
@@ -312,12 +310,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         file: processor.file.clone(),
                     },
                 };
-                for from_relay in processor.from.relays() {
-                    processors_by_input
-                        .entry(from_relay.clone())
-                        .or_default()
-                        .push(spec.clone());
-                }
+                processors.push(processor_node_spec(spec, &processor.branched_by, &branches));
             }
             Model::Ingestor(ingestor) => {
                 for output in ingestor.output_routes.outputs() {
@@ -383,87 +376,20 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     ));
                 }
             }
-            Model::Relay(_) if effective_branching.is_some() => {
-                relay_roots.push((kind, identifier.clone(), identifier));
-            }
             _ => {}
         }
     }
 
-    fn build_nodes(
-        relay: &Identifier,
-        processors_by_input: &HashMap<Identifier, Vec<BranchedProcessorSpec>>,
-    ) -> Vec<BranchedProcessorSpec> {
-        let mut nodes = Vec::new();
+    processors.sort_by(|left, right| left.spec.processor.cmp(&right.spec.processor));
 
-        if let Some(processors) = processors_by_input.get(relay) {
-            let mut processors = processors.clone();
-            processors.sort_by(|left, right| left.processor.cmp(&right.processor));
-            for mut processor in processors {
-                match &mut processor.operation {
-                    BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
-                    | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-                    | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
-                    | BranchedProcessorOperationSpec::Correlator { output_routes, .. }
-                    | BranchedProcessorOperationSpec::Junction { output_routes, .. }
-                    | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
-                    | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
-                        for output in output_routes.outputs_mut() {
-                            output.children = build_nodes(&output.relay, processors_by_input);
-                        }
-                    }
-                }
-                nodes.push(processor);
-            }
-        }
-
-        nodes
-    }
-
-    let entrypoint_relays = ingestors
-        .iter()
-        .map(|(_, _, root_relay, _, _, _, _, _, _, _)| root_relay.clone())
-        .collect::<HashSet<_>>();
-    let relay_roots = relay_roots
-        .into_iter()
-        .filter(|(_, _, root_relay)| {
-            !entrypoint_relays.contains(root_relay) && processors_by_input.contains_key(root_relay)
-        })
-        .map(|(kind, identifier, root_relay)| {
-            (
-                kind,
-                identifier,
-                root_relay,
-                None,
-                None,
-                Vec::new(),
-                BranchInstanceAckBoundary::Preserve,
-                "IMMEDIATE".to_string(),
-                None,
-                ErrorPolicies::handled_by_log(),
-            )
-        });
-
-    ingestors
-        .into_iter()
-        .chain(relay_roots)
-        .map(
-            |(
-                kind,
-                identifier,
-                root_relay,
-                branch_ttl,
-                branch_max_instances,
-                entrypoint_branch_assignments,
-                entrypoint_ack_boundary,
-                entrypoint_flush_each,
-                entrypoint_max_batch_size,
-                error_policies,
-            )| {
-                BranchedIngestorSpec {
+    BranchedNodeSpecs {
+        entrypoints: ingestors
+            .into_iter()
+            .map(
+                |(
                     kind,
                     identifier,
-                    root_relay: root_relay.clone(),
+                    root_relay,
                     branch_ttl,
                     branch_max_instances,
                     entrypoint_branch_assignments,
@@ -471,378 +397,353 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     entrypoint_flush_each,
                     entrypoint_max_batch_size,
                     error_policies,
-                    processors: collect_reachable_processors(&root_relay, &processors_by_input),
-                    roots: build_nodes(&root_relay, &processors_by_input),
-                }
-            },
-        )
-        .collect()
+                )| {
+                    BranchedIngestorSpec {
+                        kind,
+                        identifier,
+                        root_relay,
+                        branch_ttl,
+                        branch_max_instances,
+                        entrypoint_branch_assignments,
+                        entrypoint_ack_boundary,
+                        entrypoint_flush_each,
+                        entrypoint_max_batch_size,
+                        error_policies,
+                    }
+                },
+            )
+            .collect(),
+        processors,
+    }
 }
 
-pub(in crate::runtime) fn collect_reachable_processors(
-    root_relay: &Identifier,
-    processors_by_input: &HashMap<Identifier, Vec<BranchedProcessorSpec>>,
-) -> Vec<BranchedProcessorSpec> {
-    fn visit_stream(
-        relay: &Identifier,
-        processors_by_input: &HashMap<Identifier, Vec<BranchedProcessorSpec>>,
-        seen_processors: &mut HashSet<Identifier>,
-        out: &mut Vec<BranchedProcessorSpec>,
-    ) {
-        let Some(processors) = processors_by_input.get(relay) else {
-            return;
-        };
-        let mut processors = processors.clone();
-        processors.sort_by(|left, right| left.processor.cmp(&right.processor));
-        for processor in processors {
-            if !seen_processors.insert(processor.processor.clone()) {
-                continue;
-            }
-            match &processor.operation {
-                BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
-                | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
-                | BranchedProcessorOperationSpec::Correlator { output_routes, .. }
-                | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-                | BranchedProcessorOperationSpec::Junction { output_routes, .. }
-                | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
-                | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
-                    for output in output_routes.outputs() {
-                        visit_stream(&output.relay, processors_by_input, seen_processors, out);
+fn parse_optional_window_duration(
+    processor: &Identifier,
+    setting: &str,
+    value: Option<&str>,
+) -> Result<Option<Duration>, String> {
+    value
+        .map(|raw| {
+            humantime::parse_duration(raw).map_err(|error| {
+                format!(
+                    "invalid window processor '{}' {} duration '{}': {}",
+                    processor.as_str(),
+                    setting,
+                    raw,
+                    error
+                )
+            })
+        })
+        .transpose()
+}
+
+fn materialize_output(
+    output: &BranchedProcessorOutputSpec,
+) -> Result<RelayProcessorOutputTemplate, String> {
+    Ok(RelayProcessorOutputTemplate {
+        output_relay: output.relay.clone(),
+        construction: output.construction.clone(),
+        flush_policy: output
+            .flush_each
+            .as_deref()
+            .map(|flush_each| {
+                parse_branch_flush_policy(
+                    "processor output",
+                    &output.relay,
+                    flush_each,
+                    output.max_batch_size.as_deref(),
+                )
+            })
+            .transpose()?,
+        message_error_policy: output.message_error_policy.clone(),
+    })
+}
+
+fn materialize_outputs(
+    outputs: &BranchedProcessorOutputsSpec,
+) -> Result<RelayProcessorOutputsTemplate, String> {
+    Ok(RelayProcessorOutputsTemplate {
+        routes: outputs
+            .routes
+            .iter()
+            .map(materialize_output)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn parse_branch_flush_policy(
+    kind: &str,
+    processor: &Identifier,
+    value: &str,
+    max_batch_size: Option<&str>,
+) -> Result<RuntimeFlushPolicy, String> {
+    if value.eq_ignore_ascii_case("IMMEDIATE") {
+        return Ok(RuntimeFlushPolicy::Immediate);
+    }
+    let interval = humantime::parse_duration(value).map_err(|error| {
+        format!(
+            "invalid {} '{}' flush_each duration '{}': {}",
+            kind,
+            processor.as_str(),
+            value,
+            error
+        )
+    })?;
+    let max_batch_size = max_batch_size.ok_or_else(|| {
+        format!(
+            "{} '{}' FLUSH EACH requires MAX BATCH SIZE",
+            kind,
+            processor.as_str()
+        )
+    })?;
+    let max_batch_size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
+        format!(
+            "invalid {} '{}' max_batch_size '{}': {}",
+            kind,
+            processor.as_str(),
+            max_batch_size,
+            error
+        )
+    })?;
+    Ok(RuntimeFlushPolicy::Each {
+        interval,
+        max_batch_size: max_batch_size.as_u64(),
+    })
+}
+
+fn materialize_nodes(
+    nodes: &[BranchedProcessorSpec],
+    relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
+) -> Result<Vec<RelayProcessorTemplate>, String> {
+    let mut out = Vec::new();
+    for node in nodes {
+        out.push(RelayProcessorTemplate {
+            kind: node.kind,
+            processor: node.processor.clone(),
+            input_relays: node.input_relays.clone(),
+            error_policies: node.error_policies.clone(),
+            from_where: node.from_where.clone(),
+            filter_where: node.filter_where.clone(),
+            materialized_state: node.materialized_state.clone(),
+            operation: match &node.operation {
+                BranchedProcessorOperationSpec::Deduplicator {
+                    output_routes,
+                    deduplicate_on,
+                    max_time,
+                } => RelayProcessorOperationTemplate::Deduplicator {
+                    output_routes: materialize_outputs(output_routes)?,
+                    deduplicate_on: deduplicate_on.clone(),
+                    max_time: humantime::parse_duration(max_time).map_err(|error| {
+                        format!(
+                            "invalid deduplicator '{}' MAX TIME duration '{}': {}",
+                            node.processor.as_str(),
+                            max_time,
+                            error
+                        )
+                    })?,
+                },
+                BranchedProcessorOperationSpec::WindowProcessor {
+                    output_routes,
+                    width,
+                    step,
+                } => {
+                    if output_routes.outputs().next().is_none() {
+                        return Err(format!(
+                            "window processor '{}' requires an output relay",
+                            node.processor.as_str()
+                        ));
+                    }
+                    let route_aggregates = output_routes
+                        .outputs()
+                        .map(|output| {
+                            lower_window_assignments(&output.construction)
+                                .map(|aggregate| aggregate.inner)
+                                .map_err(|reason| {
+                                    format!(
+                                        "window processor '{}' output '{}' construction is \
+                                         invalid: {}",
+                                        node.processor.as_str(),
+                                        output.relay.as_str(),
+                                        reason
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut demand_offset = 0;
+                    let compiled_aggregates = output_routes
+                        .outputs()
+                        .zip(&route_aggregates)
+                        .map(|(output, aggregate)| {
+                            let compiled = CompiledWindowAggregateProgram::compile(
+                                aggregate,
+                                &node.input_relays,
+                                &output.relay,
+                                relay_schemas,
+                            )?
+                            .with_demand_offset(demand_offset);
+                            demand_offset += aggregate.demands().len();
+                            Ok(compiled)
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    let aggregate =
+                        WindowAggregateProgram::combine_route_programs(&route_aggregates);
+                    let mut materialized_outputs = materialize_outputs(output_routes)?;
+                    for output in &mut materialized_outputs.routes {
+                        output.construction.assignments.clear();
+                    }
+                    RelayProcessorOperationTemplate::WindowProcessor {
+                        output_routes: materialized_outputs,
+                        width_messages: width.messages.map(|messages| messages as usize),
+                        step_messages: step.messages.map(|messages| messages as usize),
+                        width_duration: parse_optional_window_duration(
+                            &node.processor,
+                            "width",
+                            width.duration.as_deref(),
+                        )?,
+                        step_duration: parse_optional_window_duration(
+                            &node.processor,
+                            "step",
+                            step.duration.as_deref(),
+                        )?,
+                        aggregate,
+                        compiled_aggregates,
                     }
                 }
+                BranchedProcessorOperationSpec::Reorderer {
+                    output_routes,
+                    order_by,
+                    max_time,
+                } => RelayProcessorOperationTemplate::Reorderer {
+                    output_routes: materialize_outputs(output_routes)?,
+                    order_by: order_by.clone(),
+                    max_time: humantime::parse_duration(max_time).map_err(|error| {
+                        format!(
+                            "invalid reorderer '{}' MAX TIME duration '{}': {}",
+                            node.processor.as_str(),
+                            max_time,
+                            error
+                        )
+                    })?,
+                },
+                BranchedProcessorOperationSpec::Correlator {
+                    output_routes,
+                    left_relays,
+                    right_relays,
+                    correlate_where,
+                    match_policy,
+                    max_time,
+                    timeout_policy,
+                } => RelayProcessorOperationTemplate::Correlator {
+                    output_routes: materialize_outputs(output_routes)?,
+                    left_relays: left_relays.clone(),
+                    right_relays: right_relays.clone(),
+                    correlate_where: correlate_where.clone(),
+                    match_policy: *match_policy,
+                    max_time: humantime::parse_duration(max_time).map_err(|error| {
+                        format!(
+                            "invalid correlator '{}' MAX TIME duration '{}': {}",
+                            node.processor.as_str(),
+                            max_time,
+                            error
+                        )
+                    })?,
+                    timeout_policy: timeout_policy.clone(),
+                },
+                BranchedProcessorOperationSpec::Junction { output_routes } => {
+                    RelayProcessorOperationTemplate::Junction {
+                        output_routes: materialize_outputs(output_routes)?,
+                    }
+                }
+                BranchedProcessorOperationSpec::Inferencer {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    inputs,
+                    output_schema,
+                } => RelayProcessorOperationTemplate::Inferencer {
+                    output_routes: materialize_outputs(output_routes)?,
+                    resource: resource.clone(),
+                    resource_version: *resource_version,
+                    file: file.clone(),
+                    inputs: inputs.clone(),
+                    output_schema: output_schema.clone(),
+                },
+                BranchedProcessorOperationSpec::WasmProcessor {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                } => RelayProcessorOperationTemplate::WasmProcessor {
+                    output_routes: materialize_outputs(output_routes)?,
+                    resource: resource.clone(),
+                    resource_version: *resource_version,
+                    file: file.clone(),
+                    compiled: None,
+                },
+            },
+        });
+    }
+    Ok(out)
+}
+
+fn parse_branch_ttl_setting(
+    ttl: Option<&str>,
+    kind: ModelKind,
+    identifier: &Identifier,
+) -> Result<Option<Duration>, String> {
+    ttl.map(|ttl| {
+        humantime::parse_duration(ttl).map_err(|error| {
+            format!(
+                "invalid branch ttl '{}' for {} '{}': {}",
+                ttl,
+                kind.as_str(),
+                identifier.as_str(),
+                error
+            )
+        })
+    })
+    .transpose()
+}
+
+fn parse_branch_max_instances_setting(
+    max_instances: Option<u64>,
+    kind: ModelKind,
+    identifier: &Identifier,
+) -> Result<Option<usize>, String> {
+    max_instances
+        .map(|max_instances| {
+            if max_instances == 0 {
+                return Err(format!(
+                    "invalid branch MAX INSTANCES '0' for {} '{}'",
+                    kind.as_str(),
+                    identifier.as_str()
+                ));
             }
-            out.push(processor);
-        }
-    }
-
-    let mut seen_processors = HashSet::default();
-    let mut out = Vec::new();
-    visit_stream(
-        root_relay,
-        processors_by_input,
-        &mut seen_processors,
-        &mut out,
-    );
-    out.sort_by(|left, right| left.processor.cmp(&right.processor));
-    out
+            usize::try_from(max_instances).map_err(|_| {
+                format!(
+                    "branch MAX INSTANCES '{}' for {} '{}' is too large for this runtime",
+                    max_instances,
+                    kind.as_str(),
+                    identifier.as_str()
+                )
+            })
+        })
+        .transpose()
 }
 
-pub(in crate::runtime) fn branched_processor_ids(
-    specs: &[BranchedIngestorSpec],
-) -> HashSet<Identifier> {
-    let mut ids = HashSet::default();
-    for spec in specs {
-        ids.extend(spec.processors.iter().map(|node| node.processor.clone()));
-    }
-    ids
-}
-
-pub(in crate::runtime) fn materialize_branch_instance_template(
-    spec: &BranchedIngestorSpec,
+fn resolve_branch_relay_templates(
+    branch_relay_ids: HashSet<Identifier>,
     model_index: &HashMap<(ModelKind, Identifier), Model>,
-    relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
     relay_registries: &HashMap<Identifier, RelayRegistry>,
     relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
-) -> Result<BranchInstanceTemplate, String> {
-    fn parse_optional_window_duration(
-        processor: &Identifier,
-        setting: &str,
-        value: Option<&str>,
-    ) -> Result<Option<Duration>, String> {
-        value
-            .map(|raw| {
-                humantime::parse_duration(raw).map_err(|error| {
-                    format!(
-                        "invalid window processor '{}' {} duration '{}': {}",
-                        processor.as_str(),
-                        setting,
-                        raw,
-                        error
-                    )
-                })
-            })
-            .transpose()
-    }
-
-    fn materialize_output(
-        output: &BranchedProcessorOutputSpec,
-    ) -> Result<RelayProcessorOutputTemplate, String> {
-        Ok(RelayProcessorOutputTemplate {
-            output_relay: output.relay.clone(),
-            construction: output.construction.clone(),
-            flush_policy: output
-                .flush_each
-                .as_deref()
-                .map(|flush_each| {
-                    parse_branch_flush_policy(
-                        "processor output",
-                        &output.relay,
-                        flush_each,
-                        output.max_batch_size.as_deref(),
-                    )
-                })
-                .transpose()?,
-            message_error_policy: output.message_error_policy.clone(),
-        })
-    }
-
-    fn materialize_outputs(
-        outputs: &BranchedProcessorOutputsSpec,
-    ) -> Result<RelayProcessorOutputsTemplate, String> {
-        Ok(RelayProcessorOutputsTemplate {
-            routes: outputs
-                .routes
-                .iter()
-                .map(materialize_output)
-                .collect::<Result<Vec<_>, _>>()?,
-        })
-    }
-
-    fn parse_branch_flush_policy(
-        kind: &str,
-        processor: &Identifier,
-        value: &str,
-        max_batch_size: Option<&str>,
-    ) -> Result<RuntimeFlushPolicy, String> {
-        if value.eq_ignore_ascii_case("IMMEDIATE") {
-            return Ok(RuntimeFlushPolicy::Immediate);
-        }
-        let interval = humantime::parse_duration(value).map_err(|error| {
-            format!(
-                "invalid {} '{}' flush_each duration '{}': {}",
-                kind,
-                processor.as_str(),
-                value,
-                error
-            )
-        })?;
-        let max_batch_size = max_batch_size.ok_or_else(|| {
-            format!(
-                "{} '{}' FLUSH EACH requires MAX BATCH SIZE",
-                kind,
-                processor.as_str()
-            )
-        })?;
-        let max_batch_size = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
-            format!(
-                "invalid {} '{}' max_batch_size '{}': {}",
-                kind,
-                processor.as_str(),
-                max_batch_size,
-                error
-            )
-        })?;
-        Ok(RuntimeFlushPolicy::Each {
-            interval,
-            max_batch_size: max_batch_size.as_u64(),
-        })
-    }
-
-    fn materialize_nodes(
-        nodes: &[BranchedProcessorSpec],
-        relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
-    ) -> Result<Vec<RelayProcessorTemplate>, String> {
-        let mut out = Vec::new();
-        for node in nodes {
-            out.push(RelayProcessorTemplate {
-                kind: node.kind,
-                processor: node.processor.clone(),
-                input_relays: node.input_relays.clone(),
-                mode: node.mode,
-                error_policies: node.error_policies.clone(),
-                from_where: node.from_where.clone(),
-                filter_where: node.filter_where.clone(),
-                materialized_state: node.materialized_state.clone(),
-                operation: match &node.operation {
-                    BranchedProcessorOperationSpec::Deduplicator {
-                        output_routes,
-                        deduplicate_on,
-                        max_time,
-                    } => RelayProcessorOperationTemplate::Deduplicator {
-                        output_routes: materialize_outputs(output_routes)?,
-                        deduplicate_on: deduplicate_on.clone(),
-                        max_time: humantime::parse_duration(max_time).map_err(|error| {
-                            format!(
-                                "invalid deduplicator '{}' MAX TIME duration '{}': {}",
-                                node.processor.as_str(),
-                                max_time,
-                                error
-                            )
-                        })?,
-                    },
-                    BranchedProcessorOperationSpec::WindowProcessor {
-                        output_routes,
-                        width,
-                        step,
-                    } => {
-                        if output_routes.outputs().next().is_none() {
-                            return Err(format!(
-                                "window processor '{}' requires an output relay",
-                                node.processor.as_str()
-                            ));
-                        }
-                        let route_aggregates = output_routes
-                            .outputs()
-                            .map(|output| {
-                                lower_window_assignments(&output.construction)
-                                    .map(|aggregate| aggregate.inner)
-                                    .map_err(|reason| {
-                                        format!(
-                                            "window processor '{}' output '{}' construction is \
-                                             invalid: {}",
-                                            node.processor.as_str(),
-                                            output.relay.as_str(),
-                                            reason
-                                        )
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let mut demand_offset = 0;
-                        let compiled_aggregates = output_routes
-                            .outputs()
-                            .zip(&route_aggregates)
-                            .map(|(output, aggregate)| {
-                                let compiled = CompiledWindowAggregateProgram::compile(
-                                    aggregate,
-                                    &node.input_relays,
-                                    &output.relay,
-                                    relay_schemas,
-                                )?
-                                .with_demand_offset(demand_offset);
-                                demand_offset += aggregate.demands().len();
-                                Ok(compiled)
-                            })
-                            .collect::<Result<Vec<_>, String>>()?;
-                        let aggregate =
-                            WindowAggregateProgram::combine_route_programs(&route_aggregates);
-                        let mut materialized_outputs = materialize_outputs(output_routes)?;
-                        for output in &mut materialized_outputs.routes {
-                            output.construction.assignments.clear();
-                        }
-                        RelayProcessorOperationTemplate::WindowProcessor {
-                            output_routes: materialized_outputs,
-                            width_messages: width.messages.map(|messages| messages as usize),
-                            step_messages: step.messages.map(|messages| messages as usize),
-                            width_duration: parse_optional_window_duration(
-                                &node.processor,
-                                "width",
-                                width.duration.as_deref(),
-                            )?,
-                            step_duration: parse_optional_window_duration(
-                                &node.processor,
-                                "step",
-                                step.duration.as_deref(),
-                            )?,
-                            aggregate,
-                            compiled_aggregates,
-                        }
-                    }
-                    BranchedProcessorOperationSpec::Reorderer {
-                        output_routes,
-                        order_by,
-                        max_time,
-                    } => RelayProcessorOperationTemplate::Reorderer {
-                        output_routes: materialize_outputs(output_routes)?,
-                        order_by: order_by.clone(),
-                        max_time: humantime::parse_duration(max_time).map_err(|error| {
-                            format!(
-                                "invalid reorderer '{}' MAX TIME duration '{}': {}",
-                                node.processor.as_str(),
-                                max_time,
-                                error
-                            )
-                        })?,
-                    },
-                    BranchedProcessorOperationSpec::Correlator {
-                        output_routes,
-                        left_relays,
-                        right_relays,
-                        correlate_where,
-                        match_policy,
-                        max_time,
-                        timeout_policy,
-                    } => RelayProcessorOperationTemplate::Correlator {
-                        output_routes: materialize_outputs(output_routes)?,
-                        left_relays: left_relays.clone(),
-                        right_relays: right_relays.clone(),
-                        correlate_where: correlate_where.clone(),
-                        match_policy: *match_policy,
-                        max_time: humantime::parse_duration(max_time).map_err(|error| {
-                            format!(
-                                "invalid correlator '{}' MAX TIME duration '{}': {}",
-                                node.processor.as_str(),
-                                max_time,
-                                error
-                            )
-                        })?,
-                        timeout_policy: timeout_policy.clone(),
-                    },
-                    BranchedProcessorOperationSpec::Junction { output_routes } => {
-                        RelayProcessorOperationTemplate::Junction {
-                            output_routes: materialize_outputs(output_routes)?,
-                        }
-                    }
-                    BranchedProcessorOperationSpec::Inferencer {
-                        output_routes,
-                        resource,
-                        resource_version,
-                        file,
-                        inputs,
-                        output_schema,
-                    } => RelayProcessorOperationTemplate::Inferencer {
-                        output_routes: materialize_outputs(output_routes)?,
-                        resource: resource.clone(),
-                        resource_version: *resource_version,
-                        file: file.clone(),
-                        inputs: inputs.clone(),
-                        output_schema: output_schema.clone(),
-                    },
-                    BranchedProcessorOperationSpec::WasmProcessor {
-                        output_routes,
-                        resource,
-                        resource_version,
-                        file,
-                    } => RelayProcessorOperationTemplate::WasmProcessor {
-                        output_routes: materialize_outputs(output_routes)?,
-                        resource: resource.clone(),
-                        resource_version: *resource_version,
-                        file: file.clone(),
-                        compiled: None,
-                    },
-                },
-            });
-        }
-        Ok(out)
-    }
-
-    let mut branch_relay_ids = HashSet::default();
-    branch_relay_ids.insert(spec.root_relay.clone());
-    for processor in &spec.processors {
-        branch_relay_ids.extend(processor.input_relays.iter().cloned());
-        match &processor.operation {
-            BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
-            | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
-            | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-            | BranchedProcessorOperationSpec::Junction { output_routes, .. }
-            | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
-            | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
-                branch_relay_ids.extend(output_routes.outputs().map(|output| output.relay.clone()));
-            }
-            BranchedProcessorOperationSpec::Correlator {
-                output_routes,
-                timeout_policy,
-                ..
-            } => {
-                branch_relay_ids.extend(output_routes.outputs().map(|output| output.relay.clone()));
-                if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.left {
-                    branch_relay_ids.insert(relay.clone());
-                }
-                if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.right {
-                    branch_relay_ids.insert(relay.clone());
-                }
-            }
-        }
-    }
+) -> Result<
+    (
+        HashMap<Identifier, RelayProcessorRelayTemplate>,
+        HashSet<Identifier>,
+    ),
+    String,
+> {
     let materialized_streams = branch_relay_ids
         .iter()
         .filter_map(
@@ -881,64 +782,37 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
             Ok((relay, RelayProcessorRelayTemplate { registry, services }))
         })
         .collect::<Result<HashMap<_, _>, String>>()?;
-    let branch_ttl = spec
-        .branch_ttl
-        .as_deref()
-        .map(|ttl| {
-            humantime::parse_duration(ttl).map_err(|error| {
-                format!(
-                    "invalid branch ttl '{}' for {} '{}': {}",
-                    ttl,
-                    spec.kind.as_str(),
-                    spec.identifier.as_str(),
-                    error
-                )
-            })
-        })
-        .transpose()?;
-    let branch_max_instances = spec
-        .branch_max_instances
-        .map(|max_instances| {
-            if max_instances == 0 {
-                return Err(format!(
-                    "invalid branch MAX INSTANCES '0' for {} '{}'",
-                    spec.kind.as_str(),
-                    spec.identifier.as_str()
-                ));
-            }
-            usize::try_from(max_instances).map_err(|_| {
-                format!(
-                    "branch MAX INSTANCES '{}' for {} '{}' is too large for this runtime",
-                    max_instances,
-                    spec.kind.as_str(),
-                    spec.identifier.as_str()
-                )
-            })
-        })
-        .transpose()?;
-    let processors = materialize_nodes(&spec.processors, relay_schemas)?
-        .into_iter()
-        .map(|processor| (processor.processor.clone(), processor))
-        .collect::<HashMap<_, _>>();
-    let mut processors_by_input = HashMap::<Identifier, Vec<Identifier>>::new();
-    for processor in &spec.processors {
-        for input_relay in &processor.input_relays {
-            processors_by_input
-                .entry(input_relay.clone())
-                .or_default()
-                .push(processor.processor.clone());
-        }
-    }
-    for processors in processors_by_input.values_mut() {
-        processors.sort();
-        processors.dedup();
-    }
+    Ok((relays, materialized_streams))
+}
+
+pub(in crate::runtime) fn materialize_branch_instance_template(
+    spec: &BranchedIngestorSpec,
+    model_index: &HashMap<(ModelKind, Identifier), Model>,
+    relay_registries: &HashMap<Identifier, RelayRegistry>,
+    relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
+) -> Result<BranchInstanceTemplate, String> {
+    let mut branch_relay_ids = HashSet::default();
+    branch_relay_ids.insert(spec.root_relay.clone());
+    let (relays, materialized_streams) = resolve_branch_relay_templates(
+        branch_relay_ids,
+        model_index,
+        relay_registries,
+        relay_services,
+    )?;
     Ok(BranchInstanceTemplate {
         source_kind: spec.kind,
         source: spec.identifier.clone(),
         root_relay: spec.root_relay.clone(),
-        branch_ttl,
-        branch_max_instances,
+        branch_ttl: parse_branch_ttl_setting(
+            spec.branch_ttl.as_deref(),
+            spec.kind,
+            &spec.identifier,
+        )?,
+        branch_max_instances: parse_branch_max_instances_setting(
+            spec.branch_max_instances,
+            spec.kind,
+            &spec.identifier,
+        )?,
         entrypoint_branch_assignments: spec.entrypoint_branch_assignments.clone(),
         entrypoint_ack_boundary: spec.entrypoint_ack_boundary,
         entrypoint_flush_each: parse_branch_flush_policy(
@@ -950,8 +824,57 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
         error_policies: spec.error_policies.clone(),
         relays,
         materialized_streams,
+        processors: HashMap::default(),
+    })
+}
+
+pub(in crate::runtime) fn materialize_processor_instance_template(
+    node: &BranchedProcessorNodeSpec,
+    model_index: &HashMap<(ModelKind, Identifier), Model>,
+    relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
+    relay_registries: &HashMap<Identifier, RelayRegistry>,
+    relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
+) -> Result<BranchInstanceTemplate, String> {
+    let spec = &node.spec;
+    let root_relay = spec.input_relays.first().cloned().ok_or_else(|| {
+        format!(
+            "{} '{}' requires at least one input relay",
+            spec.kind.as_str(),
+            spec.processor.as_str()
+        )
+    })?;
+    let (relays, materialized_streams) = resolve_branch_relay_templates(
+        spec.output_relays(),
+        model_index,
+        relay_registries,
+        relay_services,
+    )?;
+    let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas)?
+        .pop()
+        .expect("single processor spec must materialize one template");
+    let mut processors = HashMap::default();
+    processors.insert(spec.processor.clone(), template);
+    Ok(BranchInstanceTemplate {
+        source_kind: spec.kind,
+        source: spec.processor.clone(),
+        root_relay,
+        branch_ttl: parse_branch_ttl_setting(
+            node.branch_ttl.as_deref(),
+            spec.kind,
+            &spec.processor,
+        )?,
+        branch_max_instances: parse_branch_max_instances_setting(
+            node.branch_max_instances,
+            spec.kind,
+            &spec.processor,
+        )?,
+        entrypoint_branch_assignments: Vec::new(),
+        entrypoint_ack_boundary: BranchInstanceAckBoundary::Preserve,
+        entrypoint_flush_each: RuntimeFlushPolicy::Immediate,
+        error_policies: spec.error_policies.clone(),
+        relays,
+        materialized_streams,
         processors,
-        processors_by_input,
     })
 }
 

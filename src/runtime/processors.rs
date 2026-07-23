@@ -57,8 +57,19 @@ pub(super) struct BranchedIngestorSpec {
     pub(super) entrypoint_flush_each: String,
     pub(super) entrypoint_max_batch_size: Option<String>,
     pub(super) error_policies: ErrorPolicies,
-    pub(super) processors: Vec<BranchedProcessorSpec>,
-    pub(super) roots: Vec<BranchedProcessorSpec>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct BranchedProcessorNodeSpec {
+    pub(super) spec: BranchedProcessorSpec,
+    pub(super) branch_ttl: Option<String>,
+    pub(super) branch_max_instances: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct BranchedNodeSpecs {
+    pub(super) entrypoints: Vec<BranchedIngestorSpec>,
+    pub(super) processors: Vec<BranchedProcessorNodeSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,10 +145,6 @@ impl BranchedProcessorOutputsSpec {
     pub(super) fn outputs(&self) -> impl Iterator<Item = &BranchedProcessorOutputSpec> {
         self.routes.iter()
     }
-
-    pub(super) fn outputs_mut(&mut self) -> impl Iterator<Item = &mut BranchedProcessorOutputSpec> {
-        self.routes.iter_mut()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -147,75 +154,41 @@ pub(super) struct BranchedProcessorOutputSpec {
     pub(super) flush_each: Option<String>,
     pub(super) max_batch_size: Option<String>,
     pub(super) message_error_policy: MessageErrorPolicy,
-    pub(super) children: Vec<BranchedProcessorSpec>,
 }
 
-impl BranchedIngestorSpec {
-    pub(super) fn relay_ids(&self) -> HashSet<Identifier> {
+impl BranchedProcessorSpec {
+    pub(super) fn output_relays(&self) -> HashSet<Identifier> {
         let mut relays = HashSet::default();
-        relays.insert(self.root_relay.clone());
-
-        fn collect(nodes: &[BranchedProcessorSpec], relays: &mut HashSet<Identifier>) {
-            for node in nodes {
-                relays.extend(node.input_relays.iter().cloned());
-                match &node.operation {
-                    BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
-                    | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
-                    | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-                    | BranchedProcessorOperationSpec::Junction { output_routes, .. }
-                    | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
-                    | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
-                        for output in output_routes.outputs() {
-                            relays.insert(output.relay.clone());
-                            collect(&output.children, relays);
-                        }
-                    }
-                    BranchedProcessorOperationSpec::Correlator {
-                        output_routes,
-                        timeout_policy,
-                        ..
-                    } => {
-                        for output in output_routes.outputs() {
-                            relays.insert(output.relay.clone());
-                            collect(&output.children, relays);
-                        }
-                        if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.left {
-                            relays.insert(relay.clone());
-                        }
-                        if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.right {
-                            relays.insert(relay.clone());
-                        }
-                    }
+        match &self.operation {
+            BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
+            | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
+            | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
+            | BranchedProcessorOperationSpec::Junction { output_routes, .. }
+            | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
+            | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
+                relays.extend(output_routes.outputs().map(|output| output.relay.clone()));
+            }
+            BranchedProcessorOperationSpec::Correlator {
+                output_routes,
+                timeout_policy,
+                ..
+            } => {
+                relays.extend(output_routes.outputs().map(|output| output.relay.clone()));
+                if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.left {
+                    relays.insert(relay.clone());
+                }
+                if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.right {
+                    relays.insert(relay.clone());
                 }
             }
         }
-
-        collect(&self.roots, &mut relays);
         relays
     }
 
-    pub(super) fn contains_stream(&self, relay: &Identifier) -> bool {
-        if &self.root_relay == relay {
-            return true;
-        }
-
-        fn contains(nodes: &[BranchedProcessorSpec], relay: &Identifier) -> bool {
-            nodes.iter().any(|node| match &node.operation {
-                BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
-                | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-                | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
-                | BranchedProcessorOperationSpec::Correlator { output_routes, .. }
-                | BranchedProcessorOperationSpec::Junction { output_routes, .. }
-                | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
-                | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
-                    output_routes
-                        .outputs()
-                        .any(|output| &output.relay == relay || contains(&output.children, relay))
-                }
-            })
-        }
-
-        contains(&self.roots, relay)
+    pub(super) fn relay_ids(&self) -> HashSet<Identifier> {
+        let mut relays = self.output_relays();
+        relays.extend(self.input_relays.iter().cloned());
+        relays
     }
 }
 
@@ -233,7 +206,6 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) relays: HashMap<Identifier, RelayProcessorRelayTemplate>,
     pub(super) materialized_streams: HashSet<Identifier>,
     pub(super) processors: HashMap<Identifier, RelayProcessorTemplate>,
-    pub(super) processors_by_input: HashMap<Identifier, Vec<Identifier>>,
 }
 
 #[derive(Debug, Clone)]
@@ -247,7 +219,6 @@ pub(super) struct RelayProcessorTemplate {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
     pub(super) input_relays: Vec<Identifier>,
-    pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
     pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
     pub(super) filter_where: Option<nervix_models::Expression>,
@@ -323,7 +294,6 @@ pub(super) struct RelayProcessorNode {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
     pub(super) input_relays: Vec<Identifier>,
-    pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
     pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
     pub(super) compiled_from_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
@@ -374,7 +344,7 @@ pub(super) enum RelayProcessorOperationNode {
         timeout_policy: CorrelationTimeoutPolicy,
         compiled_where_program: Option<Box<CompiledCorrelatorWhereProgram>>,
         compiled_output_programs: Vec<Option<Box<CompiledCorrelatorOutputProgram>>>,
-        state: SharedCorrelatorBranchState,
+        state: CorrelatorBranchState,
     },
     Junction {
         output_routes: RelayProcessorOutputsNode,
@@ -827,8 +797,6 @@ pub(super) enum ReorderKeyPart {
     Utf8(String),
     Datetime(i64),
 }
-
-pub(super) type SharedCorrelatorBranchState = Arc<parking_lot::Mutex<CorrelatorBranchState>>;
 
 #[derive(Debug, Default)]
 pub(super) struct CorrelatorBranchState {

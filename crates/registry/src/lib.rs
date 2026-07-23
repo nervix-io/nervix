@@ -2585,6 +2585,7 @@ fn is_schedulable_model(model: &Model) -> bool {
             | Model::Reorderer(_)
             | Model::Junction(_)
             | Model::WindowProcessor(_)
+            | Model::WasmProcessor(_)
             | Model::Emitter(_)
     )
 }
@@ -3283,8 +3284,10 @@ impl AssignmentPlanner<'_> {
             | Model::Lookup(_)
             | Model::Deduplicator(_)
             | Model::Correlator(_)
+            | Model::Reorderer(_)
             | Model::Junction(_)
             | Model::WindowProcessor(_)
+            | Model::WasmProcessor(_)
             | Model::Emitter(_) => {
                 let preferred_order =
                     locality_affinity_scores(self.graph, index, self.assigned_by_key);
