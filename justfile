@@ -86,12 +86,15 @@ lint: build-web-console proto-lint
 audit:
     cargo audit
 
-validate: fmt lint
+validate: fmt lint validate-skill
 
-validate-ci: fmt-check lint
+validate-ci: fmt-check lint validate-skill
 
 book version="":
     python scripts/build_book.py --version {{ version }}
+
+validate-skill:
+    env GH_PROMPT_DISABLED=1 gh skill publish .agents/skills --dry-run
 
 book-pdf version="" output="":
     #!/usr/bin/env bash

@@ -96,10 +96,18 @@ jobs:
         run: |
           go install github.com/antham/ghokin/v3@v3.9.0
 
-      - name: Install apt deps
+      - name: Install apt deps and current GitHub CLI
         run: |
+          set -euo pipefail
+          gh_keyring="$(mktemp)"
+          curl -fsSL -o "${gh_keyring}" https://cli.github.com/packages/githubcli-archive-keyring.gpg
+          sudo install -D -m 644 "${gh_keyring}" /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          rm "${gh_keyring}"
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt update
           sudo apt install -y \
+            gh \
             libcurl4-openssl-dev \
             protobuf-compiler
 
@@ -127,6 +135,8 @@ jobs:
 
       - name: Validate
         run: just validate-ci
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   tests:
     name: tests

@@ -5,6 +5,7 @@
   - [What It Is Not](./what-it-is-not.md)
   - [Running Nervix](./running-locally.md)
   - [NSPL Overview](./nspl-overview.md)
+  - [NSPL Agent Skill](./nspl-agent-skill.md)
   - [Domains And Time](./domains-and-time.md)
   - [Schemas And Codecs](./schemas-and-codecs.md)
   - [Resources](./resources.md)
