@@ -27,6 +27,11 @@ struct MaterializedRelaySnapshot {
     metrics: RuntimeMetricsSnapshot,
 }
 
+type DecodedMaterializedRelaySnapshot = (
+    Vec<(Option<BranchKey>, RemoteRuntimeRecord)>,
+    RuntimeMetricsSnapshot,
+);
+
 #[derive(Debug)]
 pub(super) struct ReplicatedMaterializedRelayState {
     pub(super) placement: RuntimeStatePlacement,
@@ -172,8 +177,7 @@ pub(super) fn encode_materialized_stream_snapshot_entries(
             record: record.clone(),
         })
         .collect::<Vec<_>>();
-    snapshot_entries
-        .sort_by(|left, right| snapshot_key_sort(&left.key).cmp(&snapshot_key_sort(&right.key)));
+    snapshot_entries.sort_by_key(|entry| snapshot_key_sort(&entry.key));
     rkyv::to_bytes::<rkyv::rancor::Error>(&MaterializedRelaySnapshot {
         entries: snapshot_entries,
         metrics,
@@ -199,8 +203,7 @@ fn encode_materialized_stream_snapshot(
             record: entry.value().clone(),
         })
         .collect::<Vec<_>>();
-    snapshot_entries
-        .sort_by(|left, right| snapshot_key_sort(&left.key).cmp(&snapshot_key_sort(&right.key)));
+    snapshot_entries.sort_by_key(|entry| snapshot_key_sort(&entry.key));
     rkyv::to_bytes::<rkyv::rancor::Error>(&MaterializedRelaySnapshot {
         entries: snapshot_entries,
         metrics,
@@ -211,13 +214,7 @@ fn encode_materialized_stream_snapshot(
 
 fn decode_materialized_stream_snapshot_with_metrics(
     payload: &[u8],
-) -> Result<
-    (
-        Vec<(Option<BranchKey>, RemoteRuntimeRecord)>,
-        RuntimeMetricsSnapshot,
-    ),
-    RuntimePersistenceError,
-> {
+) -> Result<DecodedMaterializedRelaySnapshot, RuntimePersistenceError> {
     let snapshot = rkyv::from_bytes::<MaterializedRelaySnapshot, rkyv::rancor::Error>(payload)
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
     let entries = snapshot

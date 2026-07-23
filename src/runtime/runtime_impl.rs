@@ -9,6 +9,17 @@ struct ScheduledIngestorStartSpec {
     kafka_offset_state: Option<Arc<ReplicatedKafkaOffsetState>>,
 }
 
+#[derive(Clone, Copy)]
+struct ReingestorDispatchContext<'a> {
+    domain: &'a Domain,
+    reingestor: &'a Identifier,
+    from_relay: &'a Identifier,
+    from_where: Option<&'a nervix_models::Expression>,
+    mode: AckMode,
+    error_policies: &'a ErrorPolicies,
+    branched_senders: &'a HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
+}
+
 fn branch_relays_from_branched_specs(specs: &[BranchedIngestorSpec]) -> HashSet<Identifier> {
     specs
         .iter()
@@ -2369,9 +2380,9 @@ impl Runtime {
         node: &Identifier,
         policy: &MessageErrorPolicy,
         message: RelayMessage,
-        reason: String,
-        operation: MessageErrorOperation,
+        failure: MessageErrorFailure,
     ) {
+        let MessageErrorFailure { reason, operation } = failure;
         self.handle_structured_message_error(MessageErrorHandling {
             domain,
             node_kind,
@@ -7033,16 +7044,20 @@ impl Runtime {
                 )
             };
             match compile_processor_output_filter_map_program(
-                domain,
-                reingestor,
+                RuntimeCompileTarget {
+                    domain,
+                    identifier: reingestor,
+                },
                 std::slice::from_ref(from_relay),
                 &output.relay,
                 &output.construction,
-                batch.arrow_schema(),
-                input_schema.vm_sensitivity(),
+                RuntimeVmSchemaPair {
+                    input: batch.arrow_schema(),
+                    input_sensitivity: input_schema.vm_sensitivity(),
+                    output: output_schema.arrow_schema(),
+                    output_sensitivity: output_schema.vm_sensitivity(),
+                },
                 None,
-                output_schema.arrow_schema(),
-                output_schema.vm_sensitivity(),
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &available_lookups,
@@ -7139,10 +7154,12 @@ impl Runtime {
             reingestor,
             program,
             batch.records.clone(),
-            execution_now,
-            &side_inputs,
-            &batch.keys,
-            &batch.acks,
+            FilterMapInputPreparation {
+                execution_now,
+                side_inputs: &side_inputs,
+                branch_keys: &batch.keys,
+                acks: &batch.acks,
+            },
         )
         .await?;
         let executed = execute_filter_map_program(
@@ -7238,30 +7255,25 @@ impl Runtime {
 
     async fn dispatch_reingestor_outputs(
         &self,
-        domain: &Domain,
-        reingestor: &Identifier,
-        from_relay: &Identifier,
-        from_where: Option<&nervix_models::Expression>,
+        context: ReingestorDispatchContext<'_>,
         compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
-        mode: AckMode,
-        error_policies: &ErrorPolicies,
         output_routes: &mut RelayProcessorOutputsNode,
-        branched_senders: &HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
         batch: RelayRecordBatch,
     ) {
+        let ReingestorDispatchContext {
+            domain,
+            reingestor,
+            from_relay,
+            from_where: _,
+            mode,
+            error_policies,
+            branched_senders,
+        } = context;
         if batch.message_count() == 0 {
             return;
         }
         let Some(batch) = self
-            .filter_reingestor_from_batch(
-                domain,
-                reingestor,
-                from_relay,
-                from_where,
-                compiled_from_where,
-                error_policies,
-                batch,
-            )
+            .filter_reingestor_from_batch(context, compiled_from_where, batch)
             .await
         else {
             return;
@@ -7541,14 +7553,18 @@ impl Runtime {
 
     async fn filter_reingestor_from_batch(
         &self,
-        domain: &Domain,
-        reingestor: &Identifier,
-        from_relay: &Identifier,
-        from_where: Option<&nervix_models::Expression>,
+        context: ReingestorDispatchContext<'_>,
         compiled_from_where: &mut Option<CompiledProgramWithMaterializedInterest>,
-        error_policies: &ErrorPolicies,
         batch: RelayRecordBatch,
     ) -> Option<RelayRecordBatch> {
+        let ReingestorDispatchContext {
+            domain,
+            reingestor,
+            from_relay,
+            from_where,
+            error_policies,
+            ..
+        } = context;
         let Some(from_where) = from_where else {
             return Some(batch);
         };
@@ -7607,11 +7623,15 @@ impl Runtime {
                 )
             };
             match compile_expression_filter_program(
-                domain,
-                reingestor,
+                RuntimeCompileTarget {
+                    domain,
+                    identifier: reingestor,
+                },
                 Some(from_where),
-                batch.arrow_schema(),
-                input_schema.vm_sensitivity(),
+                RuntimeVmSchema {
+                    schema: batch.arrow_schema(),
+                    sensitivity: input_schema.vm_sensitivity(),
+                },
                 false,
                 MessageErrorOperation::SourceWhere,
                 RuntimeVmCompileContext {
@@ -7731,7 +7751,7 @@ impl Runtime {
                         .as_ref()
                         .map(|policy| {
                             Self::parse_runtime_node_flush_policy(
-                                &domain,
+                                domain,
                                 "reingestor output",
                                 &output.relay,
                                 &policy.flush_each,
@@ -7864,15 +7884,17 @@ impl Runtime {
                         };
                         runtime
                             .dispatch_reingestor_outputs(
-                                &task_domain,
-                                &task_reingestor,
-                                &task_from_relay,
-                                task_from_where.as_ref(),
+                                ReingestorDispatchContext {
+                                    domain: &task_domain,
+                                    reingestor: &task_reingestor,
+                                    from_relay: &task_from_relay,
+                                    from_where: task_from_where.as_ref(),
+                                    mode: task_mode,
+                                    error_policies: &task_error_policies,
+                                    branched_senders: &task_branched_senders,
+                                },
                                 &mut compiled_from_where,
-                                task_mode,
-                                &task_error_policies,
                                 &mut task_output_routes,
-                                &task_branched_senders,
                                 batch,
                             )
                             .await;
@@ -8640,11 +8662,15 @@ impl Runtime {
         };
         let empty_branching = Vec::new();
         let filter_where = compile_expression_filter_program(
-            domain,
-            &ingestor.name,
+            RuntimeCompileTarget {
+                domain,
+                identifier: &ingestor.name,
+            },
             ingestor.filter_where.as_ref(),
-            codec.schema().arrow_schema(),
-            codec.schema().vm_sensitivity(),
+            RuntimeVmSchema {
+                schema: codec.schema().arrow_schema(),
+                sensitivity: codec.schema().vm_sensitivity(),
+            },
             ingest_source_supports_headers(&ingestor.source),
             MessageErrorOperation::FilterWhere,
             RuntimeVmCompileContext {

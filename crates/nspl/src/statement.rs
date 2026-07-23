@@ -304,7 +304,7 @@ mod tests {
         }
 
         fn bool(&mut self) -> bool {
-            self.next_u8() % 2 == 0
+            self.next_u8().is_multiple_of(2)
         }
 
         fn bounded_u64(&mut self, min: u64, max: u64) -> u64 {

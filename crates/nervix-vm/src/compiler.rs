@@ -508,7 +508,7 @@ impl Compiler {
     }
 
     fn enter_set_scope(&mut self, output_schema: &Schema, output_sensitivity: &SchemaSensitivity) {
-        for namespace in self.writable_namespaces.iter().cloned() {
+        for namespace in &self.writable_namespaces {
             self.readable_namespaces
                 .insert(CompileNamespace::User(namespace.clone()));
             for field in output_schema.fields() {
@@ -3059,14 +3059,13 @@ mod tests {
                 .instructions
                 .iter()
                 .filter(|instruction| {
-                    if let InstructionKind::Binary {
-                        op: BinaryOp::Add, ..
-                    } = instruction.kind
-                    {
-                        true
-                    } else {
-                        false
-                    }
+                    matches!(
+                        instruction.kind,
+                        InstructionKind::Binary {
+                            op: BinaryOp::Add,
+                            ..
+                        }
+                    )
                 })
                 .count(),
             1

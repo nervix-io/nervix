@@ -76,7 +76,7 @@ autoinherit-check:
     git diff --exit-code
 
 cargo-clippy:
-    cargo clippy --all-features --all-targets
+    cargo clippy --all-features --all-targets --workspace
 
 [parallel]
 lint-inner: cargo-clippy proto-lint

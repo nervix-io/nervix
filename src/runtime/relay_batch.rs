@@ -26,6 +26,14 @@ pub(crate) struct RelayRecordBatch {
     pub(super) acks: Vec<AckSet>,
 }
 
+type UnkeyedRelayBatchParts = (
+    RuntimeRecordBatch,
+    Vec<RuntimeRecord>,
+    Vec<RuntimeRecordMetadata>,
+    Vec<Option<BranchKey>>,
+    Vec<AckSet>,
+);
+
 impl RelayRecordBatch {
     pub(super) fn single(
         schema: Arc<CompiledSchema>,
@@ -149,15 +157,7 @@ impl RelayRecordBatch {
         })
     }
 
-    pub(super) fn into_unkeyed_parts(
-        self,
-    ) -> (
-        RuntimeRecordBatch,
-        Vec<RuntimeRecord>,
-        Vec<RuntimeRecordMetadata>,
-        Vec<Option<BranchKey>>,
-        Vec<AckSet>,
-    ) {
+    pub(super) fn into_unkeyed_parts(self) -> UnkeyedRelayBatchParts {
         (
             self.batch,
             self.records,

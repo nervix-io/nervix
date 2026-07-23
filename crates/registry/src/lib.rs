@@ -785,22 +785,27 @@ impl DomainState {
 
         for (key, model) in models {
             let identifier = &key.identifier;
+            let validation = ModelValidationContext {
+                domain,
+                identifier,
+                models,
+            };
             let source = *indices
                 .get(key)
                 .expect("graph node must exist for every model");
 
-            if let Some(branched_by) = model_branch_selection(model) {
-                if let Some(branch_ref) = branched_by.branch_ref() {
-                    let branch = expect_kind(
-                        domain,
-                        identifier,
-                        models,
-                        &indices,
-                        branch_ref,
-                        ModelKind::Branch,
-                    )?;
-                    graph.add_edge(branch, source, EdgeKind::RequiredBy);
-                }
+            if let Some(branched_by) = model_branch_selection(model)
+                && let Some(branch_ref) = branched_by.branch_ref()
+            {
+                let branch = expect_kind(
+                    domain,
+                    identifier,
+                    models,
+                    &indices,
+                    branch_ref,
+                    ModelKind::Branch,
+                )?;
+                graph.add_edge(branch, source, EdgeKind::RequiredBy);
             }
             match model {
                 Model::Ingestor(ingestor) => add_output_branch_dependency_edges(
@@ -965,9 +970,7 @@ impl DomainState {
                     )?;
 
                     let input_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -1042,9 +1045,7 @@ impl DomainState {
                         &processor.output_routes,
                     )?;
                     let input_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -1321,9 +1322,7 @@ impl DomainState {
                     )?;
 
                     let input_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -1468,9 +1467,7 @@ impl DomainState {
                     )?;
 
                     let input_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -1522,9 +1519,7 @@ impl DomainState {
                         deduplicator.filter_where.as_ref(),
                     )?;
                     ensure_processor_output_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &deduplicator.output_routes,
                         &input_schemas,
                         branch_schema,
@@ -1543,9 +1538,7 @@ impl DomainState {
                 }
                 Model::Correlator(correlator) => {
                     let left_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -1553,9 +1546,7 @@ impl DomainState {
                         "correlator left input",
                     )?;
                     let right_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -1653,9 +1644,7 @@ impl DomainState {
                         let output_schema =
                             schema_for_ack_model(domain, identifier, models, &output.relay)?;
                         validate_correlator_output(
-                            domain,
-                            identifier,
-                            models,
+                            validation,
                             &left_schemas,
                             &right_schemas,
                             output,
@@ -1701,9 +1690,7 @@ impl DomainState {
                     )?;
 
                     let input_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -1739,9 +1726,7 @@ impl DomainState {
                         reorderer.filter_where.as_ref(),
                     )?;
                     ensure_processor_output_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &reorderer.output_routes,
                         &input_schemas,
                         branch_schema,
@@ -1775,9 +1760,7 @@ impl DomainState {
                     )?;
 
                     let input_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -1813,9 +1796,7 @@ impl DomainState {
                         junction.filter_where.as_ref(),
                     )?;
                     ensure_processor_output_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &junction.output_routes,
                         &input_schemas,
                         branch_schema,
@@ -1856,9 +1837,7 @@ impl DomainState {
                         window_processor.step.duration.as_deref(),
                     )?;
                     let input_schemas = processor_input_schemas(
-                        domain,
-                        identifier,
-                        models,
+                        validation,
                         &indices,
                         &mut graph,
                         source,
@@ -2664,14 +2643,14 @@ fn validate_branch_model(
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
     parse_branch_ttl(domain, identifier, &branch.ttl)?;
-    if let Some(eviction) = &branch.eviction {
-        if eviction.max_instances() == 0 {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: "branch MAX INSTANCES must be greater than zero".to_string(),
-            }));
-        }
+    if let Some(eviction) = &branch.eviction
+        && eviction.max_instances() == 0
+    {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "branch MAX INSTANCES must be greater than zero".to_string(),
+        }));
     }
     ensure_branch_schema_exists(domain, identifier, models, branch)
 }
@@ -2796,16 +2775,26 @@ fn parse_window_bound_duration(
         })
 }
 
-fn processor_input_schemas<'inputs, 'models>(
-    domain: &Domain,
-    identifier: &Identifier,
+#[derive(Clone, Copy)]
+struct ModelValidationContext<'location, 'models> {
+    domain: &'location Domain,
+    identifier: &'location Identifier,
     models: &'models HashMap<RegistryKey, Model>,
+}
+
+fn processor_input_schemas<'inputs, 'models>(
+    context: ModelValidationContext<'_, 'models>,
     indices: &HashMap<RegistryKey, NodeIndex>,
     graph: &mut DiGraph<ActiveNode, EdgeKind>,
     source: NodeIndex,
     inputs: &'inputs nervix_models::ProcessorInputs,
     relation: &str,
 ) -> Result<Vec<(&'inputs Identifier, &'models CreateSchema)>, Report<RegistryError>> {
+    let ModelValidationContext {
+        domain,
+        identifier,
+        models,
+    } = context;
     if inputs.from.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -4727,9 +4716,11 @@ fn validate_filter_where_for_internal_schemas(
         return Ok(());
     };
     validate_where_program_for_internal_schemas(
-        domain,
-        identifier,
-        models,
+        ModelValidationContext {
+            domain,
+            identifier,
+            models,
+        },
         input_schemas,
         branch_schema,
         filter_where,
@@ -4775,9 +4766,11 @@ fn validate_ingestor_filter_where_for_internal_schemas(
         }));
     }
     validate_where_program_for_internal_schemas(
-        domain,
-        identifier,
-        models,
+        ModelValidationContext {
+            domain,
+            identifier,
+            models,
+        },
         input_schemas,
         branch_schema,
         filter_where,
@@ -4844,9 +4837,11 @@ fn validate_scoped_from_where_for_internal_schemas(
             }));
         };
         validate_where_program_for_scoped_internal_schemas(
-            domain,
-            identifier,
-            models,
+            ModelValidationContext {
+                domain,
+                identifier,
+                models,
+            },
             &[(relay, schema)],
             branch_schema,
             &source_filter.where_clause,
@@ -4859,9 +4854,7 @@ fn validate_scoped_from_where_for_internal_schemas(
 }
 
 fn validate_where_program_for_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    context: ModelValidationContext<'_, '_>,
     input_schemas: &[(&Identifier, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     where_program: &Expression,
@@ -4869,9 +4862,7 @@ fn validate_where_program_for_internal_schemas(
     compile_options: CompileOptions,
 ) -> Result<(), Report<RegistryError>> {
     validate_where_program_for_scoped_internal_schemas(
-        domain,
-        identifier,
-        models,
+        context,
         input_schemas,
         branch_schema,
         where_program,
@@ -4882,9 +4873,7 @@ fn validate_where_program_for_internal_schemas(
 }
 
 fn validate_where_program_for_scoped_internal_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    context: ModelValidationContext<'_, '_>,
     input_schemas: &[(&Identifier, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     where_program: &Expression,
@@ -4892,6 +4881,11 @@ fn validate_where_program_for_scoped_internal_schemas(
     compile_options: CompileOptions,
     input_namespace: &'static str,
 ) -> Result<(), Report<RegistryError>> {
+    let ModelValidationContext {
+        domain,
+        identifier,
+        models,
+    } = context;
     let parsed = lower_route_construction(
         &RouteConstruction {
             where_clause: Some(where_program.clone()),
@@ -5051,15 +5045,18 @@ fn effective_processor_output_filter_map_schema(
 }
 
 fn ensure_processor_output_schemas(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    context: ModelValidationContext<'_, '_>,
     outputs: &ProcessorOutputs,
     input_schemas: &[(&Identifier, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     relation: &str,
     compatibility: ProcessorOutputSchemaCompatibility,
 ) -> Result<(), Report<RegistryError>> {
+    let ModelValidationContext {
+        domain,
+        identifier,
+        models,
+    } = context;
     ensure_processor_outputs_declared(domain, identifier, outputs)?;
     for output in outputs.outputs() {
         let output_schema = schema_for_ack_model(domain, identifier, models, &output.relay)?;
@@ -5579,16 +5576,14 @@ fn referenced_materialized_stream_bindings(
 }
 
 fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    if let EmitSink::Kafka { .. }
-    | EmitSink::Pulsar { .. }
-    | EmitSink::RabbitMq { .. }
-    | EmitSink::Nats { .. }
-    | EmitSink::Sqs { .. } = sink
-    {
-        true
-    } else {
-        false
-    }
+    matches!(
+        sink,
+        EmitSink::Kafka { .. }
+            | EmitSink::Pulsar { .. }
+            | EmitSink::RabbitMq { .. }
+            | EmitSink::Nats { .. }
+            | EmitSink::Sqs { .. }
+    )
 }
 
 fn ensure_stream_is_materialized(
@@ -5782,18 +5777,16 @@ fn effective_ingestor_output_filter_map_schema(
 }
 
 fn ingest_source_supports_headers(source: &IngestSource) -> bool {
-    if let IngestSource::Endpoint { .. }
-    | IngestSource::Http { .. }
-    | IngestSource::Kafka { .. }
-    | IngestSource::Nats { .. }
-    | IngestSource::Pulsar { .. }
-    | IngestSource::RabbitMq { .. }
-    | IngestSource::Sqs { .. } = source
-    {
-        true
-    } else {
-        false
-    }
+    matches!(
+        source,
+        IngestSource::Endpoint { .. }
+            | IngestSource::Http { .. }
+            | IngestSource::Kafka { .. }
+            | IngestSource::Nats { .. }
+            | IngestSource::Pulsar { .. }
+            | IngestSource::RabbitMq { .. }
+            | IngestSource::Sqs { .. }
+    )
 }
 
 fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSchema> {
@@ -6241,15 +6234,18 @@ fn validate_correlate_where_for_internal_schemas(
 }
 
 fn validate_correlator_output(
-    domain: &Domain,
-    identifier: &Identifier,
-    models: &HashMap<RegistryKey, Model>,
+    context: ModelValidationContext<'_, '_>,
     left_schemas: &[(&Identifier, &CreateSchema)],
     right_schemas: &[(&Identifier, &CreateSchema)],
     output: &ProcessorOutput,
     output_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
+    let ModelValidationContext {
+        domain,
+        identifier,
+        models,
+    } = context;
     if output.construction.assignments.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -7301,8 +7297,8 @@ fn validate_processing_branch_selections(
                             "reingestor materialized state",
                             from_relay,
                             &dependency.relay,
-                            &indices,
-                            &graph,
+                            indices,
+                            graph,
                         )?;
                     }
                 }
@@ -7352,8 +7348,8 @@ fn validate_processing_branch_selections(
                         "emitter materialized state",
                         &emitter.from_relay,
                         &dependency.relay,
-                        &indices,
-                        &graph,
+                        indices,
+                        graph,
                     )?;
                 }
             }

@@ -135,10 +135,7 @@ where
 
     pub(super) fn expire(&mut self, now: Timestamp, max_idle: Duration) -> Vec<(K, Arc<V>)> {
         let mut expired = Vec::new();
-        loop {
-            let Some((key, entry)) = self.entries.get_index(0) else {
-                break;
-            };
+        while let Some((key, entry)) = self.entries.get_index(0) {
             let Ok(idle) = now
                 .into_datetime()
                 .signed_duration_since(entry.last_ingestion.into_datetime())

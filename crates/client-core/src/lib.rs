@@ -1245,7 +1245,7 @@ mod tests {
             results: Vec::new(),
             transaction_active: Some(true),
         });
-        assert_eq!(outcome.success, false);
+        assert!(!outcome.success);
         assert_eq!(outcome.kind, CommandOutcomeKind::NotLeader);
         assert_eq!(outcome.message, "parse failed");
         assert_eq!(outcome.diagnostics.len(), 1);

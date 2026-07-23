@@ -852,6 +852,11 @@ struct MessageErrorHandling<'a> {
     ingest_metadata: Option<&'a IngestFilterMapMetadata>,
 }
 
+struct MessageErrorFailure {
+    reason: String,
+    operation: MessageErrorOperation,
+}
+
 #[derive(Debug, Clone)]
 struct MessageErrorCompileSchemas {
     input: Option<Arc<CompiledSchema>>,
@@ -1825,6 +1830,18 @@ pub(crate) struct RuntimeVmCompileContext<'a> {
     pub(crate) current_branch_sensitivity: Option<&'a VmSchemaSensitivity>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RuntimeCompileTarget<'a> {
+    domain: &'a Domain,
+    identifier: &'a Identifier,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeVmSchema {
+    schema: StdArc<arrow_schema::Schema>,
+    sensitivity: VmSchemaSensitivity,
+}
+
 impl RuntimeVmCompileContext<'_> {
     fn branch_binding(&self) -> Option<VmCompileBinding> {
         self.current_branch_schema.map(|schema| {
@@ -2412,7 +2429,7 @@ impl ProcessorInputFilterKind {
 }
 
 impl RelayProcessorNode {
-    fn from_where_filter_scope(&self, incoming_relay: &Identifier) -> RuntimeFilterScope {
+    fn source_filter_scope(&self, incoming_relay: &Identifier) -> RuntimeFilterScope {
         match &self.operation {
             RelayProcessorOperationNode::Correlator {
                 left_relays,
@@ -2563,7 +2580,7 @@ impl RelayProcessorNode {
                 .map(|execution| execution.lookups.clone())
                 .unwrap_or_default();
             let filter_scope = match kind {
-                ProcessorInputFilterKind::FromWhere => self.from_where_filter_scope(incoming_relay),
+                ProcessorInputFilterKind::FromWhere => self.source_filter_scope(incoming_relay),
                 ProcessorInputFilterKind::FilterWhere => RuntimeFilterScope::Source {
                     namespace: "input",
                     allow_header_reads: false,
@@ -2571,11 +2588,15 @@ impl RelayProcessorNode {
                 },
             };
             match compile_scoped_filter_program(
-                &branch.domain,
-                &self.processor,
+                RuntimeCompileTarget {
+                    domain: &branch.domain,
+                    identifier: &self.processor,
+                },
                 Some(&filter_where),
-                batch.arrow_schema(),
-                input_schema.vm_sensitivity(),
+                RuntimeVmSchema {
+                    schema: batch.arrow_schema(),
+                    sensitivity: input_schema.vm_sensitivity(),
+                },
                 kind.error_operation(),
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
@@ -3596,8 +3617,12 @@ impl RelayProcessorNode {
                         .get(&branch.domain)
                         .map(|execution| execution.lookups.clone())
                         .unwrap_or_default();
-                    for output_index in 0..output_routes.routes.len() {
-                        if compiled_output_programs[output_index].is_some() {
+                    for (output_index, compiled_output_program) in compiled_output_programs
+                        .iter_mut()
+                        .enumerate()
+                        .take(output_routes.routes.len())
+                    {
+                        if compiled_output_program.is_some() {
                             continue;
                         }
                         let output = &output_routes.routes[output_index];
@@ -3659,7 +3684,7 @@ impl RelayProcessorNode {
                         .compile();
                         match compiled {
                             Ok(program) => {
-                                compiled_output_programs[output_index] = Some(Box::new(program));
+                                *compiled_output_program = Some(Box::new(program));
                             }
                             Err(error) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
@@ -6146,8 +6171,9 @@ fn referenced_materialized_stream_bindings(
         };
         if !spec.branching.is_empty() && spec.branching != current_branching {
             return Err(format!(
-                "materialized relay '{}' uses branch fields ({}) but current input uses ({})",
-                format!("relay_state.{}", relay.as_str()),
+                "materialized relay 'relay_state.{}' uses branch fields ({}) but current input \
+                 uses ({})",
+                relay.as_str(),
                 format_branched_by(&spec.branching),
                 format_branched_by(current_branching),
             ));
@@ -6199,31 +6225,27 @@ fn referenced_materialized_stream_bindings(
 }
 
 fn ingest_source_supports_headers(source: &IngestSource) -> bool {
-    if let IngestSource::Endpoint { .. }
-    | IngestSource::Http { .. }
-    | IngestSource::Kafka { .. }
-    | IngestSource::Nats { .. }
-    | IngestSource::Pulsar { .. }
-    | IngestSource::RabbitMq { .. }
-    | IngestSource::Sqs { .. } = source
-    {
-        true
-    } else {
-        false
-    }
+    matches!(
+        source,
+        IngestSource::Endpoint { .. }
+            | IngestSource::Http { .. }
+            | IngestSource::Kafka { .. }
+            | IngestSource::Nats { .. }
+            | IngestSource::Pulsar { .. }
+            | IngestSource::RabbitMq { .. }
+            | IngestSource::Sqs { .. }
+    )
 }
 
 fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    if let EmitSink::Kafka { .. }
-    | EmitSink::Pulsar { .. }
-    | EmitSink::RabbitMq { .. }
-    | EmitSink::Nats { .. }
-    | EmitSink::Sqs { .. } = sink
-    {
-        true
-    } else {
-        false
-    }
+    matches!(
+        sink,
+        EmitSink::Kafka { .. }
+            | EmitSink::Pulsar { .. }
+            | EmitSink::RabbitMq { .. }
+            | EmitSink::Nats { .. }
+            | EmitSink::Sqs { .. }
+    )
 }
 
 fn collect_expression_field_paths(expression: &SpannedExpr, fields: &mut Vec<FieldPath>) {
@@ -6455,22 +6477,18 @@ fn compile_message_error_set_program(
     })
 }
 
-pub(crate) fn compile_expression_filter_program(
-    domain: &Domain,
-    identifier: &Identifier,
+fn compile_expression_filter_program(
+    target: RuntimeCompileTarget<'_>,
     filter: Option<&nervix_models::Expression>,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
+    input: RuntimeVmSchema,
     allow_header_reads: bool,
     filter_operation: MessageErrorOperation,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     compile_scoped_filter_program(
-        domain,
-        identifier,
+        target,
         filter,
-        input_schema,
-        input_sensitivity,
+        input,
         filter_operation,
         context,
         RuntimeFilterScope::Source {
@@ -6490,11 +6508,12 @@ fn compile_finalized_output_filter_program(
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     compile_scoped_filter_program(
-        domain,
-        identifier,
+        RuntimeCompileTarget { domain, identifier },
         filter,
-        output_schema,
-        output_sensitivity,
+        RuntimeVmSchema {
+            schema: output_schema,
+            sensitivity: output_sensitivity,
+        },
         MessageErrorOperation::RouteWhere,
         context,
         RuntimeFilterScope::FinalizedOutput,
@@ -6537,15 +6556,18 @@ impl RuntimeFilterScope {
 }
 
 fn compile_scoped_filter_program(
-    domain: &Domain,
-    identifier: &Identifier,
+    target: RuntimeCompileTarget<'_>,
     filter: Option<&nervix_models::Expression>,
-    schema: StdArc<arrow_schema::Schema>,
-    sensitivity: VmSchemaSensitivity,
+    input: RuntimeVmSchema,
     filter_operation: MessageErrorOperation,
     context: RuntimeVmCompileContext<'_>,
     scope: RuntimeFilterScope,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+    let RuntimeCompileTarget { domain, identifier } = target;
+    let RuntimeVmSchema {
+        schema,
+        sensitivity,
+    } = input;
     let Some(filter) = filter else {
         return Ok(None);
     };
@@ -6648,18 +6670,21 @@ fn compile_scoped_filter_program(
 }
 
 fn compile_processor_output_filter_map_program(
-    domain: &Domain,
-    identifier: &Identifier,
+    target: RuntimeCompileTarget<'_>,
     input_relays: &[Identifier],
     output_relay: &Identifier,
     construction: &RouteConstruction,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
+    schemas: RuntimeVmSchemaPair,
     inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
-    output_schema: StdArc<arrow_schema::Schema>,
-    output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+    let RuntimeCompileTarget { domain, identifier } = target;
+    let RuntimeVmSchemaPair {
+        input: input_schema,
+        input_sensitivity,
+        output: output_schema,
+        output_sensitivity,
+    } = schemas;
     let parsed = if let Some(tensors) = inferencer_tensors {
         lower_generated_route(
             construction,
@@ -7028,13 +7053,17 @@ pub(crate) fn compile_emitter_filter_map_program(
     })?;
 
     let body = compile_emitter_filter_map_part(
-        domain,
-        &emitter.name,
+        RuntimeCompileTarget {
+            domain,
+            identifier: &emitter.name,
+        },
         parsed,
-        input_schema,
-        input_sensitivity,
-        output_schema,
-        output_sensitivity,
+        RuntimeVmSchemaPair {
+            input: input_schema,
+            input_sensitivity,
+            output: output_schema,
+            output_sensitivity,
+        },
         codec_route,
         error_sites,
         context,
@@ -7048,17 +7077,20 @@ pub(crate) fn compile_emitter_filter_map_program(
 }
 
 fn compile_emitter_filter_map_part(
-    domain: &Domain,
-    identifier: &Identifier,
+    target: RuntimeCompileTarget<'_>,
     parsed: nervix_nspl::vm_program::SpannedNode<nervix_nspl::vm_program::Program>,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    output_schema: StdArc<arrow_schema::Schema>,
-    output_sensitivity: VmSchemaSensitivity,
+    schemas: RuntimeVmSchemaPair,
     codec_route: bool,
     error_sites: Vec<CompiledMessageErrorSite>,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+    let RuntimeCompileTarget { domain, identifier } = target;
+    let RuntimeVmSchemaPair {
+        input: input_schema,
+        input_sensitivity,
+        output: output_schema,
+        output_sensitivity,
+    } = schemas;
     let mut bindings = if codec_route {
         vec![
             VmCompileBinding::readonly("input", input_schema.clone())
@@ -7157,11 +7189,12 @@ pub(crate) fn compile_session_filter_map_program(
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     compile_expression_filter_program(
-        domain,
-        identifier,
+        RuntimeCompileTarget { domain, identifier },
         where_clause,
-        input_schema,
-        input_sensitivity,
+        RuntimeVmSchema {
+            schema: input_schema,
+            sensitivity: input_sensitivity,
+        },
         false,
         MessageErrorOperation::SourceWhere,
         context,
@@ -7594,8 +7627,10 @@ async fn flush_branch_reorderer_output(
                         processor,
                         &message_error_policy,
                         message,
-                        error.to_string(),
-                        MessageErrorOperation::Finalize,
+                        MessageErrorFailure {
+                            reason: error.to_string(),
+                            operation: MessageErrorOperation::Finalize,
+                        },
                     )
                     .await;
             }
@@ -7866,17 +7901,19 @@ async fn evaluate_correlator_output_message(
     )
     .await
     .map_err(|error| {
-        planned_message_error(
+        planned_structured_message_error(
             source_message.clone(),
-            MessageErrorCode::Evaluation,
-            format!(
-                "correlator '{}' failed to prepare TO output lookup inputs: {}",
-                processor.as_str(),
-                error
+            structured_message_error(
+                MessageErrorCode::Evaluation,
+                format!(
+                    "correlator '{}' failed to prepare TO output lookup inputs: {}",
+                    processor.as_str(),
+                    error
+                ),
+                MessageErrorOperation::Set,
+                None,
+                std::iter::empty(),
             ),
-            MessageErrorOperation::Set,
-            None,
-            std::iter::empty(),
             None,
             materialized_state_snapshot(&source_message.record),
         )
@@ -7887,17 +7924,19 @@ async fn evaluate_correlator_output_message(
     let input =
         vm_typed_batch_from_runtime_record(&combined, None, &program.program.compiled.input_schema)
             .map_err(|error| {
-                planned_message_error(
+                planned_structured_message_error(
                     source_message.clone(),
-                    MessageErrorCode::Internal,
-                    format!(
-                        "correlator '{}' failed to build TO output input batch: {}",
-                        processor.as_str(),
-                        error
+                    structured_message_error(
+                        MessageErrorCode::Internal,
+                        format!(
+                            "correlator '{}' failed to build TO output input batch: {}",
+                            processor.as_str(),
+                            error
+                        ),
+                        MessageErrorOperation::Set,
+                        None,
+                        std::iter::empty(),
                     ),
-                    MessageErrorOperation::Set,
-                    None,
-                    std::iter::empty(),
                     None,
                     materialized_state_snapshot(&source_message.record),
                 )
@@ -7912,17 +7951,19 @@ async fn evaluate_correlator_output_message(
     )
     .await
     .map_err(|error| {
-        planned_message_error(
+        planned_structured_message_error(
             source_message.clone(),
-            MessageErrorCode::Internal,
-            format!(
-                "correlator '{}' failed to evaluate TO output: {}",
-                processor.as_str(),
-                error
+            structured_message_error(
+                MessageErrorCode::Internal,
+                format!(
+                    "correlator '{}' failed to evaluate TO output: {}",
+                    processor.as_str(),
+                    error
+                ),
+                MessageErrorOperation::Set,
+                None,
+                std::iter::empty(),
             ),
-            MessageErrorOperation::Set,
-            None,
-            std::iter::empty(),
             None,
             materialized_state_snapshot(&source_message.record),
         )
@@ -7932,17 +7973,19 @@ async fn evaluate_correlator_output_message(
         return Ok(None);
     }
     if result.selected_rows.len() != 1 || result.batch.row_count() != 1 {
-        return Err(planned_message_error(
+        return Err(planned_structured_message_error(
             source_message,
-            MessageErrorCode::Internal,
-            format!(
-                "correlator '{}' TO output produced {} rows for one correlation",
-                processor.as_str(),
-                result.batch.row_count()
+            structured_message_error(
+                MessageErrorCode::Internal,
+                format!(
+                    "correlator '{}' TO output produced {} rows for one correlation",
+                    processor.as_str(),
+                    result.batch.row_count()
+                ),
+                MessageErrorOperation::Finalize,
+                None,
+                std::iter::empty(),
             ),
-            MessageErrorOperation::Finalize,
-            None,
-            std::iter::empty(),
             None,
             HashMap::default(),
         ));
@@ -7979,17 +8022,19 @@ async fn evaluate_correlator_output_message(
             source_message.record.metadata().clone(),
         )
         .ok();
-        planned_message_error(
+        planned_structured_message_error(
             source_message.clone(),
-            MessageErrorCode::Validation,
-            format!(
-                "correlator '{}' failed to decode TO output row: {}",
-                processor.as_str(),
-                error
+            structured_message_error(
+                MessageErrorCode::Validation,
+                format!(
+                    "correlator '{}' failed to decode TO output row: {}",
+                    processor.as_str(),
+                    error
+                ),
+                MessageErrorOperation::Finalize,
+                None,
+                invalid_output_fields(&result.batch, 0),
             ),
-            MessageErrorOperation::Finalize,
-            None,
-            invalid_output_fields(&result.batch, 0),
             partial_output,
             materialized_state_snapshot(&source_message.record),
         )
@@ -8057,8 +8102,10 @@ async fn enqueue_correlator_output(
                             processor,
                             &policy,
                             message,
-                            error.to_string(),
-                            MessageErrorOperation::Finalize,
+                            MessageErrorFailure {
+                                reason: error.to_string(),
+                                operation: MessageErrorOperation::Finalize,
+                            },
                         )
                         .await;
                 }
@@ -8775,16 +8822,20 @@ async fn evaluate_processor_output_events(
             ProcessorOutputFilterSource::InputRelays
             | ProcessorOutputFilterSource::Inferencer(_) => {
                 compile_processor_output_filter_map_program(
-                    &context.branch.domain,
-                    context.processor,
+                    RuntimeCompileTarget {
+                        domain: &context.branch.domain,
+                        identifier: context.processor,
+                    },
                     &input_relays,
                     &output.relay,
                     &output.construction,
-                    batch.arrow_schema(),
-                    input_sensitivity,
+                    RuntimeVmSchemaPair {
+                        input: batch.arrow_schema(),
+                        input_sensitivity,
+                        output: output_schema.arrow_schema(),
+                        output_sensitivity: output_schema.vm_sensitivity(),
+                    },
                     context.filter_source.inferencer_tensors(),
-                    output_schema.arrow_schema(),
-                    output_schema.vm_sensitivity(),
                     compile_context,
                 )
             }
@@ -8867,10 +8918,12 @@ async fn evaluate_processor_output_events(
         context.processor,
         program,
         batch.records.clone(),
-        execution_now,
-        &side_inputs,
-        &batch.keys,
-        &batch.acks,
+        FilterMapInputPreparation {
+            execution_now,
+            side_inputs: &side_inputs,
+            branch_keys: &batch.keys,
+            acks: &batch.acks,
+        },
     )
     .await?;
     let executed = execute_filter_map_program(
@@ -9178,7 +9231,7 @@ async fn dispatch_selected_processor_outputs(
             let output_schema = match relay_schema_for_runtime(
                 &context.branch.runtime,
                 &context.branch.domain,
-                &relay,
+                relay,
             ) {
                 Ok(schema) => schema,
                 Err(error) => {
@@ -9193,8 +9246,10 @@ async fn dispatch_selected_processor_outputs(
                                 context.processor,
                                 &message_error_policy,
                                 message,
-                                error.to_string(),
-                                MessageErrorOperation::Finalize,
+                                MessageErrorFailure {
+                                    reason: error.to_string(),
+                                    operation: MessageErrorOperation::Finalize,
+                                },
                             )
                             .await;
                     }
@@ -9542,23 +9597,25 @@ async fn plan_filter_map_messages(
         let record = match vm_output_row_to_decoded_record(&result.batch, output_row) {
             Ok(record) => record.into_runtime_record(source_records[input_row].metadata().clone()),
             Err(error) => {
-                message_errors.push(planned_message_error(
+                message_errors.push(planned_structured_message_error(
                     RelayMessage {
                         key: keys[input_row].clone(),
                         record: source_records[input_row].clone(),
                         acks: std::mem::take(&mut acks[input_row]),
                     },
-                    MessageErrorCode::Evaluation,
-                    format!(
-                        "{} '{}' failed to materialize {} output row: {}",
-                        processor_kind,
-                        processor.as_str(),
-                        program_label,
-                        error
+                    structured_message_error(
+                        MessageErrorCode::Evaluation,
+                        format!(
+                            "{} '{}' failed to materialize {} output row: {}",
+                            processor_kind,
+                            processor.as_str(),
+                            program_label,
+                            error
+                        ),
+                        operation_for_filter_label(program_label),
+                        None,
+                        std::iter::empty(),
                     ),
-                    operation_for_filter_label(program_label),
-                    None,
-                    std::iter::empty(),
                     None,
                     materialized_state_snapshot(&input_records[input_row]),
                 ));
@@ -9641,10 +9698,12 @@ async fn plan_emitter_filter_map_messages(
         emitter,
         &program.body,
         input_records,
-        execution_now,
-        side_inputs,
-        &batch.keys,
-        &batch.acks,
+        FilterMapInputPreparation {
+            execution_now,
+            side_inputs,
+            branch_keys: &batch.keys,
+            acks: &batch.acks,
+        },
     )
     .await?;
     let RelayRecordBatch {
@@ -9734,21 +9793,23 @@ async fn plan_emitter_filter_map_messages(
                             .ok()
                         })
                         .flatten();
-                    message_errors.push(planned_message_error(
+                    message_errors.push(planned_structured_message_error(
                         RelayMessage {
                             key: keys[input_row].clone(),
                             record: source_records[input_row].clone(),
                             acks: std::mem::take(&mut acks[input_row]),
                         },
-                        MessageErrorCode::Evaluation,
-                        format!(
-                            "emitter '{}' failed to materialize FILTER-MAP headers: {}",
-                            emitter.as_str(),
-                            error
+                        structured_message_error(
+                            MessageErrorCode::Evaluation,
+                            format!(
+                                "emitter '{}' failed to materialize FILTER-MAP headers: {}",
+                                emitter.as_str(),
+                                error
+                            ),
+                            MessageErrorOperation::Invoke,
+                            None,
+                            std::iter::empty(),
                         ),
-                        MessageErrorOperation::Invoke,
-                        None,
-                        std::iter::empty(),
                         partial_output,
                         materialized_state_snapshot(&body_input_records[input_row]),
                     ));
@@ -9769,25 +9830,27 @@ async fn plan_emitter_filter_map_messages(
                         .ok()
                     })
                     .flatten();
-                message_errors.push(planned_message_error(
+                message_errors.push(planned_structured_message_error(
                     RelayMessage {
                         key: keys[input_row].clone(),
                         record: source_records[input_row].clone(),
                         acks: std::mem::take(&mut acks[input_row]),
                     },
-                    MessageErrorCode::Validation,
-                    format!(
-                        "emitter '{}' failed to materialize FILTER-MAP output row: {}",
-                        emitter.as_str(),
-                        error
+                    structured_message_error(
+                        MessageErrorCode::Validation,
+                        format!(
+                            "emitter '{}' failed to materialize FILTER-MAP output row: {}",
+                            emitter.as_str(),
+                            error
+                        ),
+                        if program.codec_route {
+                            MessageErrorOperation::Finalize
+                        } else {
+                            MessageErrorOperation::Values
+                        },
+                        None,
+                        invalid_output_fields(&body_result.batch, output_row),
                     ),
-                    if program.codec_route {
-                        MessageErrorOperation::Finalize
-                    } else {
-                        MessageErrorOperation::Values
-                    },
-                    None,
-                    invalid_output_fields(&body_result.batch, output_row),
                     partial_output,
                     materialized_state_snapshot(&body_input_records[input_row]),
                 ));
@@ -9816,16 +9879,26 @@ struct ExecutedFilterMap {
     acks: Vec<AckSet>,
 }
 
+struct FilterMapInputPreparation<'a> {
+    execution_now: Timestamp,
+    side_inputs: &'a HashMap<String, RuntimeValue>,
+    branch_keys: &'a [Option<BranchKey>],
+    acks: &'a [AckSet],
+}
+
 async fn prepare_filter_map_input_records(
     processor_kind: &str,
     processor: &Identifier,
     program: &CompiledProgramWithMaterializedInterest,
     input_records: Vec<RuntimeRecord>,
-    execution_now: Timestamp,
-    side_inputs: &HashMap<String, RuntimeValue>,
-    branch_keys: &[Option<BranchKey>],
-    acks: &[AckSet],
+    preparation: FilterMapInputPreparation<'_>,
 ) -> Result<Vec<RuntimeRecord>, PlannedGeneralError> {
+    let FilterMapInputPreparation {
+        execution_now,
+        side_inputs,
+        branch_keys,
+        acks,
+    } = preparation;
     let input_records = augment_runtime_records_with_side_inputs(input_records, side_inputs);
     let input_records = augment_runtime_records_with_branch_keys(input_records, branch_keys)
         .map_err(|error| PlannedGeneralError {
@@ -14278,7 +14351,7 @@ async fn dispatch_wasm_output_route(
                 );
             return None;
         }
-        let dispatched_acks = decoded.batch.acks.iter().cloned().collect::<Vec<_>>();
+        let dispatched_acks = decoded.batch.acks.to_vec();
         if context
             .branch
             .dispatch_output(
@@ -14380,10 +14453,12 @@ async fn dispatch_wasm_output_route(
         context.processor,
         program,
         input_records,
-        execution_now,
-        &side_inputs,
-        &decoded.batch.keys,
-        &decoded.batch.acks,
+        FilterMapInputPreparation {
+            execution_now,
+            side_inputs: &side_inputs,
+            branch_keys: &decoded.batch.keys,
+            acks: &decoded.batch.acks,
+        },
     )
     .await
     {
@@ -14647,7 +14722,7 @@ async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let dispatched_acks = forwarded.acks.iter().cloned().collect::<Vec<_>>();
+    let dispatched_acks = forwarded.acks.to_vec();
     if context
         .branch
         .dispatch_output(
@@ -14754,8 +14829,10 @@ async fn apply_wasm_sidecar_terminal_decisions(
                         record: context.record,
                         acks: context.acks,
                     },
-                    message_error.reason.clone(),
-                    MessageErrorOperation::Wasm,
+                    MessageErrorFailure {
+                        reason: message_error.reason.clone(),
+                        operation: MessageErrorOperation::Wasm,
+                    },
                 )
                 .await;
         }
@@ -15327,24 +15404,6 @@ fn structured_message_error(
         operation_index,
         fields: SortedSet::from_unsorted(fields.into_iter().collect()),
         occurred_at: current_timestamp(),
-    }
-}
-
-fn planned_message_error(
-    message: RelayMessage,
-    code: MessageErrorCode,
-    reason: String,
-    operation: MessageErrorOperation,
-    operation_index: Option<u32>,
-    fields: impl IntoIterator<Item = FieldPath>,
-    partial_output: Option<RuntimeRecord>,
-    materialized_state: HashMap<String, RuntimeValue>,
-) -> PlannedMessageError {
-    PlannedMessageError {
-        message,
-        error: structured_message_error(code, reason, operation, operation_index, fields),
-        partial_output,
-        materialized_state,
     }
 }
 

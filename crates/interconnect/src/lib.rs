@@ -1716,8 +1716,9 @@ fn map_pem_error(err: PemError) -> TlsConfigError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, io::ErrorKind, path::PathBuf, process::Command};
+    use std::{io::ErrorKind, path::PathBuf, process::Command};
 
+    use ahash::HashMap;
     use nervix_models::{Domain, Identifier};
     use tokio::time::timeout;
 
@@ -1763,7 +1764,7 @@ mod tests {
             identities
                 .iter()
                 .map(|identity| (identity.node_id().to_string(), identity.public_key()))
-                .collect::<HashMap<_, _, ahash::RandomState>>(),
+                .collect::<HashMap<_, _>>(),
         );
         PeerVerifier::new(move |node_id| keys.get(node_id).copied())
     }
