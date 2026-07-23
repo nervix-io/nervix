@@ -5,6 +5,7 @@ mutants.out
 .nervix_client_history
 .nervix_history
 .wrangler
+.venv
 docs/book
 __pycache__
 /tls/

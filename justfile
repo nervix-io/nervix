@@ -97,7 +97,7 @@ validate: fmt lint validate-skill
 validate-ci: fmt-check lint validate-skill
 
 test-docs:
-    python -m unittest discover -s scripts/tests -p "test_*.py"
+    uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
 book version="": test-docs
@@ -139,10 +139,10 @@ book-pdf version="" output="":
     echo "${output_path}"
 
 book-upload prefix="snapshot" bucket="nervix-docs":
-    python scripts/upload_book_to_r2.py --bucket {{ bucket }} --prefix {{ prefix }}
+    uv run --locked python scripts/upload_book_to_r2.py --bucket {{ bucket }} --prefix {{ prefix }}
 
 publish-dir source target zone_id alias="snapshot" bucket="nervix-docs":
-    python scripts/publish_docs_alias.py --source {{ source }} --target {{ target }} --alias {{ alias }} --bucket {{ bucket }} --zone-id {{ zone_id }}
+    uv run --locked python scripts/publish_docs_alias.py --source {{ source }} --target {{ target }} --alias {{ alias }} --bucket {{ bucket }} --zone-id {{ zone_id }}
 
 purge-cache zone_id:
     python scripts/purge_cloudflare_cache.py --zone-id {{ zone_id }}
