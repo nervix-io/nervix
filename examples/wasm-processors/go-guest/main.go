@@ -176,21 +176,19 @@ func nervixCurrentDomainTimeNanos() int64 {
 }
 
 //export nervix_process_batch
-func nervixProcessBatch(size int32) int32 {
+func nervixProcessBatch(ptr int32, size int32) int32 {
 	return guardedExport(func() int32 {
-		if size < 0 {
-			return errInvalidSize
-		}
 		if !initialized {
 			return errNotInitialized
 		}
-		if int(size) > len(buffer) {
-			return errOutOfBounds
+		data, code := readBufferRange(ptr, size)
+		if code != success {
+			return code
 		}
 		processedBatches++
 		lastDomainTimeNanos = hostDomainTimeNanos()
 		lastTimeoutHandle = hostTimeoutAfterNanos(defaultTimeoutNanos)
-		input, code := decodeEnvelope(buffer[:int(size)])
+		input, code := decodeEnvelope(data)
 		if code != success {
 			return code
 		}
@@ -241,7 +239,7 @@ func nervixProcessBatch(size int32) int32 {
 		}
 		pendingStartRow = processedRows
 		processedRows += rowCount
-		pendingBatch = append(pendingBatch[:0], buffer[:int(size)]...)
+		pendingBatch = append(pendingBatch[:0], data...)
 		if processedBatches%flushEveryBatches == 0 {
 			return flushPending()
 		}

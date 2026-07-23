@@ -5,8 +5,8 @@ not use WASI.
 
 All byte payloads move through the guest module's default exported linear
 memory. The guest owns one reusable byte buffer. The host asks the guest to grow
-that buffer, writes a batch envelope into it, then calls the processor
-entrypoint with the number of valid bytes.
+that buffer, builds a batch envelope directly in it, then calls the processor
+entrypoint with the exact pointer and number of valid bytes.
 
 ## Imported Host Functions
 
@@ -27,7 +27,7 @@ The guest imports these functions from the `env` module:
 | `nervix_alloc` | `(size: i32) -> i32` | Ensures the single reusable buffer can hold `size` bytes, resizes it, and returns `nervix_buffer_ptr()`. |
 | `nervix_init` | `(ptr: i32, size: i32) -> i32` | Reads size-prefixed FlatBuffers init metadata from guest memory. Must be called before processing. |
 | `nervix_current_domain_time_nanos` | `() -> i64` | Returns the current domain-clock time by calling the host import. |
-| `nervix_process_batch` | `(size: i32) -> i32` | Processes `size` bytes of batch envelope from the guest buffer. Prototype behavior filters the input batch before emitting a new batch envelope. |
+| `nervix_process_batch` | `(ptr: i32, size: i32) -> i32` | Processes the exact batch-envelope range in the guest buffer. Prototype behavior filters the input batch before emitting a new batch envelope. |
 | `nervix_on_timeout` | `(handle: i64) -> i32` | Host callback when a previously requested timeout fires. |
 | `nervix_read_emit` | `() -> i32` | If the guest has a pending outgoing batch envelope, writes the next envelope into the reusable buffer, removes it from the pending emit queue, and returns the byte size. Returns `0` when nothing is pending. |
 | `nervix_dump_state` | `() -> i32` | Serializes guest state into the reusable buffer and returns the byte size. |
@@ -53,9 +53,14 @@ Every buffer carries the `NVWX` file identifier. The ABI function's size
 argument or return value must agree with the internal FlatBuffers size prefix.
 Arrow IPC values are FlatBuffers byte vectors and are read as borrowed slices
 without deserializing or copying them. Crossing the WebAssembly linear-memory
-boundary still requires one host/guest memory transfer; after a guest emit, the
-host retains that transferred FlatBuffer and exposes its generated Arrow vector
-as a shared slice rather than copying the vector again.
+boundary still requires writing source bytes once. Normally the host FlatBuffers
+builder writes directly into the final guest-memory range. Because FlatBuffers
+builds backwards, that range may start after `nervix_buffer_ptr()`, which is why
+`nervix_process_batch` receives both `ptr` and `size`. If the estimated capacity
+is insufficient, the host finishes in spill storage, releases the memory borrow,
+grows the guest buffer, and copies the finished message once. After a guest emit,
+the host retains that transferred FlatBuffer and exposes its generated Arrow
+vector as a shared slice rather than copying the vector again.
 
 Host input:
 

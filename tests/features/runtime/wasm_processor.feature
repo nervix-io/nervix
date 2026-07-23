@@ -332,6 +332,69 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: WASM processor grows its guest input buffer for a larger batch
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_growing_buffer;
+      UPLOAD RESOURCE wasm_growing_buffer VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA buffered_metric (
+        value I32,
+        message STRING
+      );
+      CREATE STRICT WIRE JSON SCHEMA buffered_metric_wire (
+        value integer,
+        message string
+      );
+      CREATE CODEC buffered_metric_codec
+        FROM WIRE JSON SCHEMA buffered_metric_wire
+        TO SCHEMA buffered_metric;
+      CREATE RELAY raw_buffered_metrics SCHEMA buffered_metric UNBRANCHED;
+      CREATE RELAY filtered_buffered_metrics SCHEMA buffered_metric UNBRANCHED;
+      CREATE VHOST edge wasm-buffer-growth-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR buffered_metric_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING buffered_metric_codec
+        TO raw_buffered_metrics
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_buffered_metrics FROM raw_buffered_metrics
+        USING RESOURCE wasm_growing_buffer VERSION 1
+        FILE 'processors/filter_even.wasm'
+        UNBRANCHED
+        TO filtered_buffered_metrics
+        SET value = value, message = message
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION filtered_buffered_metrics_subscription TO filtered_buffered_metrics;
+      START;
+      """
+    When http payload with value 1 and a 16 byte message is posted to host "wasm-buffer-growth-{{test_id}}.example.com" path "/metrics"
+    And http payload with value 2 and a 65536 byte message is posted to host "wasm-buffer-growth-{{test_id}}.example.com" path "/metrics"
+    And http payload with value 3 and a 16 byte message is posted to host "wasm-buffer-growth-{{test_id}}.example.com" path "/metrics"
+    Then within "10s" the relay subscription receives a payload
+      """
+      "value":2
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: WASM processor shares one generated column across branched output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

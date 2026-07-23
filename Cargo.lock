@@ -6343,6 +6343,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "bytes",
+ "flatbuffers",
  "nervix-models",
  "nervix-wasm-protocol",
  "parking_lot",

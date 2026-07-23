@@ -1569,7 +1569,7 @@ fn malformed_output_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
       (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_current_domain_time_nanos") (result i64) call $domain_time)
-      (func (export "nervix_process_batch") (param i32) (result i32)
+      (func (export "nervix_process_batch") (param i32 i32) (result i32)
         i32.const 1
         global.set $emitted
         i32.const 0)
@@ -1620,7 +1620,7 @@ fn uninitialized_output_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
           (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
           (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
-          (func (export "nervix_process_batch") (param i32) (result i32)
+          (func (export "nervix_process_batch") (param i32 i32) (result i32)
             i32.const 1
             global.set $emitted
             i32.const 0)
@@ -1656,7 +1656,7 @@ fn trapping_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
       (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_current_domain_time_nanos") (result i64) call $domain_time)
-      (func (export "nervix_process_batch") (param i32) (result i32)
+      (func (export "nervix_process_batch") (param i32 i32) (result i32)
         unreachable)
       (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
       (func (export "nervix_read_emit") (result i32) (i32.const 0))
@@ -7807,6 +7807,35 @@ async fn when_http_payload_is_posted(
         .publish_http("node-1", &host, &path, &payload)
         .await
         .expect("failed to post http payload");
+}
+
+#[when(
+    expr = "http payload with value {int} and a {int} byte message is posted to host {string} \
+            path {string}"
+)]
+async fn when_large_http_payload_is_posted(
+    world: &mut ScenarioWorld,
+    value: i64,
+    message_size: usize,
+    host: String,
+    path: String,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = serde_json::json!({
+        "value": value,
+        "message": "x".repeat(message_size),
+    })
+    .to_string();
+    append_cucumber_log_line(&format!(
+        "http publish large payload: node=node-1 host={host} path={path} value={value} \
+         message_size={message_size}"
+    ));
+    world
+        .cluster()
+        .publish_http("node-1", &host, &path, &payload)
+        .await
+        .expect("failed to post large http payload");
 }
 
 #[when(expr = "http payloads are posted concurrently to host {string} path {string}")]
