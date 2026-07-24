@@ -58,6 +58,7 @@ Feature: JAQ native codec
       | 3            | 0             | CBOR   | cbor_wrapped_notification | .payload                                                                                                       |
 
   Scenario Outline: Kafka emitter serializes XML through JAQ native codec
+    Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -104,7 +105,7 @@ Feature: JAQ native codec
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE EMITTER kafka_notifications FROM notifications ENCODE USING xml_notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
         INHERIT ALL
@@ -181,6 +182,7 @@ Feature: JAQ native codec
       | 3            |
 
   Scenario Outline: Emitter rejects ingestion-only JAQ native codec
+    Given Kafka is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -204,7 +206,7 @@ Feature: JAQ native codec
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE EMITTER kafka_notifications FROM notifications ENCODE USING json_notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}

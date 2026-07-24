@@ -1,5 +1,6 @@
 Feature: RabbitMQ ingestion
   Scenario Outline: RabbitMQ ingestor delivers JSON payloads to a subscribed relay
+    Given RabbitMQ is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -24,7 +25,7 @@ Feature: RabbitMQ ingestion
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
-          'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
+          'addr' = '{{rabbitmq_addr}}'
         };
         CREATE INGESTOR rabbit_notifications
         FROM RABBITMQ rabbit_main QUEUE notifications_{{test_id}} INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -60,6 +61,7 @@ Feature: RabbitMQ ingestion
       | 3            | 2         | 1             |
 
   Scenario Outline: RabbitMQ ingestor reports transient source failures and recovers
+    Given RabbitMQ is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -85,7 +87,7 @@ Feature: RabbitMQ ingestion
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
-          'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
+          'addr' = '{{rabbitmq_addr}}'
         };
         CREATE INGESTOR rabbit_notifications
         FROM RABBITMQ rabbit_main QUEUE notifications_reconnect_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s

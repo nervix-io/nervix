@@ -1,5 +1,6 @@
 Feature: Kafka TLS resource mounts
   Scenario Outline: Kafka ingestor consumes over native TLS with a mounted resource directory
+    Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -33,7 +34,7 @@ Feature: Kafka TLS resource mounts
         TYPE KAFKA
         MOUNT dev_tls
         CONFIG {
-          'bootstrap.servers' = 'localhost:9094',
+          'bootstrap.servers' = '{{kafka_tls_addr}}',
           'security.protocol' = 'ssl',
           'ssl.ca.location' = '{{dev_tls}}/ca.pem'
         };

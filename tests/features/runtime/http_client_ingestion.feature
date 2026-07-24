@@ -1,5 +1,6 @@
 Feature: HTTP client ingestion
   Scenario Outline: HTTP client ingestor polls a remote endpoint and delivers a JSON payload
+    Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -23,7 +24,7 @@ Feature: HTTP client ingestion
         CREATE CLIENT http_main
         TYPE HTTP
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:18080/http/{{test_id}}',
+          'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',
           'timeout_ms' = 5000
         };
@@ -53,6 +54,7 @@ Feature: HTTP client ingestion
       | 3            | 1             |
 
   Scenario Outline: HTTP client ingestor reports transient source failures and recovers
+    Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -77,7 +79,7 @@ Feature: HTTP client ingestion
         CREATE CLIENT http_main
         TYPE HTTP
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:18080/http/{{test_id}}',
+          'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',
           'timeout_ms' = 5000
         };

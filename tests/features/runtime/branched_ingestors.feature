@@ -1,5 +1,7 @@
 Feature: Ingestor branch consistency
   Scenario Outline: Ingestors targeting the same relay must use its exact named branch
+    Given Redis is running
+    And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -38,14 +40,14 @@ Feature: Ingestor branch consistency
       CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-mqtt-{{test_id}}'
         };
 
       CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
-          'addr' = 'redis://127.0.0.1:6379/'
+          'addr' = '{{redis_addr}}'
         }; CREATE INGESTOR mqtt_notifications
         FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
         DECODE USING notification_codec
@@ -76,6 +78,7 @@ Feature: Ingestor branch consistency
       | 3            | 1             |
 
   Scenario Outline: Differently named branches with the same schema are incompatible
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -110,14 +113,14 @@ Feature: Ingestor branch consistency
       CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-mqtt-a-{{test_id}}'
         };
 
       CREATE CLIENT mqtt_secondary
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-mqtt-b-{{test_id}}'
         };
 

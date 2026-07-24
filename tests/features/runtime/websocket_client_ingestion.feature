@@ -1,5 +1,7 @@
 Feature: Websocket client ingestion
   Scenario Outline: Websocket client ingestor connects to a remote endpoint and delivers a JSON payload
+    Given Kafka is running
+    And the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -28,13 +30,13 @@ Feature: Websocket client ingestion
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE CLIENT ws_main
         TYPE WEBSOCKETS
         CONFIG {
-          'endpoint' = 'ws://127.0.0.1:18080/ws/{{test_id}}'
+          'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
 
       CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
@@ -69,6 +71,7 @@ Feature: Websocket client ingestion
       | 3            | 1             |
 
   Scenario Outline: Websocket client ingestor reports transient source failures and recovers
+    Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -93,7 +96,7 @@ Feature: Websocket client ingestion
         CREATE CLIENT ws_main
         TYPE WEBSOCKETS
         CONFIG {
-          'endpoint' = 'ws://127.0.0.1:18080/ws/{{test_id}}'
+          'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
         CREATE INGESTOR ws_notifications
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL

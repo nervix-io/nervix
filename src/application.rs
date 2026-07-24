@@ -116,7 +116,6 @@ use ort::{
 use parking_lot::{Mutex as ParkingMutex, RwLock};
 use prost::Message as ProstMessage;
 use rdkafka::{config::ClientConfig, consumer::StreamConsumer};
-use registry::{ActiveGraph, Registry, RegistryError};
 use reqwest::Client as HttpClient;
 use rustls::{
     RootCertStore, ServerConfig,
@@ -142,6 +141,8 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
 };
+
+use crate::registry::{ActiveGraph, Registry, RegistryError};
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
@@ -7537,7 +7538,8 @@ impl SessionServiceImpl {
                     .edges()
                     .into_iter()
                     .filter_map(|(from, to, edge)| {
-                        (edge == registry::EdgeKind::RequiredBy && from == model.name).then_some(to)
+                        (edge == crate::registry::EdgeKind::RequiredBy && from == model.name)
+                            .then_some(to)
                     })
                     .collect::<Vec<_>>();
                 references.sort();

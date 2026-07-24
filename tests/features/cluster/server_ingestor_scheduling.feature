@@ -1,5 +1,6 @@
 Feature: Server ingestor scheduling
   Scenario: HTTP endpoint ingestors accept traffic on every live node
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -26,7 +27,7 @@ Feature: Server ingestor scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -64,6 +65,7 @@ Feature: Server ingestor scheduling
       """
 
   Scenario: Websocket endpoint ingestors accept traffic on every live node
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -90,7 +92,7 @@ Feature: Server ingestor scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE ENDPOINT ws_notifications_endpoint
@@ -128,6 +130,7 @@ Feature: Server ingestor scheduling
       """
 
   Scenario: HTTP endpoint ingestors follow node stop and rejoin
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -154,7 +157,7 @@ Feature: Server ingestor scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT http_notifications_endpoint
@@ -196,6 +199,7 @@ Feature: Server ingestor scheduling
       """
 
   Scenario: Websocket endpoint ingestors follow node stop and rejoin
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -222,7 +226,7 @@ Feature: Server ingestor scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE ENDPOINT ws_notifications_endpoint

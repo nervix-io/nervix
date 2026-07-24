@@ -1,10 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     fs::{OpenOptions, create_dir_all},
     io::Write,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc as StdArc, OnceLock},
+    sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -18,7 +20,7 @@ use cucumber::{
     World as _, WriterExt,
     gherkin::Step,
     given, then, when,
-    writer::{self},
+    writer::{self, Stats as _},
 };
 use futures_util::{TryStreamExt, future::try_join_all};
 use iceberg::{
@@ -63,9 +65,16 @@ use tokio_postgres::{Client as PostgresClient, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
 
-use crate::common::cluster::{
-    BrokerObserver, Cluster, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-    WebsocketExchangeAction, client_connect_options,
+use crate::common::{
+    cluster::{
+        BrokerObserver, Cluster, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
+        WebsocketExchangeAction, client_connect_options,
+    },
+    dependencies::{
+        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, MONGODB_ADDR,
+        MONGODB_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, REDIS_ADDR,
+        RUSTFS_ADDR, TestDependencies,
+    },
 };
 
 mod common;
@@ -75,11 +84,14 @@ const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
 const WEB_CONSOLE_FEATURE_NAME: &str = "Web console NSPL REPL";
+const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
+const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
 
-#[derive(cucumber::World, Debug, Default)]
+#[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     cluster: Option<Cluster>,
     active_session: Option<TestSession>,
@@ -118,6 +130,75 @@ struct ScenarioWorld {
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
     web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    dependencies: TestDependencies,
+}
+
+impl fmt::Debug for ScenarioWorld {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScenarioWorld")
+            .field("domain", &self.domain)
+            .field("test_id", &self.test_id)
+            .field("cluster_initialized", &self.cluster.is_some())
+            .field("active_session", &self.active_session.is_some())
+            .field("active_session_node", &self.active_session_node)
+            .field(
+                "active_session_has_subscription",
+                &self.active_session_has_subscription,
+            )
+            .field("last_command_error", &self.last_command_error)
+            .field(
+                "last_command_output_bytes",
+                &self.last_command_output.as_ref().map(|value| value.len()),
+            )
+            .field("last_server_error", &self.last_server_error)
+            .field(
+                "last_subscription_payload_bytes",
+                &self
+                    .last_subscription_payload
+                    .as_ref()
+                    .map(|value| value.len()),
+            )
+            .field(
+                "last_broker_payload_bytes",
+                &self.last_broker_payload.as_ref().map(|value| value.len()),
+            )
+            .field("last_broker_header_count", &self.last_broker_headers.len())
+            .field(
+                "last_auth_attempts_elapsed",
+                &self.last_auth_attempts_elapsed,
+            )
+            .field(
+                "last_cluster_operation_elapsed",
+                &self.last_cluster_operation_elapsed,
+            )
+            .field("clickhouse_table", &self.clickhouse_table)
+            .field("clickhouse_tls", &self.clickhouse_tls)
+            .field("postgres_table", &self.postgres_table)
+            .field("postgres_tls", &self.postgres_tls)
+            .field("mysql_table", &self.mysql_table)
+            .field("mysql_tls", &self.mysql_tls)
+            .field("mongodb_collection", &self.mongodb_collection)
+            .field("mongodb_tls", &self.mongodb_tls)
+            .field("placeholder_count", &self.placeholders.len())
+            .field(
+                "mqtt_ingestor_domain_count",
+                &self.mqtt_ingestors_by_domain.len(),
+            )
+            .field("avro_http_field_count", &self.avro_http_field_order.len())
+            .field(
+                "avro_http_optional_field_count",
+                &self.avro_http_optional_fields.len(),
+            )
+            .field("temp_root_initialized", &self.temp_root.is_some())
+            .field("browser_initialized", &self.browser.is_some())
+            .field(
+                "web_console_permit_acquired",
+                &self.web_console_scenario_permit.is_some(),
+            )
+            .field("dependencies", &self.dependencies)
+            .finish()
+    }
 }
 
 impl ScenarioWorld {
@@ -134,6 +215,318 @@ impl ScenarioWorld {
     }
 }
 
+fn initialize_scenario_identity(world: &mut ScenarioWorld) {
+    if !world.test_id.is_empty() {
+        return;
+    }
+    world.domain = format!("d{}", Uuid::now_v7().as_simple());
+    world.test_id = format!("t{}", Uuid::now_v7().as_simple());
+    world.zeromq_ingest_addr = format!(
+        "tcp://127.0.0.1:{}",
+        crate::common::cluster::next_port().expect("failed to allocate ZeroMQ ingest port")
+    );
+    world.zeromq_emit_addr = format!(
+        "tcp://127.0.0.1:{}",
+        crate::common::cluster::next_port().expect("failed to allocate ZeroMQ emit port")
+    );
+}
+
+fn refresh_dependency_configuration(world: &mut ScenarioWorld) {
+    world.cluster_config.dependencies = world.dependencies.endpoints().clone();
+    world
+        .dependencies
+        .endpoints()
+        .apply_placeholders(&mut world.placeholders);
+}
+
+#[given("Kafka is running")]
+async fn given_kafka_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_kafka(&world.test_id)
+        .await
+        .expect("Kafka test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Pulsar is running")]
+async fn given_pulsar_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_pulsar(&world.test_id)
+        .await
+        .expect("Pulsar test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("RabbitMQ is running")]
+async fn given_rabbitmq_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_rabbitmq(&world.test_id)
+        .await
+        .expect("RabbitMQ test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Redis is running")]
+async fn given_redis_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_redis(&world.test_id)
+        .await
+        .expect("Redis test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("MQTT is running")]
+async fn given_mqtt_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_mqtt(&world.test_id)
+        .await
+        .expect("MQTT test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("ClickHouse is running")]
+async fn given_clickhouse_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_clickhouse(&world.test_id)
+        .await
+        .expect("ClickHouse test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Postgres is running")]
+async fn given_postgres_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_postgres(&world.test_id)
+        .await
+        .expect("Postgres test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("MySQL is running")]
+async fn given_mysql_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_mysql(&world.test_id)
+        .await
+        .expect("MySQL test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("MongoDB is running")]
+async fn given_mongodb_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_mongodb(&world.test_id)
+        .await
+        .expect("MongoDB test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("NATS is running")]
+async fn given_nats_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_nats(&world.test_id)
+        .await
+        .expect("NATS test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("NATS TLS is running")]
+async fn given_nats_tls_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_nats_tls(&world.test_id)
+        .await
+        .expect("NATS TLS test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Prometheus is running")]
+async fn given_prometheus_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_prometheus(&world.test_id)
+        .await
+        .expect("Prometheus test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Prometheus TLS is running")]
+async fn given_prometheus_tls_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_prometheus_tls(&world.test_id)
+        .await
+        .expect("Prometheus TLS test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("SQS is running")]
+async fn given_sqs_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_sqs(&world.test_id)
+        .await
+        .expect("SQS test containers should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("the HTTP mock server is running")]
+async fn given_http_mock_server_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_mock_server(&world.test_id)
+        .await
+        .expect("HTTP mock server test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Iceberg dependencies are running")]
+async fn given_iceberg_dependencies_are_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_iceberg(&world.test_id)
+        .await
+        .expect("Iceberg test containers should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("GCS is running")]
+async fn given_gcs_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_gcs(&world.test_id)
+        .await
+        .expect("GCS test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Azure Blob is running")]
+async fn given_azure_blob_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_azurite(&world.test_id)
+        .await
+        .expect("Azurite test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Quickwit is running")]
+async fn given_quickwit_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_quickwit(&world.test_id)
+        .await
+        .expect("Quickwit test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Jaeger is running")]
+async fn given_jaeger_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_jaeger(&world.test_id)
+        .await
+        .expect("Jaeger test containers should start");
+    refresh_dependency_configuration(world);
+}
+
+#[then(expr = "dependency endpoint {string} responds with 200")]
+async fn then_dependency_endpoint_responds_with_200(
+    world: &mut ScenarioWorld,
+    endpoint_key: String,
+) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(&endpoint_key)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let attempt_error = match reqwest::get(&endpoint).await {
+            Ok(response) if response.status() == reqwest::StatusCode::OK => return,
+            Ok(response) => format!("HTTP {}", response.status()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "dependency endpoint '{endpoint_key}' at '{endpoint}' did not respond with 200: \
+             {attempt_error}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then("an ephemeral dependency is removed when its test suite unwinds")]
+async fn then_ephemeral_dependency_is_removed_when_test_suite_unwinds(_world: &mut ScenarioWorld) {
+    let scope = format!("lifecycle-{}", Uuid::now_v7().as_simple());
+    let output = tokio::process::Command::new(
+        std::env::current_exe().expect("scenario executable path should be available"),
+    )
+    .env(DEPENDENCY_LIFECYCLE_HELPER_ENV, &scope)
+    .env("NERVIX_TESTCONTAINERS_MODE", "ephemeral")
+    .env("TESTCONTAINERS_COMMAND", "keep")
+    .output()
+    .await
+    .expect("dependency lifecycle helper should run");
+    assert!(
+        !output.status.success(),
+        "dependency lifecycle helper must unwind to exercise emergency suite cleanup"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let container_id = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(DEPENDENCY_LIFECYCLE_STARTED))
+        .unwrap_or_else(|| {
+            panic!(
+                "dependency lifecycle helper did not start its container\nstdout:\n{}\nstderr:\n{}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    if TestDependencies::container_exists(container_id)
+        .await
+        .expect("Docker should report whether the lifecycle container remains")
+    {
+        TestDependencies::force_remove_container(container_id)
+            .await
+            .expect("leaked lifecycle reproducer container should be removed");
+        panic!(
+            "ephemeral dependency container {container_id} remained after its test suite unwound"
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum IngestorLogicTransportFixture {
     HttpEndpoint,
@@ -146,8 +539,7 @@ enum IngestorLogicTransportFixture {
 
 #[when("the nervix-server help is requested")]
 fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
-    let binary = option_env!("CARGO_BIN_EXE_nervix-server")
-        .expect("the nervix-server binary must be built for integration tests");
+    let binary = env!("CARGO_BIN_EXE_nervix-server");
     let output = Command::new(binary)
         .arg("--help")
         .output()
@@ -215,7 +607,7 @@ impl IngestorLogicTransportFixture {
       CREATE CLIENT logic_kafka
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 "#
             }
@@ -224,7 +616,7 @@ impl IngestorLogicTransportFixture {
       CREATE CLIENT logic_mqtt
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-logic-{{test_id}}'
         };
 "#
@@ -234,7 +626,7 @@ impl IngestorLogicTransportFixture {
       CREATE CLIENT logic_nats
         TYPE NATS
         CONFIG {
-          'addr' = 'nats://127.0.0.1:4222'
+          'addr' = '{{nats_addr}}'
         };
 "#
             }
@@ -414,6 +806,94 @@ impl IngestorLogicTransportFixture {
             }
         }
     }
+}
+
+#[then("failure diagnostics redact dependency certificate bytes and endpoint values")]
+fn then_failure_diagnostics_redact_dependency_secrets(world: &mut ScenarioWorld) {
+    let diagnostics = format!("{world:#?}");
+    world
+        .dependencies
+        .endpoints()
+        .tls_ca_pem()
+        .expect("Redis dependency should generate TLS certificate material");
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(REDIS_ADDR)
+        .expect("Redis dependency endpoint should be available");
+
+    assert!(
+        !diagnostics.contains("tls_ca_pem"),
+        "failure diagnostics must not contain raw certificate bytes"
+    );
+    assert!(
+        !diagnostics.contains(endpoint),
+        "failure diagnostics must not contain concrete dependency endpoint values"
+    );
+    assert!(
+        diagnostics.contains(REDIS_ADDR),
+        "failure diagnostics should identify configured dependency endpoint keys"
+    );
+    assert!(
+        diagnostics.contains("tls_configured: true"),
+        "failure diagnostics should report that TLS is configured"
+    );
+    assert!(
+        diagnostics.len() < 8 * 1024,
+        "failure diagnostics should remain compact"
+    );
+}
+
+#[then(expr = "dependency endpoint {string} remains stable for the test suite")]
+fn then_dependency_endpoint_remains_stable_for_the_test_suite(
+    world: &mut ScenarioWorld,
+    endpoint_key: String,
+) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(&endpoint_key)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .to_string();
+    let mut observed = SUITE_DEPENDENCY_ENDPOINTS
+        .get_or_init(|| StdMutex::new(BTreeMap::new()))
+        .lock()
+        .expect("suite dependency endpoint observations must not be poisoned");
+    match observed.get(&endpoint_key) {
+        Some(existing) => assert_eq!(
+            existing, &endpoint,
+            "dependency endpoint '{endpoint_key}' changed within one test suite"
+        ),
+        None => {
+            observed.insert(endpoint_key, endpoint);
+        }
+    }
+}
+
+#[given(expr = "ingestor logic dependency {string} is running")]
+async fn given_ingestor_logic_dependency_is_running(world: &mut ScenarioWorld, fixture: String) {
+    initialize_scenario_identity(world);
+    match IngestorLogicTransportFixture::parse(&fixture) {
+        IngestorLogicTransportFixture::Kafka => world
+            .dependencies
+            .start_kafka(&world.test_id)
+            .await
+            .expect("Kafka test container should start"),
+        IngestorLogicTransportFixture::Mqtt => world
+            .dependencies
+            .start_mqtt(&world.test_id)
+            .await
+            .expect("MQTT test container should start"),
+        IngestorLogicTransportFixture::Nats => world
+            .dependencies
+            .start_nats(&world.test_id)
+            .await
+            .expect("NATS test container should start"),
+        IngestorLogicTransportFixture::HttpEndpoint
+        | IngestorLogicTransportFixture::WebsocketEndpoint
+        | IngestorLogicTransportFixture::ZeroMq => {}
+    }
+    refresh_dependency_configuration(world);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -947,7 +1427,7 @@ async fn clickhouse_post_to(
 ) -> Result<String, String> {
     let mut builder = reqwest::Client::builder();
     if let Some(ca_file) = ca_file {
-        let ca_pem = std::fs::read(&ca_file)
+        let ca_pem = std::fs::read(ca_file)
             .map_err(|source| format!("failed to read ClickHouse TLS CA: {source}"))?;
         builder = builder.add_root_certificate(
             reqwest::Certificate::from_pem(&ca_pem)
@@ -972,36 +1452,53 @@ async fn clickhouse_post_to(
     }
 }
 
-async fn clickhouse_post(query: &str) -> Result<String, String> {
-    clickhouse_post_to("http://127.0.0.1:8123/", None, query).await
+async fn clickhouse_post(
+    dependencies: &DependencyEndpoints,
+    query: &str,
+) -> Result<String, String> {
+    let addr = dependencies
+        .get(CLICKHOUSE_ADDR)
+        .map_err(|error| error.to_string())?;
+    clickhouse_post_to(&format!("{addr}/"), None, query).await
 }
 
-async fn clickhouse_tls_post(query: &str) -> Result<String, String> {
-    let ca_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tls/dev")
-        .join("ca.pem");
-    clickhouse_post_to("https://127.0.0.1:8124/", Some(ca_file), query).await
+async fn clickhouse_tls_post(
+    dependencies: &DependencyEndpoints,
+    query: &str,
+) -> Result<String, String> {
+    let addr = dependencies
+        .get(CLICKHOUSE_TLS_ADDR)
+        .map_err(|error| error.to_string())?;
+    let ca_file = dependencies
+        .tls_ca_path()
+        .map_err(|error| error.to_string())?
+        .to_path_buf();
+    clickhouse_post_to(&format!("{addr}/"), Some(ca_file), query).await
 }
 
 async fn clickhouse_post_for_world(world: &ScenarioWorld, query: &str) -> Result<String, String> {
     if world.clickhouse_tls {
-        clickhouse_tls_post(query).await
+        clickhouse_tls_post(world.dependencies.endpoints(), query).await
     } else {
-        clickhouse_post(query).await
+        clickhouse_post(world.dependencies.endpoints(), query).await
     }
 }
 
-async fn postgres_client(tls: bool) -> Result<PostgresClient, String> {
+async fn postgres_client(
+    dependencies: &DependencyEndpoints,
+    tls: bool,
+) -> Result<PostgresClient, String> {
     let addr = if tls {
-        "host=127.0.0.1 port=5433 user=postgres password=nervix dbname=postgres sslmode=require"
+        dependencies.get(POSTGRES_TLS_ADDR)
     } else {
-        "host=127.0.0.1 port=5432 user=postgres password=nervix dbname=postgres"
-    };
+        dependencies.get(POSTGRES_ADDR)
+    }
+    .map_err(|error| error.to_string())?;
     if tls {
-        let ca_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tls/dev")
-            .join("ca.pem");
-        let ca_pem = std::fs::read(&ca_file)
+        let ca_file = dependencies
+            .tls_ca_path()
+            .map_err(|error| error.to_string())?;
+        let ca_pem = std::fs::read(ca_file)
             .map_err(|source| format!("failed to read Postgres TLS CA: {source}"))?;
         let mut roots = RootCertStore::empty();
         for cert in CertificateDer::pem_slice_iter(&ca_pem) {
@@ -1033,17 +1530,19 @@ async fn postgres_client(tls: bool) -> Result<PostgresClient, String> {
     }
 }
 
-fn mysql_pool(tls: bool) -> Result<MySqlPool, String> {
+fn mysql_pool(dependencies: &DependencyEndpoints, tls: bool) -> Result<MySqlPool, String> {
     let addr = if tls {
-        "mysql://nervix:nervix@127.0.0.1:3307/nervix?require_ssl=true"
+        dependencies.get(MYSQL_TLS_ADDR)
     } else {
-        "mysql://nervix:nervix@127.0.0.1:3306/nervix"
-    };
+        dependencies.get(MYSQL_ADDR)
+    }
+    .map_err(|error| error.to_string())?;
     let opts = MySqlOpts::from_url(addr).map_err(|source| source.to_string())?;
     let opts = if tls {
-        let ca_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tls/dev")
-            .join("ca.pem");
+        let ca_file = dependencies
+            .tls_ca_path()
+            .map_err(|error| error.to_string())?
+            .to_path_buf();
         let ssl_opts = MySqlSslOpts::default()
             .with_root_certs(vec![ca_file.into()])
             .with_disable_built_in_roots(true);
@@ -1054,19 +1553,24 @@ fn mysql_pool(tls: bool) -> Result<MySqlPool, String> {
     Ok(MySqlPool::new(opts))
 }
 
-async fn mongodb_client(tls: bool) -> Result<MongoDbClient, String> {
+async fn mongodb_client(
+    dependencies: &DependencyEndpoints,
+    tls: bool,
+) -> Result<MongoDbClient, String> {
     let addr = if tls {
-        "mongodb://root:nervix@127.0.0.1:27018/nervix?authSource=admin&tls=true"
+        dependencies.get(MONGODB_TLS_ADDR)
     } else {
-        "mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin"
-    };
+        dependencies.get(MONGODB_ADDR)
+    }
+    .map_err(|error| error.to_string())?;
     let mut options = MongoDbClientOptions::parse(addr)
         .await
         .map_err(|source| source.to_string())?;
     if tls {
-        let ca_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tls/dev")
-            .join("ca.pem");
+        let ca_file = dependencies
+            .tls_ca_path()
+            .map_err(|error| error.to_string())?
+            .to_path_buf();
         options.tls = Some(MongoDbTls::Enabled(
             MongoDbTlsOptions::builder().ca_file_path(ca_file).build(),
         ));
@@ -1100,6 +1604,7 @@ async fn append_cluster_statuses(world: &ScenarioWorld, prefix: &str) {
 #[given(expr = "a {int} node nervix cluster is started")]
 async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) {
     assert!(world.cluster.is_none(), "cluster is already started");
+    initialize_scenario_identity(world);
     world.active_session = None;
     world.active_session_node = None;
     world.active_session_has_subscription = false;
@@ -1110,17 +1615,6 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.broker_observer = None;
     world.last_broker_payload = None;
     world.last_broker_headers.clear();
-    world.domain = format!("d{}", Uuid::now_v7().as_simple());
-    world.test_id = format!("t{}", Uuid::now_v7().as_simple());
-    world.zeromq_ingest_addr = format!(
-        "tcp://127.0.0.1:{}",
-        crate::common::cluster::next_port().expect("failed to allocate ZeroMQ ingest port")
-    );
-    world.zeromq_emit_addr = format!(
-        "tcp://127.0.0.1:{}",
-        crate::common::cluster::next_port().expect("failed to allocate ZeroMQ emit port")
-    );
-    world.placeholders.clear();
     append_cucumber_log_line(&format!(
         "cluster start requested: nodes={node_count} domain={} test_id={}",
         world.domain, world.test_id
@@ -1795,16 +2289,6 @@ async fn given_node_has_dev_tls_resource_directory(
     node_id: String,
     placeholder: String,
 ) {
-    let status = std::process::Command::new("bash")
-        .arg("scripts/generate_dev_tls.sh")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .status()
-        .expect("dev TLS asset generation command should start");
-    assert!(
-        status.success(),
-        "dev TLS asset generation command failed with status {status}"
-    );
-
     let base_dir = world
         .cluster()
         .node_base_dir(&node_id)
@@ -1816,8 +2300,10 @@ async fn given_node_has_dev_tls_resource_directory(
     std::fs::create_dir_all(&resource_dir).expect("fixture directory should be created");
 
     for filename in ["ca.pem", "node.pem", "node-key.pem"] {
-        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tls/dev")
+        let source = world
+            .dependencies
+            .tls_dir()
+            .expect("a TLS dependency must be running")
             .join(filename);
         let destination = resource_dir.join(filename);
         std::fs::copy(&source, &destination)
@@ -6067,6 +6553,44 @@ async fn then_last_command_output_metric_has_values(
 }
 
 #[then(
+    expr = "the last command output metric {string} {string} relay {string} physical node \
+            {string} has numeric values"
+)]
+async fn then_last_command_output_metric_has_numeric_values(
+    world: &mut ScenarioWorld,
+    metric: String,
+    direction: String,
+    relay: String,
+    physical_node: String,
+    #[step] step: &Step,
+) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("a command output must exist before assertion");
+    let prefix = format!("{metric} {direction} relay={relay} physical_node={physical_node}");
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("expected metric line starting with '{prefix}', got: {output}"));
+    let assertions = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(parse_numeric_metric_assertion)
+        .collect::<Vec<_>>();
+
+    assert!(
+        assertions
+            .iter()
+            .all(|assertion| assertion.matches_metric_line(line)),
+        "metric line starting with '{prefix}' did not satisfy numeric assertions {:?}: {line}",
+        assertions
+    );
+}
+
+#[then(
     expr = "the last command output metric {string} {string} relay {string} on any physical node \
             has values"
 )]
@@ -7205,13 +7729,19 @@ async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, a
 #[given(expr = "ClickHouse table {string} exists")]
 async fn given_clickhouse_table_exists(world: &mut ScenarioWorld, table: String) {
     let table = expand_placeholders(world, &table);
-    clickhouse_post(&format!("DROP TABLE IF EXISTS {table}"))
-        .await
-        .expect("failed to drop ClickHouse table");
-    clickhouse_post(&format!(
-        "CREATE TABLE {table} (clickhouse_user_id UInt32, clickhouse_now String, \
-         clickhouse_action String) ENGINE = Memory"
-    ))
+    clickhouse_post(
+        world.dependencies.endpoints(),
+        &format!("DROP TABLE IF EXISTS {table}"),
+    )
+    .await
+    .expect("failed to drop ClickHouse table");
+    clickhouse_post(
+        world.dependencies.endpoints(),
+        &format!(
+            "CREATE TABLE {table} (clickhouse_user_id UInt32, clickhouse_now String, \
+             clickhouse_action String) ENGINE = Memory"
+        ),
+    )
     .await
     .expect("failed to create ClickHouse table");
     world.clickhouse_table = Some(table);
@@ -7221,13 +7751,19 @@ async fn given_clickhouse_table_exists(world: &mut ScenarioWorld, table: String)
 #[given(expr = "ClickHouse TLS table {string} exists")]
 async fn given_clickhouse_tls_table_exists(world: &mut ScenarioWorld, table: String) {
     let table = expand_placeholders(world, &table);
-    clickhouse_tls_post(&format!("DROP TABLE IF EXISTS {table}"))
-        .await
-        .expect("failed to drop ClickHouse TLS table");
-    clickhouse_tls_post(&format!(
-        "CREATE TABLE {table} (clickhouse_user_id UInt32, clickhouse_now String, \
-         clickhouse_action String) ENGINE = Memory"
-    ))
+    clickhouse_tls_post(
+        world.dependencies.endpoints(),
+        &format!("DROP TABLE IF EXISTS {table}"),
+    )
+    .await
+    .expect("failed to drop ClickHouse TLS table");
+    clickhouse_tls_post(
+        world.dependencies.endpoints(),
+        &format!(
+            "CREATE TABLE {table} (clickhouse_user_id UInt32, clickhouse_now String, \
+             clickhouse_action String) ENGINE = Memory"
+        ),
+    )
     .await
     .expect("failed to create ClickHouse TLS table");
     world.clickhouse_table = Some(table);
@@ -7268,7 +7804,7 @@ async fn prepare_postgres_table_schema(
     primary_key: bool,
 ) {
     let table = expand_placeholders(world, &table);
-    let client = postgres_client(tls)
+    let client = postgres_client(world.dependencies.endpoints(), tls)
         .await
         .expect("failed to connect to Postgres");
     client
@@ -7317,7 +7853,7 @@ async fn prepare_mysql_table_schema(
     primary_key: bool,
 ) {
     let table = expand_placeholders(world, &table);
-    let pool = mysql_pool(tls).expect("failed to build MySQL pool");
+    let pool = mysql_pool(world.dependencies.endpoints(), tls).expect("failed to build MySQL pool");
     let mut conn = pool.get_conn().await.expect("failed to connect to MySQL");
     conn.query_drop(format!("DROP TABLE IF EXISTS `{table}`"))
         .await
@@ -7365,7 +7901,7 @@ async fn prepare_mongodb_collection_schema(
     unique_user_id: bool,
 ) {
     let collection = expand_placeholders(world, &collection);
-    let client = mongodb_client(tls)
+    let client = mongodb_client(world.dependencies.endpoints(), tls)
         .await
         .expect("failed to connect to MongoDB");
     client
@@ -9300,7 +9836,7 @@ async fn then_postgres_table_eventually_contains_row(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.postgres_tls)
+    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
         .await
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -9346,7 +9882,8 @@ async fn then_mysql_table_eventually_contains_row(world: &mut ScenarioWorld, #[s
         .as_ref()
         .expect("a MySQL table must be prepared before assertion")
         .clone();
-    let pool = mysql_pool(world.mysql_tls).expect("failed to build MySQL pool");
+    let pool = mysql_pool(world.dependencies.endpoints(), world.mysql_tls)
+        .expect("failed to build MySQL pool");
     let mut conn = pool.get_conn().await.expect("failed to connect to MySQL");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -9392,7 +9929,7 @@ async fn then_mongodb_collection_eventually_contains_document(
         .as_ref()
         .expect("a MongoDB collection must be prepared before assertion")
         .clone();
-    let client = mongodb_client(world.mongodb_tls)
+    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
         .await
         .expect("failed to connect to MongoDB");
     let collection = client
@@ -9450,12 +9987,13 @@ async fn then_iceberg_table_eventually_contains_row(
     let expected = expand_placeholders(world, docstring(step));
     let expected = serde_json::from_str::<serde_json::Value>(&expected)
         .expect("Iceberg expected row must be valid JSON");
+    let dependencies = world.dependencies.endpoints().clone();
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut observed = Vec::new();
 
     loop {
         tokio::task::consume_budget().await;
-        match iceberg_table_rows(&domain, &table).await {
+        match iceberg_table_rows(&dependencies, &domain, &table).await {
             Ok(rows) => {
                 if rows
                     .iter()
@@ -9494,11 +10032,12 @@ async fn then_iceberg_table_does_not_contain_row_within(
         .expect("Iceberg expected row must be valid JSON");
     let duration =
         humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let dependencies = world.dependencies.endpoints().clone();
     let deadline = Instant::now() + duration;
 
     loop {
         tokio::task::consume_budget().await;
-        match iceberg_table_rows(&domain, &table).await {
+        match iceberg_table_rows(&dependencies, &domain, &table).await {
             Ok(rows) => {
                 assert!(
                     !rows
@@ -9527,12 +10066,13 @@ async fn then_iceberg_table_metadata_does_not_contain(
     let table = expand_placeholders(world, &table);
     let fragment = expand_placeholders(world, &fragment);
     let domain = world.domain.clone();
+    let dependencies = world.dependencies.endpoints().clone();
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut observed = Vec::new();
 
     loop {
         tokio::task::consume_budget().await;
-        match iceberg_table_metadata(&domain, &table).await {
+        match iceberg_table_metadata(&dependencies, &domain, &table).await {
             Ok(metadata) => {
                 assert!(
                     !metadata.contains(&fragment),
@@ -9595,7 +10135,7 @@ async fn then_temp_directory_does_not_contain_iceberg_parquet_staged_batch(
 #[then(expr = "the object storage path {string} does not exist")]
 async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path: String) {
     let path = expand_placeholders(world, &path);
-    let exists = rustfs_iceberg_file_io()
+    let exists = rustfs_iceberg_file_io(world.dependencies.endpoints())
         .exists(&path)
         .await
         .unwrap_or_else(|source| panic!("failed to check object storage path {path}: {source}"));
@@ -9644,8 +10184,12 @@ fn path_contains_staged_iceberg_batch(
     false
 }
 
-async fn iceberg_table_rows(domain: &str, table: &str) -> Result<Vec<serde_json::Value>, String> {
-    let table = rustfs_iceberg_table(domain, table).await?;
+async fn iceberg_table_rows(
+    dependencies: &DependencyEndpoints,
+    domain: &str,
+    table: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let table = rustfs_iceberg_table(dependencies, domain, table).await?;
     let stream = table
         .scan()
         .build()
@@ -9664,9 +10208,13 @@ async fn iceberg_table_rows(domain: &str, table: &str) -> Result<Vec<serde_json:
     Ok(rows)
 }
 
-async fn iceberg_table_metadata(domain: &str, table: &str) -> Result<String, String> {
-    let metadata_location = iceberg_table_metadata_location(domain, table).await?;
-    let bytes = rustfs_iceberg_file_io()
+async fn iceberg_table_metadata(
+    dependencies: &DependencyEndpoints,
+    domain: &str,
+    table: &str,
+) -> Result<String, String> {
+    let metadata_location = iceberg_table_metadata_location(dependencies, domain, table).await?;
+    let bytes = rustfs_iceberg_file_io(dependencies)
         .new_input(&metadata_location)
         .map_err(|source| format!("failed to open Iceberg table metadata: {source}"))?
         .read()
@@ -9676,22 +10224,30 @@ async fn iceberg_table_metadata(domain: &str, table: &str) -> Result<String, Str
         .map_err(|source| format!("Iceberg table metadata is not UTF-8 JSON: {source}"))
 }
 
-async fn iceberg_table_metadata_location(domain: &str, table: &str) -> Result<String, String> {
-    let table = rustfs_iceberg_table(domain, table).await?;
+async fn iceberg_table_metadata_location(
+    dependencies: &DependencyEndpoints,
+    domain: &str,
+    table: &str,
+) -> Result<String, String> {
+    let table = rustfs_iceberg_table(dependencies, domain, table).await?;
     table
         .metadata_location_result()
         .map(|location| location.to_string())
         .map_err(|source| format!("Iceberg table metadata location is unavailable: {source}"))
 }
 
-fn rustfs_iceberg_file_io() -> FileIO {
+fn rustfs_iceberg_file_io(dependencies: &DependencyEndpoints) -> FileIO {
     FileIOBuilder::new(rustfs_iceberg_storage_factory())
-        .with_props(rustfs_iceberg_props())
+        .with_props(rustfs_iceberg_props(dependencies))
         .build()
 }
 
-async fn rustfs_iceberg_table(domain: &str, table: &str) -> Result<iceberg::table::Table, String> {
-    let catalog = rustfs_rest_catalog().await?;
+async fn rustfs_iceberg_table(
+    dependencies: &DependencyEndpoints,
+    domain: &str,
+    table: &str,
+) -> Result<iceberg::table::Table, String> {
+    let catalog = rustfs_rest_catalog(dependencies).await?;
     let table_ident = TableIdent::new(NamespaceIdent::new(domain.to_string()), table.to_string());
     catalog
         .load_table(&table_ident)
@@ -9699,13 +10255,16 @@ async fn rustfs_iceberg_table(domain: &str, table: &str) -> Result<iceberg::tabl
         .map_err(|source| format!("failed to load Iceberg table {domain}.{table}: {source}"))
 }
 
-async fn rustfs_rest_catalog() -> Result<RestCatalog, String> {
-    let props = rustfs_iceberg_props()
+async fn rustfs_rest_catalog(dependencies: &DependencyEndpoints) -> Result<RestCatalog, String> {
+    let props = rustfs_iceberg_props(dependencies)
         .into_iter()
         .chain([
             (
                 REST_CATALOG_PROP_URI.to_string(),
-                "http://127.0.0.1:8181".to_string(),
+                dependencies
+                    .get(ICEBERG_REST_ADDR)
+                    .map_err(|error| error.to_string())?
+                    .to_string(),
             ),
             (
                 REST_CATALOG_PROP_WAREHOUSE.to_string(),
@@ -9720,9 +10279,15 @@ async fn rustfs_rest_catalog() -> Result<RestCatalog, String> {
         .map_err(|source| format!("{source}"))
 }
 
-fn rustfs_iceberg_props() -> [(String, String); 7] {
+fn rustfs_iceberg_props(dependencies: &DependencyEndpoints) -> [(String, String); 7] {
     [
-        (S3_ENDPOINT.to_string(), "http://127.0.0.1:9900".to_string()),
+        (
+            S3_ENDPOINT.to_string(),
+            dependencies
+                .get(RUSTFS_ADDR)
+                .expect("RustFS dependency endpoint must be configured")
+                .to_string(),
+        ),
         (S3_REGION.to_string(), "us-east-1".to_string()),
         (S3_ACCESS_KEY_ID.to_string(), "rustfsadmin".to_string()),
         (S3_SECRET_ACCESS_KEY.to_string(), "rustfsadmin".to_string()),
@@ -9739,6 +10304,7 @@ fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
 }
 
 struct IcebergTableFixture {
+    dependencies: DependencyEndpoints,
     domain: String,
     table: String,
     location: String,
@@ -9751,6 +10317,7 @@ const ICEBERG_TABLE_PROVISION_RETRY_INTERVAL: Duration = Duration::from_millis(1
 impl IcebergTableFixture {
     fn from_step(world: &ScenarioWorld, table: String, location: String, columns: &str) -> Self {
         Self {
+            dependencies: world.dependencies.endpoints().clone(),
             domain: world.domain.clone(),
             table: expand_placeholders(world, &table),
             location: expand_placeholders(world, &location),
@@ -9783,7 +10350,7 @@ impl IcebergTableFixture {
     }
 
     async fn ensure_once(&self) -> Result<(), String> {
-        let catalog = rustfs_rest_catalog().await?;
+        let catalog = rustfs_rest_catalog(&self.dependencies).await?;
         let namespace = NamespaceIdent::new(self.domain.clone());
         if !catalog
             .namespace_exists(&namespace)
@@ -10136,15 +10703,56 @@ async fn then_node_eventually_reports_interconnect_status(
 }
 
 fn main() {
-    tokio::runtime::Builder::new_multi_thread()
+    TestDependencies::configure_process_lifecycle();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(8 * 1024 * 1024)
         .build()
-        .expect("scenario runtime should build")
-        .block_on(run_scenarios());
+        .expect("scenario runtime should build");
+    let execution = catch_unwind(AssertUnwindSafe(|| {
+        if let Some(scope) = std::env::var_os(DEPENDENCY_LIFECYCLE_HELPER_ENV) {
+            runtime.block_on(run_dependency_lifecycle_helper(
+                scope.to_string_lossy().into_owned(),
+            ))
+        } else {
+            runtime.block_on(run_scenarios())
+        }
+    }));
+    let dependency_teardown_errors = runtime.block_on(TestDependencies::shutdown_suite());
+    drop(runtime);
+
+    assert!(
+        dependency_teardown_errors.is_empty(),
+        "suite dependency teardown failed: {}",
+        dependency_teardown_errors.join("; ")
+    );
+    match execution {
+        Ok(Some(message)) => panic!("{message}"),
+        Ok(None) => {}
+        Err(payload) => resume_unwind(payload),
+    }
 }
 
-async fn run_scenarios() {
+async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
+    let mut dependencies = TestDependencies::default();
+    dependencies
+        .start_redis(&scope)
+        .await
+        .expect("lifecycle helper Redis container should start");
+    let container_ids = TestDependencies::suite_container_ids().await;
+    assert_eq!(
+        container_ids.len(),
+        1,
+        "lifecycle helper should own exactly one dependency container"
+    );
+    println!("{DEPENDENCY_LIFECYCLE_STARTED}{}", container_ids[0]);
+    std::io::stdout()
+        .flush()
+        .expect("lifecycle helper marker should flush");
+    panic!("intentional dependency lifecycle helper unwind");
+}
+
+async fn run_scenarios() -> Option<String> {
     truncate_cucumber_log();
     let writer = writer::Basic::raw(
         std::io::stdout(), // Output to stdout
@@ -10154,7 +10762,7 @@ async fn run_scenarios() {
     .summarized()
     .normalized()
     .repeat_failed();
-    ScenarioWorld::cucumber()
+    let writer = ScenarioWorld::cucumber()
         .max_concurrent_scenarios(8)
         .retries(1)
         .before(|feature, _rule, scenario, world| {
@@ -10219,6 +10827,28 @@ async fn run_scenarios() {
         })
         .fail_on_skipped()
         .with_writer(writer)
-        .run_and_exit(SCENARIOS_PATH)
+        .run(SCENARIOS_PATH)
         .await;
+
+    let execution_failure = if writer.execution_has_failed() {
+        let mut messages = Vec::new();
+        let failed_steps = writer.failed_steps();
+        if failed_steps > 0 {
+            messages.push(format!("{failed_steps} step(s) failed"));
+        }
+        let parsing_errors = writer.parsing_errors();
+        if parsing_errors > 0 {
+            messages.push(format!("{parsing_errors} parsing error(s)"));
+        }
+        let hook_errors = writer.hook_errors();
+        if hook_errors > 0 {
+            messages.push(format!("{hook_errors} hook error(s)"));
+        }
+        Some(messages.join(", "))
+    } else {
+        None
+    };
+    drop(writer);
+
+    execution_failure
 }

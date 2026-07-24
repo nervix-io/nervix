@@ -158,8 +158,8 @@ A generated configuration should contain:
 
 The skill does not connect to or configure a running Nervix deployment by itself. Review the
 result, replace placeholders, provision required external entities such as Kafka topics, and then
-submit the NSPL through your normal Nervix client workflow. See [Running Nervix](running-locally.md)
-and the [NSPL Overview](nspl-overview.md) for the current client and language documentation.
+submit the NSPL through your normal Nervix client workflow. See the
+[NSPL Overview](nspl-overview.md) for the current language documentation.
 
 ## Install For One Project
 

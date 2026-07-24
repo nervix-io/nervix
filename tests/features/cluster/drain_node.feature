@@ -70,6 +70,7 @@ Feature: Drain node
     Then the last command output owner equals placeholder "expected_promoted_replica"
 
   Scenario: Draining a node cordons it and moves scheduled graph nodes away
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     When these NSPL commands are executed through the client on node "node-1"
       """
@@ -92,7 +93,7 @@ Feature: Drain node
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE INGESTOR kafka_a

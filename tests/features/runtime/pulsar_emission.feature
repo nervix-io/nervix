@@ -1,5 +1,6 @@
 Feature: Pulsar emission
   Scenario Outline: Pulsar emitter publishes JSON payloads from a relay
+    Given Pulsar is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -24,7 +25,7 @@ Feature: Pulsar emission
         CREATE CLIENT pulsar_main
         TYPE PULSAR
         CONFIG {
-          'addr' = 'pulsar://127.0.0.1:6650'
+          'addr' = '{{pulsar_addr}}'
         };
         CREATE INGESTOR pulsar_ingress
         FROM PULSAR pulsar_main TOPIC notifications_in_{{test_id}} SUBSCRIPTION nervix_pulsar_emission_{{test_id}} INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s

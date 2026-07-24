@@ -1,5 +1,6 @@
 Feature: Redis TLS resource mounts
   Scenario Outline: Redis ingestor consumes over native TLS with a mounted resource directory
+    Given Redis is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -33,7 +34,7 @@ Feature: Redis TLS resource mounts
         TYPE REDIS
         MOUNT dev_tls
         CONFIG {
-          'addr' = 'rediss://127.0.0.1:6380/',
+          'addr' = '{{redis_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE INGESTOR redis_notifications

@@ -1,5 +1,6 @@
 Feature: Pulsar TLS resource mounts
   Scenario Outline: Pulsar ingestor consumes over native TLS with a mounted resource directory
+    Given Pulsar is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -33,7 +34,7 @@ Feature: Pulsar TLS resource mounts
         TYPE PULSAR
         MOUNT dev_tls
         CONFIG {
-          'addr' = 'pulsar+ssl://127.0.0.1:6651',
+          'addr' = '{{pulsar_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE INGESTOR pulsar_notifications
