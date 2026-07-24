@@ -4,6 +4,9 @@ license-file.workspace = true
 name = "nervix-consensus"
 version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 ciborium = { workspace = true }
 fjall = { workspace = true }
