@@ -33,7 +33,6 @@ use triomphe::Arc;
 const DEFAULT_WATCHDOG: Duration = Duration::from_secs(5);
 const COMPILE_TEST_BUDGET: Duration = Duration::from_secs(10);
 const RESERVED_PREFIX: &str = "__nervix_";
-static UDF_COMPILE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Error)]
 pub enum UdfError {
@@ -1083,7 +1082,6 @@ impl UdfExecutor {
     }
 
     fn compile_sync(models: impl IntoIterator<Item = CreateUdf>) -> Result<Self, UdfError> {
-        let _compile_guard = UDF_COMPILE_LOCK.lock();
         let mut functions = HashMap::new();
         let mut signatures = UdfSignatures::default();
         for model in models {
@@ -1500,6 +1498,31 @@ mod tests {
             TypedArray::Int64(Int64Array::from(vec![Some(2), None, Some(42)]))
         );
         assert!(result.side_errors.is_empty());
+    }
+
+    #[test]
+    fn compiles_independent_udfs_concurrently() {
+        const COMPILER_COUNT: usize = 16;
+
+        let barrier = StdArc::new(std::sync::Barrier::new(COMPILER_COUNT));
+        std::thread::scope(|scope| {
+            let compilers = (0..COMPILER_COUNT)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        UdfExecutor::compile_sync([add_one_model()])
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for compiler in compilers {
+                compiler
+                    .join()
+                    .expect("Roto compiler thread should not panic")
+                    .expect("concurrent UDF compilation should succeed");
+            }
+        });
     }
 
     #[test]
