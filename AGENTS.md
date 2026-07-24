@@ -274,6 +274,10 @@ language or interface changes.
   Nervix with NSPL. Use it when helping users author, explain, review, or troubleshoot NSPL;
   agents without automatic skill discovery must read it directly. Do not turn it into a workflow
   for extending the parser, Models, compiler, or runtime.
+- Avoid duplicating public guidance between `docs/src` and the NSPL skill. `SKILL.md` and its
+  references may contain documentation routing, agent workflow, and concise correctness checks;
+  detailed syntax, semantic explanations, rationale, examples, and tuning guidance belong in
+  `docs/src` and should be read from there rather than restated in the skill.
 - Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
 - Every Rust build, check, lint, and test invocation must use the repository-configured kache
   compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
