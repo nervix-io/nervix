@@ -33,7 +33,7 @@ use nervix_models::{
 };
 use nervix_nspl::{
     vm_program::{
-        Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
+        CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal, Program,
         SemanticNamespaces, SpannedExpr, lower_branch_construction, lower_finalized_output_filter,
         lower_generated_route, lower_route_construction, lower_set_only_route,
         lower_transforming_route,
@@ -4153,6 +4153,29 @@ fn expression_contains_nondeterministic_or_side_effect_call(expression: &Express
         Expression::Array(items) => items
             .iter()
             .any(expression_contains_nondeterministic_or_side_effect_call),
+        Expression::If {
+            condition,
+            then_result,
+            else_result,
+        } => {
+            expression_contains_nondeterministic_or_side_effect_call(condition)
+                || expression_contains_nondeterministic_or_side_effect_call(then_result)
+                || expression_contains_nondeterministic_or_side_effect_call(else_result)
+        }
+        Expression::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            operand.as_ref().is_some_and(|operand| {
+                expression_contains_nondeterministic_or_side_effect_call(operand)
+            }) || branches.iter().any(|branch| {
+                expression_contains_nondeterministic_or_side_effect_call(&branch.when)
+                    || expression_contains_nondeterministic_or_side_effect_call(&branch.result)
+            }) || else_result.as_ref().is_some_and(|result| {
+                expression_contains_nondeterministic_or_side_effect_call(result)
+            })
+        }
     }
 }
 
@@ -5424,6 +5447,53 @@ fn rewrite_lookup_hash_map_expr(
                 }
             }
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => Expr::Case {
+            operand: operand
+                .as_ref()
+                .map(|operand| {
+                    rewrite_lookup_hash_map_expr(
+                        domain, identifier, models, operand, calls, next_field,
+                    )
+                    .map(Box::new)
+                })
+                .transpose()?,
+            branches: branches
+                .iter()
+                .map(|branch| {
+                    Ok(CaseArm {
+                        when: rewrite_lookup_hash_map_expr(
+                            domain,
+                            identifier,
+                            models,
+                            &branch.when,
+                            calls,
+                            next_field,
+                        )?,
+                        result: rewrite_lookup_hash_map_expr(
+                            domain,
+                            identifier,
+                            models,
+                            &branch.result,
+                            calls,
+                            next_field,
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>, Report<RegistryError>>>()?,
+            else_result: else_result
+                .as_ref()
+                .map(|result| {
+                    rewrite_lookup_hash_map_expr(
+                        domain, identifier, models, result, calls, next_field,
+                    )
+                    .map(Box::new)
+                })
+                .transpose()?,
+        },
     };
     Ok(nervix_nspl::vm_program::SpannedNode {
         inner,
@@ -5449,6 +5519,22 @@ fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>)
                 collect_expr_field_refs(arg, refs);
             }
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                collect_expr_field_refs(operand, refs);
+            }
+            for branch in branches {
+                collect_expr_field_refs(&branch.when, refs);
+                collect_expr_field_refs(&branch.result, refs);
+            }
+            if let Some(else_result) = else_result {
+                collect_expr_field_refs(else_result, refs);
+            }
+        }
     }
 }
 
@@ -5465,6 +5551,21 @@ fn expr_uses_header_read(expr: &SpannedExpr) -> bool {
             } else {
                 args.iter().any(expr_uses_header_read)
             }
+        }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|expr| expr_uses_header_read(expr))
+                || branches.iter().any(|branch| {
+                    expr_uses_header_read(&branch.when) || expr_uses_header_read(&branch.result)
+                })
+                || else_result
+                    .as_ref()
+                    .is_some_and(|expr| expr_uses_header_read(expr))
         }
     }
 }

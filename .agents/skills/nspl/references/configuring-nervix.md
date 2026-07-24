@@ -114,6 +114,8 @@ relay. Do not use them to scan across branches.
   route; set-only routes use explicit `SET` assignments.
 - Every field scope is valid for its node: use documented `input`, `message`, `output`, `branch`,
   `left`, `right`, `relay_state`, `metadata`, `error`, and `partial_output` availability.
+- Every `IF` condition and searched `CASE WHEN` condition is Boolean; simple `CASE` match values
+  have the operand's exact type; all result arms have one exact type.
 - Every flush-based route has a flush policy and every route has a message error policy.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, and validates that exact range against its reusable buffer.

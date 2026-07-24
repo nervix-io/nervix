@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, hash::Hash, sync::Arc};
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{DataType, Field, Schema};
 use nervix_nspl::vm_program::{
-    BinaryOp, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
-    Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
+    BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
+    Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
 };
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     ir::{
         AssignmentFallback, CompiledProgram, InputBinding, Instruction, InstructionKind,
         InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef, RegisterSpace,
-        RegisterType, ScalarValue,
+        RegisterType, ScalarValue, SelectArm,
     },
     semantics::{
         BuiltinLowering, binary_descriptor, binary_output_type, builtin_descriptor,
@@ -169,6 +169,7 @@ struct Compiler {
     layouts: RegisterLayouts,
     expr_cache: HashMap<CachedExpr, RegisterRef>,
     expr_cache_generation: usize,
+    current_error_mask: Option<RegisterRef>,
     allow_header_reads: bool,
     allow_header_writes: bool,
 }
@@ -200,6 +201,11 @@ enum ExprKey {
     Call {
         function: FunctionName,
         args: Vec<ExprKey>,
+    },
+    Case {
+        operand: Option<Box<ExprKey>>,
+        branches: Vec<(ExprKey, ExprKey)>,
+        else_result: Option<Box<ExprKey>>,
     },
 }
 
@@ -462,6 +468,7 @@ impl Compiler {
                 layouts,
                 expr_cache: HashMap::new(),
                 expr_cache_generation: 0,
+                current_error_mask: None,
                 allow_header_reads: false,
                 allow_header_writes: false,
             },
@@ -479,6 +486,101 @@ impl Compiler {
 
     fn alloc_output(&mut self, ty: RegisterType) -> RegisterRef {
         self.layouts.alloc(RegisterSpace::Output, ty)
+    }
+
+    fn emit(&mut self, kind: InstructionKind, span: Span) {
+        let error_mask = if instruction_can_emit_row_errors(&kind) {
+            self.current_error_mask
+        } else {
+            None
+        };
+        self.instructions.push(Instruction {
+            kind,
+            span,
+            error_mask,
+        });
+    }
+
+    fn with_error_mask<T>(
+        &mut self,
+        mask: Option<RegisterRef>,
+        compile: impl FnOnce(&mut Self) -> Result<T, CompileError>,
+    ) -> Result<T, CompileError> {
+        let previous = self.current_error_mask;
+        self.current_error_mask = mask;
+        let result = compile(self);
+        self.current_error_mask = previous;
+        result
+    }
+
+    fn emit_boolean_literal(&mut self, value: bool, span: Span) -> RegisterRef {
+        let dst = self.alloc_temp(RegisterType::Boolean);
+        self.emit(
+            InstructionKind::Literal {
+                dst,
+                value: ScalarValue::Boolean(value),
+            },
+            span,
+        );
+        dst
+    }
+
+    fn emit_boolean_binary(
+        &mut self,
+        op: BinaryOp,
+        left: RegisterRef,
+        right: RegisterRef,
+        span: Span,
+    ) -> RegisterRef {
+        let dst = self.alloc_temp(RegisterType::Boolean);
+        self.emit(
+            InstructionKind::Binary {
+                dst,
+                left,
+                right,
+                op,
+            },
+            span,
+        );
+        dst
+    }
+
+    fn emit_boolean_not(&mut self, input: RegisterRef, span: Span) -> RegisterRef {
+        let dst = self.alloc_temp(RegisterType::Boolean);
+        self.emit(
+            InstructionKind::Unary {
+                dst,
+                input,
+                op: UnaryOp::Not,
+            },
+            span,
+        );
+        dst
+    }
+
+    fn normalize_condition(&mut self, input: RegisterRef, span: Span) -> RegisterRef {
+        let false_value = self.emit_boolean_literal(false, span);
+        let dst = self.alloc_temp(RegisterType::Boolean);
+        self.emit(
+            InstructionKind::Builtin {
+                dst,
+                lowering: BuiltinLowering::Coalesce,
+                inputs: vec![input, false_value],
+            },
+            span,
+        );
+        dst
+    }
+
+    fn combine_with_outer_mask(
+        &mut self,
+        outer: Option<RegisterRef>,
+        mask: RegisterRef,
+        span: Span,
+    ) -> RegisterRef {
+        outer.map_or(mask, |outer| {
+            self.emit_boolean_binary(BinaryOp::And, outer, mask, span)
+        })
     }
 
     fn apply_options(&mut self, options: CompileOptions) {
@@ -549,13 +651,13 @@ impl Compiler {
         let ty =
             Self::register_type_for_data_type(&binding.data_type, span, "uninitialized column")?;
         let dst = self.alloc_temp(ty);
-        self.instructions.push(Instruction {
-            kind: InstructionKind::Uninitialized {
+        self.emit(
+            InstructionKind::Uninitialized {
                 dst,
                 data_type: binding.data_type.clone(),
             },
             span,
-        });
+        );
         let initialized = ColumnBinding {
             nullable: true,
             value: ColumnValue::Initialized(dst),
@@ -788,6 +890,108 @@ impl Compiler {
                     .collect::<Result<Vec<_>, _>>()?;
                 builtin_signature(function, &arg_types, expr.span)
             }
+            Expr::Case {
+                operand,
+                branches,
+                else_result,
+            } => {
+                if branches.is_empty() {
+                    return Err(CompileError {
+                        code: "invalid_case",
+                        message: "CASE requires at least one WHEN branch".to_string(),
+                        span: expr.span,
+                    });
+                }
+                let operand_type = operand
+                    .as_ref()
+                    .map(|operand| self.infer_expr_type(operand))
+                    .transpose()?;
+                let mut result_type = None;
+                for branch in branches {
+                    if let Some(operand_type) = &operand_type {
+                        if matches!(branch.when.inner, Expr::Literal(Literal::Null)) {
+                            return Err(CompileError {
+                                code: "untyped_null",
+                                message: "simple CASE WHEN values cannot be bare NULL".to_string(),
+                                span: branch.when.span,
+                            });
+                        }
+                        let when_type = self.infer_expr_type(&branch.when)?;
+                        if &when_type != operand_type {
+                            return Err(CompileError {
+                                code: "type_mismatch",
+                                message: format!(
+                                    "simple CASE operand has type {operand_type:?}, but WHEN \
+                                     value has type {when_type:?}"
+                                ),
+                                span: branch.when.span,
+                            });
+                        }
+                    } else {
+                        let condition_type = self.infer_expr_type(&branch.when)?;
+                        if condition_type != DataType::Boolean {
+                            return Err(CompileError {
+                                code: "invalid_condition",
+                                message: format!(
+                                    "CASE WHEN condition must evaluate to Boolean, found \
+                                     {condition_type:?}"
+                                ),
+                                span: branch.when.span,
+                            });
+                        }
+                    }
+                    if !matches!(branch.result.inner, Expr::Literal(Literal::Null)) {
+                        let branch_type = self.infer_expr_type(&branch.result)?;
+                        if let Some(expected) = &result_type
+                            && expected != &branch_type
+                        {
+                            return Err(CompileError {
+                                code: "type_mismatch",
+                                message: format!(
+                                    "CASE results must have one exact type, found {expected:?} \
+                                     and {branch_type:?}"
+                                ),
+                                span: branch.result.span,
+                            });
+                        }
+                        result_type.get_or_insert(branch_type);
+                    }
+                }
+                if let Some(else_result) = else_result
+                    && !matches!(else_result.inner, Expr::Literal(Literal::Null))
+                {
+                    let else_type = self.infer_expr_type(else_result)?;
+                    if let Some(expected) = &result_type
+                        && expected != &else_type
+                    {
+                        return Err(CompileError {
+                            code: "type_mismatch",
+                            message: format!(
+                                "CASE results must have one exact type, found {expected:?} and \
+                                 {else_type:?}"
+                            ),
+                            span: else_result.span,
+                        });
+                    }
+                    result_type.get_or_insert(else_type);
+                }
+                let result_type = result_type.ok_or_else(|| CompileError {
+                    code: "untyped_null",
+                    message: "CASE with only NULL results has no inferable type".to_string(),
+                    span: expr.span,
+                })?;
+                if RegisterType::from_data_type(&result_type) == Some(RegisterType::Generic) {
+                    return Err(CompileError {
+                        code: "unsupported_type",
+                        message: format!(
+                            "CASE result type {result_type:?} is not supported by conditional \
+                             selection"
+                        ),
+                        span: expr.span,
+                    });
+                }
+                Ok(result_type)
+            }
         }
     }
 
@@ -873,6 +1077,25 @@ impl Compiler {
                 }
                 Ok(false)
             }
+            Expr::Case {
+                branches,
+                else_result,
+                ..
+            } => {
+                if else_result.is_none() {
+                    return Ok(true);
+                }
+                for branch in branches {
+                    if self.expr_may_be_null(&branch.result)? {
+                        return Ok(true);
+                    }
+                }
+                self.expr_may_be_null(
+                    else_result
+                        .as_ref()
+                        .expect("checked CASE ELSE presence above"),
+                )
+            }
         }
     }
 
@@ -900,6 +1123,30 @@ impl Compiler {
                     if self.expr_is_sensitive(arg)? {
                         return Ok(true);
                     }
+                }
+                Ok(false)
+            }
+            Expr::Case {
+                operand,
+                branches,
+                else_result,
+            } => {
+                if let Some(operand) = operand
+                    && self.expr_is_sensitive(operand)?
+                {
+                    return Ok(true);
+                }
+                for branch in branches {
+                    if self.expr_is_sensitive(&branch.when)?
+                        || self.expr_is_sensitive(&branch.result)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                if let Some(else_result) = else_result
+                    && self.expr_is_sensitive(else_result)?
+                {
+                    return Ok(true);
                 }
                 Ok(false)
             }
@@ -994,13 +1241,13 @@ impl Compiler {
         if let Expr::Literal(Literal::Null) = expr.inner {
             let ty = Self::register_type_for_data_type(target_type, expr.span, "NULL target")?;
             let dst = self.alloc_temp(ty);
-            self.instructions.push(Instruction {
-                kind: InstructionKind::NullLiteral {
+            self.emit(
+                InstructionKind::NullLiteral {
                     dst,
                     data_type: target_type.clone(),
                 },
-                span: expr.span,
-            });
+                expr.span,
+            );
             return Ok(dst);
         }
 
@@ -1029,10 +1276,7 @@ impl Compiler {
                     }
                 };
                 let dst = self.alloc_temp(ty);
-                self.instructions.push(Instruction {
-                    kind: InstructionKind::Literal { dst, value },
-                    span: expr.span,
-                });
+                self.emit(InstructionKind::Literal { dst, value }, expr.span);
                 Ok(dst)
             }
             Expr::FieldRef(field_ref) => {
@@ -1083,14 +1327,14 @@ impl Compiler {
                     UnaryOp::Neg => self.alloc_temp(input.ty),
                     UnaryOp::Not => self.alloc_temp(RegisterType::Boolean),
                 };
-                self.instructions.push(Instruction {
-                    kind: InstructionKind::Unary {
+                self.emit(
+                    InstructionKind::Unary {
                         dst,
                         input,
                         op: *op,
                     },
-                    span: expr.span,
-                });
+                    expr.span,
+                );
                 Ok(dst)
             }
             Expr::Binary { op, left, right } => {
@@ -1099,15 +1343,15 @@ impl Compiler {
                 let output_type = RegisterType::from_data_type(&self.infer_expr_type(expr)?)
                     .expect("validated expression type must be supported");
                 let dst = self.alloc_temp(output_type);
-                self.instructions.push(Instruction {
-                    kind: InstructionKind::Binary {
+                self.emit(
+                    InstructionKind::Binary {
                         dst,
                         left: left_reg,
                         right: right_reg,
                         op: *op,
                     },
-                    span: expr.span,
-                });
+                    expr.span,
+                );
                 Ok(dst)
             }
             Expr::Cast {
@@ -1118,10 +1362,7 @@ impl Compiler {
                 let target = RegisterType::from_data_type(data_type)
                     .expect("validated cast target must be supported");
                 let dst = self.alloc_temp(target);
-                self.instructions.push(Instruction {
-                    kind: InstructionKind::Cast { dst, input, target },
-                    span: expr.span,
-                });
+                self.emit(InstructionKind::Cast { dst, input, target }, expr.span);
                 Ok(dst)
             }
             Expr::Call { function, args } => {
@@ -1139,15 +1380,15 @@ impl Compiler {
                         RegisterType::from_data_type(&output_type)
                             .expect("validated injected output type must be supported"),
                     );
-                    self.instructions.push(Instruction {
-                        kind: InstructionKind::Inject {
+                    self.emit(
+                        InstructionKind::Inject {
                             dst,
                             function: function.clone(),
                             inputs,
                             output_type,
                         },
-                        span: expr.span,
-                    });
+                        expr.span,
+                    );
                     return Ok(dst);
                 }
                 if let FunctionName::WindowAggregate(invocation) = function {
@@ -1160,26 +1401,167 @@ impl Compiler {
                         RegisterType::from_data_type(&output_type)
                             .expect("validated aggregate output type must be supported"),
                     );
-                    self.instructions.push(Instruction {
-                        kind: InstructionKind::Inject {
+                    self.emit(
+                        InstructionKind::Inject {
                             dst,
                             function: function.clone(),
                             inputs: Vec::new(),
                             output_type,
                         },
-                        span: expr.span,
-                    });
+                        expr.span,
+                    );
                     return Ok(dst);
                 }
                 let builtin = self.compile_builtin_call(function, args, expr.span)?;
                 let dst = self.alloc_temp(builtin.output_type());
-                self.instructions.push(Instruction {
-                    kind: builtin.into_instruction(dst),
-                    span: expr.span,
-                });
+                self.emit(builtin.into_instruction(dst), expr.span);
                 Ok(dst)
             }
+            Expr::Case {
+                operand,
+                branches,
+                else_result,
+            } => {
+                let result_type = self.infer_expr_type(expr)?;
+                self.compile_case(
+                    operand.as_deref(),
+                    branches,
+                    else_result.as_deref(),
+                    &result_type,
+                    expr.span,
+                )
+            }
         }
+    }
+
+    fn compile_case(
+        &mut self,
+        operand: Option<&SpannedExpr>,
+        branches: &[CaseArm],
+        else_result: Option<&SpannedExpr>,
+        result_type: &DataType,
+        span: Span,
+    ) -> Result<RegisterRef, CompileError> {
+        let outer_mask = self.current_error_mask;
+        let folded_operand = operand.map(fold_constant_expr).transpose()?.flatten();
+        let mut active_branches = Vec::with_capacity(branches.len());
+        let mut effective_else = else_result;
+
+        for branch in branches {
+            let known_match = if operand.is_some() {
+                if let Some(operand) = &folded_operand {
+                    fold_constant_expr(&branch.when)?
+                        .and_then(|when| fold_binary_expr(BinaryOp::Eq, operand.clone(), when))
+                        .and_then(|value| match value {
+                            FoldedValue::NonNull(ScalarValue::Boolean(value)) => Some(value),
+                            FoldedValue::NonNull(_) | FoldedValue::Null(_) => None,
+                        })
+                } else {
+                    None
+                }
+            } else {
+                match &branch.when.inner {
+                    Expr::Literal(Literal::Bool(value)) => Some(*value),
+                    Expr::Literal(Literal::Null) => Some(false),
+                    _ => fold_constant_expr(&branch.when)?.and_then(|value| match value {
+                        FoldedValue::NonNull(ScalarValue::Boolean(value)) => Some(value),
+                        FoldedValue::NonNull(_) | FoldedValue::Null(_) => None,
+                    }),
+                }
+            };
+            match known_match {
+                Some(false) => {}
+                Some(true) => {
+                    effective_else = Some(&branch.result);
+                    break;
+                }
+                None => active_branches.push(branch),
+            }
+        }
+
+        if active_branches.is_empty() {
+            return self.compile_case_result(effective_else, result_type, outer_mask, span);
+        }
+
+        let operand_reg = operand
+            .map(|operand| self.compile_expr(operand))
+            .transpose()?;
+        let mut matched = None;
+        let mut select_arms = Vec::with_capacity(active_branches.len());
+
+        for branch in active_branches {
+            let unmatched = matched.map(|matched| self.emit_boolean_not(matched, span));
+            let eligible = unmatched
+                .map(|unmatched| self.combine_with_outer_mask(outer_mask, unmatched, span));
+            let condition_mask = eligible.or(outer_mask);
+            let condition = self.with_error_mask(condition_mask, |compiler| {
+                let when = compiler.compile_expr(&branch.when)?;
+                Ok(operand_reg.map_or(when, |operand| {
+                    compiler.emit_boolean_binary(BinaryOp::Eq, operand, when, branch.when.span)
+                }))
+            })?;
+            let normalized = self.normalize_condition(condition, branch.when.span);
+            let selected = unmatched.map_or(normalized, |unmatched| {
+                self.emit_boolean_binary(BinaryOp::And, unmatched, normalized, span)
+            });
+            let selected = self.combine_with_outer_mask(outer_mask, selected, span);
+            let value = self.compile_case_result(
+                Some(&branch.result),
+                result_type,
+                Some(selected),
+                branch.result.span,
+            )?;
+            select_arms.push(SelectArm {
+                mask: normalized,
+                value,
+            });
+            matched = Some(matched.map_or(normalized, |matched| {
+                self.emit_boolean_binary(BinaryOp::Or, matched, normalized, span)
+            }));
+        }
+
+        let else_mask = matched.map(|matched| {
+            let unmatched = self.emit_boolean_not(matched, span);
+            self.combine_with_outer_mask(outer_mask, unmatched, span)
+        });
+        let else_mask = else_mask.or(outer_mask);
+        let otherwise = self.compile_case_result(effective_else, result_type, else_mask, span)?;
+        let output_type = Self::register_type_for_data_type(result_type, span, "CASE result")?;
+        let dst = self.alloc_temp(output_type);
+        self.emit(
+            InstructionKind::Select {
+                dst,
+                arms: select_arms,
+                otherwise,
+            },
+            span,
+        );
+        Ok(dst)
+    }
+
+    fn compile_case_result(
+        &mut self,
+        result: Option<&SpannedExpr>,
+        result_type: &DataType,
+        error_mask: Option<RegisterRef>,
+        span: Span,
+    ) -> Result<RegisterRef, CompileError> {
+        self.with_error_mask(error_mask, |compiler| {
+            if result.is_none_or(|result| matches!(result.inner, Expr::Literal(Literal::Null))) {
+                let ty = Self::register_type_for_data_type(result_type, span, "CASE NULL result")?;
+                let dst = compiler.alloc_temp(ty);
+                compiler.emit(
+                    InstructionKind::NullLiteral {
+                        dst,
+                        data_type: result_type.clone(),
+                    },
+                    span,
+                );
+                Ok(dst)
+            } else {
+                compiler.compile_expr(result.expect("checked CASE result presence above"))
+            }
+        })
     }
 
     fn emit_folded_value(&mut self, value: FoldedValue, span: Span) -> RegisterRef {
@@ -1187,10 +1569,7 @@ impl Compiler {
             FoldedValue::NonNull(value) => {
                 let ty = value.register_type();
                 let dst = self.alloc_temp(ty);
-                self.instructions.push(Instruction {
-                    kind: InstructionKind::Literal { dst, value },
-                    span,
-                });
+                self.emit(InstructionKind::Literal { dst, value }, span);
                 dst
             }
             FoldedValue::Null(_) => unreachable!("null-valued constant folding is not emitted yet"),
@@ -1298,10 +1677,7 @@ impl Compiler {
 
     fn emit_move(&mut self, dst: RegisterRef, input: RegisterRef, span: Span) {
         if dst != input {
-            self.instructions.push(Instruction {
-                kind: InstructionKind::Move { dst, input },
-                span,
-            });
+            self.emit(InstructionKind::Move { dst, input }, span);
         }
     }
 
@@ -1312,14 +1688,14 @@ impl Compiler {
         fallback: AssignmentFallback,
         span: Span,
     ) {
-        self.instructions.push(Instruction {
-            kind: InstructionKind::Assign {
+        self.emit(
+            InstructionKind::Assign {
                 dst,
                 input,
                 fallback,
             },
             span,
-        });
+        );
     }
 }
 
@@ -1345,6 +1721,27 @@ impl ExprKey {
             Expr::Call { function, args } => Self::Call {
                 function: function.clone(),
                 args: args.iter().map(Self::from_expr).collect(),
+            },
+            Expr::Case {
+                operand,
+                branches,
+                else_result,
+            } => Self::Case {
+                operand: operand
+                    .as_ref()
+                    .map(|operand| Box::new(Self::from_expr(operand))),
+                branches: branches
+                    .iter()
+                    .map(|branch| {
+                        (
+                            Self::from_expr(&branch.when),
+                            Self::from_expr(&branch.result),
+                        )
+                    })
+                    .collect(),
+                else_result: else_result
+                    .as_ref()
+                    .map(|result| Box::new(Self::from_expr(result))),
             },
         }
     }
@@ -1448,6 +1845,45 @@ fn fold_constant_expr(expr: &SpannedExpr) -> Result<Option<FoldedValue>, Compile
                 folded_args.push(value);
             }
             Ok(fold_builtin_call(function, &folded_args))
+        }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            let has_operand = operand.is_some();
+            let operand = operand
+                .as_ref()
+                .map(|operand| fold_constant_expr(operand))
+                .transpose()?
+                .flatten();
+            if has_operand && operand.is_none() {
+                return Ok(None);
+            }
+            for branch in branches {
+                let matches = if let Some(operand) = &operand {
+                    let Some(when) = fold_constant_expr(&branch.when)? else {
+                        return Ok(None);
+                    };
+                    matches!(
+                        fold_binary_expr(BinaryOp::Eq, operand.clone(), when),
+                        Some(FoldedValue::NonNull(ScalarValue::Boolean(true)))
+                    )
+                } else {
+                    let Some(condition) = fold_constant_expr(&branch.when)? else {
+                        return Ok(None);
+                    };
+                    matches!(condition, FoldedValue::NonNull(ScalarValue::Boolean(true)))
+                };
+                if matches {
+                    return fold_constant_expr(&branch.result);
+                }
+            }
+            else_result
+                .as_ref()
+                .map(|result| fold_constant_expr(result))
+                .transpose()
+                .map(Option::flatten)
         }
     }
 }
@@ -2094,13 +2530,13 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
                     "uninitialized output",
                 )?;
                 let reg = compiler.alloc_output(ty);
-                compiler.instructions.push(Instruction {
-                    kind: InstructionKind::Uninitialized {
+                compiler.emit(
+                    InstructionKind::Uninitialized {
                         dst: reg,
                         data_type: field.data_type().clone(),
                     },
-                    span: program.span,
-                });
+                    program.span,
+                );
                 reg
             }
             ColumnValue::Unsupported => {
@@ -2230,7 +2666,7 @@ fn eliminate_dead_removable_temps(
         }
 
         live.remove(&output);
-        for input in instruction_inputs(&instruction.kind) {
+        for input in instruction_inputs(instruction) {
             live.insert(input);
         }
         retained.push(instruction.clone());
@@ -2243,7 +2679,7 @@ fn eliminate_dead_removable_temps(
 fn collect_register_use_counts(instructions: &[Instruction]) -> HashMap<RegisterRef, usize> {
     let mut counts = HashMap::new();
     for instruction in instructions {
-        for input in instruction_inputs(&instruction.kind) {
+        for input in instruction_inputs(instruction) {
             *counts.entry(input).or_default() += 1;
         }
     }
@@ -2278,6 +2714,25 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
             builtin_semantics_for_lowering(*lowering).supports_common_subexpression_elimination()
         }
         InstructionKind::Inject { .. } => true,
+        InstructionKind::Select { .. } => true,
+    }
+}
+
+fn instruction_can_emit_row_errors(kind: &InstructionKind) -> bool {
+    match kind {
+        InstructionKind::Unary { op, .. } => unary_descriptor(*op).semantics.can_error,
+        InstructionKind::Binary { op, .. } => binary_descriptor(*op).semantics.can_error,
+        InstructionKind::Cast { .. } => cast_descriptor().semantics.can_error,
+        InstructionKind::Builtin { lowering, .. } => {
+            builtin_semantics_for_lowering(*lowering).can_error
+        }
+        InstructionKind::Move { .. }
+        | InstructionKind::Assign { .. }
+        | InstructionKind::Literal { .. }
+        | InstructionKind::NullLiteral { .. }
+        | InstructionKind::Uninitialized { .. }
+        | InstructionKind::Inject { .. }
+        | InstructionKind::Select { .. } => false,
     }
 }
 
@@ -2288,17 +2743,23 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
     let mut peak = crate::ir::RegisterLayout::default();
 
     for (inst_idx, instruction) in instructions.iter_mut().enumerate() {
-        let inputs = instruction_inputs(&instruction.kind);
+        let logical_error_mask = instruction.error_mask;
+        let inputs = instruction_inputs(instruction);
         let mut dead_inputs = HashSet::new();
+        let mut deferred_dead_inputs = HashSet::new();
 
         for input in &inputs {
             if input.space == RegisterSpace::Temp {
                 let physical_index = *active
                     .get(input)
                     .expect("temp register must be assigned before it is read");
-                rewrite_temp_input(&mut instruction.kind, *input, physical_index);
+                rewrite_temp_input(instruction, *input, physical_index);
                 if last_uses.get(input) == Some(&inst_idx) {
-                    dead_inputs.insert(*input);
+                    if Some(*input) == logical_error_mask {
+                        deferred_dead_inputs.insert(*input);
+                    } else {
+                        dead_inputs.insert(*input);
+                    }
                 }
             }
         }
@@ -2316,6 +2777,13 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
             active.insert(output, physical_index);
             rewrite_temp_output(&mut instruction.kind, physical_index);
         }
+
+        for dead in deferred_dead_inputs {
+            let physical_index = active
+                .remove(&dead)
+                .expect("dead error-mask temp register must still be active");
+            free.release(dead.ty, physical_index);
+        }
     }
 
     *layout = peak;
@@ -2324,7 +2792,7 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
 fn collect_temp_last_uses(instructions: &[Instruction]) -> HashMap<RegisterRef, usize> {
     let mut last_uses = HashMap::new();
     for (inst_idx, instruction) in instructions.iter().enumerate() {
-        for input in instruction_inputs(&instruction.kind) {
+        for input in instruction_inputs(instruction) {
             if input.space == RegisterSpace::Temp {
                 last_uses.insert(input, inst_idx);
             }
@@ -2333,8 +2801,8 @@ fn collect_temp_last_uses(instructions: &[Instruction]) -> HashMap<RegisterRef, 
     last_uses
 }
 
-fn instruction_inputs(kind: &InstructionKind) -> Vec<RegisterRef> {
-    match kind {
+fn instruction_inputs(instruction: &Instruction) -> Vec<RegisterRef> {
+    let mut inputs = match &instruction.kind {
         InstructionKind::Move { input, .. }
         | InstructionKind::Unary { input, .. }
         | InstructionKind::Cast { input, .. } => vec![*input],
@@ -2354,7 +2822,22 @@ fn instruction_inputs(kind: &InstructionKind) -> Vec<RegisterRef> {
         InstructionKind::Builtin { inputs, .. } | InstructionKind::Inject { inputs, .. } => {
             inputs.clone()
         }
+        InstructionKind::Select {
+            arms, otherwise, ..
+        } => {
+            let mut inputs = Vec::with_capacity(arms.len() * 2 + 1);
+            for arm in arms {
+                inputs.push(arm.mask);
+                inputs.push(arm.value);
+            }
+            inputs.push(*otherwise);
+            inputs
+        }
+    };
+    if let Some(error_mask) = instruction.error_mask {
+        inputs.push(error_mask);
     }
+    inputs
 }
 
 fn instruction_output(kind: &InstructionKind) -> RegisterRef {
@@ -2368,7 +2851,8 @@ fn instruction_output(kind: &InstructionKind) -> RegisterRef {
         | InstructionKind::Binary { dst, .. }
         | InstructionKind::Cast { dst, .. }
         | InstructionKind::Builtin { dst, .. }
-        | InstructionKind::Inject { dst, .. } => *dst,
+        | InstructionKind::Inject { dst, .. }
+        | InstructionKind::Select { dst, .. } => *dst,
     }
 }
 
@@ -2383,18 +2867,19 @@ fn rewrite_instruction_output(kind: &mut InstructionKind, dst: RegisterRef) {
         | InstructionKind::Binary { dst: output, .. }
         | InstructionKind::Cast { dst: output, .. }
         | InstructionKind::Builtin { dst: output, .. }
-        | InstructionKind::Inject { dst: output, .. } => *output = dst,
+        | InstructionKind::Inject { dst: output, .. }
+        | InstructionKind::Select { dst: output, .. } => *output = dst,
     }
 }
 
-fn rewrite_temp_input(kind: &mut InstructionKind, from: RegisterRef, to_index: usize) {
+fn rewrite_temp_input(instruction: &mut Instruction, from: RegisterRef, to_index: usize) {
     let rewrite = |reg: &mut RegisterRef| {
         if *reg == from {
             reg.index = to_index;
         }
     };
 
-    match kind {
+    match &mut instruction.kind {
         InstructionKind::Move { input, .. }
         | InstructionKind::Unary { input, .. }
         | InstructionKind::Cast { input, .. } => rewrite(input),
@@ -2418,6 +2903,18 @@ fn rewrite_temp_input(kind: &mut InstructionKind, from: RegisterRef, to_index: u
                 rewrite(input);
             }
         }
+        InstructionKind::Select {
+            arms, otherwise, ..
+        } => {
+            for arm in arms {
+                rewrite(&mut arm.mask);
+                rewrite(&mut arm.value);
+            }
+            rewrite(otherwise);
+        }
+    }
+    if let Some(error_mask) = &mut instruction.error_mask {
+        rewrite(error_mask);
     }
 }
 
@@ -2432,7 +2929,8 @@ fn rewrite_temp_output(kind: &mut InstructionKind, to_index: usize) {
         | InstructionKind::Binary { dst, .. }
         | InstructionKind::Cast { dst, .. }
         | InstructionKind::Builtin { dst, .. }
-        | InstructionKind::Inject { dst, .. } => dst,
+        | InstructionKind::Inject { dst, .. }
+        | InstructionKind::Select { dst, .. } => dst,
     };
     output.index = to_index;
 }
@@ -2552,6 +3050,99 @@ mod tests {
         )
         .expect_err("must fail");
         assert_eq!(error.code, "type_mismatch");
+    }
+
+    #[test]
+    fn validates_conditional_expression_types_and_nullability() {
+        let schema = schema(vec![
+            Field::new("number", DataType::Int64, true),
+            Field::new("kind", DataType::Utf8, true),
+        ]);
+        let invalid_condition =
+            parse_program("SET input.result = CASE WHEN input.number THEN 1 ELSE 0 END;")
+                .expect("program must parse");
+        let error = compile_program_with_output_fields(
+            &invalid_condition,
+            schema.clone(),
+            vec![Field::new("result", DataType::Int64, true)],
+        )
+        .expect_err("non-Boolean condition must fail");
+        assert_eq!(error.code, "invalid_condition");
+
+        let mismatched_results = parse_program(
+            "SET input.result = CASE input.kind WHEN \"number\" THEN 1 ELSE \"text\" END;",
+        )
+        .expect("program must parse");
+        let error = compile_program_with_output_fields(
+            &mismatched_results,
+            schema.clone(),
+            vec![Field::new("result", DataType::Int64, true)],
+        )
+        .expect_err("mixed CASE results must fail");
+        assert_eq!(error.code, "type_mismatch");
+
+        let untyped =
+            parse_program("SET input.result = CASE WHEN input.number = 0 THEN NULL ELSE NULL END;")
+                .expect("program must parse");
+        let error = compile_program_with_output_fields(
+            &untyped,
+            schema.clone(),
+            vec![Field::new("result", DataType::Int64, true)],
+        )
+        .expect_err("all-NULL CASE must fail");
+        assert_eq!(error.code, "untyped_null");
+
+        let omitted_else =
+            parse_program("SET input.result = CASE WHEN input.number = 0 THEN 1 END;")
+                .expect("program must parse");
+        let error = compile_program_with_output_fields(
+            &omitted_else,
+            schema,
+            vec![Field::new("result", DataType::Int64, false)],
+        )
+        .expect_err("omitted CASE ELSE must require an optional output");
+        assert_eq!(error.code, "null_for_required_field");
+    }
+
+    #[test]
+    fn folds_constant_if_without_emitting_select() {
+        let program = parse_program("SET input.result = IF TRUE THEN 1 ELSE 2 END;")
+            .expect("program must parse");
+        let schema = schema(vec![Field::new("source", DataType::Int64, false)]);
+        let compiled = compile_program_with_output_fields(
+            &program,
+            schema,
+            vec![Field::new("result", DataType::Int64, false)],
+        )
+        .expect("constant IF must compile");
+
+        assert!(
+            compiled
+                .instructions
+                .iter()
+                .all(|instruction| !matches!(instruction.kind, InstructionKind::Select { .. }))
+        );
+    }
+
+    #[test]
+    fn propagates_sensitivity_from_conditional_conditions() {
+        let program = parse_program("SET input.result = IF input.secret THEN 1 ELSE 0 END;")
+            .expect("program must parse");
+        let input_schema = schema(vec![Field::new("secret", DataType::Boolean, false)]);
+        let output_schema = with_output_fields(
+            &input_schema,
+            vec![Field::new("result", DataType::Int64, false)],
+        );
+        let error = compile_program_with_sensitive_output(
+            &program,
+            input_schema,
+            sensitivity(&["secret"]),
+            output_schema,
+            SchemaSensitivity::default(),
+        )
+        .expect_err("sensitive condition must taint the CASE result");
+
+        assert_eq!(error.code, "sensitive_leak");
     }
 
     #[test]
@@ -3207,6 +3798,7 @@ mod tests {
                     value: ScalarValue::Utf8("ABC".to_string()),
                 },
                 span: (0..0).into(),
+                error_mask: None,
             },
             Instruction {
                 kind: InstructionKind::Builtin {
@@ -3215,6 +3807,7 @@ mod tests {
                     inputs: vec![literal],
                 },
                 span: (0..0).into(),
+                error_mask: None,
             },
             Instruction {
                 kind: InstructionKind::Move {
@@ -3222,6 +3815,7 @@ mod tests {
                     input: lowered,
                 },
                 span: (0..0).into(),
+                error_mask: None,
             },
             Instruction {
                 kind: InstructionKind::Literal {
@@ -3229,6 +3823,7 @@ mod tests {
                     value: ScalarValue::Utf8("unused".to_string()),
                 },
                 span: (0..0).into(),
+                error_mask: None,
             },
         ];
 
@@ -3270,6 +3865,7 @@ mod tests {
                 op: BinaryOp::Div,
             },
             span: (0..0).into(),
+            error_mask: None,
         }];
 
         optimize_instructions(&mut instructions, &[], None, &[]);
@@ -3283,6 +3879,49 @@ mod tests {
                 ..
             } if dst == dead
         ));
+    }
+
+    #[test]
+    fn temp_remapping_keeps_error_mask_live_through_boolean_output() {
+        let mask = RegisterRef::new(RegisterSpace::Temp, RegisterType::Boolean, 0);
+        let output = RegisterRef::new(RegisterSpace::Temp, RegisterType::Boolean, 1);
+        let text = RegisterRef::new(RegisterSpace::Input, RegisterType::Utf8, 0);
+        let pattern = RegisterRef::new(RegisterSpace::Input, RegisterType::Utf8, 1);
+        let mut instructions = vec![
+            Instruction {
+                kind: InstructionKind::Literal {
+                    dst: mask,
+                    value: ScalarValue::Boolean(true),
+                },
+                span: (0..0).into(),
+                error_mask: None,
+            },
+            Instruction {
+                kind: InstructionKind::Builtin {
+                    dst: output,
+                    lowering: BuiltinLowering::RegexpLike,
+                    inputs: vec![text, pattern],
+                },
+                span: (0..0).into(),
+                error_mask: Some(mask),
+            },
+        ];
+        let mut layout = crate::ir::RegisterLayout {
+            boolean: 2,
+            ..crate::ir::RegisterLayout::default()
+        };
+
+        remap_temp_registers(&mut instructions, &mut layout);
+
+        let Instruction {
+            kind: InstructionKind::Builtin { dst, .. },
+            error_mask: Some(error_mask),
+            ..
+        } = &instructions[1]
+        else {
+            panic!("masked Boolean instruction must remain");
+        };
+        assert_ne!(*dst, *error_mask);
     }
 
     #[test]

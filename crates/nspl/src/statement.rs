@@ -1127,6 +1127,18 @@ mod tests {
     }
 
     #[test]
+    fn conditional_expression_body_does_not_change_route_completion_context() {
+        let literal = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = 1 ";
+        let conditional = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = \
+                           CASE WHEN input.active THEN 1 ELSE 0 END ";
+
+        assert_eq!(
+            suggest_statement(literal, literal.len()),
+            suggest_statement(conditional, conditional.len())
+        );
+    }
+
+    #[test]
     fn reingestor_output_context_suggestions_do_not_leak_schema_keywords() {
         let input = "CREATE REINGESTOR log_splitter FROM incoming_logs TO errors_ss FLUSH \
                      IMMEDIATE ON MESSAGE ERROR LOG ";
@@ -2124,6 +2136,39 @@ mod tests {
             panic!("expected create statement");
         };
         let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_preserves_conditional_surface_forms() {
+        let input = r#"
+            CREATE JUNCTION conditional
+                FROM source
+                UNBRANCHED
+                TO projected
+                    INHERIT ALL
+                    SET if_result = IF input.active THEN 1 ELSE 0 END,
+                        simple_result = CASE input.kind
+                            WHEN "primary" THEN 1
+                            WHEN "secondary" THEN 2
+                            ELSE 0
+                        END,
+                        searched_result = CASE
+                            WHEN input.active THEN 1
+                        END
+                    FLUSH IMMEDIATE
+                    ON MESSAGE ERROR LOG;
+        "#;
+
+        let parsed = parse_statement(input).expect("parse should succeed");
+        let Statement::Create(parsed) = parsed else {
+            panic!("expected create statement");
+        };
+        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        assert!(canonical.contains("IF input.active THEN 1 ELSE 0 END"));
+        assert!(canonical.contains("CASE input.kind WHEN"));
+        assert!(canonical.contains("CASE WHEN input.active THEN 1 END"));
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::Create(parsed), reparsed);
     }

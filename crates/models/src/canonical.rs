@@ -115,6 +115,39 @@ pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNs
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )),
+        Expression::If {
+            condition,
+            then_result,
+            else_result,
+        } => Ok(format!(
+            "IF {} THEN {} ELSE {} END",
+            expression_to_nspl(condition)?,
+            expression_to_nspl(then_result)?,
+            expression_to_nspl(else_result)?
+        )),
+        Expression::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            let mut rendered = "CASE".to_string();
+            if let Some(operand) = operand {
+                rendered.push(' ');
+                rendered.push_str(&expression_to_nspl(operand)?);
+            }
+            for branch in branches {
+                rendered.push_str(" WHEN ");
+                rendered.push_str(&expression_to_nspl(&branch.when)?);
+                rendered.push_str(" THEN ");
+                rendered.push_str(&expression_to_nspl(&branch.result)?);
+            }
+            if let Some(else_result) = else_result {
+                rendered.push_str(" ELSE ");
+                rendered.push_str(&expression_to_nspl(else_result)?);
+            }
+            rendered.push_str(" END");
+            Ok(rendered)
+        }
     }
 }
 

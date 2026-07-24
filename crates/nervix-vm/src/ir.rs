@@ -257,6 +257,12 @@ pub enum AssignmentFallback {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SelectArm {
+    pub mask: RegisterRef,
+    pub value: RegisterRef,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum InstructionKind {
     Move {
         dst: RegisterRef,
@@ -306,12 +312,18 @@ pub enum InstructionKind {
         inputs: Vec<RegisterRef>,
         output_type: DataType,
     },
+    Select {
+        dst: RegisterRef,
+        arms: Vec<SelectArm>,
+        otherwise: RegisterRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instruction {
     pub kind: InstructionKind,
     pub span: Span,
+    pub error_mask: Option<RegisterRef>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

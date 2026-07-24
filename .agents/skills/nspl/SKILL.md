@@ -53,6 +53,9 @@ request can mix those phases.
 
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
+- Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
+  result at one exact type; remember that omitted `CASE ELSE` yields a typed null and requires an
+  optional destination.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named

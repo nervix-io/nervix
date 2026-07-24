@@ -2,13 +2,14 @@ use ahash_compile_time::{HashSet, HashSetExt};
 use arrow_schema::{DataType, Schema, TimeUnit};
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator as ModelBinaryOperator,
-    Expression as ModelExpression, FieldReference, FieldScope, Inheritance,
-    Literal as ModelLiteral, ParseAsType, RouteConstruction, UnaryOperator as ModelUnaryOperator,
+    CaseBranch as ModelCaseBranch, Expression as ModelExpression, FieldReference, FieldScope,
+    Inheritance, Literal as ModelLiteral, ParseAsType, RouteConstruction,
+    UnaryOperator as ModelUnaryOperator,
 };
 
 use super::{
-    BinaryOp, Expr, FieldRef, FunctionName, Invocation, Literal, Program, Span, SpannedExpr,
-    SpannedInvocation, SpannedNode, UnaryOp, ast::spanned,
+    BinaryOp, CaseArm, Expr, FieldRef, FunctionName, Invocation, Literal, Program, Span,
+    SpannedExpr, SpannedInvocation, SpannedNode, UnaryOp, ast::spanned,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -605,6 +606,38 @@ fn resolve_expression(
                 .map(|item| resolve_expression(item, resolve_field))
                 .collect::<Result<Vec<_>, String>>()?,
         ),
+        ModelExpression::If {
+            condition,
+            then_result,
+            else_result,
+        } => ModelExpression::If {
+            condition: Box::new(resolve_expression(condition, resolve_field)?),
+            then_result: Box::new(resolve_expression(then_result, resolve_field)?),
+            else_result: Box::new(resolve_expression(else_result, resolve_field)?),
+        },
+        ModelExpression::Case {
+            operand,
+            branches,
+            else_result,
+        } => ModelExpression::Case {
+            operand: operand
+                .as_ref()
+                .map(|operand| resolve_expression(operand, resolve_field).map(Box::new))
+                .transpose()?,
+            branches: branches
+                .iter()
+                .map(|branch| {
+                    Ok(ModelCaseBranch {
+                        when: resolve_expression(&branch.when, resolve_field)?,
+                        result: resolve_expression(&branch.result, resolve_field)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            else_result: else_result
+                .as_ref()
+                .map(|result| resolve_expression(result, resolve_field).map(Box::new))
+                .transpose()?,
+        },
     })
 }
 
@@ -794,6 +827,53 @@ fn lower_expression_with_span(
         ModelExpression::Array(_) => {
             return Err("array expressions are valid only in window SET values".to_string());
         }
+        ModelExpression::If {
+            condition,
+            then_result,
+            else_result,
+        } => Expr::Case {
+            operand: None,
+            branches: vec![CaseArm {
+                when: lower_expression_with_span(condition, bare_read_namespace, span)?,
+                result: lower_expression_with_span(then_result, bare_read_namespace, span)?,
+            }],
+            else_result: Some(Box::new(lower_expression_with_span(
+                else_result,
+                bare_read_namespace,
+                span,
+            )?)),
+        },
+        ModelExpression::Case {
+            operand,
+            branches,
+            else_result,
+        } => Expr::Case {
+            operand: operand
+                .as_ref()
+                .map(|operand| {
+                    lower_expression_with_span(operand, bare_read_namespace, span).map(Box::new)
+                })
+                .transpose()?,
+            branches: branches
+                .iter()
+                .map(|branch| {
+                    Ok(CaseArm {
+                        when: lower_expression_with_span(&branch.when, bare_read_namespace, span)?,
+                        result: lower_expression_with_span(
+                            &branch.result,
+                            bare_read_namespace,
+                            span,
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            else_result: else_result
+                .as_ref()
+                .map(|result| {
+                    lower_expression_with_span(result, bare_read_namespace, span).map(Box::new)
+                })
+                .transpose()?,
+        },
     };
     Ok(spanned(expression, span))
 }

@@ -229,6 +229,23 @@ fn validate_window_input_scope(expression: &Expr, inside_aggregate: bool) -> Res
             }
             Ok(())
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                validate_window_input_scope(&operand.inner, inside_aggregate)?;
+            }
+            for branch in branches {
+                validate_window_input_scope(&branch.when.inner, inside_aggregate)?;
+                validate_window_input_scope(&branch.result.inner, inside_aggregate)?;
+            }
+            if let Some(else_result) = else_result {
+                validate_window_input_scope(&else_result.inner, inside_aggregate)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -274,6 +291,22 @@ fn offset_expr_demand_references(expr: &mut Expr, offset: usize) {
                 offset_expr_demand_references(&mut arg.inner, offset);
             }
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                offset_expr_demand_references(&mut operand.inner, offset);
+            }
+            for branch in branches {
+                offset_expr_demand_references(&mut branch.when.inner, offset);
+                offset_expr_demand_references(&mut branch.result.inner, offset);
+            }
+            if let Some(else_result) = else_result {
+                offset_expr_demand_references(&mut else_result.inner, offset);
+            }
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
     }
 }
@@ -296,6 +329,22 @@ fn collect_expr_demand_references(expr: &Expr, counts: &mut [usize]) {
             }
             for arg in args {
                 collect_expr_demand_references(&arg.inner, counts);
+            }
+        }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                collect_expr_demand_references(&operand.inner, counts);
+            }
+            for branch in branches {
+                collect_expr_demand_references(&branch.when.inner, counts);
+                collect_expr_demand_references(&branch.result.inner, counts);
+            }
+            if let Some(else_result) = else_result {
+                collect_expr_demand_references(&else_result.inner, counts);
             }
         }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
@@ -443,6 +492,23 @@ fn validate_aggregate_expr<'src>(expr: &SpannedExpr) -> Result<(), Rich<'src, To
             }
             Ok(())
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                validate_aggregate_expr(operand)?;
+            }
+            for branch in branches {
+                validate_aggregate_expr(&branch.when)?;
+                validate_aggregate_expr(&branch.result)?;
+            }
+            if let Some(else_result) = else_result {
+                validate_aggregate_expr(else_result)?;
+            }
+            Ok(())
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => Ok(()),
     }
 }
@@ -571,6 +637,22 @@ fn contains_aggregate_call(expr: &Expr) -> bool {
         Expr::Binary { left, right, .. } => {
             contains_aggregate_call(&left.inner) || contains_aggregate_call(&right.inner)
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|operand| contains_aggregate_call(&operand.inner))
+                || branches.iter().any(|branch| {
+                    contains_aggregate_call(&branch.when.inner)
+                        || contains_aggregate_call(&branch.result.inner)
+                })
+                || else_result
+                    .as_ref()
+                    .is_some_and(|result| contains_aggregate_call(&result.inner))
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
 }
@@ -654,6 +736,22 @@ fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggreg
                 percentile,
             });
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                assign_vm_expr_demands(operand, demands);
+            }
+            for branch in branches {
+                assign_vm_expr_demands(&mut branch.when, demands);
+                assign_vm_expr_demands(&mut branch.result, demands);
+            }
+            if let Some(else_result) = else_result {
+                assign_vm_expr_demands(else_result, demands);
+            }
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
     }
 }
@@ -717,6 +815,22 @@ fn collect_expr_field_refs<'a>(expr: &'a Expr, refs: &mut Vec<&'a FieldRef>) {
                 collect_expr_field_refs(&arg.inner, refs);
             }
         }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            if let Some(operand) = operand {
+                collect_expr_field_refs(&operand.inner, refs);
+            }
+            for branch in branches {
+                collect_expr_field_refs(&branch.when.inner, refs);
+                collect_expr_field_refs(&branch.result.inner, refs);
+            }
+            if let Some(else_result) = else_result {
+                collect_expr_field_refs(&else_result.inner, refs);
+            }
+        }
         Expr::Literal(_) | Expr::InternalFieldRef(_) => {}
     }
 }
@@ -747,6 +861,17 @@ mod tests {
         assert_eq!(demands[1].storage, WindowAggregateStorageKind::SortedMap);
         assert_eq!(demands[2].storage, WindowAggregateStorageKind::Sequence);
         assert_eq!(demands[3].storage, WindowAggregateStorageKind::Histogram);
+    }
+
+    #[test]
+    fn conditional_window_results_collect_all_aggregate_demands() {
+        let parsed = parse_aggregate_program(
+            "s2.result = CASE WHEN COUNT(s1.value) > 0 THEN SUM(s1.value) ELSE 0 END",
+        )
+        .expect("conditional aggregate expression must parse");
+
+        assert_eq!(parsed.demands().len(), 2);
+        assert_eq!(parsed.demand_reference_counts(), vec![1, 1]);
     }
 
     #[test]

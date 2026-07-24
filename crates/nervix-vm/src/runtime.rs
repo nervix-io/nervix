@@ -695,7 +695,18 @@ fn execute_program_with_selection_in_context_sync(
     let mut row_errors = batch.errors().to_vec();
 
     for instruction in &program.instructions {
+        let baseline = instruction
+            .error_mask
+            .map(|_| row_errors.iter().map(Vec::len).collect::<Vec<_>>());
         instruction.execute(&mut registers, batch.row_count(), &mut row_errors, context)?;
+        if let (Some(mask_reg), Some(baseline)) = (instruction.error_mask, baseline) {
+            let mask = registers.boolean(mask_reg)?;
+            for (row, previous_len) in baseline.into_iter().enumerate() {
+                if !row_selected(mask, row) {
+                    row_errors[row].truncate(previous_len);
+                }
+            }
+        }
     }
 
     let mut columns = Vec::with_capacity(program.outputs.len());
@@ -868,6 +879,26 @@ impl Instruction {
                         expected_rows: row_count,
                         actual_rows: output.len(),
                     });
+                }
+                registers.set_array(*dst, output)
+            }
+            InstructionKind::Select {
+                dst,
+                arms,
+                otherwise,
+            } => {
+                let mut output = registers.read_array(*otherwise)?;
+                for arm in arms.iter().rev() {
+                    let mask = registers.boolean(arm.mask)?;
+                    let value = typed_array_to_array_ref(registers.read_array(arm.value)?);
+                    let fallback = typed_array_to_array_ref(output);
+                    let selected = zip(
+                        mask,
+                        &value.as_ref() as &dyn Datum,
+                        &fallback.as_ref() as &dyn Datum,
+                    )
+                    .map_err(|error| arrow_kernel_error("conditional selection failed", error))?;
+                    output = array_ref_to_typed_array(selected)?;
                 }
                 registers.set_array(*dst, output)
             }
@@ -3940,6 +3971,51 @@ mod tests {
     }
 
     #[test]
+    fn conditional_results_observe_only_selected_row_errors() {
+        let parsed = parse_program(
+            "SET input.result = CASE WHEN input.run THEN 10 / input.divisor ELSE 0 END;",
+        )
+        .expect("conditional expression must parse");
+        let schema = schema(vec![
+            Field::new("run", DataType::Boolean, true),
+            Field::new("divisor", DataType::Int64, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![Field::new("result", DataType::Int64, true)],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Boolean(BooleanArray::from(vec![
+                    Some(false),
+                    Some(true),
+                    Some(true),
+                    None,
+                ])),
+                TypedArray::Int64(Int64Array::from(vec![Some(0), Some(0), Some(2), Some(0)])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Int64(result) = output_column(&output, "result") else {
+            panic!("result must be Int64");
+        };
+
+        assert_eq!(result.value(0), 0);
+        assert!(result.is_null(1));
+        assert_eq!(result.value(2), 5);
+        assert_eq!(result.value(3), 0);
+        assert!(output.errors()[0].is_empty());
+        assert_eq!(output.errors()[1].len(), 1);
+        assert_eq!(output.errors()[1][0].code, ErrorCode::DivisionByZero);
+        assert!(output.errors()[2].is_empty());
+        assert!(output.errors()[3].is_empty());
+    }
+
+    #[test]
     fn executes_null_assignment_to_declared_optional_field() {
         let parsed = parse_program("SET input.maybe = NULL;").expect("must parse");
         let schema = schema(vec![Field::new("value", DataType::Utf8, true)]);
@@ -5350,6 +5426,7 @@ mod tests {
                     inputs: vec![float_input],
                 },
                 span: (0..1).into(),
+                error_mask: None,
             }],
             filter: None,
             branch_filters: Vec::new(),
@@ -5419,6 +5496,7 @@ mod tests {
                     op: BinaryOp::Add,
                 },
                 span: (0..1).into(),
+                error_mask: None,
             }],
             filter: None,
             branch_filters: Vec::new(),

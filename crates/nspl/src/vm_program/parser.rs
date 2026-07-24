@@ -8,8 +8,8 @@ use chumsky::{
 
 use crate::vm_program::{
     ast::{
-        BinaryOp, Expr, FieldRef, FunctionName, Invocation, Literal, Program, Span, merge_spans,
-        spanned,
+        BinaryOp, CaseArm, Expr, FieldRef, FunctionName, Invocation, Literal, Program, Span,
+        merge_spans, spanned,
     },
     lexer::{SpannedToken, Token, lex},
 };
@@ -145,9 +145,60 @@ where
                 )
             });
 
+        let when_clause = keyword(Token::When)
+            .ignore_then(expr.clone())
+            .then_ignore(keyword(Token::Then))
+            .then(expr.clone())
+            .map(|(when, result)| CaseArm { when, result });
+
+        let case_expression = keyword(Token::Case)
+            .ignore_then(expr.clone().or_not())
+            .then(
+                when_clause
+                    .clone()
+                    .repeated()
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
+            )
+            .then(keyword(Token::Else).ignore_then(expr.clone()).or_not())
+            .then_ignore(keyword(Token::End))
+            .map_with(|((operand, branches), else_result), e| {
+                spanned(
+                    Expr::Case {
+                        operand: operand.map(Box::new),
+                        branches,
+                        else_result: else_result.map(Box::new),
+                    },
+                    e.span(),
+                )
+            });
+
+        let if_expression = keyword(Token::If)
+            .ignore_then(expr.clone())
+            .then_ignore(keyword(Token::Then))
+            .then(expr.clone())
+            .then_ignore(keyword(Token::Else))
+            .then(expr.clone())
+            .then_ignore(keyword(Token::End))
+            .map_with(|((condition, then_result), else_result), e| {
+                spanned(
+                    Expr::Case {
+                        operand: None,
+                        branches: vec![CaseArm {
+                            when: condition,
+                            result: then_result,
+                        }],
+                        else_result: Some(Box::new(else_result)),
+                    },
+                    e.span(),
+                )
+            });
+
         let atom = choice((
             literal,
             function_call,
+            if_expression,
+            case_expression,
             field_ref_parser()
                 .map(|field_ref| spanned(Expr::FieldRef(field_ref.inner), field_ref.span)),
             expr.clone()
@@ -518,6 +569,79 @@ mod tests {
         let parsed = parse_program("SET input.optional_value = NULL;").expect("program must parse");
 
         assert_eq!(parsed.inner.set.len(), 1);
+    }
+
+    #[test]
+    fn parses_conditional_expression_forms() {
+        let parsed = parse_program(
+            "SET input.searched = CASE WHEN input.active THEN input.value ELSE 0 END, \
+             input.simple = CASE input.kind WHEN \"primary\" THEN 1 WHEN \"secondary\" THEN 2 \
+             END, input.conditional = IF input.active THEN input.value ELSE 0 END;",
+        )
+        .expect("conditional expressions must parse");
+
+        assert_eq!(parsed.inner.set.len(), 3);
+        assert!(matches!(
+            parsed.inner.set[0].1.inner,
+            Expr::Case {
+                operand: None,
+                ref branches,
+                else_result: Some(_),
+            } if branches.len() == 1
+        ));
+        assert!(matches!(
+            parsed.inner.set[1].1.inner,
+            Expr::Case {
+                operand: Some(_),
+                ref branches,
+                else_result: None,
+            } if branches.len() == 2
+        ));
+        assert!(matches!(
+            parsed.inner.set[2].1.inner,
+            Expr::Case {
+                operand: None,
+                ref branches,
+                else_result: Some(_),
+            } if branches.len() == 1
+        ));
+    }
+
+    #[test]
+    fn conditional_expressions_compose_as_atoms() {
+        let parsed = parse_program(
+            "SET input.value = lower(CASE input.kind WHEN \"primary\" THEN \"A\" ELSE IF \
+             input.active THEN \"B\" ELSE \"C\" END END) AS STRING;",
+        )
+        .expect("nested conditional expression must parse");
+
+        assert!(matches!(
+            parsed.inner.set[0].1.inner,
+            Expr::Cast { ref expr, .. }
+                if matches!(
+                    expr.inner,
+                    Expr::Call {
+                        function: FunctionName::Lower,
+                        ..
+                    }
+                )
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_conditionals_and_reserved_field_names() {
+        for source in [
+            "SET input.value = CASE WHEN input.active THEN 1 ELSE 0;",
+            "SET input.value = IF input.active THEN 1 END;",
+            "SET input.value = CASE ELSE 0 END;",
+            "SET input.value = CASE WHEN input.active 1 ELSE 0 END;",
+            "SET input.value = input.case;",
+        ] {
+            assert!(
+                parse_program(source).is_err(),
+                "conditional syntax must fail: {source}"
+            );
+        }
     }
 
     #[test]

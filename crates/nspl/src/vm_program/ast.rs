@@ -63,6 +63,17 @@ pub enum Expr {
         function: FunctionName,
         args: Vec<SpannedExpr>,
     },
+    Case {
+        operand: Option<Box<SpannedExpr>>,
+        branches: Vec<CaseArm>,
+        else_result: Option<Box<SpannedExpr>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseArm {
+    pub when: SpannedExpr,
+    pub result: SpannedExpr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

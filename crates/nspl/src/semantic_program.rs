@@ -4,7 +4,7 @@ use chumsky::{
     prelude::*,
 };
 use nervix_models::{
-    Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, Expression,
+    Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
     FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField, Invocation, Literal,
     ParseAsType, RouteConstruction, UnaryOperator,
 };
@@ -143,10 +143,43 @@ where
             .collect::<Vec<_>>()
             .delimited_by(keyword(Token::LBracket), keyword(Token::RBracket))
             .map(Expression::Array);
+        let when_clause = keyword(Token::When)
+            .ignore_then(expression.clone())
+            .then_ignore(keyword(Token::Then))
+            .then(expression.clone())
+            .map(|(when, result)| CaseBranch { when, result });
+        let case_expression = keyword(Token::Case)
+            .ignore_then(expression.clone().or_not())
+            .then(when_clause.repeated().at_least(1).collect::<Vec<_>>())
+            .then(
+                keyword(Token::Else)
+                    .ignore_then(expression.clone())
+                    .or_not(),
+            )
+            .then_ignore(keyword(Token::End))
+            .map(|((operand, branches), else_result)| Expression::Case {
+                operand: operand.map(Box::new),
+                branches,
+                else_result: else_result.map(Box::new),
+            });
+        let if_expression = keyword(Token::If)
+            .ignore_then(expression.clone())
+            .then_ignore(keyword(Token::Then))
+            .then(expression.clone())
+            .then_ignore(keyword(Token::Else))
+            .then(expression.clone())
+            .then_ignore(keyword(Token::End))
+            .map(|((condition, then_result), else_result)| Expression::If {
+                condition: Box::new(condition),
+                then_result: Box::new(then_result),
+                else_result: Box::new(else_result),
+            });
         let atom = choice((
             literal,
             function_call,
             array,
+            if_expression,
+            case_expression,
             field_reference().map(Expression::Field),
             expression
                 .clone()
