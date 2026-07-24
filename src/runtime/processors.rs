@@ -10,6 +10,7 @@ use nervix_nspl::{
     vm_program::{FieldRef, Program as VmProgram, SpannedNode},
     window_processor::aggregate::{WindowAggregateExpr, WindowAggregateProgram},
 };
+use nervix_roto::UdfExecutor;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileOptions as VmCompileOptions,
     CompiledProgram as VmCompiledProgram, InstructionKind as VmInstructionKind,
@@ -427,6 +428,7 @@ impl CompiledWindowAggregateProgram {
         input_relays: &[Identifier],
         output_relay: &Identifier,
         relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
+        udfs: Option<&UdfExecutor>,
     ) -> Result<Self, String> {
         let output_schema = relay_schemas.get(output_relay).ok_or_else(|| {
             format!(
@@ -472,6 +474,7 @@ impl CompiledWindowAggregateProgram {
                         target_field.data_type(),
                         target_sensitive,
                         &bindings,
+                        udfs,
                     )?,
                 })
             })
@@ -507,6 +510,7 @@ impl CompiledWindowAggregateProgram {
         target_type: &arrow_schema::DataType,
         target_sensitive: bool,
         bindings: &[VmCompileBinding],
+        udfs: Option<&UdfExecutor>,
     ) -> Result<CompiledWindowAggregateExpr, String> {
         match expr {
             WindowAggregateExpr::Scalar(expr) => {
@@ -540,10 +544,13 @@ impl CompiledWindowAggregateProgram {
                     output_schema,
                     output_sensitivity,
                     compile_bindings,
-                    VmCompileOptions {
-                        output_mode: VmOutputMode::ExplicitOnly,
-                        ..VmCompileOptions::default()
-                    },
+                    super::runtime_udf_compile_options(
+                        udfs,
+                        VmCompileOptions {
+                            output_mode: VmOutputMode::ExplicitOnly,
+                            ..VmCompileOptions::default()
+                        },
+                    ),
                 )
                 .map(|program| CompiledWindowAggregateExpr::Scalar(Box::new(program)))
                 .map_err(|error| format!("window aggregate VM compile failed: {}", error.message))
@@ -569,6 +576,7 @@ impl CompiledWindowAggregateProgram {
                                 element_type,
                                 target_sensitive,
                                 bindings,
+                                udfs,
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?,

@@ -40,10 +40,11 @@ use nervix_nspl::{
     },
     window_processor::aggregate::{lower_window_assignments, referenced_field_refs},
 };
+use nervix_roto::signatures_for as udf_signatures_for;
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity,
-    compile_program_for_bindings_with_sensitivity,
-    compile_program_with_options_for_bindings_with_sensitivity, infer_set_expr_types_for_bindings,
+    compile_program_with_options_for_bindings_with_sensitivity,
+    infer_set_expr_types_for_bindings_with_udfs,
 };
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
@@ -58,6 +59,17 @@ use triomphe::Arc;
 const BRANCH_NAMESPACE: &str = "branch";
 const INGEST_MESSAGE_NAMESPACE: &str = "message";
 const INNER_OUTPUT_NAMESPACE: &str = "inner_output";
+
+fn udf_compile_options(
+    models: &HashMap<RegistryKey, Model>,
+    mut options: CompileOptions,
+) -> CompileOptions {
+    options.udf_signatures = udf_signatures_for(models.values().filter_map(|model| match model {
+        Model::Udf(udf) => Some(udf),
+        _ => None,
+    }));
+    options
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RegistryError {
@@ -845,6 +857,7 @@ impl DomainState {
                 model,
                 materialized_state,
             )?;
+            add_udf_dependency_edges(domain, identifier, model, &indices, &mut graph, source)?;
 
             match model {
                 Model::Schema(schema) => {
@@ -885,6 +898,29 @@ impl DomainState {
                 | Model::ClientAzureBlob(_)
                 | Model::ClientIcebergRest(_)
                 | Model::Vhost(_) => {}
+                Model::Udf(udf) => {
+                    if !udf.has_valid_code_hash() {
+                        return Err(Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: "UDF source does not match its content hash".to_string(),
+                        }));
+                    }
+                    if udf.arguments.is_empty() || udf.arguments.len() > 8 {
+                        return Err(Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: "UDF arity must be between 1 and 8".to_string(),
+                        }));
+                    }
+                    if udf.code.len() > 64 * 1024 {
+                        return Err(Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: "UDF code exceeds the 64 KiB limit".to_string(),
+                        }));
+                    }
+                }
                 Model::ClientWebsockets(client) => {
                     if let Some(signaling_protocol) = client.signaling_protocol.as_ref() {
                         let signaling_protocol = expect_kind(
@@ -1008,6 +1044,7 @@ impl DomainState {
                     ensure_inferencer_input_mappings(
                         domain,
                         identifier,
+                        models,
                         processor,
                         &input_schemas,
                     )?;
@@ -1477,6 +1514,7 @@ impl DomainState {
                     ensure_deduplicator_key_compiles(
                         domain,
                         identifier,
+                        models,
                         deduplicator,
                         &input_schemas,
                     )?;
@@ -3028,10 +3066,13 @@ fn effective_wasm_output_filter_map_schema(
         output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -3194,7 +3235,7 @@ fn validate_window_route_where(
         output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions::default(),
+        udf_compile_options(models, CompileOptions::default()),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -3927,11 +3968,14 @@ fn validate_message_error_policy(
         arrow_schema_for_internal_schema(error_output),
         schema_sensitivity_for_internal_schema(error_output),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            allow_header_reads: schemas.allow_header_reads,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                allow_header_reads: schemas.allow_header_reads,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -4077,7 +4121,7 @@ fn validate_materialized_state_default(
                 ),
             }));
         }
-        if expression_contains_nondeterministic_or_side_effect_call(&assignment.value) {
+        if expression_contains_nondeterministic_or_side_effect_call(&assignment.value, models) {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -4111,10 +4155,13 @@ fn validate_materialized_state_default(
         output_schema,
         schema_sensitivity_for_internal_schema(schema),
         vec![writable_binding_for_internal_schema("output", schema)],
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -4129,15 +4176,18 @@ fn validate_materialized_state_default(
     Ok(())
 }
 
-fn expression_contains_nondeterministic_or_side_effect_call(expression: &Expression) -> bool {
+fn expression_contains_nondeterministic_or_side_effect_call(
+    expression: &Expression,
+    models: &HashMap<RegistryKey, Model>,
+) -> bool {
     match expression {
         Expression::Literal(_) | Expression::Field(_) => false,
         Expression::Unary { expression, .. } | Expression::Cast { expression, .. } => {
-            expression_contains_nondeterministic_or_side_effect_call(expression)
+            expression_contains_nondeterministic_or_side_effect_call(expression, models)
         }
         Expression::Binary { left, right, .. } => {
-            expression_contains_nondeterministic_or_side_effect_call(left)
-                || expression_contains_nondeterministic_or_side_effect_call(right)
+            expression_contains_nondeterministic_or_side_effect_call(left, models)
+                || expression_contains_nondeterministic_or_side_effect_call(right, models)
         }
         Expression::Call {
             function,
@@ -4146,21 +4196,32 @@ fn expression_contains_nondeterministic_or_side_effect_call(expression: &Express
             matches!(
                 function.as_str().to_ascii_lowercase().as_str(),
                 "now" | "uuid_v4" | "uuid_v7" | "write_header"
-            ) || arguments
-                .iter()
-                .any(expression_contains_nondeterministic_or_side_effect_call)
+            ) || arguments.iter().any(|argument| {
+                expression_contains_nondeterministic_or_side_effect_call(argument, models)
+            })
+        }
+        Expression::UdfCall {
+            function,
+            arguments,
+        } => {
+            models
+                .get(&RegistryKey::new(ModelKind::Udf, function.clone()))
+                .is_none_or(|model| !matches!(model, Model::Udf(udf) if !udf.volatile))
+                || arguments.iter().any(|argument| {
+                    expression_contains_nondeterministic_or_side_effect_call(argument, models)
+                })
         }
         Expression::Array(items) => items
             .iter()
-            .any(expression_contains_nondeterministic_or_side_effect_call),
+            .any(|item| expression_contains_nondeterministic_or_side_effect_call(item, models)),
         Expression::If {
             condition,
             then_result,
             else_result,
         } => {
-            expression_contains_nondeterministic_or_side_effect_call(condition)
-                || expression_contains_nondeterministic_or_side_effect_call(then_result)
-                || expression_contains_nondeterministic_or_side_effect_call(else_result)
+            expression_contains_nondeterministic_or_side_effect_call(condition, models)
+                || expression_contains_nondeterministic_or_side_effect_call(then_result, models)
+                || expression_contains_nondeterministic_or_side_effect_call(else_result, models)
         }
         Expression::Case {
             operand,
@@ -4168,12 +4229,15 @@ fn expression_contains_nondeterministic_or_side_effect_call(expression: &Express
             else_result,
         } => {
             operand.as_ref().is_some_and(|operand| {
-                expression_contains_nondeterministic_or_side_effect_call(operand)
+                expression_contains_nondeterministic_or_side_effect_call(operand, models)
             }) || branches.iter().any(|branch| {
-                expression_contains_nondeterministic_or_side_effect_call(&branch.when)
-                    || expression_contains_nondeterministic_or_side_effect_call(&branch.result)
+                expression_contains_nondeterministic_or_side_effect_call(&branch.when, models)
+                    || expression_contains_nondeterministic_or_side_effect_call(
+                        &branch.result,
+                        models,
+                    )
             }) || else_result.as_ref().is_some_and(|result| {
-                expression_contains_nondeterministic_or_side_effect_call(result)
+                expression_contains_nondeterministic_or_side_effect_call(result, models)
             })
         }
     }
@@ -4234,6 +4298,11 @@ fn visit_model_expressions(model: &Model, visitor: &mut impl FnMut(&Expression))
     }
     fn visit_outputs(outputs: &ProcessorOutputs, visitor: &mut impl FnMut(&Expression)) {
         for output in outputs.outputs() {
+            if let Some(branch) = &output.branch {
+                for assignment in branch.assignments() {
+                    visitor(&assignment.value);
+                }
+            }
             for assignment in &output.construction.assignments {
                 visitor(&assignment.value);
             }
@@ -4339,6 +4408,41 @@ fn visit_model_expressions(model: &Model, visitor: &mut impl FnMut(&Expression))
         }
         _ => {}
     }
+    for dependency in model_materialized_state_dependencies(model) {
+        if let MaterializedStatePolicy::Default(assignments) = &dependency.policy {
+            for assignment in assignments {
+                visitor(&assignment.value);
+            }
+        }
+    }
+}
+
+fn add_udf_dependency_edges(
+    domain: &Domain,
+    identifier: &Identifier,
+    model: &Model,
+    indices: &HashMap<RegistryKey, NodeIndex>,
+    graph: &mut DiGraph<ActiveNode, EdgeKind>,
+    consumer: NodeIndex,
+) -> Result<(), Report<RegistryError>> {
+    let mut dependencies = HashSet::default();
+    visit_model_expressions(model, &mut |expression| {
+        expression.visit_udf_calls(&mut |function, _| {
+            dependencies.insert(function.clone());
+        });
+    });
+    for function in dependencies {
+        let key = RegistryKey::new(ModelKind::Udf, function.clone());
+        let udf = indices.get(&key).copied().ok_or_else(|| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("referenced UDF 'udf::{}' does not exist", function.as_str()),
+            })
+        })?;
+        graph.add_edge(udf, consumer, EdgeKind::RequiredBy);
+    }
+    Ok(())
 }
 
 fn add_output_message_error_policy_edges(
@@ -4970,7 +5074,7 @@ fn validate_where_program_for_scoped_internal_schemas(
         arrow_schema_for_internal_schema(first_schema),
         schema_sensitivity_for_internal_schema(first_schema),
         bindings,
-        compile_options,
+        udf_compile_options(models, compile_options),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -5054,10 +5158,13 @@ fn effective_processor_output_filter_map_schema(
         arrow_schema_for_internal_schema(output_schema),
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -5199,16 +5306,19 @@ fn effective_emitter_filter_map_schema(
         output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         body_bindings,
-        CompileOptions {
-            output_mode: if codec_route {
-                OutputMode::ExplicitOnly
-            } else {
-                OutputMode::PassthroughByName
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: if codec_route {
+                    OutputMode::ExplicitOnly
+                } else {
+                    OutputMode::PassthroughByName
+                },
+                allow_sensitive_output: false,
+                allow_header_writes: true,
+                ..CompileOptions::default()
             },
-            allow_sensitive_output: false,
-            allow_header_writes: true,
-            ..CompileOptions::default()
-        },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -5770,10 +5880,13 @@ fn validate_generator_output(
         output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -5863,11 +5976,14 @@ fn effective_ingestor_output_filter_map_schema(
         arrow_schema_for_internal_schema(output_schema),
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            allow_header_reads: true,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                allow_header_reads: true,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -6146,6 +6262,7 @@ fn ensure_equal_internal_schema(
 fn ensure_deduplicator_key_compiles(
     domain: &Domain,
     identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
     deduplicator: &CreateDeduplicator,
     input_schemas: &[(&Identifier, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
@@ -6200,7 +6317,12 @@ fn ensure_deduplicator_key_compiles(
         "input",
         primary_schema,
     )];
-    let key_types = infer_set_expr_types_for_bindings(&parsed, bindings).map_err(|error| {
+    let key_types = infer_set_expr_types_for_bindings_with_udfs(
+        &parsed,
+        bindings,
+        udf_compile_options(models, CompileOptions::default()).udf_signatures,
+    )
+    .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -6240,6 +6362,7 @@ fn validate_correlator(
     validate_correlate_where_for_internal_schemas(
         domain,
         identifier,
+        models,
         correlator,
         left_schemas,
         right_schemas,
@@ -6280,6 +6403,7 @@ fn validate_correlator(
 fn validate_correlate_where_for_internal_schemas(
     domain: &Domain,
     identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
     correlator: &CreateCorrelator,
     left_schemas: &[(&Identifier, &CreateSchema)],
     right_schemas: &[(&Identifier, &CreateSchema)],
@@ -6320,11 +6444,12 @@ fn validate_correlate_where_for_internal_schemas(
         readonly_binding_for_internal_schema("right", right_schema),
     ];
 
-    compile_program_for_bindings_with_sensitivity(
+    compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         arrow_schema_for_internal_schema(first_schema),
         schema_sensitivity_for_internal_schema(first_schema),
         bindings,
+        udf_compile_options(models, CompileOptions::default()),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -6434,10 +6559,13 @@ fn validate_correlator_output(
         output_arrow_schema.clone(),
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -6526,6 +6654,7 @@ fn validate_correlator_timeout_action(
 fn ensure_inferencer_input_mappings(
     domain: &Domain,
     identifier: &Identifier,
+    models: &HashMap<RegistryKey, Model>,
     processor: &CreateInferencer,
     input_schemas: &[(&Identifier, &CreateSchema)],
 ) -> Result<(), Report<RegistryError>> {
@@ -6561,9 +6690,10 @@ fn ensure_inferencer_input_mappings(
                 reason: format!("inference input '{}' is invalid: {reason}", mapping.tensor),
             })
         })?;
-        let inferred = infer_set_expr_types_for_bindings(
+        let inferred = infer_set_expr_types_for_bindings_with_udfs(
             &parsed,
             [writable_binding_for_internal_schema("input", input_schema)],
+            udf_compile_options(models, CompileOptions::default()).udf_signatures,
         )
         .map_err(|error| {
             Report::new(RegistryError::InvalidModel {
@@ -6668,10 +6798,13 @@ fn validate_inferencer_output_filter_map(
         output_arrow_schema,
         schema_sensitivity_for_internal_schema(output_schema),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {
@@ -6960,10 +7093,13 @@ fn ensure_output_branch(
         arrow_schema_for_internal_schema(branch_schema),
         schema_sensitivity_for_internal_schema(branch_schema),
         bindings,
-        CompileOptions {
-            output_mode: OutputMode::ExplicitOnly,
-            ..CompileOptions::default()
-        },
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                ..CompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         Report::new(RegistryError::InvalidModel {

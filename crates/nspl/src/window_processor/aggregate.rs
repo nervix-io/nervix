@@ -66,7 +66,11 @@ pub struct WindowAggregateDemand {
 
 impl WindowAggregateFunction {
     fn parse_name(function: &FunctionName) -> Option<Self> {
-        function.as_str().parse().ok()
+        if matches!(function, FunctionName::Udf(_)) {
+            None
+        } else {
+            function.as_str().parse().ok()
+        }
     }
 
     pub fn storage(self) -> WindowAggregateStorageKind {
@@ -658,7 +662,8 @@ fn contains_aggregate_call(expr: &Expr) -> bool {
 }
 
 fn legacy_percentile_name(function: &FunctionName) -> bool {
-    function.as_str().eq_ignore_ascii_case("percentile")
+    !matches!(function, FunctionName::Udf(_))
+        && function.as_str().eq_ignore_ascii_case("percentile")
 }
 
 fn assign_aggregate_demands(program: &mut WindowAggregateProgram) {

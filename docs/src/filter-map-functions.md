@@ -30,6 +30,9 @@ General rules:
 - `NOW()` returns the execution-local domain time as `DATETIME`
 - `UUID_V7()` uses that same execution-local domain time when building the UUID
 
+Domain-owned [Roto UDFs](./udfs.md) use the same call syntax and exact typing rules. Builtins take
+name-resolution precedence, and a UDF declaration may not reuse a builtin name.
+
 ## Conditional Expressions
 
 NSPL provides three self-delimited conditional forms:

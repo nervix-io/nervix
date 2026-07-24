@@ -38,6 +38,11 @@ pub enum Expression {
         #[rkyv(omit_bounds)]
         arguments: Vec<Self>,
     },
+    UdfCall {
+        function: Identifier,
+        #[rkyv(omit_bounds)]
+        arguments: Vec<Self>,
+    },
     Array(#[rkyv(omit_bounds)] Vec<Self>),
     If {
         #[rkyv(omit_bounds)]
@@ -88,7 +93,7 @@ impl Expression {
                 left.visit_fields(visitor);
                 right.visit_fields(visitor);
             }
-            Self::Call { arguments, .. } => {
+            Self::Call { arguments, .. } | Self::UdfCall { arguments, .. } => {
                 for argument in arguments {
                     argument.visit_fields(visitor);
                 }
@@ -121,6 +126,120 @@ impl Expression {
                 }
                 if let Some(else_result) = else_result {
                     else_result.visit_fields(visitor);
+                }
+            }
+        }
+    }
+
+    pub fn visit_calls(&self, visitor: &mut impl FnMut(&Identifier, &[Self])) {
+        match self {
+            Self::Literal(_) | Self::Field(_) => {}
+            Self::Unary { expression, .. } | Self::Cast { expression, .. } => {
+                expression.visit_calls(visitor);
+            }
+            Self::Binary { left, right, .. } => {
+                left.visit_calls(visitor);
+                right.visit_calls(visitor);
+            }
+            Self::Call {
+                function,
+                arguments,
+            } => {
+                visitor(function, arguments);
+                for argument in arguments {
+                    argument.visit_calls(visitor);
+                }
+            }
+            Self::UdfCall { arguments, .. } => {
+                for argument in arguments {
+                    argument.visit_calls(visitor);
+                }
+            }
+            Self::Array(items) => {
+                for item in items {
+                    item.visit_calls(visitor);
+                }
+            }
+            Self::If {
+                condition,
+                then_result,
+                else_result,
+            } => {
+                condition.visit_calls(visitor);
+                then_result.visit_calls(visitor);
+                else_result.visit_calls(visitor);
+            }
+            Self::Case {
+                operand,
+                branches,
+                else_result,
+            } => {
+                if let Some(operand) = operand {
+                    operand.visit_calls(visitor);
+                }
+                for branch in branches {
+                    branch.when.visit_calls(visitor);
+                    branch.result.visit_calls(visitor);
+                }
+                if let Some(else_result) = else_result {
+                    else_result.visit_calls(visitor);
+                }
+            }
+        }
+    }
+
+    pub fn visit_udf_calls(&self, visitor: &mut impl FnMut(&Identifier, &[Self])) {
+        match self {
+            Self::Literal(_) | Self::Field(_) => {}
+            Self::Unary { expression, .. } | Self::Cast { expression, .. } => {
+                expression.visit_udf_calls(visitor);
+            }
+            Self::Binary { left, right, .. } => {
+                left.visit_udf_calls(visitor);
+                right.visit_udf_calls(visitor);
+            }
+            Self::Call { arguments, .. } => {
+                for argument in arguments {
+                    argument.visit_udf_calls(visitor);
+                }
+            }
+            Self::UdfCall {
+                function,
+                arguments,
+            } => {
+                visitor(function, arguments);
+                for argument in arguments {
+                    argument.visit_udf_calls(visitor);
+                }
+            }
+            Self::Array(items) => {
+                for item in items {
+                    item.visit_udf_calls(visitor);
+                }
+            }
+            Self::If {
+                condition,
+                then_result,
+                else_result,
+            } => {
+                condition.visit_udf_calls(visitor);
+                then_result.visit_udf_calls(visitor);
+                else_result.visit_udf_calls(visitor);
+            }
+            Self::Case {
+                operand,
+                branches,
+                else_result,
+            } => {
+                if let Some(operand) = operand {
+                    operand.visit_udf_calls(visitor);
+                }
+                for branch in branches {
+                    branch.when.visit_udf_calls(visitor);
+                    branch.result.visit_udf_calls(visitor);
+                }
+                if let Some(else_result) = else_result {
+                    else_result.visit_udf_calls(visitor);
                 }
             }
         }

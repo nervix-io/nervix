@@ -22,6 +22,7 @@ pub fn create_junction_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
+        .boxed()
         .then(branch_selection())
         .then(materialized_state_dependencies())
         .then(flushed_processor_outputs())
@@ -48,6 +49,7 @@ pub fn create_junction_parser<'src>()
                 )
             },
         )
+        .boxed()
 }
 
 pub fn parse_create_junction_tokens(
@@ -130,6 +132,46 @@ mod tests {
         ));
         assert_eq!(route.construction.assignments.len(), 2);
         assert!(route.construction.where_clause.is_some());
+    }
+
+    #[test]
+    fn parses_qualified_udf_calls_in_route_expressions() {
+        let input = r#"
+            CREATE JUNCTION apply_udf
+            FROM incoming
+            UNBRANCHED
+            TO outgoing
+            SET result = udf::add_one(abs(input.value))
+            WHERE udf::add_one(input.value) > 0
+            FLUSH IMMEDIATE
+            ON MESSAGE ERROR LOG;
+        "#;
+
+        let parsed = parse_create_junction(input).expect("qualified UDF calls must parse");
+        let route = &parsed.output_routes.routes[0];
+        assert!(matches!(
+            route.construction.assignments[0].value,
+            nervix_models::Expression::UdfCall { .. }
+        ));
+        assert!(matches!(
+            route.construction.where_clause,
+            Some(nervix_models::Expression::Binary { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_whitespace_inside_the_udf_qualifier() {
+        let input = r#"
+            CREATE JUNCTION apply_udf
+            FROM incoming
+            UNBRANCHED
+            TO outgoing
+            SET result = udf : : add_one(input.value)
+            FLUSH IMMEDIATE
+            ON MESSAGE ERROR LOG;
+        "#;
+
+        assert!(parse_create_junction(input).is_err());
     }
 
     #[test]

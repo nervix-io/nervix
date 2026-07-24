@@ -9,8 +9,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, channel_ref, client_ref, codec_ref, consumer_group_ref,
-        current_word_prefix, duration_lit, endpoint_ref, filter_where_clause,
+        ParseError, ParseFromSourceError, boxed_choice, channel_ref, client_ref, codec_ref,
+        consumer_group_ref, current_word_prefix, duration_lit, endpoint_ref, filter_where_clause,
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
         into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
         queue_ref, relay_ref, string_lit, subscription_ref, suggestions_from_errors, tok,
@@ -618,7 +618,7 @@ fn websockets_ingest_source_parser<'src>()
 
 fn ingest_source_parser<'src>()
 -> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    choice((
+    boxed_choice!(
         http_ingest_source_parser(),
         kinesis_ingest_source_parser(),
         kafka_ingest_source_parser(),
@@ -632,7 +632,7 @@ fn ingest_source_parser<'src>()
         sqs_ingest_source_parser(),
         endpoint_ingest_source_parser(),
         websockets_ingest_source_parser(),
-    ))
+    )
 }
 
 pub fn create_ingestor_parser<'src>()
@@ -644,10 +644,12 @@ pub fn create_ingestor_parser<'src>()
         .then(ingestor_name())
         .then_ignore(kw(Identifier::From))
         .then(ingest_source_parser())
+        .boxed()
         .then_ignore(kw_phrase2(Identifier::Decode, Identifier::Using))
         .then(codec_ref())
         .then(timestamp_source().or_not())
         .then(filter_where_clause().or_not())
+        .boxed()
         .then(flushed_ingestor_outputs())
         .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -676,6 +678,7 @@ pub fn create_ingestor_parser<'src>()
                 )
             },
         )
+        .boxed()
 }
 
 pub fn parse_create_ingestor_tokens(

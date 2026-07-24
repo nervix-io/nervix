@@ -16,6 +16,7 @@ humantime = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
+nervix-roto = { workspace = true }
 nervix-vm = { workspace = true }
 petgraph = { workspace = true }
 rkyv = { workspace = true }

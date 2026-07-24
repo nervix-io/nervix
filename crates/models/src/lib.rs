@@ -7,6 +7,7 @@ mod resource;
 mod schema;
 mod statement;
 mod timestamp;
+mod udf;
 
 pub use canonical::{CanonicalNsplError, expression_to_nspl};
 pub use expression::{
@@ -50,10 +51,10 @@ pub use statement::{
     CreateUser, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, DeleteSubscription,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
     DescribeIngestor, DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainId,
-    DomainPace, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode,
-    DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies, GcsConfigEntry,
-    GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, IcebergRestConfigEntry,
+    DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
+    DomainId, DomainPace, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, DomainTick,
+    DrainNode, DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
+    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, IcebergRestConfigEntry,
     IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
@@ -67,9 +68,11 @@ pub use statement::{
     ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
     RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
     RelayBranching, RetryPolicy, S3ConfigEntry, ScheduledNode, ShowClusterStatus, ShowCreate,
-    ShowRelayMaterializedState, SignalingProtocolOnConnect, SqsConfigEntry, SqsIngestMode,
-    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
-    SubscriptionLiteral, UncordonNode, UploadResource, VhostTlsResource, WebsocketsConfigEntry,
-    WebsocketsIngestMode, WindowBound, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    ShowRelayMaterializedState, ShowUdfs, SignalingProtocolOnConnect, SqsConfigEntry,
+    SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode, UploadResource,
+    VhostTlsResource, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, ZeroMqConfigEntry,
+    ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::Timestamp;
+pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

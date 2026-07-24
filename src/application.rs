@@ -81,9 +81,9 @@ use nervix_models::{
     CreateReorderer, CreateResource, CreateStatement, CreateUser, CreateWindowProcessor,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
     DescribeIngestor, DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeWasmProcessor, DescribeWindowProcessor, Domain, DomainConfig,
-    DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink, IcebergCatalog,
-    Identifier, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
+    DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, Domain,
+    DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, EmitSink,
+    IcebergCatalog, Identifier, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
     IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind,
     MongoDbConflictAction, MySqlConflictAction, ParseAsType, PostgresConflictAction,
     ProcessorInputs, ProcessorOutputs, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
@@ -103,6 +103,7 @@ use nervix_nspl::{
         WindowAggregateDemand, WindowAggregateProgram, lower_window_assignments,
     },
 };
+use nervix_roto::UdfExecutor;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -6141,6 +6142,11 @@ impl SessionServiceImpl {
                     processor.name.as_str()
                 ));
             }
+            if let Model::Udf(udf) = model.as_ref()
+                && let Err(error) = UdfExecutor::compile(vec![udf.clone()]).await
+            {
+                return command_error(format!("invalid UDF '{}': {error}", udf.name.as_str()));
+            }
 
             created.push((index, model_id, model_kind));
             models.push(*model);
@@ -6389,6 +6395,11 @@ impl SessionServiceImpl {
                         "invalid INFERENCER '{}': {error}",
                         processor.name.as_str()
                     ));
+                }
+                if let Model::Udf(udf) = model.as_ref()
+                    && let Err(error) = UdfExecutor::compile(vec![udf.clone()]).await
+                {
+                    return command_error(format!("invalid UDF '{}': {error}", udf.name.as_str()));
                 }
                 let model_id = model.as_ref().identifier().clone();
                 let model_kind = model.as_ref().kind();
@@ -6694,6 +6705,10 @@ impl SessionServiceImpl {
                 let domain = domain.as_ref().expect("domain required");
                 self.describe_wasm_processor(domain, describe).await
             }
+            Statement::DescribeUdf(describe) => {
+                let domain = domain.as_ref().expect("domain required");
+                self.describe_udf(domain, describe)
+            }
             Statement::DescribeResource(describe) => self.describe_resource(describe).await,
             Statement::LookupQuery(query) => {
                 let domain = domain.as_ref().expect("domain required");
@@ -6771,6 +6786,10 @@ impl SessionServiceImpl {
             Statement::ShowRelayMaterializedState(show) => {
                 let domain = domain.as_ref().expect("domain required");
                 self.show_stream_materialized_state(domain, show).await
+            }
+            Statement::ShowUdfs(_) => {
+                let domain = domain.as_ref().expect("domain required");
+                self.show_udfs(domain)
             }
             Statement::ShowClusterStatus(_) => CommandResult {
                 success: true,
@@ -7427,6 +7446,85 @@ impl SessionServiceImpl {
             format_materialized_stream_state_output(&show.relay, materializer, entry_lines)
         };
         command_ok(message)
+    }
+
+    fn describe_udf(&self, domain: &Domain, describe: DescribeUdf) -> CommandResult {
+        let model = match self.registry.get(domain, ModelKind::Udf, &describe.name) {
+            Ok(Some(Model::Udf(udf))) => udf,
+            Ok(Some(_)) => unreachable!("UDF registry keys only contain UDF models"),
+            Ok(None) => {
+                return command_error(format!(
+                    "UDF '{}' does not exist in domain '{}'",
+                    describe.name.as_str(),
+                    domain.as_str()
+                ));
+            }
+            Err(error) => {
+                return command_error(format!("failed to read UDF: {error}"));
+            }
+        };
+        let arguments = model
+            .arguments
+            .iter()
+            .map(|argument| {
+                format!(
+                    "{} {}{}",
+                    argument.name.as_str(),
+                    argument.ty,
+                    if argument.optional { " OPTIONAL" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let references = self
+            .registry
+            .active_graph(domain)
+            .map(|graph| {
+                let mut references = graph
+                    .edges()
+                    .into_iter()
+                    .filter_map(|(from, to, edge)| {
+                        (edge == registry::EdgeKind::RequiredBy && from == model.name).then_some(to)
+                    })
+                    .collect::<Vec<_>>();
+                references.sort();
+                references.dedup();
+                references
+                    .iter()
+                    .map(Identifier::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|references| !references.is_empty())
+            .unwrap_or_else(|| "(none)".to_string());
+        command_ok(format!(
+            "name: {}\nlanguage: {}\nsignature: ({arguments}) -> {}{}\nvolatile: {}\ncode_hash: \
+             {}\nreferencing_nodes: {references}",
+            model.name.as_str(),
+            model.language.as_ref(),
+            model.returns.ty,
+            if model.returns.optional {
+                " OPTIONAL"
+            } else {
+                ""
+            },
+            model.volatile,
+            model.code_hash
+        ))
+    }
+
+    fn show_udfs(&self, domain: &Domain) -> CommandResult {
+        match self.registry.list_identifiers(domain, ModelKind::Udf, "") {
+            Ok(identifiers) if identifiers.is_empty() => command_ok("(none)".to_string()),
+            Ok(identifiers) => command_ok(
+                identifiers
+                    .iter()
+                    .map(Identifier::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(error) => command_error(format!("failed to list UDFs: {error}")),
+        }
     }
 
     async fn describe_resource(&self, describe: DescribeResource) -> CommandResult {
@@ -9202,6 +9300,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(Some(schema)) => {
+                let udfs = self.runtime.udf_executor(domain);
                 let schema = runtime_schema::compile_schema(&schema);
                 let input_sensitivity = schema.vm_sensitivity();
                 let filter_map = match compile_session_filter_map_program(
@@ -9216,6 +9315,7 @@ impl SessionServiceImpl {
                         current_branching: &relay_branching,
                         current_branch_schema: relay_branch_schema.as_ref(),
                         current_branch_sensitivity: None,
+                        udfs: udfs.as_ref(),
                     },
                 ) {
                     Ok(filter_map) => filter_map,
@@ -10390,10 +10490,12 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::DescribeCorrelator(_)
             | Statement::DescribeReorderer(_)
             | Statement::DescribeEmitter(_)
+            | Statement::DescribeUdf(_)
             | Statement::DescribeWasmProcessor(_)
             | Statement::DescribeWindowProcessor(_)
             | Statement::LookupQuery(_)
             | Statement::ShowCreate(_)
+            | Statement::ShowUdfs(_)
             | Statement::ShowRelayMaterializedState(_)
     )
 }

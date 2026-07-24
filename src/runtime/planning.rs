@@ -514,6 +514,7 @@ fn parse_branch_flush_policy(
 fn materialize_nodes(
     nodes: &[BranchedProcessorSpec],
     relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<Vec<RelayProcessorTemplate>, String> {
     let mut out = Vec::new();
     for node in nodes {
@@ -579,6 +580,7 @@ fn materialize_nodes(
                                 &node.input_relays,
                                 &output.relay,
                                 relay_schemas,
+                                udfs,
                             )?
                             .with_demand_offset(demand_offset);
                             demand_offset += aggregate.demands().len();
@@ -834,6 +836,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
     relay_registries: &HashMap<Identifier, RelayRegistry>,
     relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<BranchInstanceTemplate, String> {
     let spec = &node.spec;
     let root_relay = spec.input_relays.first().cloned().ok_or_else(|| {
@@ -849,7 +852,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         relay_registries,
         relay_services,
     )?;
-    let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas)?
+    let template = materialize_nodes(std::slice::from_ref(spec), relay_schemas, udfs)?
         .pop()
         .expect("single processor spec must materialize one template");
     let mut processors = HashMap::default();
@@ -909,6 +912,7 @@ pub(in crate::runtime) fn resolve_concrete_branch_from_assignments(
     branch_key: Option<&BranchKey>,
     assignments: &[Assignment],
     owner: &Identifier,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<ConcreteBranch, String> {
     if assignments.is_empty() {
         return Ok(branch_key
@@ -920,13 +924,14 @@ pub(in crate::runtime) fn resolve_concrete_branch_from_assignments(
     let mut fields = Vec::<(Identifier, RuntimeValue)>::with_capacity(assignments.len());
     let mut initialized = HashMap::<Identifier, RuntimeValue>::default();
     for (index, assignment) in assignments.iter().enumerate() {
-        let value = evaluate_branch_expression(&assignment.value, output, input, &initialized)
-            .map_err(|reason| {
-                format!(
-                    "branch SET assignment {index} for '{}' failed: {reason}",
-                    owner.as_str()
-                )
-            })?;
+        let value =
+            evaluate_branch_expression(&assignment.value, output, input, &initialized, udfs)
+                .map_err(|reason| {
+                    format!(
+                        "branch SET assignment {index} for '{}' failed: {reason}",
+                        owner.as_str()
+                    )
+                })?;
         if let Some((_, current)) = fields
             .iter_mut()
             .find(|(field, _)| field == &assignment.target.field)
@@ -946,6 +951,7 @@ fn evaluate_branch_expression(
     output: &RuntimeRecord,
     input: Option<&RuntimeRecord>,
     initialized: &HashMap<Identifier, RuntimeValue>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<RuntimeValue, String> {
     use nervix_models::{Expression, FieldScope, Literal, ParseAsType, UnaryOperator};
 
@@ -999,7 +1005,7 @@ fn evaluate_branch_expression(
             operator,
             expression,
         } => {
-            let value = evaluate_branch_expression(expression, output, input, initialized)?;
+            let value = evaluate_branch_expression(expression, output, input, initialized, udfs)?;
             match operator {
                 UnaryOperator::Negate => negate_runtime_value(value),
                 UnaryOperator::Not => match value {
@@ -1016,8 +1022,8 @@ fn evaluate_branch_expression(
             left,
             right,
         } => {
-            let left = evaluate_branch_expression(left, output, input, initialized)?;
-            let right = evaluate_branch_expression(right, output, input, initialized)?;
+            let left = evaluate_branch_expression(left, output, input, initialized, udfs)?;
+            let right = evaluate_branch_expression(right, output, input, initialized, udfs)?;
             let operator = match operator {
                 nervix_models::BinaryOperator::Add => BinaryOp::Add,
                 nervix_models::BinaryOperator::Subtract => BinaryOp::Sub,
@@ -1036,7 +1042,7 @@ fn evaluate_branch_expression(
             evaluate_runtime_binary(operator, left, right)
         }
         Expression::Cast { expression, target } => {
-            let value = evaluate_branch_expression(expression, output, input, initialized)?;
+            let value = evaluate_branch_expression(expression, output, input, initialized, udfs)?;
             let target = match target {
                 ParseAsType::U8 => ArrowDataType::UInt8,
                 ParseAsType::I8 => ArrowDataType::Int8,
@@ -1064,7 +1070,9 @@ fn evaluate_branch_expression(
         } => {
             let values = arguments
                 .iter()
-                .map(|argument| evaluate_branch_expression(argument, output, input, initialized))
+                .map(|argument| {
+                    evaluate_branch_expression(argument, output, input, initialized, udfs)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             match function.as_str().to_ascii_lowercase().as_str() {
                 "leak_sensitive" => values
@@ -1100,18 +1108,101 @@ fn evaluate_branch_expression(
                 )),
             }
         }
+        Expression::UdfCall {
+            function,
+            arguments,
+        } => {
+            let executor = udfs.ok_or_else(|| {
+                format!(
+                    "UDF 'udf::{}' is unavailable during branch construction",
+                    function.as_str()
+                )
+            })?;
+            let signature = executor
+                .signatures()
+                .get(function.as_str())
+                .ok_or_else(|| format!("unknown UDF 'udf::{}'", function.as_str()))?;
+            let values = arguments
+                .iter()
+                .map(|argument| {
+                    evaluate_branch_expression(argument, output, input, initialized, udfs)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if values.len() != signature.arguments.len() {
+                return Err(format!(
+                    "UDF 'udf::{}' expects {} arguments, found {}",
+                    function.as_str(),
+                    signature.arguments.len(),
+                    values.len()
+                ));
+            }
+            let fields = signature
+                .arguments
+                .iter()
+                .enumerate()
+                .map(|(index, argument)| {
+                    arrow_schema::Field::new(
+                        format!("arg{index}"),
+                        argument.data_type.clone(),
+                        argument.optional,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let argument_record = RuntimeRecord::from_fields_with_metadata(
+                values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| (format!("arg{index}"), value)),
+                RuntimeRecordMetadata::from_ingested_at_watermarks(
+                    Timestamp::now(),
+                    Timestamp::now(),
+                ),
+            );
+            let argument_batch = super::vm_typed_batch_from_runtime_records(
+                std::slice::from_ref(&argument_record),
+                &StdArc::new(arrow_schema::Schema::new(fields)),
+            )?;
+            let result = executor
+                .inject_with_context(
+                    &FunctionName::Udf(function.as_str().to_string()),
+                    argument_batch.columns(),
+                    1,
+                    (0..0).into(),
+                    Timestamp::now(),
+                    &[false],
+                )
+                .map_err(|error| error.to_string())?;
+            if let Some((_, error)) = result.side_errors.into_iter().next() {
+                return Err(error.message);
+            }
+            let return_type = super::parse_as_type_from_arrow(&signature.return_type)?;
+            runtime_value_from_arrow_array(
+                result.output.to_array_ref().as_ref(),
+                &return_type,
+                signature.return_optional,
+                0,
+                function.as_str(),
+            )?
+            .ok_or_else(|| {
+                format!(
+                    "UDF 'udf::{}' returned NULL for a branch-key value",
+                    function.as_str()
+                )
+            })
+        }
         Expression::If {
             condition,
             then_result,
             else_result,
         } => {
-            let condition = evaluate_branch_expression(condition, output, input, initialized)?;
+            let condition =
+                evaluate_branch_expression(condition, output, input, initialized, udfs)?;
             match condition {
                 RuntimeValue::Bool(true) => {
-                    evaluate_branch_expression(then_result, output, input, initialized)
+                    evaluate_branch_expression(then_result, output, input, initialized, udfs)
                 }
                 RuntimeValue::Bool(false) => {
-                    evaluate_branch_expression(else_result, output, input, initialized)
+                    evaluate_branch_expression(else_result, output, input, initialized, udfs)
                 }
                 other => Err(format!(
                     "IF condition expects BOOL, found {}",
@@ -1126,10 +1217,13 @@ fn evaluate_branch_expression(
         } => {
             let operand = operand
                 .as_ref()
-                .map(|operand| evaluate_branch_expression(operand, output, input, initialized))
+                .map(|operand| {
+                    evaluate_branch_expression(operand, output, input, initialized, udfs)
+                })
                 .transpose()?;
             for branch in branches {
-                let when = evaluate_branch_expression(&branch.when, output, input, initialized)?;
+                let when =
+                    evaluate_branch_expression(&branch.when, output, input, initialized, udfs)?;
                 let matches = if let Some(operand) = &operand {
                     operand == &when
                 } else {
@@ -1144,7 +1238,13 @@ fn evaluate_branch_expression(
                     }
                 };
                 if matches {
-                    return evaluate_branch_expression(&branch.result, output, input, initialized);
+                    return evaluate_branch_expression(
+                        &branch.result,
+                        output,
+                        input,
+                        initialized,
+                        udfs,
+                    );
                 }
             }
             else_result
@@ -1153,13 +1253,25 @@ fn evaluate_branch_expression(
                     "CASE without ELSE produced NULL during branch construction".to_string()
                 })
                 .and_then(|else_result| {
-                    evaluate_branch_expression(else_result, output, input, initialized)
+                    evaluate_branch_expression(else_result, output, input, initialized, udfs)
                 })
         }
         Expression::Array(_) => {
             Err("array expressions are unavailable during branch construction".to_string())
         }
     }
+}
+
+pub(in crate::runtime) fn evaluate_constant_expression(
+    expression: &nervix_models::Expression,
+    udfs: Option<&UdfExecutor>,
+) -> Result<RuntimeValue, String> {
+    let now = Timestamp::now();
+    let empty = RuntimeRecord::from_fields_with_metadata(
+        std::iter::empty(),
+        RuntimeRecordMetadata::from_ingested_at_watermarks(now, now),
+    );
+    evaluate_branch_expression(expression, &empty, None, &HashMap::default(), udfs)
 }
 
 pub(in crate::runtime) fn format_branched_by(branched_by: &[Identifier]) -> String {

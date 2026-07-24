@@ -52,10 +52,12 @@ pub fn create_deduplicator_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
+        .boxed()
         .then(deduplicate_on_exprs())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
         .then(duration_lit())
+        .boxed()
         .then(branch_selection())
         .then(materialized_state_dependencies())
         .then(flushed_processor_outputs())
@@ -93,6 +95,7 @@ pub fn create_deduplicator_parser<'src>()
                 )
             },
         )
+        .boxed()
 }
 
 pub fn parse_create_deduplicator_tokens(

@@ -10,8 +10,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, byte_size_lit, channel_ref, client_ref,
-        codec_ref, current_word_prefix, duration_lit, emitter_name, flush_each,
+        ParseError, ParseFromSourceError, ack_mode, boxed_choice, byte_size_lit, channel_ref,
+        client_ref, codec_ref, current_word_prefix, duration_lit, emitter_name, flush_each,
         general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
         materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
         render_vm_program_tokens, route_construction, string_lit, suggestions_from_errors,
@@ -503,7 +503,7 @@ fn iceberg_commit_each<'src>()
 
 fn emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    choice((
+    boxed_choice!(
         clickhouse_emit_sink_parser(),
         postgres_emit_sink_parser(),
         mysql_emit_sink_parser(),
@@ -518,7 +518,7 @@ fn emit_sink_parser<'src>()
         nats_emit_sink_parser(),
         zeromq_emit_sink_parser(),
         sqs_emit_sink_parser(),
-    ))
+    )
 }
 
 pub fn create_emitter_parser<'src>()
@@ -531,6 +531,7 @@ pub fn create_emitter_parser<'src>()
         .then(emitter_name())
         .then_ignore(kw(Identifier::From))
         .then(relay_ref())
+        .boxed()
         .then(
             kw_phrase2(Identifier::Encode, Identifier::Using)
                 .ignore_then(codec_ref())
@@ -539,9 +540,11 @@ pub fn create_emitter_parser<'src>()
         .then(materialized_state_dependencies())
         .then_ignore(kw(Identifier::To))
         .then(emit_sink_parser())
+        .boxed()
         .then(route_construction().or_not())
         .then(flush_each())
         .then(iceberg_commit_each().or_not())
+        .boxed()
         .then(message_error_policy())
         .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -732,6 +735,7 @@ pub fn create_emitter_parser<'src>()
                 ))
             },
         )
+        .boxed()
 }
 
 pub fn parse_create_emitter_tokens(

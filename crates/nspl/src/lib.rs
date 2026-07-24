@@ -46,6 +46,7 @@ pub mod show_stream_state;
 pub mod signaling_protocol;
 pub mod statement;
 pub mod subscribe;
+pub mod udf;
 pub mod upload_resource;
 pub mod user;
 pub mod vhost;

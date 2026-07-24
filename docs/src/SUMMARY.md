@@ -15,6 +15,7 @@
   - [Emitters](./emitters.md)
   - [Metrics And Observability](./metrics-and-observability.md)
   - [Filter-Map Functions](./filter-map-functions.md)
+  - [User-Defined Functions](./udfs.md)
   - [Lookups](./lookups.md)
   - [Sessions](./sessions.md)
   - [Rust Client Library](./client-library.md)

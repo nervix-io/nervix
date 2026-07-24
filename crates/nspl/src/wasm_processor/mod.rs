@@ -94,15 +94,18 @@ pub fn create_wasm_processor_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
+        .boxed()
         .then_ignore(kw(Identifier::Using))
         .then_ignore(kw(Identifier::Resource))
         .then(resource_ref())
         .then(kw(Identifier::Version).ignore_then(u64_value()).or_not())
         .then_ignore(kw(Identifier::File))
         .then(string_lit())
+        .boxed()
         .then(branch_selection())
         .then(materialized_state_dependencies())
         .then(wasm_processor_outputs())
+        .boxed()
         .then(global_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(|(base, global_error_policy)| {
@@ -142,6 +145,7 @@ pub fn create_wasm_processor_parser<'src>()
                 if_not_exists,
             )
         })
+        .boxed()
 }
 
 pub fn parse_create_wasm_processor_tokens(

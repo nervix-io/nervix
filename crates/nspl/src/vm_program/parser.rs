@@ -127,14 +127,27 @@ where
             },
         ));
 
+        let arguments = expr
+            .clone()
+            .separated_by(keyword(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(keyword(Token::LParen), keyword(Token::RParen));
+        let udf_call = keyword(Token::Udf)
+            .then_ignore(keyword(Token::DoubleColon))
+            .then(identifier_name())
+            .then(arguments.clone())
+            .map_with(|(((), name), args), e| {
+                spanned(
+                    Expr::Call {
+                        function: FunctionName::Udf(name),
+                        args,
+                    },
+                    e.span(),
+                )
+            });
         let function_call = identifier_name()
-            .then(
-                expr.clone()
-                    .separated_by(keyword(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
-            )
+            .then(arguments)
             .map_with(|(name, args), e| {
                 spanned(
                     Expr::Call {
@@ -196,6 +209,7 @@ where
 
         let atom = choice((
             literal,
+            udf_call,
             function_call,
             if_expression,
             case_expression,
@@ -203,7 +217,8 @@ where
                 .map(|field_ref| spanned(Expr::FieldRef(field_ref.inner), field_ref.span)),
             expr.clone()
                 .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
-        ));
+        ))
+        .boxed();
 
         let cast = atom
             .then(
@@ -223,7 +238,8 @@ where
                         span,
                     )
                 })
-            });
+            })
+            .boxed();
 
         let unary = choice((
             select! {
@@ -247,108 +263,124 @@ where
                     span,
                 )
             })
-        });
+        })
+        .boxed();
 
-        let multiplicative = unary.clone().foldl(
-            choice((
-                keyword(Token::Star).to(BinaryOp::Mul),
-                keyword(Token::Slash).to(BinaryOp::Div),
-                keyword(Token::Percent).to(BinaryOp::Rem),
-            ))
-            .then(unary.clone())
-            .repeated(),
-            |left, (op, right)| {
-                let span = merge_spans(&left.span, &right.span);
-                spanned(
-                    Expr::Binary {
-                        op,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    },
-                    span,
-                )
-            },
-        );
-
-        let additive = multiplicative.clone().foldl(
-            choice((
-                keyword(Token::Plus).to(BinaryOp::Add),
-                keyword(Token::Minus).to(BinaryOp::Sub),
-            ))
-            .then(multiplicative.clone())
-            .repeated(),
-            |left, (op, right)| {
-                let span = merge_spans(&left.span, &right.span);
-                spanned(
-                    Expr::Binary {
-                        op,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    },
-                    span,
-                )
-            },
-        );
-
-        let comparison = additive.clone().foldl(
-            choice((
-                keyword(Token::Eq).to(BinaryOp::Eq),
-                keyword(Token::NotEq).to(BinaryOp::NotEq),
-                keyword(Token::GtEq).to(BinaryOp::GtEq),
-                keyword(Token::LtEq).to(BinaryOp::LtEq),
-                keyword(Token::Gt).to(BinaryOp::Gt),
-                keyword(Token::Lt).to(BinaryOp::Lt),
-            ))
-            .then(additive.clone())
-            .repeated(),
-            |left, (op, right)| {
-                let span = merge_spans(&left.span, &right.span);
-                spanned(
-                    Expr::Binary {
-                        op,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    },
-                    span,
-                )
-            },
-        );
-
-        let logical_and = comparison.clone().foldl(
-            keyword(Token::And)
-                .to(BinaryOp::And)
-                .then(comparison.clone())
+        let multiplicative = unary
+            .clone()
+            .foldl(
+                choice((
+                    keyword(Token::Star).to(BinaryOp::Mul),
+                    keyword(Token::Slash).to(BinaryOp::Div),
+                    keyword(Token::Percent).to(BinaryOp::Rem),
+                ))
+                .then(unary.clone())
                 .repeated(),
-            |left, (op, right)| {
-                let span = merge_spans(&left.span, &right.span);
-                spanned(
-                    Expr::Binary {
-                        op,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    },
-                    span,
-                )
-            },
-        );
+                |left, (op, right)| {
+                    let span = merge_spans(&left.span, &right.span);
+                    spanned(
+                        Expr::Binary {
+                            op,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        span,
+                    )
+                },
+            )
+            .boxed();
 
-        logical_and.clone().foldl(
-            keyword(Token::Or)
-                .to(BinaryOp::Or)
-                .then(logical_and)
+        let additive = multiplicative
+            .clone()
+            .foldl(
+                choice((
+                    keyword(Token::Plus).to(BinaryOp::Add),
+                    keyword(Token::Minus).to(BinaryOp::Sub),
+                ))
+                .then(multiplicative.clone())
                 .repeated(),
-            |left, (op, right)| {
-                let span = merge_spans(&left.span, &right.span);
-                spanned(
-                    Expr::Binary {
-                        op,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    },
-                    span,
-                )
-            },
-        )
+                |left, (op, right)| {
+                    let span = merge_spans(&left.span, &right.span);
+                    spanned(
+                        Expr::Binary {
+                            op,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        span,
+                    )
+                },
+            )
+            .boxed();
+
+        let comparison = additive
+            .clone()
+            .foldl(
+                choice((
+                    keyword(Token::Eq).to(BinaryOp::Eq),
+                    keyword(Token::NotEq).to(BinaryOp::NotEq),
+                    keyword(Token::GtEq).to(BinaryOp::GtEq),
+                    keyword(Token::LtEq).to(BinaryOp::LtEq),
+                    keyword(Token::Gt).to(BinaryOp::Gt),
+                    keyword(Token::Lt).to(BinaryOp::Lt),
+                ))
+                .then(additive.clone())
+                .repeated(),
+                |left, (op, right)| {
+                    let span = merge_spans(&left.span, &right.span);
+                    spanned(
+                        Expr::Binary {
+                            op,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        span,
+                    )
+                },
+            )
+            .boxed();
+
+        let logical_and = comparison
+            .clone()
+            .foldl(
+                keyword(Token::And)
+                    .to(BinaryOp::And)
+                    .then(comparison.clone())
+                    .repeated(),
+                |left, (op, right)| {
+                    let span = merge_spans(&left.span, &right.span);
+                    spanned(
+                        Expr::Binary {
+                            op,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        span,
+                    )
+                },
+            )
+            .boxed();
+
+        logical_and
+            .clone()
+            .foldl(
+                keyword(Token::Or)
+                    .to(BinaryOp::Or)
+                    .then(logical_and)
+                    .repeated(),
+                |left, (op, right)| {
+                    let span = merge_spans(&left.span, &right.span);
+                    spanned(
+                        Expr::Binary {
+                            op,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        span,
+                    )
+                },
+            )
+            .boxed()
     })
 }
 
@@ -415,6 +447,7 @@ where
             })
         })
         .map_with(|program, e| spanned(program, e.span()))
+        .boxed()
 }
 
 pub fn parse_tokens(
@@ -562,6 +595,19 @@ mod tests {
             }
             other => panic!("expected cast, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_udf_calls_only_through_the_udf_qualifier() {
+        let program = parse_program("SET input.value = UdF::add_one(input.value);")
+            .expect("qualified UDF call must parse");
+        assert!(matches!(
+            program.inner.set[0].1.inner,
+            Expr::Call {
+                function: FunctionName::Udf(ref name),
+                ..
+            } if name == "add_one"
+        ));
     }
 
     #[test]
