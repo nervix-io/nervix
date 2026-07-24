@@ -38,7 +38,7 @@ Feature: Sentry emission
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       CREATE CLIENT sentry_main
-      TYPE HTTP
+      TYPE SENTRY
       CONFIG {
         'dsn' = '{{sentry_dsn}}',
         'timeout_ms' = 5000

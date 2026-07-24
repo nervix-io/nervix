@@ -18,14 +18,14 @@ pub(in crate::runtime) struct SentryEmitter {
 
 impl SentryEmitter {
     pub(in crate::runtime) fn new(
-        client: &CreateClientHttp,
+        client: &CreateClientSentry,
         resolved: Option<&ResolvedClientConfig>,
     ) -> EmitterRuntimeResult<Self> {
         let config = resolved
             .map(|config| config.entries.as_slice())
             .unwrap_or(client.config.as_slice());
         let dsn = emitter_config_value(config, "dsn", || {
-            "missing Sentry HTTP client config key 'dsn'".to_string()
+            "missing Sentry client config key 'dsn'".to_string()
         })?
         .parse::<Dsn>()
         .map_err(|error| emitter_config_error(format!("invalid Sentry dsn: {error}")))?;
