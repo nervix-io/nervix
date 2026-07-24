@@ -14,12 +14,11 @@ blocking worker pool, including small Arrow batches and UDFs used while construc
 so native UDF work does not occupy an asynchronous runtime worker.
 
 The Roto language itself — syntax, types, functions, and `test` blocks — is covered by the
-[Roto documentation](https://roto.docs.nlnetlabs.nl/) and its
-[language reference](https://roto.docs.nlnetlabs.nl/en/latest/reference/language_reference.html);
-the language is developed at [NLnetLabs/roto](https://github.com/NLnetLabs/roto). The `ROTO_0_11`
-tag pins Roto 0.11, so select the matching version in the documentation's version switcher when
-`latest` has moved ahead. The column types and operations available inside a UDF body are the
-Nervix-provided catalog described on this page, not part of the Roto standard library.
+bundled [Roto Language Reference](roto-language-reference.md), taken from the upstream
+[Roto documentation](https://roto.docs.nlnetlabs.nl/) at the exact Roto release Nervix embeds
+for `ROTO_0_11`; the language is developed at [NLnetLabs/roto](https://github.com/NLnetLabs/roto).
+The column types and operations available inside a UDF body are the Nervix-provided catalog
+described on this page, not part of the Roto standard library.
 
 ## Declaration
 

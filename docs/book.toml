@@ -36,6 +36,7 @@ include = [
   "emitters.md",
   "filter-map-functions.md",
   "udfs.md",
+  "roto-language-reference.md",
   "lookups.md",
   "sessions.md",
   "metrics-and-observability.md",

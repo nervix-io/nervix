@@ -24,6 +24,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Internal/wire schemas, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` |
 | Expressions, casts, and built-in functions | `Filter-Map Functions` |
 | Trusted Roto user-defined expression functions | `User-Defined Functions` |
+| Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |

@@ -20,7 +20,7 @@ module.exports = {
         "revert",
         "drop",
         "obs",
-        "agents",
+        "agent",
       ],
     ],
   },
