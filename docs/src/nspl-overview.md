@@ -148,6 +148,12 @@ Every `TO` destination on a flush-based node requires `FLUSH EACH <duration> MAX
 <bytes>` or `FLUSH IMMEDIATE`; there are no hidden defaults. Window processors use `WIDTH` and
 `STEP`, and WASM processors use guest-owned output cadence instead of `FLUSH`.
 
+During normal processing, `FLUSH IMMEDIATE` starts a system-owned 100 µs minimum batching timeout
+when data first enters an empty route buffer. The route flushes when that timeout expires, allowing
+nearby arrivals to remain in one Arrow batch instead of collapsing to one batch per message.
+`FLUSH IMMEDIATE` has no size boundary; shutdown and error handling may still force pending data
+out. Use `FLUSH EACH` when the cadence and maximum batch size must be configured explicitly.
+
 `SET` assignments execute left to right and repeated targets are valid. A later assignment may read
 an earlier value through the bare field or `output.<field>`. `INHERIT ALL`, `INHERIT ALL EXCEPT
 ...`, and explicit `INHERIT field, ...` copy compatible same-named input fields. `UNSET` is not part

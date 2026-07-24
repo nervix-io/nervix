@@ -667,18 +667,11 @@ impl RelayProcessorOutputNode {
         now: Timestamp,
         pending_bytes: u64,
     ) -> Option<bool> {
-        match self.flush_policy? {
-            RuntimeFlushPolicy::Immediate => Some(true),
-            RuntimeFlushPolicy::Each {
-                interval,
-                max_batch_size,
-            } => {
-                let deadline = self
-                    .next_flush
-                    .get_or_insert_with(|| super::checked_add_duration_to_timestamp(now, interval));
-                Some(*deadline <= now || pending_bytes >= max_batch_size)
-            }
-        }
+        let policy = self.flush_policy?;
+        let deadline = self.next_flush.get_or_insert_with(|| {
+            super::checked_add_duration_to_timestamp(now, policy.interval())
+        });
+        Some(*deadline <= now || policy.size_boundary_reached(pending_bytes))
     }
 
     pub(super) fn flush_deadline_due(&self, now: Timestamp) -> bool {
@@ -695,24 +688,19 @@ impl RelayProcessorOutputNode {
 
     pub(super) fn enqueue(&mut self, batch: RelayRecordBatch, now: Timestamp) -> bool {
         self.pending.push(batch);
-        match self.flush_policy {
-            None | Some(RuntimeFlushPolicy::Immediate) => true,
-            Some(RuntimeFlushPolicy::Each {
-                interval,
-                max_batch_size,
-            }) => {
-                let deadline = self
-                    .next_flush
-                    .get_or_insert_with(|| super::checked_add_duration_to_timestamp(now, interval));
-                *deadline <= now
-                    || self
-                        .pending
-                        .iter()
-                        .map(RelayRecordBatch::estimated_bytes)
-                        .sum::<u64>()
-                        >= max_batch_size
-            }
-        }
+        let Some(policy) = self.flush_policy else {
+            return true;
+        };
+        let deadline = self.next_flush.get_or_insert_with(|| {
+            super::checked_add_duration_to_timestamp(now, policy.interval())
+        });
+        *deadline <= now
+            || policy.size_boundary_reached(
+                self.pending
+                    .iter()
+                    .map(RelayRecordBatch::estimated_bytes)
+                    .sum::<u64>(),
+            )
     }
 
     pub(super) fn flush_due(&self, now: Timestamp) -> bool {

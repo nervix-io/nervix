@@ -218,19 +218,10 @@ impl EmitterBatchBuffer {
         };
         self.pending_bytes = self.pending_bytes.saturating_add(batch.estimated_bytes());
         self.pending.push(batch);
-        let should_flush = match flush_policy {
-            RuntimeFlushPolicy::Immediate => true,
-            RuntimeFlushPolicy::Each {
-                interval,
-                max_batch_size,
-            } => {
-                if self.flush_at.is_none() {
-                    self.flush_at = Some(Instant::now() + interval);
-                }
-                self.pending_bytes >= max_batch_size
-            }
-        };
-        Ok(should_flush)
+        if self.flush_at.is_none() {
+            self.flush_at = Some(Instant::now() + flush_policy.interval());
+        }
+        Ok(flush_policy.size_boundary_reached(self.pending_bytes))
     }
 
     fn is_due(&self) -> bool {

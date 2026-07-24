@@ -6646,7 +6646,6 @@ impl Runtime {
                 let should_refresh_state =
                     next_state_refresh.is_some_and(|next| execution_now >= next);
                 let mut did_scheduled_work = false;
-                let mut generated_branches = HashSet::default();
 
                 if should_refresh_state {
                     advance_scheduled_timestamp(&mut next_state_refresh, interval, execution_now);
@@ -6810,7 +6809,6 @@ impl Runtime {
                                 interval,
                                 execution_now,
                             );
-                            generated_branches.insert(branch_key.clone());
 
                             for source_record in records {
                                 tokio::task::consume_budget().await;
@@ -6839,7 +6837,9 @@ impl Runtime {
                                     .map(|(name, value)| (name.clone(), value.clone()))
                                     .collect::<HashMap<_, _>>();
 
-                                for (route_index, (route, _)) in routes.iter().enumerate() {
+                                for (route_index, (route, flush_policy)) in
+                                    routes.iter().enumerate()
+                                {
                                     tokio::task::consume_budget().await;
                                     let input = match generator_context_batch(
                                         &route.program.compiled.input_schema,
@@ -6869,13 +6869,19 @@ impl Runtime {
                                     {
                                         Ok(SingleRecordFilterMapOutcome::Filtered) => {}
                                         Ok(SingleRecordFilterMapOutcome::Output(record)) => {
-                                            branch_state.routes[route_index].pending.push(
-                                                RelayMessage {
-                                                    key: branch_key.clone(),
-                                                    record,
-                                                    acks: AckSet::empty(),
-                                                },
-                                            );
+                                            let route_state = &mut branch_state.routes[route_index];
+                                            route_state.pending.push(RelayMessage {
+                                                key: branch_key.clone(),
+                                                record,
+                                                acks: AckSet::empty(),
+                                            });
+                                            if route_state.next_flush.is_none() {
+                                                route_state.next_flush =
+                                                    Some(checked_add_duration_to_timestamp(
+                                                        execution_now,
+                                                        flush_policy.interval(),
+                                                    ));
+                                            }
                                         }
                                         Ok(SingleRecordFilterMapOutcome::MessageError {
                                             error,
@@ -6927,27 +6933,23 @@ impl Runtime {
                     for ((route, flush_policy), route_state) in
                         routes.iter().zip(&mut branch_state.routes)
                     {
-                        let should_flush = match flush_policy {
-                            RuntimeFlushPolicy::Immediate => {
-                                generated_branches.contains(branch_key)
-                            }
-                            RuntimeFlushPolicy::Each { .. } => route_state
-                                .next_flush
-                                .is_some_and(|next| execution_now >= next),
-                        };
-                        if !should_flush {
+                        if !route_state
+                            .next_flush
+                            .is_some_and(|next| execution_now >= next)
+                        {
                             continue;
                         }
-                        if let RuntimeFlushPolicy::Each {
-                            interval: flush_each,
-                            ..
-                        } = flush_policy
-                        {
-                            advance_scheduled_timestamp(
-                                &mut route_state.next_flush,
-                                *flush_each,
-                                execution_now,
-                            );
+                        match flush_policy {
+                            RuntimeFlushPolicy::Each { interval, .. } => {
+                                advance_scheduled_timestamp(
+                                    &mut route_state.next_flush,
+                                    *interval,
+                                    execution_now,
+                                );
+                            }
+                            RuntimeFlushPolicy::Immediate => {
+                                route_state.next_flush = None;
+                            }
                         }
                         if !route_state.pending.is_empty() {
                             let mut pending_group = vec![(
@@ -8338,33 +8340,10 @@ impl Runtime {
             return BatchedInput::Closed;
         };
 
-        if flush_each == RuntimeFlushPolicy::Immediate {
-            let mut batch = vec![first];
-            loop {
-                tokio::task::consume_budget().await;
-                match receiver.try_recv() {
-                    Ok(message) => batch.push(message),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                        return relay_batches_into_batched_input(batch);
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        return relay_batches_into_batched_input(batch);
-                    }
-                }
-            }
-        }
-
-        let RuntimeFlushPolicy::Each {
-            interval: flush_each,
-            max_batch_size,
-        } = flush_each
-        else {
-            unreachable!("immediate flush policy returned before deadline calculation");
-        };
-        let deadline = Instant::now() + flush_each;
+        let deadline = Instant::now() + flush_each.interval();
         let mut batch = vec![first];
         let mut batch_size = relay_batches_estimated_bytes(&batch);
-        if batch_size >= max_batch_size {
+        if flush_each.size_boundary_reached(batch_size) {
             return relay_batches_into_batched_input(batch);
         }
         loop {
@@ -8386,7 +8365,7 @@ impl Runtime {
                     };
                     batch_size = batch_size.saturating_add(message.estimated_bytes());
                     batch.push(message);
-                    if batch_size >= max_batch_size {
+                    if flush_each.size_boundary_reached(batch_size) {
                         return relay_batches_into_batched_input(batch);
                     }
                 }
@@ -8413,29 +8392,10 @@ impl Runtime {
             return BatchedInput::Closed;
         };
 
-        if flush_each == RuntimeFlushPolicy::Immediate {
-            let mut batch = vec![first];
-            loop {
-                tokio::task::consume_budget().await;
-                match receiver.try_recv() {
-                    Ok(Some(message)) => batch.push(message),
-                    Ok(None) => return relay_batches_into_batched_input(batch),
-                    Err(()) => return relay_batches_into_batched_input(batch),
-                }
-            }
-        }
-
-        let RuntimeFlushPolicy::Each {
-            interval: flush_each,
-            max_batch_size,
-        } = flush_each
-        else {
-            unreachable!("immediate flush policy returned before deadline calculation");
-        };
-        let deadline = Instant::now() + flush_each;
+        let deadline = Instant::now() + flush_each.interval();
         let mut batch = vec![first];
         let mut batch_size = relay_batches_estimated_bytes(&batch);
-        if batch_size >= max_batch_size {
+        if flush_each.size_boundary_reached(batch_size) {
             return relay_batches_into_batched_input(batch);
         }
         loop {
@@ -8453,7 +8413,7 @@ impl Runtime {
                         Some(message) => {
                             batch_size = batch_size.saturating_add(message.estimated_bytes());
                             batch.push(message);
-                            if batch_size >= max_batch_size {
+                            if flush_each.size_boundary_reached(batch_size) {
                                 return relay_batches_into_batched_input(batch);
                             }
                         }

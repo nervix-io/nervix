@@ -3562,6 +3562,42 @@ async fn recv_stream_message_batch_collects_until_flush_deadline() {
     drop(shutdown_tx);
 }
 
+#[test]
+fn flush_immediate_schedules_100_microsecond_system_timeout() {
+    let now = Timestamp::from_unix_nanos(1_000_000);
+    let mut output = super::RelayProcessorOutputNode {
+        relay: identifier("notifications"),
+        construction: nervix_models::RouteConstruction::default(),
+        branch: None,
+        flush_policy: Some(super::RuntimeFlushPolicy::Immediate),
+        message_error_policy: MessageErrorPolicy::Log,
+        pending: Vec::new(),
+        next_flush: None,
+        compiled_program: None,
+    };
+
+    assert_eq!(output.schedule_input_flush(now, u64::MAX), Some(false));
+    assert_eq!(
+        output.next_flush,
+        Some(super::checked_add_duration_to_timestamp(
+            now,
+            Duration::from_micros(100)
+        ))
+    );
+    assert!(
+        !output.flush_deadline_due(super::checked_add_duration_to_timestamp(
+            now,
+            Duration::from_micros(99)
+        ))
+    );
+    assert!(
+        output.flush_deadline_due(super::checked_add_duration_to_timestamp(
+            now,
+            Duration::from_micros(100)
+        ))
+    );
+}
+
 #[tokio::test]
 async fn recv_stream_message_batch_flushes_when_max_batch_size_is_reached() {
     let (sender, mut receiver) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
