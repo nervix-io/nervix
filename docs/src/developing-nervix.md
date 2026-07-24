@@ -1,4 +1,14 @@
-# Running Nervix
+# Developing Nervix
+
+This section is for working on Nervix itself. Everything here assumes a clone of the Nervix
+repository and uses its `just` recipes; none of it is required to use Nervix.
+
+## Clone The Repository
+
+```bash
+git clone https://github.com/nervix-io/nervix
+cd nervix
+```
 
 ## Prerequisites
 

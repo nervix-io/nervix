@@ -86,7 +86,6 @@ use nervix_wasm::{
 };
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
-use registry::{ActiveGraph, RuntimeChange, RuntimeChanges};
 use sorted_vec::SortedSet;
 use tempfile::TempDir;
 use thiserror::Error;
@@ -108,6 +107,7 @@ use crate::{
         NodeBatchObservation, NodeLatencyObservation, NodeWithoutRelayObservation,
         RelayBatchObservation, RelayBufferObservation, RuntimeMetrics,
     },
+    registry::{ActiveGraph, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,
     runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckSet},
     runtime_schema::{

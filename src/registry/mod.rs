@@ -1,12 +1,7 @@
 mod stored;
 
 use std::{
-    cmp::Reverse,
-    num::NonZeroUsize,
-    path::Path,
-    str::FromStr,
-    sync::{Arc as StdArc, RwLock},
-    time::Duration,
+    cmp::Reverse, num::NonZeroUsize, path::Path, str::FromStr, sync::Arc as StdArc, time::Duration,
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -46,6 +41,7 @@ use nervix_vm::{
     compile_program_with_options_for_bindings_with_sensitivity,
     infer_set_expr_types_for_bindings_with_udfs,
 };
+use parking_lot::RwLock;
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
 };
@@ -75,6 +71,7 @@ fn udf_compile_options(
 pub enum RegistryError {
     #[error("failed to open registry storage")]
     OpenStorage,
+    #[cfg(test)]
     #[error("failed to open database")]
     OpenDatabase,
     #[error("failed to open keyspace")]
@@ -93,8 +90,6 @@ pub enum RegistryError {
     DeserializeValue,
     #[error("failed to convert stored model")]
     ModelConversion,
-    #[error("failed to iterate values")]
-    IterateValues,
     #[error("failed to decode key")]
     DecodeKey,
     #[error("failed to persist model batch")]
@@ -159,8 +154,6 @@ pub enum RegistryError {
         identifier: String,
         blockers: String,
     },
-    #[error("failed to update in-memory registry state")]
-    UpdateState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,7 +213,8 @@ pub enum RuntimeChange {
 }
 
 impl Registry {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, Report<RegistryError>> {
+    #[cfg(test)]
+    fn open(path: impl AsRef<Path>) -> Result<Self, Report<RegistryError>> {
         let path = path.as_ref();
         let db = Database::builder(path)
             .open()
@@ -335,10 +329,7 @@ impl Registry {
     }
 
     pub fn startup_runtime_changes(&self) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| Report::new(RegistryError::UpdateState))?;
+        let state = self.state.read();
         let domains = SortedSet::from_unsorted(state.domains.keys().cloned().collect()).into_vec();
 
         Ok(domains
@@ -572,10 +563,7 @@ impl Registry {
                 .change_context(RegistryError::PersistBatch)?;
         }
 
-        let current = self
-            .state
-            .read()
-            .map_err(|_| Report::new(RegistryError::UpdateState))?;
+        let current = self.state.read();
         let mut domains = current.domains.clone();
         if domain_state.graph.node_count() == 0 {
             domains.remove(domain);
@@ -584,10 +572,7 @@ impl Registry {
         }
         drop(current);
 
-        let mut writer = self
-            .state
-            .write()
-            .map_err(|_| Report::new(RegistryError::UpdateState))?;
+        let mut writer = self.state.write();
         *writer = Arc::new(RegistryState { domains });
 
         let graph_snapshot = writer
@@ -641,14 +626,12 @@ impl Registry {
     }
 
     pub fn active_graph(&self, domain: &Domain) -> Option<ActiveGraph> {
-        let state = self.state.read().ok()?;
+        let state = self.state.read();
         state.domains.get(domain).map(|ns| ns.graph.clone())
     }
 
     pub fn active_graphs(&self) -> Vec<(Domain, ActiveGraph)> {
-        let Some(state) = self.state.read().ok() else {
-            return Vec::new();
-        };
+        let state = self.state.read();
         let mut graphs = state
             .domains
             .iter()
@@ -659,9 +642,7 @@ impl Registry {
     }
 
     pub fn active_domain_entities(&self, domain: &Domain) -> Vec<RegistryEntity> {
-        let Some(state) = self.state.read().ok() else {
-            return Vec::new();
-        };
+        let state = self.state.read();
         let Some(domain_state) = state.domains.get(domain) else {
             return Vec::new();
         };
@@ -8601,7 +8582,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("nervix-registry-test-{nanos}"))
+        std::env::temp_dir().join(format!("nervix-server-registry-test-{nanos}"))
     }
 
     fn sample_transport_model(name: &str) -> Model {
@@ -9361,18 +9342,18 @@ mod tests {
 
     #[test]
     fn runnable_example_graphs_validate() {
-        assert_example_graph_validates("iot", include_str!("../../../examples/iot/iot.nspl"));
+        assert_example_graph_validates("iot", include_str!("../../examples/iot/iot.nspl"));
         assert_example_graph_validates(
             "nats_factory_windows",
-            include_str!("../../../examples/nats-factory-windows/nats_factory_windows.nspl"),
+            include_str!("../../examples/nats-factory-windows/nats_factory_windows.nspl"),
         );
         assert_example_graph_validates(
             "datalake",
-            include_str!("../../../examples/datalake/datalake.nspl"),
+            include_str!("../../examples/datalake/datalake.nspl"),
         );
         assert_example_graph_validates(
             "wasm_dual",
-            include_str!("../../../examples/wasm-processors/wasm-dual.nspl"),
+            include_str!("../../examples/wasm-processors/wasm-dual.nspl"),
         );
     }
 

@@ -3,7 +3,6 @@
 - [Introduction](./introduction.md)
 - [Manual](./manual.md)
   - [What It Is Not](./what-it-is-not.md)
-  - [Running Nervix](./running-locally.md)
   - [NSPL Overview](./nspl-overview.md)
   - [NSPL Agent Skill](./nspl-agent-skill.md)
   - [Domains And Time](./domains-and-time.md)
@@ -27,4 +26,5 @@
   - [Control Plane](./control-plane.md)
   - [Data Plane](./data-plane.md)
   - [Relay](./relay.md)
+- [Developing Nervix](./developing-nervix.md)
 - [License](./license.md)

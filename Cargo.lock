@@ -6568,32 +6568,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nervix-registry"
-version = "0.1.0-dev"
-dependencies = [
- "ahash 0.8.12",
- "arrow-schema",
- "error-stack",
- "fjall",
- "humantime",
- "nervix-dataflow-graph",
- "nervix-models",
- "nervix-nspl",
- "nervix-roto",
- "nervix-vm",
- "petgraph 0.8.3",
- "rkyv 0.8.17",
- "serde",
- "sorted-vec",
- "storekey",
- "strum 0.26.3",
- "thiserror 2.0.19",
- "tracing",
- "triomphe",
- "ubyte",
-]
-
-[[package]]
 name = "nervix-roto"
 version = "0.1.0-dev"
 dependencies = [
@@ -6683,7 +6657,6 @@ dependencies = [
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",
- "nervix-registry",
  "nervix-roto",
  "nervix-vm",
  "nervix-wasm",
@@ -6695,6 +6668,7 @@ dependencies = [
  "ort",
  "parking_lot",
  "parquet",
+ "petgraph 0.8.3",
  "playwright-rs",
  "postgres-types",
  "prometheus",
@@ -6716,6 +6690,7 @@ dependencies = [
  "serde_json",
  "simd-json",
  "sorted-vec",
+ "storekey",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.19",
