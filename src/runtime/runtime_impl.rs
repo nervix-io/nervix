@@ -331,6 +331,7 @@ impl Runtime {
             emitter_transient_errors: Arc::new(DashMap::default()),
             emitter_reconnect_backoffs: Arc::new(DashMap::default()),
             executions: Arc::new(DashMap::default()),
+            compiled_domain_udfs: Arc::new(DashMap::default()),
             schedule_apply_lock: Arc::new(Mutex::new(())),
             domain_instantiation_errors: Arc::new(DashMap::default()),
             domains: Arc::new(DashMap::default()),
@@ -3927,6 +3928,7 @@ impl Runtime {
         }
 
         let Some(schedule) = schedule else {
+            self.compiled_domain_udfs.remove(domain);
             self.clear_domain_graph_handle(domain).await;
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
@@ -3974,23 +3976,25 @@ impl Runtime {
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let udf_executor = UdfExecutor::compile(
-            model_index
-                .values()
-                .filter_map(|model| {
-                    if let Model::Udf(udf) = model {
-                        Some(udf.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        )
-        .await
-        .map_err(|error| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("failed to compile domain UDFs: {error}"),
-        })?;
+        let udf_executor = self
+            .compile_domain_udfs(
+                domain,
+                model_index
+                    .values()
+                    .filter_map(|model| {
+                        if let Model::Udf(udf) = model {
+                            Some(udf.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+            )
+            .await
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("failed to compile domain UDFs: {error}"),
+            })?;
         let all_branched_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
         let branched_specs = all_branched_specs
@@ -5682,6 +5686,41 @@ impl Runtime {
             .map(|execution| execution.udfs.clone())
     }
 
+    pub(crate) async fn prepare_domain_udfs(
+        &self,
+        mut models: Vec<CreateUdf>,
+    ) -> Result<CompiledDomainUdfs, nervix_roto::UdfError> {
+        models.sort_by(|left, right| left.name.cmp(&right.name));
+        let executor = UdfExecutor::compile(models.clone()).await?;
+        Ok(CompiledDomainUdfs { models, executor })
+    }
+
+    pub(crate) fn install_prepared_domain_udfs(
+        &self,
+        domain: &Domain,
+        prepared: CompiledDomainUdfs,
+    ) {
+        self.compiled_domain_udfs.insert(domain.clone(), prepared);
+    }
+
+    async fn compile_domain_udfs(
+        &self,
+        domain: &Domain,
+        models: Vec<CreateUdf>,
+    ) -> Result<UdfExecutor, nervix_roto::UdfError> {
+        let mut sorted_models = models;
+        sorted_models.sort_by(|left, right| left.name.cmp(&right.name));
+        if let Some(cached) = self.compiled_domain_udfs.get(domain)
+            && cached.models == sorted_models
+        {
+            return Ok(cached.executor.clone());
+        }
+        let prepared = self.prepare_domain_udfs(sorted_models).await?;
+        let executor = prepared.executor.clone();
+        self.install_prepared_domain_udfs(domain, prepared);
+        Ok(executor)
+    }
+
     pub fn query_local_lookup(
         &self,
         domain: &Domain,
@@ -5828,23 +5867,25 @@ impl Runtime {
             .into_iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
-        let udf_executor = UdfExecutor::compile(
-            model_index
-                .values()
-                .filter_map(|model| {
-                    if let Model::Udf(udf) = model {
-                        Some(udf.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        )
-        .await
-        .map_err(|error| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("failed to compile domain UDFs: {error}"),
-        })?;
+        let udf_executor = self
+            .compile_domain_udfs(
+                domain,
+                model_index
+                    .values()
+                    .filter_map(|model| {
+                        if let Model::Udf(udf) = model {
+                            Some(udf.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+            )
+            .await
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("failed to compile domain UDFs: {error}"),
+            })?;
 
         for node in graph.nodes() {
             match node.config.as_ref() {
@@ -6352,24 +6393,26 @@ impl Runtime {
         domain: &Domain,
         schedule: &DomainSchedule,
     ) -> Result<DomainExecution, RuntimeError> {
-        let udf_executor = UdfExecutor::compile(
-            schedule
-                .nodes
-                .iter()
-                .filter_map(|node| {
-                    if let Model::Udf(udf) = node.config.as_ref() {
-                        Some(udf.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        )
-        .await
-        .map_err(|error| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("failed to compile domain UDFs: {error}"),
-        })?;
+        let udf_executor = self
+            .compile_domain_udfs(
+                domain,
+                schedule
+                    .nodes
+                    .iter()
+                    .filter_map(|node| {
+                        if let Model::Udf(udf) = node.config.as_ref() {
+                            Some(udf.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+            )
+            .await
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("failed to compile domain UDFs: {error}"),
+            })?;
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();
         let mut relay_branching_schemas = HashMap::new();
@@ -6381,50 +6424,6 @@ impl Runtime {
 
         for node in &schedule.nodes {
             match node.config.as_ref() {
-                Model::Relay(relay) => {
-                    let Some(schema) = schemas.get(&relay.schema).cloned() else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing compiled relay schema '{}' for relay '{}'",
-                                relay.schema.as_str(),
-                                node.identifier.as_str()
-                            ),
-                        });
-                    };
-                    let capacity = Self::relay_capacity(domain, &node.identifier, relay.buffer)?;
-                    let fanout = self
-                        .relay_boundary_fanout_with_capacity(
-                            domain,
-                            &node.identifier,
-                            !relay.branching.is_unbranched(),
-                            capacity,
-                        )
-                        .await;
-                    relay_builders.insert(
-                        node.identifier.clone(),
-                        RelayBoundaryBuilder {
-                            fanout,
-                            attached_runtime_consumer_count: 0,
-                            detached_runtime_consumer_count: 0,
-                            registry: RelayRegistry::new(),
-                            remote_runtime_consumers: Vec::new(),
-                        },
-                    );
-                    relay_branchings.insert(
-                        node.identifier.clone(),
-                        node.effective_branching.clone().unwrap_or_default(),
-                    );
-                    let branching_schema = relay_branching_schema_for_runtime(
-                        domain,
-                        &node.identifier,
-                        relay,
-                        node.effective_branching_schema.as_ref(),
-                        &schemas,
-                    )?;
-                    relay_branching_schemas.insert(node.identifier.clone(), branching_schema);
-                    relay_schemas.insert(node.identifier.clone(), schema);
-                }
                 Model::Schema(schema) => {
                     schemas.insert(node.identifier.clone(), Arc::new(compile_schema(schema)));
                 }
@@ -6433,6 +6432,54 @@ impl Runtime {
                 }
                 _ => {}
             }
+        }
+
+        for node in &schedule.nodes {
+            let Model::Relay(relay) = node.config.as_ref() else {
+                continue;
+            };
+            let Some(schema) = schemas.get(&relay.schema).cloned() else {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "missing compiled relay schema '{}' for relay '{}'",
+                        relay.schema.as_str(),
+                        node.identifier.as_str()
+                    ),
+                });
+            };
+            let capacity = Self::relay_capacity(domain, &node.identifier, relay.buffer)?;
+            let fanout = self
+                .relay_boundary_fanout_with_capacity(
+                    domain,
+                    &node.identifier,
+                    !relay.branching.is_unbranched(),
+                    capacity,
+                )
+                .await;
+            relay_builders.insert(
+                node.identifier.clone(),
+                RelayBoundaryBuilder {
+                    fanout,
+                    attached_runtime_consumer_count: 0,
+                    detached_runtime_consumer_count: 0,
+                    registry: RelayRegistry::new(),
+                    remote_runtime_consumers: Vec::new(),
+                },
+            );
+            relay_branchings.insert(
+                node.identifier.clone(),
+                node.effective_branching.clone().unwrap_or_default(),
+            );
+            let branching_schema = relay_branching_schema_for_runtime(
+                domain,
+                &node.identifier,
+                relay,
+                node.effective_branching_schema.as_ref(),
+                &schemas,
+            )?;
+            relay_branching_schemas.insert(node.identifier.clone(), branching_schema);
+            relay_schemas.insert(node.identifier.clone(), schema);
         }
 
         for node in &schedule.nodes {
@@ -8286,6 +8333,7 @@ impl Runtime {
             }
         }
         self.endpoint_bindings.clear();
+        self.compiled_domain_udfs.clear();
         self.ingestor_readiness.clear();
         self.expiring_stream_states.clear();
         self.replicated_deduplicator_states.clear();

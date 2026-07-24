@@ -2504,9 +2504,7 @@ async fn run_nspl_commands_on_node(
 fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
     nspl_statements(commands).into_iter().all(|command| {
         let normalized = command.trim().to_ascii_uppercase();
-        normalized.starts_with("CREATE SUBSCRIPTION ")
-            || normalized.starts_with("DELETE SUBSCRIPTION ")
-            || normalized == "DESCRIBE DOMAIN;"
+        normalized == "DESCRIBE DOMAIN;"
             || normalized.starts_with("DESCRIBE ENDPOINT ")
             || normalized.starts_with("DESCRIBE RESOURCE ")
             || normalized.starts_with("DESCRIBE RELAY ")

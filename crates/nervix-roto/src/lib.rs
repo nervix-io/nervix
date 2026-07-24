@@ -33,6 +33,7 @@ use triomphe::Arc;
 const DEFAULT_WATCHDOG: Duration = Duration::from_secs(5);
 const COMPILE_TEST_BUDGET: Duration = Duration::from_secs(10);
 const RESERVED_PREFIX: &str = "__nervix_";
+static UDF_COMPILE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Error)]
 pub enum UdfError {
@@ -48,7 +49,7 @@ pub enum UdfError {
     TestsFailed,
     #[error("Roto compile and test budget of {limit:?} was exceeded")]
     CompileBudgetExceeded { limit: Duration },
-    #[error("Roto compilation task failed")]
+    #[error("Roto compilation task failed: {0}")]
     CompileTask(#[source] tokio::task::JoinError),
     #[error("Roto entry signature is invalid: {0}")]
     Signature(String),
@@ -1082,6 +1083,7 @@ impl UdfExecutor {
     }
 
     fn compile_sync(models: impl IntoIterator<Item = CreateUdf>) -> Result<Self, UdfError> {
+        let _compile_guard = UDF_COMPILE_LOCK.lock();
         let mut functions = HashMap::new();
         let mut signatures = UdfSignatures::default();
         for model in models {
