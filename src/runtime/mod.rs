@@ -163,10 +163,10 @@ use materialized_state::{
 #[cfg(test)]
 use planning::resolve_concrete_branch;
 use planning::{
-    branched_ingestor_specs_from_active_graph, branched_ingestor_specs_from_models,
-    branched_ingestor_specs_from_scheduled_nodes, format_branched_by,
-    materialize_branch_instance_template, materialize_processor_instance_template,
-    resolve_concrete_branch_from_assignments,
+    assignments_contain_udf, branched_ingestor_specs_from_active_graph,
+    branched_ingestor_specs_from_models, branched_ingestor_specs_from_scheduled_nodes,
+    format_branched_by, materialize_branch_instance_template,
+    materialize_processor_instance_template, resolve_concrete_branch_from_assignments,
 };
 use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
@@ -1590,6 +1590,24 @@ async fn branched_entrypoint_batch_from_inputs_blocking(
             acks,
         )),
     }
+}
+
+async fn branched_branch_plan_blocking(
+    input: Arc<BranchedEntrypointBatch>,
+    mappings: Vec<Assignment>,
+    source: Identifier,
+    root_relay: Identifier,
+    udfs: Option<UdfExecutor>,
+) -> Result<BranchedBranchPlan, String> {
+    if !assignments_contain_udf(&mappings) {
+        return Ok(input.branch_selections(&mappings, &source, &root_relay, udfs.as_ref()));
+    }
+
+    tokio::task::spawn_blocking(move || {
+        input.branch_selections(&mappings, &source, &root_relay, udfs.as_ref())
+    })
+    .await
+    .map_err(|error| format!("branch UDF execution task failed: {error}"))
 }
 
 async fn branched_branch_filter_blocking(
@@ -5069,12 +5087,44 @@ impl BranchedIngestorRuntime {
             }
         };
         let udfs = runtime_handle.udf_executor(domain);
-        let branch_plan = input_batch.branch_selections(
-            &template.entrypoint_branch_assignments,
-            &template.source,
-            &template.root_relay,
-            udfs.as_ref(),
-        );
+        let branch_plan = match branched_branch_plan_blocking(
+            input_batch.clone(),
+            template.entrypoint_branch_assignments.clone(),
+            template.source.clone(),
+            template.root_relay.clone(),
+            udfs,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                let reason = format!(
+                    "branched entrypoint '{}' failed to evaluate branch assignments: {}",
+                    ingestor.as_str(),
+                    error
+                );
+                if template.source_kind == ModelKind::Ingestor {
+                    runtime_handle.handle_general_error_for_acks(
+                        domain,
+                        template.source_kind.as_str(),
+                        ingestor,
+                        &template.error_policies,
+                        input_batch.acks.iter(),
+                        reason,
+                    );
+                } else {
+                    runtime_handle.handle_internal_processor_error_for_acks(
+                        domain,
+                        template.source_kind.as_str(),
+                        ingestor,
+                        &template.error_policies,
+                        input_batch.acks.iter(),
+                        reason,
+                    );
+                }
+                return None;
+            }
+        };
         for row_error in branch_plan.row_errors {
             tokio::task::consume_budget().await;
             runtime_handle

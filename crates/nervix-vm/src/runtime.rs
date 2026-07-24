@@ -593,7 +593,17 @@ pub struct FunctionInvocation {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionExecutionPolicy {
+    Inline,
+    SpawnBlocking,
+}
+
 pub trait FunctionInjector: Send + Sync + fmt::Debug {
+    fn execution_policy(&self, _function: &FunctionName) -> FunctionExecutionPolicy {
+        FunctionExecutionPolicy::Inline
+    }
+
     fn inject(
         &self,
         function: &FunctionName,
@@ -676,7 +686,9 @@ pub async fn execute_program_with_selection_in_context(
     batch: &TypedBatch,
     context: &ExecutionContext,
 ) -> Result<ExecutionResult, RuntimeError> {
-    if batch.row_count() <= SPAWN_BLOCKING_ROW_THRESHOLD {
+    if batch.row_count() <= SPAWN_BLOCKING_ROW_THRESHOLD
+        && !program_requires_spawn_blocking(program, context)
+    {
         return execute_program_with_selection_in_context_sync(program, batch, context);
     }
 
@@ -690,6 +702,19 @@ pub async fn execute_program_with_selection_in_context(
     .map_err(|error| RuntimeError::BlockingExecutionFailed {
         message: error.to_string(),
     })?
+}
+
+fn program_requires_spawn_blocking(program: &CompiledProgram, context: &ExecutionContext) -> bool {
+    program.instructions.iter().any(|instruction| {
+        let InstructionKind::Inject { function, .. } = &instruction.kind else {
+            return false;
+        };
+        context.injector.as_ref().is_some_and(|injector| {
+            injector.execution_policy(function) == FunctionExecutionPolicy::SpawnBlocking
+        }) || program.injector.as_ref().is_some_and(|injector| {
+            injector.execution_policy(function) == FunctionExecutionPolicy::SpawnBlocking
+        })
+    })
 }
 
 #[cfg(test)]
@@ -3894,6 +3919,11 @@ fn push_error(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{Mutex, mpsc},
+        time::Duration,
+    };
+
     use arrow_array::{
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
         StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
@@ -3932,6 +3962,36 @@ mod tests {
                     Some(_) | None => None,
                 },
             ))))
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingPolicyInjector {
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl FunctionInjector for BlockingPolicyInjector {
+        fn execution_policy(&self, function: &FunctionName) -> FunctionExecutionPolicy {
+            assert_eq!(*function, FunctionName::ReadHeader);
+            FunctionExecutionPolicy::SpawnBlocking
+        }
+
+        fn inject(
+            &self,
+            function: &FunctionName,
+            arguments: &[TypedArray],
+            row_count: usize,
+            span: Span,
+        ) -> Result<TypedArray, RuntimeError> {
+            self.release
+                .lock()
+                .expect("release receiver lock must be available")
+                .recv_timeout(Duration::from_secs(1))
+                .map_err(|error| RuntimeError::InjectedFunctionFailed {
+                    function: function.as_str().to_string(),
+                    message: format!("blocking injector was not released: {error}"),
+                })?;
+            TestHeaderInjector.inject(function, arguments, row_count, span)
         }
     }
 
@@ -5477,6 +5537,56 @@ mod tests {
             panic!("write_header arguments must be Utf8");
         };
         assert_eq!(second_value.value(0), "second");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_injector_policy_offloads_small_batches() {
+        let parsed = parse_program("SET input.route = read_header(input.header_name);")
+            .expect("program must parse");
+        let input_schema = schema(vec![
+            Field::new("header_name", DataType::Utf8, false),
+            Field::new("route", DataType::Utf8, true),
+        ]);
+        let compiled = compile_program_with_options_for_bindings(
+            &parsed,
+            input_schema.clone(),
+            [CompileBinding::writable("input", input_schema.clone())],
+            CompileOptions {
+                allow_header_reads: true,
+                ..CompileOptions::default()
+            },
+        )
+        .expect("header program must compile");
+        let batch = TypedBatch::try_new(
+            input_schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec!["route"])),
+                TypedArray::Utf8(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .expect("batch must build");
+        let (release_tx, release_rx) = mpsc::channel();
+        let context = ExecutionContext {
+            now: Timestamp::from_unix_nanos(1),
+            injector: Some(triomphe::Arc::new(Box::new(BlockingPolicyInjector {
+                release: Mutex::new(release_rx),
+            }))),
+        };
+
+        let (result, ()) = tokio::join!(
+            execute_program_in_context(&compiled, &batch, &context),
+            async move {
+                tokio::task::yield_now().await;
+                release_tx
+                    .send(())
+                    .expect("blocking injector must still be waiting");
+            }
+        );
+        let result = result.expect("blocking injector execution must succeed");
+        let TypedArray::Utf8(route) = output_column(&result.batch, "route") else {
+            panic!("route must be Utf8");
+        };
+        assert_eq!(route.value(0), "primary");
     }
 
     #[test]
