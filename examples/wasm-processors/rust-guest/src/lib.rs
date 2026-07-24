@@ -100,7 +100,7 @@ impl Processor for EvenRowFilter {
     fn on_timeout(
         &mut self,
         ctx: &mut GuestContext<'_>,
-        _handle: TimeoutHandle,
+        _handle: TimeoutHandle,alloc
     ) -> Result<(), GuestError> {
         self.flush_pending(ctx)
     }

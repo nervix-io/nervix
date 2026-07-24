@@ -242,5 +242,11 @@ snapshot restoration — is `examples/wasm-processors/rust-guest` in the Nervix
 repository. Build it with:
 
 ```bash
-just wasm-processor-rust-guest
+cargo build \
+  --manifest-path examples/wasm-processors/rust-guest/Cargo.toml \
+  --target wasm32-unknown-unknown \
+  --release
 ```
+
+The module is produced at
+`examples/wasm-processors/rust-guest/target/wasm32-unknown-unknown/release/nervix_wasm_processor_rust_guest.wasm`.
