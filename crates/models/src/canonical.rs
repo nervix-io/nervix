@@ -12,7 +12,7 @@ use crate::{
     CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
     CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
-    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
+    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
     CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
     GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
@@ -100,6 +100,18 @@ pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNs
             arguments,
         } => Ok(format!(
             "{}({})",
+            function.as_str(),
+            arguments
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        Expression::UdfCall {
+            function,
+            arguments,
+        } => Ok(format!(
+            "udf::{}({})",
             function.as_str(),
             arguments
                 .iter()
@@ -353,7 +365,50 @@ impl Model {
             Self::Reorderer(reorderer) => reorderer.to_canonical_nspl(),
             Self::WindowProcessor(window_processor) => window_processor.to_canonical_nspl(),
             Self::Emitter(emitter) => emitter.to_canonical_nspl(),
+            Self::Udf(udf) => udf.to_canonical_nspl(),
         }
+    }
+}
+
+impl CreateUdf {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let arguments = self
+            .arguments
+            .iter()
+            .map(|argument| {
+                format!(
+                    "{} {}{}",
+                    argument.name.as_str(),
+                    parse_as_to_keyword(&argument.ty),
+                    if argument.optional { " OPTIONAL" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let returns = format!(
+            "{}{}",
+            parse_as_to_keyword(&self.returns.ty),
+            if self.returns.optional {
+                " OPTIONAL"
+            } else {
+                ""
+            }
+        );
+        let mut delimiter = "$roto$".to_string();
+        let mut suffix = 1_u64;
+        while self.code.contains(&delimiter) {
+            delimiter = format!("$roto_{suffix}$");
+            suffix += 1;
+        }
+
+        Ok(format!(
+            "CREATE UDF {}\n  WITH {}\n  ARGS ({arguments})\n  RETURNS {returns}{}\n  CODE \
+             {delimiter}{}{delimiter};",
+            self.name.as_str(),
+            self.language.as_ref(),
+            if self.volatile { "\n  VOLATILE" } else { "" },
+            self.code,
+        ))
     }
 }
 
@@ -2245,8 +2300,8 @@ mod tests {
         CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
         CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
         CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
-        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
-        CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
+        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf,
+        CreateVhost, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
         EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope,
         GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, JsonType, KafkaConfigEntry,
         KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, Literal, MessageErrorPolicy, Model,
@@ -2254,8 +2309,9 @@ mod tests {
         MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
         PostgresConflictAction, PostgresValueMapping, ProcessorInputs, ProcessorOutput,
         ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode,
-        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SqsIngestMode,
-        WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
+        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SqsIngestMode, UdfArgument,
+        UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound, WireSchemaField,
+        ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -3550,5 +3606,32 @@ mod tests {
             super::string_literal("line\nbreak"),
             Err(super::CanonicalNsplError::UnrepresentableStringLiteral { .. })
         ));
+    }
+
+    #[test]
+    fn udf_canonicalization_preserves_source_bytes_and_avoids_delimiter_collisions() {
+        let code = "fn redact(value: StringColumn) -> StringColumn {\n    // $roto$\n    \
+                    value\n}\n"
+            .to_string();
+        let udf = CreateUdf::new(
+            identifier("redact"),
+            UdfLanguage::Roto0_11,
+            vec![UdfArgument {
+                name: identifier("value"),
+                ty: ParseAsType::String,
+                optional: true,
+            }],
+            UdfReturn {
+                ty: ParseAsType::String,
+                optional: false,
+            },
+            false,
+            code.clone(),
+        );
+
+        let rendered = udf.to_canonical_nspl().expect("must render");
+
+        assert!(rendered.contains("CODE $roto_1$"));
+        assert!(rendered.contains(&code));
     }
 }

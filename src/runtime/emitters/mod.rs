@@ -46,6 +46,7 @@ pub(in crate::runtime) struct EmitterSinkContext {
     emitter: Identifier,
     temp_dir: Arc<PathBuf>,
     events: broadcast::Sender<RuntimeEvent>,
+    udfs: Option<UdfExecutor>,
 }
 
 struct EmitterPublishControl<'a> {
@@ -293,6 +294,7 @@ fn compile_sql_values_program(
     emitter: &Identifier,
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     if values.is_empty() {
         return Err(RuntimeError::BuildDomainExecution {
@@ -343,17 +345,20 @@ fn compile_sql_values_program(
         VmCompileBinding::readonly("input", input_schema.clone()),
         VmCompileBinding::readonly("message", input_schema.clone()),
     ];
-    let inferred_fields =
-        infer_vm_set_expr_types_for_bindings(&parsed, infer_bindings).map_err(|error| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "{label} VALUES type inference failed for '{}': {}",
-                    emitter.as_str(),
-                    error.message
-                ),
-            }
-        })?;
+    let inferred_fields = infer_vm_set_expr_types_for_bindings_with_udfs(
+        &parsed,
+        infer_bindings,
+        udfs.map(|executor| executor.signatures().clone())
+            .unwrap_or_default(),
+    )
+    .map_err(|error| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "{label} VALUES type inference failed for '{}': {}",
+            emitter.as_str(),
+            error.message
+        ),
+    })?;
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred_fields
             .into_iter()
@@ -372,11 +377,14 @@ fn compile_sql_values_program(
         output_schema.clone(),
         VmSchemaSensitivity::default(),
         compile_bindings,
-        VmCompileOptions {
-            output_mode: VmOutputMode::ExplicitOnly,
-            allow_sensitive_output: false,
-            ..VmCompileOptions::default()
-        },
+        runtime_udf_compile_options(
+            udfs,
+            VmCompileOptions {
+                output_mode: VmOutputMode::ExplicitOnly,
+                allow_sensitive_output: false,
+                ..VmCompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -397,6 +405,7 @@ fn compile_clickhouse_values_program(
     emitter: &Identifier,
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "ClickHouse",
@@ -405,6 +414,7 @@ fn compile_clickhouse_values_program(
         emitter,
         values,
         input_schema,
+        udfs,
     )
 }
 
@@ -413,6 +423,7 @@ fn compile_postgres_values_program(
     emitter: &Identifier,
     values: &[PostgresValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
     compile_sql_values_program(
         "Postgres",
@@ -421,6 +432,7 @@ fn compile_postgres_values_program(
         emitter,
         values,
         input_schema,
+        udfs,
     )
 }
 
@@ -429,8 +441,17 @@ fn compile_mysql_values_program(
     emitter: &Identifier,
     values: &[MySqlValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program("MySQL", "mysql", domain, emitter, values, input_schema)
+    compile_sql_values_program(
+        "MySQL",
+        "mysql",
+        domain,
+        emitter,
+        values,
+        input_schema,
+        udfs,
+    )
 }
 
 fn compile_mongodb_values_program(
@@ -438,8 +459,17 @@ fn compile_mongodb_values_program(
     emitter: &Identifier,
     values: &[MongoDbValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program("MongoDB", "mongodb", domain, emitter, values, input_schema)
+    compile_sql_values_program(
+        "MongoDB",
+        "mongodb",
+        domain,
+        emitter,
+        values,
+        input_schema,
+        udfs,
+    )
 }
 
 fn compile_iceberg_values_program(
@@ -447,8 +477,17 @@ fn compile_iceberg_values_program(
     emitter: &Identifier,
     values: &[IcebergValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program("Iceberg", "iceberg", domain, emitter, values, input_schema)
+    compile_sql_values_program(
+        "Iceberg",
+        "iceberg",
+        domain,
+        emitter,
+        values,
+        input_schema,
+        udfs,
+    )
 }
 
 async fn sql_mapped_batch_values(
@@ -1392,6 +1431,7 @@ impl EmitterTask {
             .as_ref()
             .map(|codec| codec.schema())
             .unwrap_or_else(|| input_schema.clone());
+        let udfs = runtime.udf_executor(domain);
         let filter_map = compile_emitter_filter_map_program(
             domain,
             &emitter,
@@ -1405,6 +1445,7 @@ impl EmitterTask {
                 current_branching: &input_branching,
                 current_branch_schema: input_branching_schema.as_ref(),
                 current_branch_sensitivity: None,
+                udfs: udfs.as_ref(),
             },
         )?;
         let client = clients.get(emitter.sink.client()).cloned();
@@ -1444,6 +1485,7 @@ impl EmitterTask {
                 emitter: task_emitter.clone(),
                 temp_dir: runtime.temp_dir.clone(),
                 events: task_events.clone(),
+                udfs,
             };
             let mut publish_backoff = RuntimeReconnectBackoff::default();
             let mut emitter_buffer =

@@ -70,6 +70,17 @@ pub enum RuntimeError {
         expected_rows: usize,
         actual_rows: usize,
     },
+    #[error(
+        "caller supplied an invalid side error for function '{function}' at row {row}; batch has \
+         {row_count} rows"
+    )]
+    InvalidInjectedSideError {
+        function: String,
+        row: usize,
+        row_count: usize,
+    },
+    #[error("injected function '{function}' failed: {message}")]
+    InjectedFunctionFailed { function: String, message: String },
 }
 
 #[cfg(test)]

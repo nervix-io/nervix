@@ -2670,6 +2670,7 @@ impl Runtime {
                     current_branching: &branching,
                     current_branch_schema: None,
                     current_branch_sensitivity: None,
+                    udfs: Some(&execution.udfs),
                 },
             )?;
             (schema, registry, services, branching, program)
@@ -3240,6 +3241,7 @@ impl Runtime {
                         None,
                         assignments,
                         dispatch.ingestor,
+                        self.udf_executor(dispatch.domain).as_ref(),
                     ) {
                         Ok(branch) => branch.into_relay_key(),
                         Err(reason) => {
@@ -3970,6 +3972,23 @@ impl Runtime {
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
+        let udf_executor = UdfExecutor::compile(
+            model_index
+                .values()
+                .filter_map(|model| {
+                    if let Model::Udf(udf) = model {
+                        Some(udf.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        )
+        .await
+        .map_err(|error| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("failed to compile domain UDFs: {error}"),
+        })?;
         let all_branched_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
         let branched_specs = all_branched_specs
@@ -4209,6 +4228,7 @@ impl Runtime {
                             output_schema.vm_sensitivity(),
                             source_schema.arrow_schema(),
                             source_branch_schema.clone(),
+                            Some(&udf_executor),
                         )?;
                         routes.push((output.clone(), program, output_schema));
                     }
@@ -4550,6 +4570,7 @@ impl Runtime {
                 &relay_schemas,
                 &relay_registries,
                 &relay_services,
+                Some(&udf_executor),
             )
             .map_err(|reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
@@ -4658,6 +4679,7 @@ impl Runtime {
                 relay_schemas,
                 relay_services,
                 lookups: lookup_runtimes,
+                udfs: udf_executor,
                 relay_branchings,
                 relay_branching_schemas,
                 materialized_stream_specs,
@@ -5519,6 +5541,7 @@ impl Runtime {
             .map(|execution| execution.materialized_stream_owner_nodes.clone())
             .unwrap_or_default();
         let mut resolved = HashMap::default();
+        let udfs = self.udf_executor(domain);
         for dependency in dependencies {
             tokio::task::consume_budget().await;
             if let Some(values) = self
@@ -5548,11 +5571,10 @@ impl Runtime {
                         ) {
                             continue;
                         }
-                        let lowered = nervix_nspl::vm_program::lower_expression(
+                        let value = planning::evaluate_constant_expression(
                             &assignment.value,
-                            "__invalid_default_field",
+                            udfs.as_ref(),
                         )?;
-                        let value = evaluate_runtime_expr(&lowered.inner, None)?;
                         resolved.insert(
                             format!(
                                 "relay_state.{}.{}",
@@ -5649,6 +5671,12 @@ impl Runtime {
             lookup.resource_version,
             lookup.entries.len(),
         ))
+    }
+
+    pub(crate) fn udf_executor(&self, domain: &Domain) -> Option<UdfExecutor> {
+        self.executions
+            .get(domain)
+            .map(|execution| execution.udfs.clone())
     }
 
     pub fn query_local_lookup(
@@ -5797,6 +5825,23 @@ impl Runtime {
             .into_iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
+        let udf_executor = UdfExecutor::compile(
+            model_index
+                .values()
+                .filter_map(|model| {
+                    if let Model::Udf(udf) = model {
+                        Some(udf.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        )
+        .await
+        .map_err(|error| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("failed to compile domain UDFs: {error}"),
+        })?;
 
         for node in graph.nodes() {
             match node.config.as_ref() {
@@ -6039,6 +6084,7 @@ impl Runtime {
                             output_schema.vm_sensitivity(),
                             source_schema.arrow_schema(),
                             source_branch_schema.clone(),
+                            Some(&udf_executor),
                         )?;
                         routes.push((output.clone(), program, output_schema));
                     }
@@ -6156,6 +6202,7 @@ impl Runtime {
                 &relay_schemas,
                 &relay_registries,
                 &relay_services,
+                Some(&udf_executor),
             )
             .map_err(|reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
@@ -6280,6 +6327,7 @@ impl Runtime {
                 relay_schemas,
                 relay_services,
                 lookups: lookup_runtimes,
+                udfs: udf_executor,
                 relay_branchings,
                 relay_branching_schemas,
                 materialized_stream_specs,
@@ -6301,6 +6349,24 @@ impl Runtime {
         domain: &Domain,
         schedule: &DomainSchedule,
     ) -> Result<DomainExecution, RuntimeError> {
+        let udf_executor = UdfExecutor::compile(
+            schedule
+                .nodes
+                .iter()
+                .filter_map(|node| {
+                    if let Model::Udf(udf) = node.config.as_ref() {
+                        Some(udf.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        )
+        .await
+        .map_err(|error| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("failed to compile domain UDFs: {error}"),
+        })?;
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();
         let mut relay_branching_schemas = HashMap::new();
@@ -6449,6 +6515,7 @@ impl Runtime {
             relay_schemas,
             relay_services,
             lookups,
+            udfs: udf_executor,
             relay_branchings,
             relay_branching_schemas,
             materialized_stream_specs: HashMap::default(),
@@ -6974,6 +7041,7 @@ impl Runtime {
                 output_schema,
                 materialized_stream_specs,
                 available_lookups,
+                udfs,
                 current_branching,
                 current_branch_schema,
             ) = {
@@ -7012,6 +7080,7 @@ impl Runtime {
                     output_schema,
                     execution.materialized_stream_specs.clone(),
                     execution.lookups.clone(),
+                    execution.udfs.clone(),
                     execution
                         .relay_branchings
                         .get(from_relay)
@@ -7045,6 +7114,7 @@ impl Runtime {
                     current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
+                    udfs: Some(&udfs),
                 },
             ) {
                 Ok(program) => output.compiled_program = program,
@@ -7555,6 +7625,7 @@ impl Runtime {
                 input_schema,
                 materialized_stream_specs,
                 available_lookups,
+                udfs,
                 current_branching,
                 current_branch_schema,
             ) = {
@@ -7591,6 +7662,7 @@ impl Runtime {
                     input_schema,
                     execution.materialized_stream_specs.clone(),
                     execution.lookups.clone(),
+                    execution.udfs.clone(),
                     execution
                         .relay_branchings
                         .get(from_relay)
@@ -7621,6 +7693,7 @@ impl Runtime {
                     current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
+                    udfs: Some(&udfs),
                 },
             ) {
                 Ok(program) => *compiled_from_where = program,
@@ -8650,6 +8723,7 @@ impl Runtime {
                 current_branching: &empty_branching,
                 current_branch_schema: None,
                 current_branch_sensitivity: None,
+                udfs: Some(&execution.udfs),
             },
         )?;
         let mut output_routes = RelayProcessorOutputsNode {
@@ -8691,6 +8765,7 @@ impl Runtime {
                         .unwrap_or_default(),
                     current_branch_schema: None,
                     current_branch_sensitivity: None,
+                    udfs: Some(&execution.udfs),
                 },
             )?;
             let flush_policy = output

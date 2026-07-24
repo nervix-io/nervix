@@ -10,19 +10,20 @@ use nervix_models::{
     CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
     CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
     CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode,
-    EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog,
-    IcebergStorageBackend, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
-    MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
+    EndpointIngestMode, EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy,
+    IcebergCatalog, IcebergStorageBackend, Identifier, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, IngestSource, IngestTimestampSource,
+    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode,
+    MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode,
+    MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OutputFlushPolicy,
+    ParseAsType, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
     ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
-    SchemaField, SignalingProtocolOnConnect, SqsIngestMode, VhostTlsResource, WebsocketsIngestMode,
-    WindowBound, WireSchemaField, WireSchemaStrictness, ZeroMqIngestMode,
+    SchemaField, SignalingProtocolOnConnect, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+    VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
+    ZeroMqIngestMode,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -68,6 +69,36 @@ pub enum StoredModelVersioned {
     Junction(StoredCreateJunction),
     WindowProcessor(StoredCreateWindowProcessor),
     Emitter(StoredCreateEmitter),
+    Udf(StoredCreateUdf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredCreateUdf {
+    pub name: String,
+    pub language: StoredUdfLanguage,
+    pub arguments: Vec<StoredUdfArgument>,
+    pub returns: StoredUdfReturn,
+    pub volatile: bool,
+    pub code: String,
+    pub code_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub enum StoredUdfLanguage {
+    Roto0_11,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredUdfArgument {
+    pub name: String,
+    pub ty: StoredParseAsType,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredUdfReturn {
+    pub ty: StoredParseAsType,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1096,6 +1127,7 @@ impl From<Model> for StoredModelVersioned {
             Model::Junction(v) => Self::Junction(v.into()),
             Model::WindowProcessor(v) => Self::WindowProcessor(v.into()),
             Model::Emitter(v) => Self::Emitter(v.into()),
+            Model::Udf(v) => Self::Udf(v.into()),
             Model::Materializer(_) => {
                 unreachable!("synthetic materializers must not be stored")
             }
@@ -1160,6 +1192,97 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::Junction(v) => Ok(Model::Junction(v.try_into()?)),
             StoredModelVersioned::WindowProcessor(v) => Ok(Model::WindowProcessor(v.try_into()?)),
             StoredModelVersioned::Emitter(v) => Ok(Model::Emitter(v.try_into()?)),
+            StoredModelVersioned::Udf(v) => Ok(Model::Udf(v.try_into()?)),
+        }
+    }
+}
+
+impl From<CreateUdf> for StoredCreateUdf {
+    fn from(value: CreateUdf) -> Self {
+        Self {
+            name: value.name.to_string(),
+            language: value.language.into(),
+            arguments: value.arguments.into_iter().map(Into::into).collect(),
+            returns: value.returns.into(),
+            volatile: value.volatile,
+            code: value.code,
+            code_hash: value.code_hash,
+        }
+    }
+}
+
+impl TryFrom<StoredCreateUdf> for CreateUdf {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredCreateUdf) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: Identifier::parse(&value.name)?,
+            language: value.language.into(),
+            arguments: value
+                .arguments
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+            returns: value.returns.into(),
+            volatile: value.volatile,
+            code: value.code,
+            code_hash: value.code_hash,
+        })
+    }
+}
+
+impl From<UdfLanguage> for StoredUdfLanguage {
+    fn from(value: UdfLanguage) -> Self {
+        match value {
+            UdfLanguage::Roto0_11 => Self::Roto0_11,
+        }
+    }
+}
+
+impl From<StoredUdfLanguage> for UdfLanguage {
+    fn from(value: StoredUdfLanguage) -> Self {
+        match value {
+            StoredUdfLanguage::Roto0_11 => Self::Roto0_11,
+        }
+    }
+}
+
+impl From<UdfArgument> for StoredUdfArgument {
+    fn from(value: UdfArgument) -> Self {
+        Self {
+            name: value.name.to_string(),
+            ty: value.ty.into(),
+            optional: value.optional,
+        }
+    }
+}
+
+impl TryFrom<StoredUdfArgument> for UdfArgument {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredUdfArgument) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: Identifier::parse(&value.name)?,
+            ty: value.ty.into(),
+            optional: value.optional,
+        })
+    }
+}
+
+impl From<UdfReturn> for StoredUdfReturn {
+    fn from(value: UdfReturn) -> Self {
+        Self {
+            ty: value.ty.into(),
+            optional: value.optional,
+        }
+    }
+}
+
+impl From<StoredUdfReturn> for UdfReturn {
+    fn from(value: StoredUdfReturn) -> Self {
+        Self {
+            ty: value.ty.into(),
+            optional: value.optional,
         }
     }
 }

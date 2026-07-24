@@ -66,6 +66,7 @@ use nervix_nspl::{
         WindowAggregateStorageKind, lower_window_assignments,
     },
 };
+use nervix_roto::UdfExecutor;
 #[cfg(test)]
 use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
 use nervix_vm::{
@@ -74,10 +75,9 @@ use nervix_vm::{
     ExecutionContext as VmExecutionContext, FunctionInjector as VmFunctionInjector,
     OutputMode as VmOutputMode, SchemaSensitivity as VmSchemaSensitivity,
     TypedArray as VmTypedArray, TypedBatch as VmTypedBatch,
-    compile_program_for_bindings_with_sensitivity as compile_vm_program_for_bindings_with_sensitivity,
     compile_program_with_options_for_bindings_with_sensitivity as compile_vm_program_with_options_for_bindings_with_sensitivity,
     execute_program_with_selection_in_context,
-    infer_set_expr_types_for_bindings as infer_vm_set_expr_types_for_bindings,
+    infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
 };
 use nervix_wasm::{
     DomainClock as WasmDomainClock, WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmBranchInit,
@@ -424,6 +424,7 @@ struct DomainExecution {
     relay_schemas: HashMap<Identifier, Arc<CompiledSchema>>,
     relay_services: HashMap<Identifier, Arc<RelayBoundaryServices>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,
+    udfs: UdfExecutor,
     relay_branchings: HashMap<Identifier, Vec<Identifier>>,
     relay_branching_schemas: HashMap<Identifier, Option<StdArc<arrow_schema::Schema>>>,
     materialized_stream_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
@@ -714,6 +715,7 @@ impl BranchedEntrypointBatch {
         mappings: &[Assignment],
         source: &Identifier,
         root_relay: &Identifier,
+        udfs: Option<&UdfExecutor>,
     ) -> BranchedBranchPlan {
         let mut selections = Vec::<BranchedBranchSelection>::new();
         let mut positions = HashMap::<Option<BranchKey>, usize>::default();
@@ -726,6 +728,7 @@ impl BranchedEntrypointBatch {
                 self.keys.get(index).and_then(Option::as_ref),
                 mappings,
                 source,
+                udfs,
             ) {
                 Ok(branch) => {
                     let key = branch.into_relay_key();
@@ -1828,6 +1831,7 @@ pub(crate) struct RuntimeVmCompileContext<'a> {
     pub(crate) current_branching: &'a [Identifier],
     pub(crate) current_branch_schema: Option<&'a StdArc<arrow_schema::Schema>>,
     pub(crate) current_branch_sensitivity: Option<&'a VmSchemaSensitivity>,
+    pub(crate) udfs: Option<&'a UdfExecutor>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1850,6 +1854,21 @@ impl RuntimeVmCompileContext<'_> {
                 .with_sensitivity(sensitivity)
         })
     }
+
+    fn compile_options(&self, options: VmCompileOptions) -> VmCompileOptions {
+        runtime_udf_compile_options(self.udfs, options)
+    }
+}
+
+fn runtime_udf_compile_options(
+    udfs: Option<&UdfExecutor>,
+    mut options: VmCompileOptions,
+) -> VmCompileOptions {
+    if let Some(udfs) = udfs {
+        options.udf_signatures = udfs.signatures().clone();
+        options.injector = Some(Arc::new(Box::new(udfs.clone())));
+    }
+    options
 }
 
 #[derive(Debug, Clone)]
@@ -2577,6 +2596,11 @@ impl RelayProcessorNode {
                 .get(&branch.domain)
                 .map(|execution| execution.lookups.clone())
                 .unwrap_or_default();
+            let udfs = branch
+                .runtime
+                .executions
+                .get(&branch.domain)
+                .map(|execution| execution.udfs.clone());
             let filter_scope = match kind {
                 ProcessorInputFilterKind::FromWhere => self.source_filter_scope(incoming_relay),
                 ProcessorInputFilterKind::FilterWhere => RuntimeFilterScope::Source {
@@ -2602,6 +2626,7 @@ impl RelayProcessorNode {
                     current_branching: &current_branching,
                     current_branch_schema: current_branch_schema.as_ref(),
                     current_branch_sensitivity: None,
+                    udfs: udfs.as_ref(),
                 },
                 filter_scope,
             ) {
@@ -2811,11 +2836,13 @@ impl RelayProcessorNode {
                     };
 
                     if compiled_key_program.is_none() {
+                        let udfs = branch.runtime.udf_executor(&branch.domain);
                         match compile_deduplicator_key_program(
                             &self.processor,
                             &self.input_relays,
                             deduplicate_on,
                             input_arrow_schema.clone(),
+                            udfs.as_ref(),
                         ) {
                             Ok(program) => *compiled_key_program = Some(Box::new(program)),
                             Err(error) => {
@@ -3162,11 +3189,13 @@ impl RelayProcessorNode {
                     arrival_sequence,
                 } => {
                     if compiled_program.is_none() {
+                        let udfs = branch.runtime.udf_executor(&branch.domain);
                         match compile_reorderer_program(
                             &self.processor,
                             &self.input_relays,
                             order_by,
                             batch.arrow_schema(),
+                            udfs.as_ref(),
                         ) {
                             Ok(program) => *compiled_program = Some(Box::new(program)),
                             Err(error) => {
@@ -3460,6 +3489,7 @@ impl RelayProcessorNode {
                             left_schema.arrow_schema(),
                             right_relays,
                             right_schema.arrow_schema(),
+                            branch.runtime.udf_executor(&branch.domain).as_ref(),
                         ) {
                             Ok(program) => *compiled_where_program = Some(Box::new(program)),
                             Err(error) => {
@@ -3615,6 +3645,11 @@ impl RelayProcessorNode {
                         .get(&branch.domain)
                         .map(|execution| execution.lookups.clone())
                         .unwrap_or_default();
+                    let udfs = branch
+                        .runtime
+                        .executions
+                        .get(&branch.domain)
+                        .map(|execution| execution.udfs.clone());
                     for (output_index, compiled_output_program) in compiled_output_programs
                         .iter_mut()
                         .enumerate()
@@ -3677,6 +3712,7 @@ impl RelayProcessorNode {
                                 current_branching: &current_branching,
                                 current_branch_schema: current_branch_schema.as_ref(),
                                 current_branch_sensitivity: None,
+                                udfs: udfs.as_ref(),
                             },
                         }
                         .compile();
@@ -5032,10 +5068,12 @@ impl BranchedIngestorRuntime {
                 return None;
             }
         };
+        let udfs = runtime_handle.udf_executor(domain);
         let branch_plan = input_batch.branch_selections(
             &template.entrypoint_branch_assignments,
             &template.source,
             &template.root_relay,
+            udfs.as_ref(),
         );
         for row_error in branch_plan.row_errors {
             tokio::task::consume_budget().await;
@@ -6716,6 +6754,7 @@ fn compile_lookup_hash_map_calls(
     pending_calls: Vec<PendingLookupHashMapCall>,
     writable_namespace: &str,
     bindings: &[VmCompileBinding],
+    udfs: Option<&UdfExecutor>,
 ) -> Result<(Vec<LookupHashMapCall>, Option<VmCompileBinding>), String> {
     if pending_calls.is_empty() {
         return Ok((Vec::new(), None));
@@ -6748,17 +6787,22 @@ fn compile_lookup_hash_map_calls(
             },
             span: (0..0).into(),
         };
-        let key_types =
-            infer_vm_set_expr_types_for_bindings(&key_program, bindings.iter().cloned()).map_err(
-                |error| {
-                    format!(
-                        "LOOKUP_HASH_MAP key compile failed for hash map '{}' field '{}': {}",
-                        call.lookup.as_str(),
-                        call.lookup_field,
-                        error.message
-                    )
-                },
-            )?;
+        let signatures = udfs
+            .map(|executor| executor.signatures().clone())
+            .unwrap_or_default();
+        let key_types = infer_vm_set_expr_types_for_bindings_with_udfs(
+            &key_program,
+            bindings.iter().cloned(),
+            signatures,
+        )
+        .map_err(|error| {
+            format!(
+                "LOOKUP_HASH_MAP key compile failed for hash map '{}' field '{}': {}",
+                call.lookup.as_str(),
+                call.lookup_field,
+                error.message
+            )
+        })?;
         let key_output_schema = StdArc::new(arrow_schema::Schema::new(
             key_types
                 .into_iter()
@@ -6772,10 +6816,13 @@ fn compile_lookup_hash_map_calls(
             key_output_schema,
             VmSchemaSensitivity::default(),
             bindings.iter().cloned(),
-            VmCompileOptions {
-                output_mode: VmOutputMode::ExplicitOnly,
-                ..VmCompileOptions::default()
-            },
+            runtime_udf_compile_options(
+                udfs,
+                VmCompileOptions {
+                    output_mode: VmOutputMode::ExplicitOnly,
+                    ..VmCompileOptions::default()
+                },
+            ),
         )
         .map_err(|error| {
             format!(
@@ -7109,8 +7156,12 @@ fn compile_message_error_set_program(
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
         rewrite_lookup_hash_map_program(&parsed, context.available_lookups)?;
-    let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, "error_output", &bindings)?;
+    let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
+        pending_lookup_calls,
+        "error_output",
+        &bindings,
+        context.udfs,
+    )?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -7120,11 +7171,11 @@ fn compile_message_error_set_program(
         output_schema.arrow_schema(),
         output_sensitivity.clone(),
         bindings,
-        VmCompileOptions {
+        context.compile_options(VmCompileOptions {
             output_mode: VmOutputMode::ExplicitOnly,
             allow_header_reads: schemas.allow_header_reads,
             ..VmCompileOptions::default()
-        },
+        }),
     )
     .map_err(|error| {
         format!(
@@ -7291,16 +7342,19 @@ fn compile_scoped_filter_program(
                 ),
             }
         })?;
-    let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, scope.namespace(), &bindings).map_err(
-            |reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "filter compile failed for '{}': {reason}",
-                    identifier.as_str()
-                ),
-            },
-        )?;
+    let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
+        pending_lookup_calls,
+        scope.namespace(),
+        &bindings,
+        context.udfs,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "filter compile failed for '{}': {reason}",
+            identifier.as_str()
+        ),
+    })?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -7309,10 +7363,10 @@ fn compile_scoped_filter_program(
         schema,
         sensitivity.clone(),
         bindings,
-        VmCompileOptions {
+        context.compile_options(VmCompileOptions {
             allow_header_reads: scope.allow_header_reads(),
             ..VmCompileOptions::default()
-        },
+        }),
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -7462,16 +7516,15 @@ fn compile_processor_output_filter_map_program(
             }
         })?;
     let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings).map_err(
-            |reason| RuntimeError::BuildDomainExecution {
+        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
                     "FILTER-MAP compile failed for '{}': {}",
                     identifier.as_str(),
                     reason
                 ),
-            },
-        )?;
+            })?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -7481,10 +7534,10 @@ fn compile_processor_output_filter_map_program(
         output_schema,
         output_sensitivity.clone(),
         bindings,
-        VmCompileOptions {
+        context.compile_options(VmCompileOptions {
             output_mode: VmOutputMode::ExplicitOnly,
             ..VmCompileOptions::default()
-        },
+        }),
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -7588,16 +7641,15 @@ fn compile_wasm_output_filter_map_program(
             }
         })?;
     let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings).map_err(
-            |reason| RuntimeError::BuildDomainExecution {
+        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
                     "FILTER-MAP compile failed for '{}': {}",
                     identifier.as_str(),
                     reason
                 ),
-            },
-        )?;
+            })?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -7607,10 +7659,10 @@ fn compile_wasm_output_filter_map_program(
         output_schema,
         output_sensitivity.clone(),
         bindings,
-        VmCompileOptions {
+        context.compile_options(VmCompileOptions {
             output_mode: VmOutputMode::ExplicitOnly,
             ..VmCompileOptions::default()
-        },
+        }),
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -7799,16 +7851,20 @@ fn compile_emitter_filter_map_part(
             }
         })?;
     let lookup_output_namespace = if codec_route { "output" } else { "input" };
-    let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, lookup_output_namespace, &bindings)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            })?;
+    let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
+        pending_lookup_calls,
+        lookup_output_namespace,
+        &bindings,
+        context.udfs,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "FILTER-MAP compile failed for '{}': {}",
+            identifier.as_str(),
+            reason
+        ),
+    })?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -7817,7 +7873,7 @@ fn compile_emitter_filter_map_part(
         output_schema,
         output_sensitivity.clone(),
         bindings,
-        VmCompileOptions {
+        context.compile_options(VmCompileOptions {
             output_mode: if codec_route {
                 VmOutputMode::ExplicitOnly
             } else {
@@ -7826,7 +7882,7 @@ fn compile_emitter_filter_map_part(
             allow_sensitive_output: false,
             allow_header_writes: true,
             ..VmCompileOptions::default()
-        },
+        }),
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -7874,6 +7930,7 @@ pub(super) fn compile_key_projection_program(
     input_relays: &[Identifier],
     expressions: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<VmCompiledProgram, String> {
     if input_relays.is_empty() {
         return Err(format!(
@@ -7917,16 +7974,20 @@ pub(super) fn compile_key_projection_program(
         )
     })?;
     let bindings = vec![VmCompileBinding::writable("input", input_schema.clone())];
+    let signatures = udfs
+        .map(|udfs| udfs.signatures().clone())
+        .unwrap_or_default();
     let key_types =
-        infer_vm_set_expr_types_for_bindings(&parsed, bindings.clone()).map_err(|error| {
-            format!(
-                "{} '{}' {} compile failed: {}",
-                processor_kind,
-                processor.as_str(),
-                clause,
-                error.message
-            )
-        })?;
+        infer_vm_set_expr_types_for_bindings_with_udfs(&parsed, bindings.clone(), signatures)
+            .map_err(|error| {
+                format!(
+                    "{} '{}' {} compile failed: {}",
+                    processor_kind,
+                    processor.as_str(),
+                    clause,
+                    error.message
+                )
+            })?;
     if key_types.len() != expressions.len() {
         return Err(format!(
             "{} '{}' {} inferred a different number of key fields",
@@ -7946,10 +8007,13 @@ pub(super) fn compile_key_projection_program(
         output_schema,
         VmSchemaSensitivity::default(),
         bindings,
-        VmCompileOptions {
-            output_mode: VmOutputMode::ExplicitOnly,
-            ..VmCompileOptions::default()
-        },
+        runtime_udf_compile_options(
+            udfs,
+            VmCompileOptions {
+                output_mode: VmOutputMode::ExplicitOnly,
+                ..VmCompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         format!(
@@ -7967,6 +8031,7 @@ fn compile_reorderer_program(
     input_relays: &[Identifier],
     order_by: &[nervix_models::Expression],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledReordererProgram, String> {
     if order_by.is_empty() {
         return Err(format!(
@@ -7981,6 +8046,7 @@ fn compile_reorderer_program(
         input_relays,
         order_by,
         input_schema,
+        udfs,
     )?;
     Ok(CompiledReordererProgram {
         key_column_offset: 0,
@@ -7996,6 +8062,7 @@ fn compile_correlator_where_program(
     left_schema: StdArc<arrow_schema::Schema>,
     right_relays: &[Identifier],
     right_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledCorrelatorWhereProgram, String> {
     let parsed = lower_route_construction(
         &RouteConstruction {
@@ -8024,11 +8091,12 @@ fn compile_correlator_where_program(
         VmCompileBinding::writable("left", left_schema.clone()),
         VmCompileBinding::readonly("right", right_schema.clone()),
     ];
-    let program = compile_vm_program_for_bindings_with_sensitivity(
+    let program = compile_vm_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         left_schema.clone(),
         VmSchemaSensitivity::default(),
         bindings,
+        runtime_udf_compile_options(udfs, VmCompileOptions::default()),
     )
     .map_err(|error| {
         format!(
@@ -8102,8 +8170,12 @@ impl CorrelatorOutputCompileContext<'_> {
         bindings.extend(materialized_bindings);
         let (parsed, pending_lookup_calls) =
             rewrite_lookup_hash_map_program(&parsed, self.runtime.available_lookups)?;
-        let (lookup_hash_maps, lookup_binding) =
-            compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings)?;
+        let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
+            pending_lookup_calls,
+            "output",
+            &bindings,
+            self.runtime.udfs,
+        )?;
         if let Some(lookup_binding) = lookup_binding {
             bindings.push(lookup_binding);
         }
@@ -8112,10 +8184,10 @@ impl CorrelatorOutputCompileContext<'_> {
             self.output_schema.clone(),
             self.output_sensitivity.clone(),
             bindings,
-            VmCompileOptions {
+            self.runtime.compile_options(VmCompileOptions {
                 output_mode: VmOutputMode::ExplicitOnly,
                 ..VmCompileOptions::default()
-            },
+            }),
         )
         .map_err(|error| {
             format!(
@@ -9018,16 +9090,15 @@ fn compile_ingestor_filter_map_program(
             }
         })?;
     let (lookup_hash_maps, lookup_binding) =
-        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings).map_err(
-            |reason| RuntimeError::BuildDomainExecution {
+        compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
                     "FILTER-MAP compile failed for '{}': {}",
                     identifier.as_str(),
                     reason
                 ),
-            },
-        )?;
+            })?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -9037,11 +9108,11 @@ fn compile_ingestor_filter_map_program(
         schemas.output,
         schemas.output_sensitivity.clone(),
         bindings,
-        VmCompileOptions {
+        context.compile_options(VmCompileOptions {
             output_mode: VmOutputMode::ExplicitOnly,
             allow_header_reads: ingest_source_supports_headers(source),
             ..VmCompileOptions::default()
-        },
+        }),
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -9069,6 +9140,7 @@ fn compile_generator_set_program(
     output_sensitivity: VmSchemaSensitivity,
     source_schema: StdArc<arrow_schema::Schema>,
     branch_schema: Option<StdArc<arrow_schema::Schema>>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
     let parsed =
         lower_set_only_route(&output.construction, output_schema.as_ref()).map_err(|reason| {
@@ -9105,10 +9177,13 @@ fn compile_generator_set_program(
         output_schema,
         output_sensitivity.clone(),
         bindings,
-        VmCompileOptions {
-            output_mode: VmOutputMode::ExplicitOnly,
-            ..VmCompileOptions::default()
-        },
+        runtime_udf_compile_options(
+            udfs,
+            VmCompileOptions {
+                output_mode: VmOutputMode::ExplicitOnly,
+                ..VmCompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -9309,6 +9384,9 @@ fn expression_reads_sensitive_source(
                     .iter()
                     .any(|argument| expression_reads_sensitive_source(argument, sensitivity))
         }
+        nervix_models::Expression::UdfCall { arguments, .. } => arguments
+            .iter()
+            .any(|argument| expression_reads_sensitive_source(argument, sensitivity)),
         nervix_models::Expression::Array(items) => items
             .iter()
             .any(|item| expression_reads_sensitive_source(item, sensitivity)),
@@ -9477,6 +9555,12 @@ async fn evaluate_processor_output_events(
             .get(&context.branch.domain)
             .map(|execution| execution.lookups.clone())
             .unwrap_or_default();
+        let udfs = context
+            .branch
+            .runtime
+            .executions
+            .get(&context.branch.domain)
+            .map(|execution| execution.udfs.clone());
         let output_schema = match relay_schema_for_runtime(
             &context.branch.runtime,
             &context.branch.domain,
@@ -9497,6 +9581,7 @@ async fn evaluate_processor_output_events(
             current_branching: &current_branching,
             current_branch_schema: current_branch_schema.as_ref(),
             current_branch_sensitivity: None,
+            udfs: udfs.as_ref(),
         };
         let compiled = match context.filter_source {
             ProcessorOutputFilterSource::OutputRelay => compile_finalized_output_filter_program(
@@ -13198,6 +13283,7 @@ fn compile_inferencer_input_mappings(
     mappings: &[InferencerTensorMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     input_sensitivity: VmSchemaSensitivity,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<VmCompiledProgram, String> {
     let assignments = mappings
         .iter()
@@ -13257,10 +13343,13 @@ fn compile_inferencer_input_mappings(
             VmCompileBinding::writeonly("mapped_input", output_schema)
                 .with_sensitivity(output_sensitivity),
         ],
-        VmCompileOptions {
-            output_mode: VmOutputMode::ExplicitOnly,
-            ..VmCompileOptions::default()
-        },
+        runtime_udf_compile_options(
+            udfs,
+            VmCompileOptions {
+                output_mode: VmOutputMode::ExplicitOnly,
+                ..VmCompileOptions::default()
+            },
+        ),
     )
     .map_err(|error| {
         format!(
@@ -13571,6 +13660,7 @@ async fn flush_branch_inferencer_output(
         inputs,
         input_batch.schema().clone(),
         input_sensitivity,
+        branch.runtime.udf_executor(&branch.domain).as_ref(),
     ) {
         Ok(program) => program,
         Err(error) => {
@@ -14999,6 +15089,12 @@ async fn dispatch_wasm_output_route(
             .get(&context.branch.domain)
             .map(|execution| execution.lookups.clone())
             .unwrap_or_default();
+        let udfs = context
+            .branch
+            .runtime
+            .executions
+            .get(&context.branch.domain)
+            .map(|execution| execution.udfs.clone());
         let output_schema = match relay_schema_for_runtime(
             &context.branch.runtime,
             &context.branch.domain,
@@ -15032,6 +15128,7 @@ async fn dispatch_wasm_output_route(
                 current_branching: &current_branching,
                 current_branch_schema: current_branch_schema.as_ref(),
                 current_branch_sensitivity: None,
+                udfs: udfs.as_ref(),
             },
         ) {
             Ok(program) => output.compiled_program = program,

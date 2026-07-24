@@ -45,7 +45,7 @@ fn protobuf_config<'src>()
 pub fn create_codec_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateCodec>, extra::Err<ParseError<'src>>> + Clone
 {
-    let directed_jaq_transformations = kw(Identifier::On)
+    let ingestion_transformations = kw(Identifier::On)
         .ignore_then(kw(Identifier::Ingestion))
         .ignore_then(string_lit())
         .then(
@@ -57,14 +57,16 @@ pub fn create_codec_parser<'src>()
         .map(|(on_ingestion, on_emitting)| CodecJaqTransformations {
             on_ingestion: Some(on_ingestion),
             on_emitting,
-        })
-        .or(kw(Identifier::On)
-            .ignore_then(kw(Identifier::Emitting))
-            .ignore_then(string_lit())
-            .map(|on_emitting| CodecJaqTransformations {
-                on_ingestion: None,
-                on_emitting: Some(on_emitting),
-            }));
+        });
+    let emitting_transformations = kw(Identifier::On)
+        .ignore_then(kw(Identifier::Emitting))
+        .ignore_then(string_lit())
+        .map(|on_emitting| CodecJaqTransformations {
+            on_ingestion: None,
+            on_emitting: Some(on_emitting),
+        });
+    let directed_jaq_transformations =
+        choice((ingestion_transformations, emitting_transformations)).boxed();
     let jaq_transformations = kw(Identifier::With)
         .ignore_then(kw(Identifier::Jaq))
         .ignore_then(choice((
@@ -75,12 +77,14 @@ pub fn create_codec_parser<'src>()
                     on_emitting: None,
                 }),
             kw(Identifier::Transformations).ignore_then(directed_jaq_transformations),
-        )));
+        )))
+        .boxed();
 
     let encoding_rule = field_ref()
         .then_ignore(kw(Identifier::As))
         .then(kw(Identifier::Rfc3339).to(CodecEncoding::Rfc3339))
-        .map(|(field, encoding)| CodecEncodingRule { field, encoding });
+        .map(|(field, encoding)| CodecEncodingRule { field, encoding })
+        .boxed();
     let encoding_rules = kw(Identifier::Encode)
         .ignore_then(
             encoding_rule
@@ -90,7 +94,8 @@ pub fn create_codec_parser<'src>()
                 .collect::<Vec<_>>(),
         )
         .or_not()
-        .map(Option::unwrap_or_default);
+        .map(Option::unwrap_or_default)
+        .boxed();
 
     let json_wire = kw(Identifier::Json)
         .ignore_then(kw(Identifier::Schema))
@@ -109,22 +114,26 @@ pub fn create_codec_parser<'src>()
         .then_ignore(kw(Identifier::To))
         .then_ignore(kw(Identifier::Schema))
         .then(schema_ref())
+        .boxed()
         .then(encoding_rules.clone())
         .map(|(((wire_format, wire_schema), schema), encoding_rules)| {
             (wire_format, wire_schema, schema, encoding_rules)
-        });
+        })
+        .boxed();
     let jaq_format = choice((
         kw(Identifier::Json).to(CodecJaqFormat::Json),
         kw(Identifier::Yaml).to(CodecJaqFormat::Yaml),
         kw(Identifier::Toml).to(CodecJaqFormat::Toml),
         kw(Identifier::Xml).to(CodecJaqFormat::Xml),
         kw(Identifier::Cbor).to(CodecJaqFormat::Cbor),
-    ));
+    ))
+    .boxed();
     let jaq_native_codec = jaq_format
         .then_ignore(kw(Identifier::To))
         .then_ignore(kw(Identifier::Schema))
         .then(schema_ref())
         .then(jaq_transformations.clone())
+        .boxed()
         .then(encoding_rules.clone())
         .map(|(((format, schema), transformations), encoding_rules)| {
             (
@@ -136,18 +145,21 @@ pub fn create_codec_parser<'src>()
                 schema,
                 encoding_rules,
             )
-        });
+        })
+        .boxed();
     let protobuf_codec = kw(Identifier::Protobuf)
         .ignore_then(kw(Identifier::Using))
         .ignore_then(kw(Identifier::Resource))
         .ignore_then(resource_ref())
         .then(kw(Identifier::Version).ignore_then(u64_value()).or_not())
         .then(protobuf_config())
+        .boxed()
         .then_ignore(kw(Identifier::Message))
         .then(string_lit())
         .then_ignore(kw(Identifier::To))
         .then_ignore(kw(Identifier::Schema))
         .then(schema_ref())
+        .boxed()
         .then(jaq_transformations)
         .then(encoding_rules)
         .map(
@@ -168,14 +180,16 @@ pub fn create_codec_parser<'src>()
                     encoding_rules,
                 )
             },
-        );
+        )
+        .boxed();
 
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
         .then_ignore(kw(Identifier::Codec))
         .then(codec_name())
         .then_ignore(kw(Identifier::From))
-        .then(choice((schemaful_codec, protobuf_codec, jaq_native_codec)))
+        .boxed()
+        .then(choice((schemaful_codec, protobuf_codec, jaq_native_codec)).boxed())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |((if_not_exists, name), (wire_format, wire_schema, schema, encoding_rules))| {
@@ -191,6 +205,7 @@ pub fn create_codec_parser<'src>()
                 )
             },
         )
+        .boxed()
 }
 
 pub fn parse_create_codec_tokens(

@@ -128,10 +128,12 @@ pub fn create_window_processor_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
+        .boxed()
         .then_ignore(kw(Identifier::Width))
         .then(window_bound())
         .then_ignore(kw(Identifier::Step))
         .then(window_bound())
+        .boxed()
         .then(branch_selection())
         .then(materialized_state_dependencies())
         .then(explicit_processor_outputs())
@@ -168,6 +170,7 @@ pub fn create_window_processor_parser<'src>()
                 ))
             },
         )
+        .boxed()
 }
 
 pub fn parse_create_window_processor_tokens(

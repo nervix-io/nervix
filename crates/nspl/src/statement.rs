@@ -4,173 +4,157 @@ use nervix_models::{Model, Statement};
 use crate::{
     lexer::Token,
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, into_parse_error, lex_input,
-        suggestions_from_errors,
+        ParseError, ParseFromSourceError, boxed_choice, current_word_prefix, into_parse_error,
+        lex_input, suggestions_from_errors,
     },
 };
 
 pub fn statement_parser<'src>()
 -> impl Parser<'src, &'src [Token], Statement, extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        choice((
-            crate::domain::create_domain_parser().map(Statement::CreateDomain),
-            crate::create_resource::create_resource_parser().map(Statement::CreateResource),
-            crate::domain::start_domain_parser().map(Statement::StartDomain),
-            crate::domain::stop_domain_parser().map(Statement::StopDomain),
-            crate::branch::create_branch_parser()
-                .map(|create| Statement::Create(create.map_body(Model::Branch).map_body(Box::new))),
-            crate::describe_deduplicator::describe_deduplicator_parser()
-                .map(Statement::DescribeDeduplicator),
-            crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
-            crate::describe_endpoint::describe_endpoint_parser().map(Statement::DescribeEndpoint),
-            crate::describe_ingestor::describe_ingestor_parser().map(Statement::DescribeIngestor),
-            crate::describe_lookup::describe_lookup_parser().map(Statement::DescribeLookup),
-            crate::describe_resource::describe_resource_parser().map(Statement::DescribeResource),
-            crate::describe_stream::describe_stream_parser().map(Statement::DescribeRelay),
-            crate::describe_window_processor::describe_window_processor_parser()
-                .map(Statement::DescribeWindowProcessor),
-            crate::lookup_query::lookup_query_parser().map(Statement::LookupQuery),
-            crate::generator::create_generator_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Generator).map_body(Box::new))
-            }),
-            crate::inferencer::create_inferencer_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Inferencer).map_body(Box::new))
-            }),
-            crate::lookup::create_lookup_parser()
-                .map(|create| Statement::Create(create.map_body(Model::Lookup).map_body(Box::new))),
-            crate::reingestor::create_reingestor_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Reingestor).map_body(Box::new))
-            }),
-            crate::reorderer::create_reorderer_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Reorderer).map_body(Box::new))
-            }),
-            crate::codec::create_codec_parser()
-                .map(|create| Statement::Create(create.map_body(Model::Codec).map_body(Box::new))),
-            crate::junction::create_junction_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Junction).map_body(Box::new))
-            }),
-            crate::deduplicator::create_deduplicator_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Deduplicator).map_body(Box::new))
-            }),
-            crate::window_processor::create_window_processor_parser().map(|create| {
-                Statement::Create(create.map_body(Model::WindowProcessor).map_body(Box::new))
-            }),
-            crate::vhost::create_vhost_parser()
-                .map(|create| Statement::Create(create.map_body(Model::Vhost).map_body(Box::new))),
-        )),
-        choice((
-            crate::user::create_user_parser().map(Statement::CreateUser),
-            crate::describe_correlator::describe_correlator_parser()
-                .map(Statement::DescribeCorrelator),
-            crate::endpoint::create_endpoint_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Endpoint).map_body(Box::new))
-            }),
-            crate::signaling_protocol::create_signaling_protocol_parser().map(|create| {
-                Statement::Create(create.map_body(Model::SignalingProtocol).map_body(Box::new))
-            }),
-            crate::describe_emitter::describe_emitter_parser().map(Statement::DescribeEmitter),
-            crate::describe_wasm_processor::describe_wasm_processor_parser()
-                .map(Statement::DescribeWasmProcessor),
-            crate::wasm_processor::create_wasm_processor_parser().map(|create| {
-                Statement::Create(create.map_body(Model::WasmProcessor).map_body(Box::new))
-            }),
-            crate::describe_reingestor::describe_reingestor_parser()
-                .map(Statement::DescribeReingestor),
-            crate::describe_reorderer::describe_reorderer_parser()
-                .map(Statement::DescribeReorderer),
-            crate::correlator::create_correlator_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Correlator).map_body(Box::new))
-            }),
-            crate::emitter::create_emitter_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Emitter).map_body(Box::new))
-            }),
-            crate::ingestor::create_ingestor_parser().map(|create| {
-                Statement::Create(create.map_body(Model::Ingestor).map_body(Box::new))
-            }),
-            crate::relay::create_relay_parser()
-                .map(|create| Statement::Create(create.map_body(Model::Relay).map_body(Box::new))),
-            crate::schema::create_wire_schema_parser_any().map(|create| {
-                Statement::Create(create.map_body(Model::WireSchema).map_body(Box::new))
-            }),
-            crate::schema::create_schema_parser()
-                .map(|create| Statement::Create(create.map_body(Model::Schema).map_body(Box::new))),
-        )),
-        choice((
-            crate::client::create_client_kafka_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientKafka).map_body(Box::new))
-            }),
-            crate::client::create_client_pulsar_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientPulsar).map_body(Box::new))
-            }),
-            crate::client::create_client_kinesis_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientKinesis).map_body(Box::new))
-            }),
-            crate::client::create_client_http_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientHttp).map_body(Box::new))
-            }),
-            crate::client::create_client_prometheus_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientPrometheus).map_body(Box::new))
-            }),
-            crate::client::create_client_rabbitmq_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientRabbitMq).map_body(Box::new))
-            }),
-            crate::client::create_client_redis_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientRedis).map_body(Box::new))
-            }),
-            crate::client::create_client_mqtt_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientMqtt).map_body(Box::new))
-            }),
-            crate::client::create_client_nats_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientNats).map_body(Box::new))
-            }),
-            crate::client::create_client_zeromq_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientZeroMq).map_body(Box::new))
-            }),
-            crate::client::create_client_sqs_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientSqs).map_body(Box::new))
-            }),
-            crate::client::create_client_s3_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientS3).map_body(Box::new))
-            }),
-            crate::client::create_client_gcs_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientGcs).map_body(Box::new))
-            }),
-            crate::client::create_client_azure_blob_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientAzureBlob).map_body(Box::new))
-            }),
-            crate::client::create_client_iceberg_rest_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientIcebergRest).map_body(Box::new))
-            }),
-            crate::client::create_client_websockets_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientWebsockets).map_body(Box::new))
-            }),
-            crate::client::create_client_clickhouse_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientClickHouse).map_body(Box::new))
-            }),
-            crate::client::create_client_postgres_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientPostgres).map_body(Box::new))
-            }),
-            crate::client::create_client_mysql_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientMySql).map_body(Box::new))
-            }),
-            crate::client::create_client_mongodb_parser().map(|create| {
-                Statement::Create(create.map_body(Model::ClientMongoDb).map_body(Box::new))
-            }),
-        )),
-        choice((
-            crate::relay::alter_relay_parser().map(Statement::AlterRelay),
-            crate::node_control::cordon_node_parser().map(Statement::CordonNode),
-            crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
-            crate::node_control::drain_node_parser().map(Statement::DrainNode),
-            crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
-            crate::drop_stmt::drop_parser().map(Statement::Drop),
-            crate::show_cluster_status::show_cluster_status_parser()
-                .map(Statement::ShowClusterStatus),
-            crate::show_create::show_create_parser().map(Statement::ShowCreate),
-            crate::show_stream_state::show_stream_materialized_state_parser()
-                .map(Statement::ShowRelayMaterializedState),
-        )),
-    ))
+    let domain_and_core = boxed_choice!(
+        crate::domain::create_domain_parser().map(Statement::CreateDomain),
+        crate::create_resource::create_resource_parser().map(Statement::CreateResource),
+        crate::domain::start_domain_parser().map(Statement::StartDomain),
+        crate::domain::stop_domain_parser().map(Statement::StopDomain),
+        crate::branch::create_branch_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Branch).map_body(Box::new))),
+        crate::describe_deduplicator::describe_deduplicator_parser()
+            .map(Statement::DescribeDeduplicator),
+        crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
+        crate::describe_endpoint::describe_endpoint_parser().map(Statement::DescribeEndpoint),
+        crate::describe_ingestor::describe_ingestor_parser().map(Statement::DescribeIngestor),
+        crate::describe_lookup::describe_lookup_parser().map(Statement::DescribeLookup),
+        crate::describe_resource::describe_resource_parser().map(Statement::DescribeResource),
+        crate::describe_stream::describe_stream_parser().map(Statement::DescribeRelay),
+        crate::describe_window_processor::describe_window_processor_parser()
+            .map(Statement::DescribeWindowProcessor),
+        crate::lookup_query::lookup_query_parser().map(Statement::LookupQuery),
+        crate::generator::create_generator_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Generator).map_body(Box::new))),
+        crate::inferencer::create_inferencer_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Inferencer).map_body(Box::new))),
+        crate::lookup::create_lookup_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Lookup).map_body(Box::new))),
+        crate::reingestor::create_reingestor_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Reingestor).map_body(Box::new))),
+        crate::reorderer::create_reorderer_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Reorderer).map_body(Box::new))),
+        crate::codec::create_codec_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Codec).map_body(Box::new))),
+        crate::junction::create_junction_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Junction).map_body(Box::new))),
+        crate::deduplicator::create_deduplicator_parser().map(|create| {
+            Statement::Create(create.map_body(Model::Deduplicator).map_body(Box::new))
+        }),
+        crate::window_processor::create_window_processor_parser().map(|create| {
+            Statement::Create(create.map_body(Model::WindowProcessor).map_body(Box::new))
+        }),
+        crate::vhost::create_vhost_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Vhost).map_body(Box::new))),
+        crate::udf::create_udf_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Udf).map_body(Box::new))),
+    );
+    let processing_and_io = boxed_choice!(
+        crate::user::create_user_parser().map(Statement::CreateUser),
+        crate::describe_correlator::describe_correlator_parser().map(Statement::DescribeCorrelator),
+        crate::endpoint::create_endpoint_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Endpoint).map_body(Box::new))),
+        crate::signaling_protocol::create_signaling_protocol_parser().map(|create| {
+            Statement::Create(create.map_body(Model::SignalingProtocol).map_body(Box::new))
+        }),
+        crate::describe_emitter::describe_emitter_parser().map(Statement::DescribeEmitter),
+        crate::describe_wasm_processor::describe_wasm_processor_parser()
+            .map(Statement::DescribeWasmProcessor),
+        crate::wasm_processor::create_wasm_processor_parser().map(|create| {
+            Statement::Create(create.map_body(Model::WasmProcessor).map_body(Box::new))
+        }),
+        crate::describe_reingestor::describe_reingestor_parser().map(Statement::DescribeReingestor),
+        crate::describe_reorderer::describe_reorderer_parser().map(Statement::DescribeReorderer),
+        crate::correlator::create_correlator_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Correlator).map_body(Box::new))),
+        crate::emitter::create_emitter_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Emitter).map_body(Box::new))),
+        crate::ingestor::create_ingestor_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Ingestor).map_body(Box::new))),
+        crate::relay::create_relay_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Relay).map_body(Box::new))),
+        crate::schema::create_wire_schema_parser_any()
+            .map(|create| Statement::Create(create.map_body(Model::WireSchema).map_body(Box::new))),
+        crate::schema::create_schema_parser()
+            .map(|create| Statement::Create(create.map_body(Model::Schema).map_body(Box::new))),
+    );
+    let clients = boxed_choice!(
+        crate::client::create_client_kafka_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientKafka).map_body(Box::new))
+        }),
+        crate::client::create_client_pulsar_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientPulsar).map_body(Box::new))
+        }),
+        crate::client::create_client_kinesis_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientKinesis).map_body(Box::new))
+        }),
+        crate::client::create_client_http_parser()
+            .map(|create| Statement::Create(create.map_body(Model::ClientHttp).map_body(Box::new))),
+        crate::client::create_client_prometheus_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientPrometheus).map_body(Box::new))
+        }),
+        crate::client::create_client_rabbitmq_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientRabbitMq).map_body(Box::new))
+        }),
+        crate::client::create_client_redis_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientRedis).map_body(Box::new))
+        }),
+        crate::client::create_client_mqtt_parser()
+            .map(|create| Statement::Create(create.map_body(Model::ClientMqtt).map_body(Box::new))),
+        crate::client::create_client_nats_parser()
+            .map(|create| Statement::Create(create.map_body(Model::ClientNats).map_body(Box::new))),
+        crate::client::create_client_zeromq_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientZeroMq).map_body(Box::new))
+        }),
+        crate::client::create_client_sqs_parser()
+            .map(|create| Statement::Create(create.map_body(Model::ClientSqs).map_body(Box::new))),
+        crate::client::create_client_s3_parser()
+            .map(|create| Statement::Create(create.map_body(Model::ClientS3).map_body(Box::new))),
+        crate::client::create_client_gcs_parser()
+            .map(|create| Statement::Create(create.map_body(Model::ClientGcs).map_body(Box::new))),
+        crate::client::create_client_azure_blob_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientAzureBlob).map_body(Box::new))
+        }),
+        crate::client::create_client_iceberg_rest_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientIcebergRest).map_body(Box::new))
+        }),
+        crate::client::create_client_websockets_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientWebsockets).map_body(Box::new))
+        }),
+        crate::client::create_client_clickhouse_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientClickHouse).map_body(Box::new))
+        }),
+        crate::client::create_client_postgres_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientPostgres).map_body(Box::new))
+        }),
+        crate::client::create_client_mysql_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientMySql).map_body(Box::new))
+        }),
+        crate::client::create_client_mongodb_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientMongoDb).map_body(Box::new))
+        }),
+    );
+    let administration = boxed_choice!(
+        crate::relay::alter_relay_parser().map(Statement::AlterRelay),
+        crate::node_control::cordon_node_parser().map(Statement::CordonNode),
+        crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
+        crate::node_control::drain_node_parser().map(Statement::DrainNode),
+        crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
+        crate::drop_stmt::drop_parser().map(Statement::Drop),
+        crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
+        crate::show_create::show_create_parser().map(Statement::ShowCreate),
+        crate::show_stream_state::show_stream_materialized_state_parser()
+            .map(Statement::ShowRelayMaterializedState),
+        crate::udf::describe_udf_parser().map(Statement::DescribeUdf),
+        crate::udf::show_udfs_parser().map(Statement::ShowUdfs),
+    );
+
+    choice([domain_and_core, processing_and_io, clients, administration]).boxed()
 }
 
 pub fn parse_statement_tokens(tokens: &[Token]) -> Result<Statement, Vec<ParseError<'_>>> {

@@ -47,6 +47,7 @@ impl MongoDbEmitter {
             &context.emitter,
             values,
             input_schema,
+            context.udfs.as_ref(),
         ) {
             Ok(program) => Some(program),
             Err(error) => {

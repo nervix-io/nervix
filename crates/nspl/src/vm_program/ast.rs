@@ -140,6 +140,7 @@ pub enum FunctionName {
     ReadHeaders,
     WriteHeader,
     WindowAggregate(WindowAggregateInvocation),
+    Udf(String),
     Unknown(String),
 }
 
@@ -325,6 +326,7 @@ impl FunctionName {
             Self::ReadHeaders => "read_headers",
             Self::WriteHeader => "write_header",
             Self::WindowAggregate(invocation) => invocation.function.as_ref(),
+            Self::Udf(name) => name.as_str(),
             Self::Unknown(name) => name.as_str(),
         }
     }

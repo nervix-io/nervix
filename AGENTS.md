@@ -21,6 +21,13 @@ language or interface changes.
   must not merge suggestions from independent feature parsers.
 - Statement families own their domain grammar, while shared lexical and grammatical concepts have
   one shared implementation.
+- Keyword and type literals belong to the shared language token definition, not grammar-local raw
+  string matching. Multi-word logical keywords are composed grammar units so parsing and completion
+  treat them as one item.
+- Semantic reference kinds and repeated grammar patterns use focused shared parser primitives, not
+  ad hoc word parsers or duplicated statement-local grammar.
+- Grammar labels use underscore style, such as `field_name` and `string_literal`. Completion labels
+  for composed keyword phrases use their human-readable space-separated form.
 - The compiler consumes semantic Models directly. Persisted or public Models must never contain raw
   executable NSPL that the runtime reparses.
 - Grammar keywords are case-insensitive language tokens. Original spelling may be retained for
@@ -159,8 +166,8 @@ language or interface changes.
   callable beside a safe wrapper.
 - Callers must not choose blocking, yielding, batching, throttling, or similar safety behavior
   unless it is an explicit typed part of the operation's contract.
-- Async loops that perform async work must cooperatively consume scheduler budget once per
-  iteration.
+- In async code, a loop whose body performs async work must call
+  `tokio::task::consume_budget().await` once per iteration near the top of the loop body.
 
 ### Domains and external systems
 
@@ -184,49 +191,80 @@ language or interface changes.
 
 ## Engineering Conventions
 
-- Organize modules around coherent domain ownership, not broad `helpers`, `utils`, or `common`
-  categories.
-- Behavior that naturally belongs to one model, runtime object, or domain type must be an inherent
-  method. Free functions are for symmetric multi-type operations, parser-combinator plumbing, or
-  small lexical primitives without an owner.
-- Prefer compact refactors that remove obsolete layers and duplicate logic. Do not add wrappers or
-  adapters merely to preserve superseded behavior.
-- Model internal special cases with typed variants or internal structures, never magic
-  user-visible identifiers.
+- Keep Rust modules organized around coherent ownership boundaries, not broad technical categories.
+  Do not create grab-bag `clients`, `helpers`, `utils`, or `common` modules. Shared logic belongs in
+  a focused abstraction; concrete setup, configuration interpretation, state transitions, I/O,
+  encoding, decoding, and lifecycle behavior belong to the struct that owns them.
+- Behavior that naturally belongs to one model, AST, runtime object, or domain type must be an
+  inherent method using `&self`, `&mut self`, or `self`, including private helpers. Boolean
+  predicates over enum variants are methods on the enum.
+- Use free functions only for symmetric operations over independent types, parser-combinator
+  plumbing, or small lexical primitives without a natural owner. Do not use them as convenience
+  helpers for behavior owned by one domain object.
+- Prefer compact refactors that collapse duplicate logic into the owning parser, model, or runtime
+  path and remove obsolete layers. Add a wrapper, adapter, or helper layer only when it reduces
+  total complexity or isolates a real boundary.
+- Model internal special cases with typed variants or internal-only structures, never magic or
+  reserved user-visible identifiers that can collide with user-defined names.
 - Use semantic typed errors. Domain error enums use `thiserror`, contextual propagation uses
   `error-stack`, and `anyhow` is limited to boundaries where callers cannot make semantic choices.
   Do not introduce `String` as a domain error type.
-- Prefer declarative enum metadata and conversions, invariant-preserving collections, and the
-  repository's established concurrency primitives over manual mappings and ad-hoc lock-wrapped
-  maps.
-- Use typed timestamps internally. Raw Unix nanoseconds are boundary representations only.
-- Parse URL-like addresses with a URL parser rather than manual string splitting.
-- Do not add lint allowances without explicit approval.
-- Do not leak memory to extend callback lifetimes; callbacks require explicit ownership and cleanup.
-- Preserve unrelated user changes in dirty worktrees and do not add legacy compatibility unless
-  the current task explicitly requires it.
+- Prefer deriving declarative enum string conversions and metadata with `strum`, including
+  `AsRefStr`, `EnumString`, and `EnumProperty`, over manual match-based helpers.
+- When sorted vectors or arrays are an invariant, use `sorted-vec`'s `SortedVec` or `SortedSet`
+  instead of a plain `Vec` with manual sorting and deduplication.
+- Prefer synchronous locks from `parking_lot` over `std::sync` lock types.
+- Prefer `DashMap` over `Arc<Mutex<HashMap<...>>>` for shared concurrent maps.
+- `triomphe::Arc` is the default shared-ownership type for Nervix-owned state. Use
+  `std::sync::Arc` only when weak references or an external API require it. In modules that need
+  both, import the standard type as `StdArc` and confine it to that boundary.
+- In `if` conditions, prefer `if let` or `if let` chains over `matches!` when they express the same
+  logic cleanly. Use `matches!` when an `if let` form would be unclear or outside an `if`
+  condition.
+- Use semantic datetime or timestamp types for internal runtime, application, persistence, and
+  domain-clock state. Raw Unix integers are not internal time models.
+- Nanosecond Unix integers are boundary representations for serialization, public or cross-node
+  protocols, and Arrow timestamp arrays. Convert them to typed timestamps immediately after
+  decoding and back to integers only at the boundary.
+- Parse URLs and URL-like service addresses with the `url` crate. Do not manually split schemes,
+  authorities, hosts, ports, paths, or query strings unless the format is not URL-compatible.
+- Do not add `#[allow(...)]` annotations without explicit approval.
+- Do not use `std::mem::forget`, `Closure::forget`, leaked boxes, or equivalent lifetime leaks to
+  keep browser callbacks alive. Use explicit ownership and cleanup or a crate-managed abstraction.
+- Do not preserve old syntax, implicit fallbacks, compatibility shims, migration shortcuts, or
+  parallel legacy paths unless the user explicitly requests compatibility for the current change.
+- Preserve unrelated user changes in dirty worktrees.
 
 ## Validation and Testing
 
 ### Test-first changes
 
-- For a bug, first add or identify a focused reproducer and confirm that it fails for the expected
-  reason. Implement only after the reproducer is red, then rerun it until green.
+- For a bug, first add or identify a focused test or cucumber scenario and confirm that it fails for
+  the expected reason. Implement only after the reproducer is red, rerun it until green, then run
+  the appropriate broader validation.
 - For new runtime, persistence, API, CLI, scheduling, cluster, metric, or domain behavior, first add
-  or update a cucumber scenario through the public interface and confirm the expected failure.
+  or update a cucumber scenario through the public interface and confirm the expected failure
+  before changing product code.
 - Parser-only work requires positive parse tests, negative parse tests, and completion-context tests
   that guard against grammar-branch leakage. Composed language phrases require completion coverage.
 
 ### Integration coverage
 
-- Unit tests support but do not replace cucumber coverage for observable system behavior.
+- Unit tests support but do not replace cucumber coverage for behavior observable through an NSPL
+  command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
+  executable statement with application or runtime handling is not parser-only. Do not substitute
+  unit tests unless the user explicitly approves the exception for the current task.
+- Cucumber scenarios keep step semantics aligned: `Given` establishes preconditions, `When`
+  performs the action or event under test, and `Then` asserts the observable outcome.
 - Runtime cucumber behavior uses scenario outlines covering one-node and three-node clusters unless
-  the behavior is explicitly topology-specific.
+  the behavior is explicitly topology-specific. Scheduling, leader/follower restrictions, and
+  inter-node mechanics use dedicated scenarios or lower-level tests rather than being folded into
+  generic runtime scenarios.
 - Stateful processor scenarios must prove branch isolation and field preservation with interleaved
   records from at least two branches.
 - Tests must explicitly provision required external entities.
 - Avoid blind sleeps. Wait for explicit conditions with bounded timeouts and useful failure
-  messages.
+  messages. Short polling intervals are acceptable only inside such a condition-based wait.
 - Browser behavior is tested through the standard web-console cucumber suite and Playwright-facing
   steps, not by bypassing the public browser flow.
 
@@ -237,15 +275,20 @@ language or interface changes.
   agents without automatic skill discovery must read it directly. Do not turn it into a workflow
   for extending the parser, Models, compiler, or runtime.
 - Use `just validate` for formatting and validation; do not invoke Cargo formatting directly.
+- Every Rust build, check, lint, and test invocation must use the repository-configured kache
+  compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
+  benchmarks, cache troubleshooting, or retries.
 - Use `just validate-skill` to validate the public NSPL skill against the Agent Skills publication
   checks. CI runs this validation but does not create GitHub releases; the public default branch is
   the install source.
 - `docs/book.toml` owns the curated public NSPL chapter allowlist rendered into the versioned
   `llms.txt` agent index. Keep that list focused on user-facing NSPL configuration and exclude
   architecture, repository-development, and local-operation material.
+- After each development cycle, run `just validate` and any focused tests added or changed.
 - Use `just test` for the full suite so repository-required environment is configured.
-- Use the repository's scenario task for targeted cucumber runs. Add a focused task when a needed
-  invocation is not already represented instead of bypassing the configured test environment.
+- Use `just test-scenarios --input <feature> ...` for targeted cucumber runs so the configured test
+  environment is applied. Add a focused `justfile` task when a needed invocation is not represented
+  instead of running the scenario test binary directly.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

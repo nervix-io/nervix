@@ -357,6 +357,7 @@ pub struct CompiledProgram {
     pub outputs: Vec<OutputBinding>,
     pub invocations: Vec<InvocationBinding>,
     pub layouts: RegisterLayouts,
+    pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 #[cfg(test)]

@@ -9,14 +9,15 @@ pub use crate::parser_support::{Diagnostic, ParseFromSourceError};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, current_word_prefix, field_ref, if_not_exists_clause, into_parse_error, kw,
-        lex_input, schema_name, suggestions_from_errors, tok, wire_schema_name,
+        ParseError, boxed_choice, current_word_prefix, field_ref, if_not_exists_clause,
+        into_parse_error, kw, lex_input, schema_name, suggestions_from_errors, tok,
+        wire_schema_name,
     },
 };
 
 fn json_type<'src>()
 -> impl Parser<'src, &'src [Token], JsonType, extra::Err<ParseError<'src>>> + Clone {
-    choice((
+    boxed_choice!(
         kw(Identifier::String).to(JsonType::String),
         kw(Identifier::Number).to(JsonType::Number),
         kw(Identifier::Integer).to(JsonType::Integer),
@@ -24,7 +25,7 @@ fn json_type<'src>()
         kw(Identifier::Array).to(JsonType::Array),
         kw(Identifier::Boolean).to(JsonType::Boolean),
         kw(Identifier::Null).to(JsonType::Null),
-    ))
+    )
 }
 
 fn cbor_type<'src>()
@@ -34,7 +35,7 @@ fn cbor_type<'src>()
 
 fn avro_type<'src>()
 -> impl Parser<'src, &'src [Token], AvroType, extra::Err<ParseError<'src>>> + Clone {
-    choice((
+    boxed_choice!(
         kw(Identifier::Null).to(AvroType::Null),
         kw(Identifier::Boolean).to(AvroType::Boolean),
         kw(Identifier::Int).to(AvroType::Int),
@@ -48,13 +49,13 @@ fn avro_type<'src>()
         kw(Identifier::Array).to(AvroType::Array),
         kw(Identifier::Map).to(AvroType::Map),
         kw(Identifier::Fixed).to(AvroType::Fixed),
-    ))
+    )
 }
 
-fn nervix_type<'src>()
+pub(crate) fn nervix_type<'src>()
 -> impl Parser<'src, &'src [Token], ParseAsType, extra::Err<ParseError<'src>>> + Clone {
     recursive(|ty| {
-        let scalar = choice((
+        let scalar = boxed_choice!(
             kw(Identifier::U8).to(ParseAsType::U8),
             kw(Identifier::I8).to(ParseAsType::I8),
             kw(Identifier::U16).to(ParseAsType::U16),
@@ -68,7 +69,7 @@ fn nervix_type<'src>()
             kw(Identifier::Datetime).to(ParseAsType::Datetime),
             kw(Identifier::F32).to(ParseAsType::F32),
             kw(Identifier::F64).to(ParseAsType::F64),
-        ));
+        );
 
         let array_len = select! { Token::NumberLiteral(raw) => raw }.try_map(|raw, span| {
             let len = raw
@@ -113,7 +114,7 @@ fn nervix_type<'src>()
                 .delimited_by(tok(Token::Lt), tok(Token::Gt)),
         );
 
-        choice((array, vec_ty, scalar))
+        choice((array, vec_ty, scalar)).boxed()
     })
 }
 
@@ -122,7 +123,7 @@ fn wire_schema_field<'src, T, P>(
 ) -> impl Parser<'src, &'src [Token], WireSchemaField<T>, extra::Err<ParseError<'src>>> + Clone
 where
     T: Clone + 'src,
-    P: Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone,
+    P: Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     field_ref()
         .then(native_type)
@@ -197,7 +198,7 @@ fn create_wire_schema_parser<'src, T, P>(
 + Clone
 where
     T: Clone + 'src,
-    P: Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone,
+    P: Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     let fields = wire_schema_field(native_type)
         .separated_by(tok(Token::Comma))
@@ -220,6 +221,7 @@ where
         .ignore_then(if_not_exists_clause())
         .then(wire_schema_header)
         .then(wire_schema_name())
+        .boxed()
         .then(fields)
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(|(((if_not_exists, strictness), name), fields)| {
@@ -232,6 +234,7 @@ where
                 if_not_exists,
             )
         })
+        .boxed()
 }
 
 pub fn create_json_wire_schema_parser<'src>()
@@ -255,11 +258,11 @@ pub fn create_avro_wire_schema_parser<'src>()
 pub fn create_wire_schema_parser_any<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateWireSchemaStmt>, extra::Err<ParseError<'src>>>
 + Clone {
-    choice((
+    boxed_choice!(
         create_json_wire_schema_parser().map(|create| create.map_body(CreateWireSchemaStmt::Json)),
         create_cbor_wire_schema_parser().map(|create| create.map_body(CreateWireSchemaStmt::Cbor)),
         create_avro_wire_schema_parser().map(|create| create.map_body(CreateWireSchemaStmt::Avro)),
-    ))
+    )
 }
 
 pub fn create_schema_parser<'src>()
@@ -276,11 +279,13 @@ pub fn create_schema_parser<'src>()
         .ignore_then(if_not_exists_clause())
         .then_ignore(kw(Identifier::Schema))
         .then(schema_name())
+        .boxed()
         .then(fields)
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(|((if_not_exists, name), fields)| {
             CreateStatement::new(CreateSchema { name, fields }, if_not_exists)
         })
+        .boxed()
 }
 
 pub fn parse_create_wire_schema_tokens(

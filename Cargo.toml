@@ -82,6 +82,7 @@ nervix-interconnect = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
 nervix-proto = { workspace = true, features = ["client", "server"] }
+nervix-roto = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
 opendal = { workspace = true }
@@ -186,6 +187,7 @@ members = [
   "crates/interconnect",
   "crates/nervix-wasm",
   "crates/nervix-wasm-protocol",
+  "crates/nervix-roto",
   "crates/web-console",
   "crates/nervix-vm",
   "crates/nspl",
@@ -312,6 +314,7 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
 ] }
 nervix-proto = { package = "nervix-proto", path = "crates/proto" }
+nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-server = { path = "" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
@@ -366,6 +369,7 @@ regex = "1"
 registry = { package = "nervix-registry", path = "crates/registry" }
 reqwest = "0.13"
 rkyv = "0.8"
+roto = "=0.11.0"
 rpassword = "7"
 # This rumqttc-next line exposes the MQTT 5 facade with explicit AWS-LC selection.
 rumqttc = { package = "rumqttc-next", version = "0.34.0-alpha", default-features = false, features = [
@@ -480,4 +484,10 @@ opt-level = 3
 [profile.dev.package."arrow-select"]
 opt-level = 3
 [profile.dev.package."arrow-string"]
+opt-level = 3
+[profile.dev.package."roto"]
+opt-level = 3
+[profile.dev.package."cranelift-codegen"]
+opt-level = 3
+[profile.dev.package."cranelift-jit"]
 opt-level = 3

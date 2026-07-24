@@ -62,7 +62,7 @@ fn field_reference<'src, I>()
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    raw_identifier()
+    let scoped = raw_identifier()
         .then_ignore(keyword(Token::Dot))
         .then(identifier())
         .then(keyword(Token::Dot).ignore_then(identifier()).or_not())
@@ -80,8 +80,10 @@ where
                 "relay_state references require relay_state.<relay>.<field>",
             )),
             None => parse_scope(&scope, span).map(|scope| FieldReference::scoped(scope, second)),
-        })
-        .or(identifier().map(FieldReference::bare))
+        });
+    let bare = identifier().map(FieldReference::bare);
+
+    choice((scoped, bare)).boxed()
 }
 
 fn cast_type<'src, I>() -> impl Parser<'src, I, ParseAsType, extra::Err<ParseError<'src>>> + Clone
@@ -122,19 +124,27 @@ where
             keyword(Token::Null).to(Expression::Literal(Literal::Null)),
             select! { Token::String(value) => Expression::Literal(Literal::String(value)) },
         ));
-        let function_call = identifier()
-            .then(
-                expression
-                    .clone()
-                    .separated_by(keyword(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
-            )
-            .map(|(function, arguments)| Expression::Call {
+        let arguments = expression
+            .clone()
+            .separated_by(keyword(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(keyword(Token::LParen), keyword(Token::RParen));
+        let udf_call = keyword(Token::Udf)
+            .then_ignore(keyword(Token::DoubleColon))
+            .then(identifier())
+            .then(arguments.clone())
+            .map(|(((), function), arguments)| Expression::UdfCall {
                 function,
                 arguments,
             });
+        let function_call =
+            identifier()
+                .then(arguments)
+                .map(|(function, arguments)| Expression::Call {
+                    function,
+                    arguments,
+                });
         let array = expression
             .clone()
             .separated_by(keyword(Token::Comma))
@@ -176,6 +186,7 @@ where
             });
         let atom = choice((
             literal,
+            udf_call,
             function_call,
             array,
             if_expression,
@@ -184,7 +195,8 @@ where
             expression
                 .clone()
                 .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
-        ));
+        ))
+        .boxed();
         let cast = atom
             .then(
                 keyword(Token::As)
@@ -199,7 +211,8 @@ where
                         expression: Box::new(expression),
                         target,
                     })
-            });
+            })
+            .boxed();
         let unary = choice((
             keyword(Token::Minus).to(UnaryOperator::Negate),
             keyword(Token::Not).to(UnaryOperator::Not),
@@ -215,73 +228,88 @@ where
                     operator,
                     expression: Box::new(expression),
                 })
-        });
-        let multiplicative = unary.clone().foldl(
-            choice((
-                keyword(Token::Star).to(BinaryOperator::Multiply),
-                keyword(Token::Slash).to(BinaryOperator::Divide),
-                keyword(Token::Percent).to(BinaryOperator::Remainder),
-            ))
-            .then(unary.clone())
-            .repeated(),
-            |left, (operator, right)| Expression::Binary {
-                operator,
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        );
-        let additive = multiplicative.clone().foldl(
-            choice((
-                keyword(Token::Plus).to(BinaryOperator::Add),
-                keyword(Token::Minus).to(BinaryOperator::Subtract),
-            ))
-            .then(multiplicative.clone())
-            .repeated(),
-            |left, (operator, right)| Expression::Binary {
-                operator,
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        );
-        let comparison = additive.clone().foldl(
-            choice((
-                keyword(Token::Eq).to(BinaryOperator::Equal),
-                keyword(Token::NotEq).to(BinaryOperator::NotEqual),
-                keyword(Token::GtEq).to(BinaryOperator::GreaterThanOrEqual),
-                keyword(Token::LtEq).to(BinaryOperator::LessThanOrEqual),
-                keyword(Token::Gt).to(BinaryOperator::GreaterThan),
-                keyword(Token::Lt).to(BinaryOperator::LessThan),
-            ))
-            .then(additive.clone())
-            .repeated(),
-            |left, (operator, right)| Expression::Binary {
-                operator,
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        );
-        let and = comparison.clone().foldl(
-            keyword(Token::And)
-                .to(BinaryOperator::And)
-                .then(comparison.clone())
+        })
+        .boxed();
+        let multiplicative = unary
+            .clone()
+            .foldl(
+                choice((
+                    keyword(Token::Star).to(BinaryOperator::Multiply),
+                    keyword(Token::Slash).to(BinaryOperator::Divide),
+                    keyword(Token::Percent).to(BinaryOperator::Remainder),
+                ))
+                .then(unary.clone())
                 .repeated(),
-            |left, (operator, right)| Expression::Binary {
-                operator,
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        );
-        and.clone().foldl(
-            keyword(Token::Or)
-                .to(BinaryOperator::Or)
-                .then(and)
+                |left, (operator, right)| Expression::Binary {
+                    operator,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            )
+            .boxed();
+        let additive = multiplicative
+            .clone()
+            .foldl(
+                choice((
+                    keyword(Token::Plus).to(BinaryOperator::Add),
+                    keyword(Token::Minus).to(BinaryOperator::Subtract),
+                ))
+                .then(multiplicative.clone())
                 .repeated(),
-            |left, (operator, right)| Expression::Binary {
-                operator,
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        )
+                |left, (operator, right)| Expression::Binary {
+                    operator,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            )
+            .boxed();
+        let comparison = additive
+            .clone()
+            .foldl(
+                choice((
+                    keyword(Token::Eq).to(BinaryOperator::Equal),
+                    keyword(Token::NotEq).to(BinaryOperator::NotEqual),
+                    keyword(Token::GtEq).to(BinaryOperator::GreaterThanOrEqual),
+                    keyword(Token::LtEq).to(BinaryOperator::LessThanOrEqual),
+                    keyword(Token::Gt).to(BinaryOperator::GreaterThan),
+                    keyword(Token::Lt).to(BinaryOperator::LessThan),
+                ))
+                .then(additive.clone())
+                .repeated(),
+                |left, (operator, right)| Expression::Binary {
+                    operator,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            )
+            .boxed();
+        let and = comparison
+            .clone()
+            .foldl(
+                keyword(Token::And)
+                    .to(BinaryOperator::And)
+                    .then(comparison.clone())
+                    .repeated(),
+                |left, (operator, right)| Expression::Binary {
+                    operator,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            )
+            .boxed();
+        and.clone()
+            .foldl(
+                keyword(Token::Or)
+                    .to(BinaryOperator::Or)
+                    .then(and)
+                    .repeated(),
+                |left, (operator, right)| Expression::Binary {
+                    operator,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            )
+            .boxed()
     })
 }
 
@@ -437,6 +465,7 @@ where
                 })
             },
         )
+        .boxed()
 }
 
 fn parse_tokens(tokens: &[SpannedToken]) -> Result<RouteConstruction, Vec<ParseError<'_>>> {
@@ -557,4 +586,28 @@ pub fn parse_expression_list(input: &str) -> Result<Vec<Expression>, ParseFromSo
                 })
                 .collect(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_udf_namespace_in_the_public_expression_model() {
+        let expression =
+            parse_expression("udf::add_one(input.value)").expect("qualified UDF call must parse");
+        assert!(matches!(
+            expression,
+            Expression::UdfCall {
+                ref function,
+                ref arguments,
+            } if function.as_str() == "add_one" && arguments.len() == 1
+        ));
+
+        assert!(matches!(
+            parse_expression("add_one(input.value)").expect("bare call remains valid syntax"),
+            Expression::Call { ref function, .. } if function.as_str() == "add_one"
+        ));
+        assert!(parse_expression("builtin::add_one(input.value)").is_err());
+    }
 }

@@ -140,3 +140,25 @@ pub enum ParseAsType {
         element: Box<ParseAsType>,
     },
 }
+
+impl std::fmt::Display for ParseAsType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::U8 => formatter.write_str("U8"),
+            Self::I8 => formatter.write_str("I8"),
+            Self::U16 => formatter.write_str("U16"),
+            Self::I16 => formatter.write_str("I16"),
+            Self::U32 => formatter.write_str("U32"),
+            Self::I32 => formatter.write_str("I32"),
+            Self::U64 => formatter.write_str("U64"),
+            Self::I64 => formatter.write_str("I64"),
+            Self::F32 => formatter.write_str("F32"),
+            Self::F64 => formatter.write_str("F64"),
+            Self::Bool => formatter.write_str("BOOL"),
+            Self::String => formatter.write_str("STRING"),
+            Self::Datetime => formatter.write_str("DATETIME"),
+            Self::Vec { element } => write!(formatter, "VEC<{element}>"),
+            Self::Array { element, len } => write!(formatter, "ARRAY<{element}, {len}>"),
+        }
+    }
+}

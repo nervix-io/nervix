@@ -431,6 +431,7 @@ pub const fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescri
         | FunctionName::ReadHeaders
         | FunctionName::WriteHeader
         | FunctionName::WindowAggregate(_)
+        | FunctionName::Udf(_)
         | FunctionName::Unknown(_) => return None,
     };
     Some(BuiltinDescriptor {
