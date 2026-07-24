@@ -152,7 +152,15 @@ During normal processing, `FLUSH IMMEDIATE` starts a system-owned 100 µs minimu
 when data first enters an empty route buffer. The route flushes when that timeout expires, allowing
 nearby arrivals to remain in one Arrow batch instead of collapsing to one batch per message.
 `FLUSH IMMEDIATE` has no size boundary; shutdown and error handling may still force pending data
-out. Use `FLUSH EACH` when the cadence and maximum batch size must be configured explicitly.
+out.
+
+Treat each required `FLUSH` clause as workload-specific operational tuning. `FLUSH IMMEDIATE`
+minimizes time spent waiting beyond the system-owned batching window, while `FLUSH EACH <duration>
+MAX BATCH SIZE <bytes>` emits when either configured boundary is reached. Shorter intervals and
+smaller batches generally reduce latency and per-buffer memory at the cost of throughput; longer
+intervals and larger batches generally improve throughput at the cost of latency and memory. Choose
+both values for the route's traffic, downstream behavior, and branch cardinality. Values in
+examples are illustrative, not recommended defaults.
 
 `SET` assignments execute left to right and repeated targets are valid. A later assignment may read
 an earlier value through the bare field or `output.<field>`. `INHERIT ALL`, `INHERIT ALL EXCEPT
