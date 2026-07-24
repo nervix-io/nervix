@@ -16,8 +16,8 @@ use testcontainers::{
     Image, ImageExt, ReuseDirective, TestcontainersError,
     bollard::{Docker, query_parameters::RemoveContainerOptionsBuilder},
     core::{
-        BuildImageOptions, ContainerPort, ContainerState, ExecCommand, IntoContainerPort, WaitFor,
-        wait::HttpWaitStrategy,
+        BuildImageOptions, CmdWaitFor, ContainerPort, ContainerState, ExecCommand,
+        IntoContainerPort, WaitFor, wait::HttpWaitStrategy,
     },
     runners::{AsyncBuilder, AsyncRunner},
 };
@@ -81,6 +81,8 @@ pub(crate) const AZURITE_ADDR: &str = "azurite_addr";
 pub(crate) const QUICKWIT_ADDR: &str = "quickwit_addr";
 pub(crate) const OTLP_ADDR: &str = "otlp_addr";
 pub(crate) const JAEGER_ADDR: &str = "jaeger_addr";
+pub(crate) const SENTRY_ADDR: &str = "sentry_addr";
+pub(crate) const SENTRY_DSN: &str = "sentry_dsn";
 
 #[derive(Clone, Default)]
 pub(crate) struct DependencyEndpoints {
@@ -240,6 +242,18 @@ impl TestDependencies {
         start_azurite => "azurite",
         start_quickwit => "quickwit",
         start_jaeger => "jaeger",
+        start_sentry => "sentry",
+    }
+
+    pub(crate) async fn sentry_event(
+        &self,
+        environment: &str,
+    ) -> io::Result<Option<serde_json::Value>> {
+        suite_dependencies()
+            .lock()
+            .await
+            .sentry_event(environment)
+            .await
     }
 
     pub(crate) async fn shutdown_suite() -> Vec<String> {
@@ -1150,6 +1164,115 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         Ok(())
     }
 
+    pub(crate) async fn start_sentry(&mut self, scope: &str) -> io::Result<()> {
+        if !self.mark_starting("sentry", scope).await? {
+            return Ok(());
+        }
+        let container = self
+            .start_container("sentry", 8000.tcp(), "Sentry", || {
+                GenericImage::new("bugsink/bugsink", "2.3.1")
+                    .with_exposed_port(8000.tcp())
+                    .with_wait_for(WaitFor::http(
+                        HttpWaitStrategy::new("/health/ready")
+                            .with_port(8000.tcp())
+                            .with_expected_status_code(200_u16),
+                    ))
+                    .with_env_var(
+                        "SECRET_KEY",
+                        "nervix-cucumber-sentry-secret-key-000000000000000000000000000000",
+                    )
+                    .with_env_var("CREATE_SUPERUSER", "admin@example.org:admin")
+                    .with_env_var("PORT", "8000")
+                    .with_env_var("BASE_URL", "http://127.0.0.1:8000")
+                    .with_startup_timeout(STARTUP_TIMEOUT)
+            })
+            .await?;
+        let port = mapped_port(&container, 8000, "Sentry").await?;
+        let mut setup = container
+            .exec(
+                ExecCommand::new([
+                    "bugsink-manage",
+                    "shell",
+                    "-c",
+                    "import json; from projects.models import Project; project, _ = \
+                     Project.objects.get_or_create(slug='nervix-cucumber', defaults={'name': \
+                     'Nervix Cucumber'}); print(json.dumps({'id': project.id, 'key': \
+                     project.sentry_key.hex}))",
+                ])
+                .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+            )
+            .await
+            .map_err(testcontainers_error("Sentry project initialization"))?;
+        let setup_output = setup
+            .stdout_to_vec()
+            .await
+            .map_err(testcontainers_error("Sentry project initialization output"))?;
+        let setup = String::from_utf8(setup_output).map_err(io::Error::other)?;
+        let project = setup
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "Sentry project initialization returned no JSON configuration: {setup}"
+                ))
+            })?;
+        let project_id = project["id"]
+            .as_u64()
+            .ok_or_else(|| io::Error::other("Sentry project initialization omitted its id"))?;
+        let sentry_key = project["key"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("Sentry project initialization omitted its key"))?;
+        self.endpoints
+            .insert(SENTRY_ADDR, format!("http://127.0.0.1:{port}"));
+        self.endpoints.insert(
+            SENTRY_DSN,
+            format!("http://{sentry_key}@127.0.0.1:{port}/{project_id}"),
+        );
+        self.containers.push(RunningContainer::Sentry(container));
+        Ok(())
+    }
+
+    async fn sentry_event(&self, environment: &str) -> io::Result<Option<serde_json::Value>> {
+        let container = self
+            .containers
+            .iter()
+            .find_map(RunningContainer::sentry)
+            .ok_or_else(|| {
+                io::Error::other(
+                    "Sentry test container is unavailable; add 'Given Sentry is running'",
+                )
+            })?;
+        let environment = serde_json::to_string(environment).map_err(io::Error::other)?;
+        let script = format!(
+            "import json; from events.models import Event; event = \
+             Event.objects.filter(environment={environment}).order_by('-ingested_at').first(); \
+             print(json.dumps(event.get_parsed_data() if event else None))"
+        );
+        let mut query = container
+            .exec(
+                ExecCommand::new(["bugsink-manage", "shell", "-c", script.as_str()])
+                    .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+            )
+            .await
+            .map_err(testcontainers_error("Sentry event query"))?;
+        let output = query
+            .stdout_to_vec()
+            .await
+            .map_err(testcontainers_error("Sentry event query output"))?;
+        let output = String::from_utf8(output).map_err(io::Error::other)?;
+        output
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "Sentry event query returned no JSON value: {output}"
+                ))
+            })
+            .map(|event| if event.is_null() { None } else { Some(event) })
+    }
+
     pub(crate) async fn shutdown(&mut self) -> Vec<String> {
         let mut errors = Vec::new();
         for container in std::mem::take(&mut self.containers).into_iter().rev() {
@@ -1691,19 +1814,28 @@ fn run_openssl(arguments: Vec<OsString>, operation: &str) -> io::Result<()> {
 enum RunningContainer {
     Generic(ContainerAsync<GenericImage>),
     Kafka(ContainerAsync<KafkaImage>),
+    Sentry(ContainerAsync<GenericImage>),
 }
 
 impl RunningContainer {
+    fn sentry(&self) -> Option<&ContainerAsync<GenericImage>> {
+        if let Self::Sentry(container) = self {
+            Some(container)
+        } else {
+            None
+        }
+    }
+
     fn id(&self) -> String {
         match self {
-            Self::Generic(container) => container.id().to_string(),
+            Self::Generic(container) | Self::Sentry(container) => container.id().to_string(),
             Self::Kafka(container) => container.id().to_string(),
         }
     }
 
     async fn stop_and_remove(self) -> Result<(), String> {
         match self {
-            Self::Generic(container) => stop_and_remove(container).await,
+            Self::Generic(container) | Self::Sentry(container) => stop_and_remove(container).await,
             Self::Kafka(container) => stop_and_remove(container).await,
         }
     }

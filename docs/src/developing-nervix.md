@@ -127,7 +127,13 @@ just client subscribe notifications
 just deps
 ```
 
-The local dependency stack includes broker and service containers used by the documented examples, including Kafka, Pulsar, RabbitMQ, Redis, MQTT, ClickHouse, Postgres, MySQL, MongoDB, RustFS, Prometheus, Quickwit, and Jaeger.
+The local dependency stack includes broker and service containers used by the documented examples,
+including Kafka, Pulsar, RabbitMQ, Redis, MQTT, ClickHouse, Postgres, MySQL, MongoDB, RustFS,
+Prometheus, Quickwit, Jaeger, and a Sentry-compatible Bugsink service.
+
+The local Sentry-compatible service is available at `http://127.0.0.1:18090`. Sign in with
+`admin@example.org` / `admin`, create a project, and copy its DSN into a `TYPE SENTRY` client used
+by a Sentry emitter. These credentials and the Compose `SECRET_KEY` are development-only.
 
 RustFS provides the local Rust-written S3-compatible target for Iceberg emitters:
 

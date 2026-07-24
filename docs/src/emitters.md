@@ -101,7 +101,8 @@ partial-envelope publication.
 
 Header output is supported only on codec emitters for Kafka, NATS, Pulsar, RabbitMQ, and SQS.
 Kafka and NATS preserve ordered repeated values. Pulsar, RabbitMQ, and SQS use last-write-wins
-behavior. Kinesis, Redis, MQTT, ZeroMQ, direct database sinks, and Iceberg reject header writes.
+behavior. Kinesis, Redis, MQTT, ZeroMQ, Sentry, direct database sinks, and Iceberg reject header
+writes.
 
 Emitter expressions use the same typed surface as other runtime nodes:
 
@@ -149,6 +150,8 @@ Transport-specific expectations:
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
 - `KINESIS`: use an `https://...` optional `endpoint` for AWS-compatible targets. Nervix honors `tls_ca_file`; local/test targets can also set `region`, `access_key_id`, and `secret_access_key`.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`.
+- `SENTRY`: the referenced `TYPE SENTRY` client carries an `https://...` `dsn`; Nervix honors the
+  client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
 - `CLICKHOUSE`: use an `https://...` `addr`; Nervix honors `tls_ca_file`.
 - `POSTGRES`: include `sslmode=require` in `addr`; Nervix honors `tls_ca_file`.
 - `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
@@ -234,6 +237,41 @@ TO ZEROMQ <client>
 ```nspl
 TO SQS <client> QUEUE <queue>
 ```
+
+### Sentry
+
+Sentry emission uses a `TYPE SENTRY` client whose required `dsn` contains the project endpoint and
+public key:
+
+```nspl
+CREATE CLIENT sentry_main
+  TYPE SENTRY
+  CONFIG {
+    'dsn' = 'https://<public-key>@sentry.example.com/<project-id>',
+    'timeout_ms' = 5000
+  };
+
+CREATE EMITTER sentry_errors
+  FROM errors
+  ENCODE USING sentry_event_codec
+  TO SENTRY sentry_main
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+The codec must produce one top-level JSON object per record. Its fields use the Sentry event
+protocol, such as `message`, `level`, `environment`, `release`, `tags`, `extra`, `user`, and
+`exception`. Nervix preserves the complete object and supplies `event_id`, `timestamp`, and
+`platform` when they are omitted. It then creates a Sentry envelope, derives the envelope URL and
+authentication header from the DSN, and submits the event. An invalid event object is handled as a
+route-local encoding error.
+
+Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters require `ENCODE
+USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
+fields. The optional Sentry client keys `timeout_ms`, `tls_ca_file`, `tls_cert_file`, and
+`tls_key_file` have their usual meanings.
 
 ### ClickHouse
 

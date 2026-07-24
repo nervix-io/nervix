@@ -7,19 +7,20 @@ use nervix_models::{
     CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
     CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
-    EndpointIngestMode, EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy,
-    IcebergCatalog, IcebergStorageBackend, Identifier, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, IngestSource, IngestTimestampSource,
-    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode,
-    MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode,
-    MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OutputFlushPolicy,
-    ParseAsType, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
+    CreateLookup, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType,
+    ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend,
+    Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
+    KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
+    MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
     ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
     SchemaField, SignalingProtocolOnConnect, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
     VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
@@ -36,6 +37,7 @@ pub enum StoredModelVersioned {
     TransportPulsar(StoredCreateClientPulsar),
     TransportKinesis(StoredCreateClientKinesis),
     TransportHttp(StoredCreateClientHttp),
+    TransportSentry(StoredCreateClientSentry),
     TransportPrometheus(StoredCreateClientPrometheus),
     TransportRabbitMq(StoredCreateClientRabbitMq),
     TransportRedis(StoredCreateClientRedis),
@@ -236,6 +238,13 @@ pub struct StoredCreateClientKinesis {
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateClientHttp {
+    pub name: String,
+    pub mount: Option<String>,
+    pub config: Vec<StoredClientConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredCreateClientSentry {
     pub name: String,
     pub mount: Option<String>,
     pub config: Vec<StoredClientConfigEntry>,
@@ -995,6 +1004,9 @@ pub enum StoredEmitSink {
         client: String,
         queue: String,
     },
+    Sentry {
+        client: String,
+    },
     ClickHouse {
         client: String,
         table: String,
@@ -1094,6 +1106,7 @@ impl From<Model> for StoredModelVersioned {
             Model::ClientPulsar(v) => Self::TransportPulsar(v.into()),
             Model::ClientKinesis(v) => Self::TransportKinesis(v.into()),
             Model::ClientHttp(v) => Self::TransportHttp(v.into()),
+            Model::ClientSentry(v) => Self::TransportSentry(v.into()),
             Model::ClientPrometheus(v) => Self::TransportPrometheus(v.into()),
             Model::ClientRabbitMq(v) => Self::TransportRabbitMq(v.into()),
             Model::ClientRedis(v) => Self::TransportRedis(v.into()),
@@ -1147,6 +1160,7 @@ impl TryFrom<StoredModelVersioned> for Model {
             StoredModelVersioned::TransportPulsar(v) => Ok(Model::ClientPulsar(v.try_into()?)),
             StoredModelVersioned::TransportKinesis(v) => Ok(Model::ClientKinesis(v.try_into()?)),
             StoredModelVersioned::TransportHttp(v) => Ok(Model::ClientHttp(v.try_into()?)),
+            StoredModelVersioned::TransportSentry(v) => Ok(Model::ClientSentry(v.try_into()?)),
             StoredModelVersioned::TransportPrometheus(v) => {
                 Ok(Model::ClientPrometheus(v.try_into()?))
             }
@@ -1704,6 +1718,31 @@ impl TryFrom<StoredCreateClientHttp> for CreateClientHttp {
     type Error = Report<NameError>;
 
     fn try_from(value: StoredCreateClientHttp) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: Identifier::parse(&value.name)?,
+            mount: value
+                .mount
+                .map(|mount| Identifier::parse(&mount))
+                .transpose()?,
+            config: value.config.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
+impl From<CreateClientSentry> for StoredCreateClientSentry {
+    fn from(value: CreateClientSentry) -> Self {
+        Self {
+            name: value.name.to_string(),
+            mount: value.mount.map(|mount| mount.to_string()),
+            config: value.config.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<StoredCreateClientSentry> for CreateClientSentry {
+    type Error = Report<NameError>;
+
+    fn try_from(value: StoredCreateClientSentry) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             mount: value
@@ -4075,6 +4114,9 @@ impl From<EmitSink> for StoredEmitSink {
                 client: client.to_string(),
                 queue: queue.to_string(),
             },
+            EmitSink::Sentry { client } => Self::Sentry {
+                client: client.to_string(),
+            },
             EmitSink::ClickHouse {
                 client,
                 table,
@@ -4197,6 +4239,9 @@ impl TryFrom<StoredEmitSink> for EmitSink {
             StoredEmitSink::Sqs { client, queue } => Ok(Self::Sqs {
                 client: Identifier::parse(&client)?,
                 queue: Identifier::parse(&queue)?,
+            }),
+            StoredEmitSink::Sentry { client } => Ok(Self::Sentry {
+                client: Identifier::parse(&client)?,
             }),
             StoredEmitSink::ClickHouse {
                 client,
@@ -4380,6 +4425,17 @@ mod tests {
                     StoredClientConfigEntry {
                         key: "endpoint".to_string(),
                         value: "https://example.com/api".to_string(),
+                    }
+                    .into(),
+                ],
+            }),
+            Model::ClientSentry(CreateClientSentry {
+                name: identifier("sentry_client"),
+                mount: None,
+                config: vec![
+                    StoredClientConfigEntry {
+                        key: "dsn".to_string(),
+                        value: "https://key@sentry.example/42".to_string(),
                     }
                     .into(),
                 ],

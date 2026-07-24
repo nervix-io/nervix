@@ -124,6 +124,8 @@ relay. Do not use them to scan across branches.
   UDFs using the domain clock or randomness declare `VOLATILE`; untrusted third-party code remains
   in a WASM processor.
 - Every flush-based route has a flush policy and every route has a message error policy.
+- Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
+  object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, and validates that exact range against its reusable buffer.
 - Paced ingestors declare their timestamp source.

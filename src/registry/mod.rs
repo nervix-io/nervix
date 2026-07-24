@@ -863,6 +863,7 @@ impl DomainState {
                 | Model::ClientPulsar(_)
                 | Model::ClientKinesis(_)
                 | Model::ClientHttp(_)
+                | Model::ClientSentry(_)
                 | Model::ClientPrometheus(_)
                 | Model::ClientRabbitMq(_)
                 | Model::ClientRedis(_)
@@ -1936,26 +1937,65 @@ impl DomainState {
                         ensure_codec_supports_encoding(domain, identifier, codec_model)?;
                     }
 
-                    let client = emitter.sink.client();
+                    let client_name = emitter.sink.client();
                     let client = expect_kind(
                         domain,
                         identifier,
                         models,
                         &indices,
-                        client,
+                        client_name,
                         ModelKind::Client,
                     )?;
+                    let client_model = models
+                        .get(&RegistryKey::new(ModelKind::Client, client_name.clone()))
+                        .expect("validated emitter client must exist");
+                    if !emitter.sink.accepts_client(client_model) {
+                        return Err(Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: identifier.as_str().to_string(),
+                            reason: format!(
+                                "{} emitter requires a {} client, found {} client '{}'",
+                                emitter.sink.transport_label(),
+                                emitter.sink.expected_client_type(),
+                                client_model
+                                    .client_type_label()
+                                    .expect("validated client model must have a client type"),
+                                client_name.as_str(),
+                            ),
+                        }));
+                    }
                     graph.add_edge(client, source, EdgeKind::RequiredBy);
 
-                    if let Some(catalog_client) = emitter.sink.iceberg_catalog_client() {
+                    if let Some(catalog_client_name) = emitter.sink.iceberg_catalog_client() {
                         let catalog_client = expect_kind(
                             domain,
                             identifier,
                             models,
                             &indices,
-                            catalog_client,
+                            catalog_client_name,
                             ModelKind::Client,
                         )?;
+                        let catalog_client_model = models
+                            .get(&RegistryKey::new(
+                                ModelKind::Client,
+                                catalog_client_name.clone(),
+                            ))
+                            .expect("validated Iceberg catalog client must exist");
+                        if let Model::ClientIcebergRest(_) = catalog_client_model {
+                        } else {
+                            return Err(Report::new(RegistryError::InvalidModel {
+                                domain: domain.as_str().to_string(),
+                                identifier: identifier.as_str().to_string(),
+                                reason: format!(
+                                    "ICEBERG emitter requires an ICEBERG_REST catalog client, \
+                                     found {} client '{}'",
+                                    catalog_client_model.client_type_label().expect(
+                                        "validated catalog client model must have a client type"
+                                    ),
+                                    catalog_client_name.as_str(),
+                                ),
+                            }));
+                        }
                         graph.add_edge(catalog_client, source, EdgeKind::RequiredBy);
                     }
 
@@ -8563,16 +8603,16 @@ mod tests {
         AssignmentTargetScope, BranchSelection, ClientConfigEntry, CodecEncoding,
         CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
         CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-        CreateBranch, CreateClientKafka, CreateCodec, CreateCorrelator, CreateDeduplicator,
-        CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreateReingestor,
-        CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-        CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink,
-        ErrorPolicies, Expression, FieldReference, FieldScope, GeneralErrorPolicy, Identifier,
-        IngestSource, IngestTimestampSource, Inheritance, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model,
-        ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching, ScheduledNode,
-        SchemaField, WindowBound, WireSchemaField,
+        CreateBranch, CreateClientHttp, CreateClientKafka, CreateCodec, CreateCorrelator,
+        CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
+        CreateReingestor, CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor,
+        CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule,
+        DropModel, EmitSink, ErrorPolicies, Expression, FieldReference, FieldScope,
+        GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource, Inheritance, JsonType,
+        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
+        MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch,
+        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
+        ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
     use super::{ModelStorage, Registry, RegistryError, RuntimeChange};
@@ -11074,6 +11114,51 @@ mod tests {
             format!("{error:#}").contains(
                 "codec 'event_codec' cannot be used for encoding because it does not declare an \
                  ON EMITTING transformation"
+            ),
+            "unexpected error: {error:#}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn sentry_emitter_rejects_http_client() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Emitter(mut sentry_emitter) =
+            emitter("emit", "notifications", "event_codec", "sentry_main")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        sentry_emitter.sink = EmitSink::Sentry {
+            client: identifier("sentry_main"),
+        };
+
+        let error = registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                    Model::ClientHttp(CreateClientHttp {
+                        name: identifier("sentry_main"),
+                        mount: None,
+                        config: vec![ClientConfigEntry {
+                            key: "dsn".to_string(),
+                            value: "https://key@sentry.example/42".to_string(),
+                        }],
+                    }),
+                    relay("notifications", "event_schema"),
+                    Model::Emitter(sentry_emitter),
+                ],
+            )
+            .expect_err("Sentry emitter must reject an HTTP client");
+
+        assert!(
+            format!("{error:#}").contains(
+                "SENTRY emitter requires a SENTRY client, found HTTP client 'sentry_main'"
             ),
             "unexpected error: {error:#}"
         );

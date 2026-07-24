@@ -17,6 +17,7 @@ mod postgres;
 pub(in crate::runtime) mod pulsar;
 mod rabbitmq;
 mod redis;
+mod sentry;
 mod sqs;
 mod zeromq;
 
@@ -35,6 +36,7 @@ use postgres::PostgresEmitter;
 use pulsar::PulsarEmitter;
 use rabbitmq::RabbitMqEmitter;
 use redis::RedisEmitter;
+use sentry::SentryEmitter;
 use sqs::SqsEmitter;
 use zeromq::ZeroMqEmitter;
 
@@ -700,6 +702,7 @@ enum SinkEmitter {
     Nats(NatsEmitter),
     ZeroMq(ZeroMqEmitter),
     Sqs(SqsEmitter),
+    Sentry(SentryEmitter),
     ClickHouse(ClickHouseEmitter),
     Postgres(PostgresEmitter),
     MySql(MySqlEmitter),
@@ -772,6 +775,10 @@ impl SinkEmitter {
                     Ok(emitter) => Self::Sqs(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("sqs", context, &error),
                 }
+            }
+            (EmitSink::Sentry { .. }, Some(Model::ClientSentry(client)), _) => {
+                Self::from_result("sentry", context, SentryEmitter::new(client, resolved))
+                    .map(Self::Sentry)
             }
             (EmitSink::ClickHouse { values, .. }, Some(Model::ClientClickHouse(client)), _) => {
                 Self::ClickHouse(ClickHouseEmitter::new(
@@ -1245,6 +1252,7 @@ impl SinkEmitter {
             (Self::Sqs(emitter), EmitSink::Sqs { queue, .. }) => {
                 emitter.publish(queue, payload, headers).await
             }
+            (Self::Sentry(emitter), EmitSink::Sentry { .. }) => emitter.publish(payload).await,
             _ => Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable("emitter has no initialized sink client")),
         }
@@ -1377,6 +1385,7 @@ impl EmitSinkLabel for EmitSink {
             EmitSink::Nats { .. } => "nats",
             EmitSink::ZeroMq { .. } => "zeromq",
             EmitSink::Sqs { .. } => "sqs",
+            EmitSink::Sentry { .. } => "sentry",
             EmitSink::ClickHouse { .. } => "clickhouse",
             EmitSink::Postgres { .. } => "postgres",
             EmitSink::MySql { .. } => "mysql",
@@ -1916,6 +1925,9 @@ fn resolve_emitter_client(
             Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Sqs { .. }, Some(Model::ClientSqs(client))) => {
+            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
+        }
+        (EmitSink::Sentry { .. }, Some(Model::ClientSentry(client))) => {
             Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
         }
         (EmitSink::ClickHouse { .. }, Some(Model::ClientClickHouse(client))) => {
