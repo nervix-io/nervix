@@ -3,7 +3,7 @@
 //! Decoding first produces verified borrowed views. Large Arrow IPC vectors stay
 //! borrowed from the FlatBuffer until a caller explicitly asks for an owned model.
 
-use flatbuffers::{FlatBufferBuilder, WIPOffset};
+use flatbuffers::{Allocator, FlatBufferBuilder, WIPOffset};
 use thiserror::Error;
 
 mod generated {
@@ -168,12 +168,18 @@ pub struct OutputEnvelopeRef<'a>(wire::OutputEnvelope<'a>);
 impl BranchInit {
     pub fn encode(&self) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::new();
-        let payload = build_branch_init(&mut builder, self);
+        self.encode_in(&mut builder);
+        builder.finished_data().to_vec()
+    }
+
+    /// Encodes and finishes this message in the supplied FlatBuffer builder.
+    pub fn encode_in<'a, A: Allocator + 'a>(&self, builder: &mut FlatBufferBuilder<'a, A>) {
+        let payload = build_branch_init(builder, self);
         finish_message(
-            &mut builder,
+            builder,
             wire::MessagePayload::BranchInit,
             payload.as_union_value(),
-        )
+        );
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
@@ -192,46 +198,22 @@ impl BranchInit {
 impl Envelope {
     pub fn encode(&self) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::new();
-        let (payload_type, payload) = match self {
+        self.encode_in(&mut builder);
+        builder.finished_data().to_vec()
+    }
+
+    /// Encodes and finishes this message in the supplied FlatBuffer builder.
+    pub fn encode_in<'a, A: Allocator + 'a>(&self, builder: &mut FlatBufferBuilder<'a, A>) {
+        match self {
             Self::Input {
                 arrow_ipc_batch,
                 acks,
-            } => {
-                let arrow_ipc_batch = builder.create_vector(arrow_ipc_batch);
-                let acks = build_ack_sidecar(&mut builder, acks);
-                let input = wire::InputEnvelope::create(
-                    &mut builder,
-                    &wire::InputEnvelopeArgs {
-                        arrow_ipc_batch: Some(arrow_ipc_batch),
-                        acks: Some(acks),
-                    },
-                );
-                (wire::MessagePayload::InputEnvelope, input.as_union_value())
-            }
+            } => encode_input_in(builder, arrow_ipc_batch, acks),
             Self::Output {
                 generated_arrow_ipc_batch,
                 outputs,
-            } => {
-                let generated_arrow_ipc_batch = builder.create_vector(generated_arrow_ipc_batch);
-                let outputs = outputs
-                    .iter()
-                    .map(|output| build_routed_output(&mut builder, output))
-                    .collect::<Vec<_>>();
-                let outputs = builder.create_vector(&outputs);
-                let output = wire::OutputEnvelope::create(
-                    &mut builder,
-                    &wire::OutputEnvelopeArgs {
-                        generated_arrow_ipc_batch: Some(generated_arrow_ipc_batch),
-                        outputs: Some(outputs),
-                    },
-                );
-                (
-                    wire::MessagePayload::OutputEnvelope,
-                    output.as_union_value(),
-                )
-            }
-        };
-        finish_message(&mut builder, payload_type, payload)
+            } => encode_output_in(builder, generated_arrow_ipc_batch, outputs),
+        }
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
@@ -291,6 +273,12 @@ impl<'a> OutputEnvelopeRef<'a> {
 impl GuestSnapshot {
     pub fn encode(&self) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::new();
+        self.encode_in(&mut builder);
+        builder.finished_data().to_vec()
+    }
+
+    /// Encodes and finishes this message in the supplied FlatBuffer builder.
+    pub fn encode_in<'a, A: Allocator + 'a>(&self, builder: &mut FlatBufferBuilder<'a, A>) {
         let pending_batch = builder.create_vector(&self.pending_batch);
         let init_metadata = builder.create_vector(&self.init_metadata);
         let saved_state = builder.create_vector(&self.saved_state);
@@ -299,7 +287,7 @@ impl GuestSnapshot {
             .as_deref()
             .map(|error| builder.create_string(error));
         let payload = wire::GuestSnapshot::create(
-            &mut builder,
+            builder,
             &wire::GuestSnapshotArgs {
                 processed_batches: self.processed_batches,
                 processed_rows: self.processed_rows,
@@ -313,10 +301,10 @@ impl GuestSnapshot {
             },
         );
         finish_message(
-            &mut builder,
+            builder,
             wire::MessagePayload::GuestSnapshot,
             payload.as_union_value(),
-        )
+        );
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
@@ -360,11 +348,59 @@ fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
     wire::size_prefixed_root_as_message(bytes).map_err(ProtocolError::InvalidFlatbuffer)
 }
 
-fn finish_message(
-    builder: &mut FlatBufferBuilder<'_>,
+/// Encodes and finishes an input envelope in the supplied FlatBuffer builder.
+pub fn encode_input_in<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
+    arrow_ipc_batch: &[u8],
+    acks: &AckSidecar,
+) {
+    let arrow_ipc_batch = builder.create_vector(arrow_ipc_batch);
+    let acks = build_ack_sidecar(builder, acks);
+    let input = wire::InputEnvelope::create(
+        builder,
+        &wire::InputEnvelopeArgs {
+            arrow_ipc_batch: Some(arrow_ipc_batch),
+            acks: Some(acks),
+        },
+    );
+    finish_message(
+        builder,
+        wire::MessagePayload::InputEnvelope,
+        input.as_union_value(),
+    );
+}
+
+/// Encodes and finishes an output envelope in the supplied FlatBuffer builder.
+pub fn encode_output_in<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
+    generated_arrow_ipc_batch: &[u8],
+    outputs: &[RoutedOutput],
+) {
+    let generated_arrow_ipc_batch = builder.create_vector(generated_arrow_ipc_batch);
+    let outputs = outputs
+        .iter()
+        .map(|output| build_routed_output(builder, output))
+        .collect::<Vec<_>>();
+    let outputs = builder.create_vector(&outputs);
+    let output = wire::OutputEnvelope::create(
+        builder,
+        &wire::OutputEnvelopeArgs {
+            generated_arrow_ipc_batch: Some(generated_arrow_ipc_batch),
+            outputs: Some(outputs),
+        },
+    );
+    finish_message(
+        builder,
+        wire::MessagePayload::OutputEnvelope,
+        output.as_union_value(),
+    );
+}
+
+fn finish_message<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
     payload_type: wire::MessagePayload,
     payload: WIPOffset<flatbuffers::UnionWIPOffset>,
-) -> Vec<u8> {
+) {
     let message = wire::Message::create(
         builder,
         &wire::MessageArgs {
@@ -373,15 +409,14 @@ fn finish_message(
         },
     );
     wire::finish_size_prefixed_message_buffer(builder, message);
-    builder.finished_data().to_vec()
 }
 
 fn payload_name(payload: wire::MessagePayload) -> &'static str {
     payload.variant_name().unwrap_or("unknown")
 }
 
-fn build_branch_init<'a>(
-    builder: &mut FlatBufferBuilder<'a>,
+fn build_branch_init<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
     init: &BranchInit,
 ) -> WIPOffset<wire::BranchInit<'a>> {
     let domain_name = builder.create_string(&init.domain_name);
@@ -409,8 +444,8 @@ fn build_branch_init<'a>(
     )
 }
 
-fn build_processor_schema<'a>(
-    builder: &mut FlatBufferBuilder<'a>,
+fn build_processor_schema<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
     schema: &ProcessorSchema,
 ) -> WIPOffset<wire::ProcessorSchema<'a>> {
     let name = builder.create_string(&schema.name);
@@ -440,8 +475,8 @@ fn build_processor_schema<'a>(
     )
 }
 
-fn build_processor_type<'a>(
-    builder: &mut FlatBufferBuilder<'a>,
+fn build_processor_type<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
     ty: &ProcessorType,
 ) -> WIPOffset<wire::ProcessorType<'a>> {
     let (kind, element, array_len) = match ty {
@@ -479,8 +514,8 @@ fn build_processor_type<'a>(
     )
 }
 
-fn build_ack_sidecar<'a>(
-    builder: &mut FlatBufferBuilder<'a>,
+fn build_ack_sidecar<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
     sidecar: &AckSidecar,
 ) -> WIPOffset<wire::AckSidecar<'a>> {
     let rows = sidecar
@@ -559,8 +594,8 @@ fn build_ack_sidecar<'a>(
     )
 }
 
-fn build_routed_output<'a>(
-    builder: &mut FlatBufferBuilder<'a>,
+fn build_routed_output<'a, A: Allocator + 'a>(
+    builder: &mut FlatBufferBuilder<'a, A>,
     output: &RoutedOutput,
 ) -> WIPOffset<wire::RoutedOutput<'a>> {
     let output_relay = builder.create_string(&output.output_relay);
@@ -831,11 +866,12 @@ mod tests {
                 outputs: Some(outputs),
             },
         );
-        let encoded = finish_message(
+        finish_message(
             &mut builder,
             wire::MessagePayload::OutputEnvelope,
             output.as_union_value(),
         );
+        let encoded = builder.finished_data().to_vec();
 
         assert!(matches!(
             Envelope::decode(&encoded),

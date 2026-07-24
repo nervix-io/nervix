@@ -1,4 +1,6 @@
-use std::{cell::UnsafeCell, io::Cursor, net::IpAddr, panic::AssertUnwindSafe, sync::Arc};
+use std::{
+    cell::UnsafeCell, io::Cursor, net::IpAddr, ops::Range, panic::AssertUnwindSafe, sync::Arc,
+};
 
 use arrow_array::{
     Array, ArrayRef, RecordBatch, StringArray,
@@ -113,7 +115,7 @@ impl GuestState {
         self.buffer.as_mut_ptr() as i32
     }
 
-    fn read_memory(&self, ptr: i32, size: i32) -> Result<Vec<u8>, i32> {
+    fn buffer_range(&self, ptr: i32, size: i32) -> Result<Range<usize>, i32> {
         let ptr = usize::try_from(ptr).map_err(|_| ERR_OUT_OF_BOUNDS)?;
         let size = usize::try_from(size).map_err(|_| ERR_INVALID_SIZE)?;
         let end = ptr.checked_add(size).ok_or(ERR_OUT_OF_BOUNDS)?;
@@ -121,13 +123,11 @@ impl GuestState {
         if ptr < base || end > base + self.buffer.len() {
             return Err(ERR_OUT_OF_BOUNDS);
         }
+        Ok(ptr - base..end - base)
+    }
 
-        let source = ptr as *const u8;
-        let mut out = vec![0; size];
-        unsafe {
-            std::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), size);
-        }
-        Ok(out)
+    fn read_memory(&self, ptr: i32, size: i32) -> Result<Vec<u8>, i32> {
+        Ok(self.buffer[self.buffer_range(ptr, size)?].to_vec())
     }
 
     fn dump_state(&mut self) -> i32 {
@@ -320,23 +320,20 @@ pub extern "C" fn nervix_current_domain_time_nanos() -> i64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
-    let Ok(size) = usize::try_from(size) else {
-        return ERR_INVALID_SIZE;
-    };
-
+pub extern "C" fn nervix_process_batch(ptr: i32, size: i32) -> i32 {
     STATE.guarded_export(|state| {
         if !state.initialized {
             return ERR_NOT_INITIALIZED;
         }
-        if size > state.buffer.len() {
-            return ERR_OUT_OF_BOUNDS;
-        }
+        let range = match state.buffer_range(ptr, size) {
+            Ok(range) => range,
+            Err(error) => return error,
+        };
 
         state.processed_batches = state.processed_batches.saturating_add(1);
         state.last_domain_time_nanos = unsafe { nervix_domain_time_nanos() };
         let (row_count, enriched) = {
-            let envelope = match EnvelopeRef::decode(&state.buffer[..size]) {
+            let envelope = match EnvelopeRef::decode(&state.buffer[range]) {
                 Ok(EnvelopeRef::Input(envelope)) => envelope,
                 Ok(EnvelopeRef::Output(_)) | Err(_) => return ERR_ENVELOPE,
             };

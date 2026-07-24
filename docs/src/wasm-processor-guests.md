@@ -24,7 +24,7 @@ nervix_buffer_capacity() -> i32
 nervix_alloc(size: i32) -> i32
 nervix_init(ptr: i32, size: i32) -> i32
 nervix_current_domain_time_nanos() -> i64
-nervix_process_batch(size: i32) -> i32
+nervix_process_batch(ptr: i32, size: i32) -> i32
 nervix_on_timeout(handle: i64) -> i32
 nervix_read_emit() -> i32
 nervix_dump_state() -> i32
@@ -38,14 +38,20 @@ Return `0` from fallible functions on success. Return a negative code on guest r
 
 The guest owns one reusable byte buffer in linear memory.
 
-1. Host calls `nervix_alloc(size)`.
-2. Guest grows/resizes its buffer and returns the buffer pointer.
-3. Host writes exactly `size` bytes into guest memory.
-4. Host calls `nervix_process_batch(size)` or `nervix_load_state(ptr, size)`.
+1. Host estimates the required FlatBuffer capacity and calls `nervix_alloc(capacity)`.
+2. Guest ensures its buffer can hold `capacity` bytes and returns its current pointer. The buffer
+   may move on every call.
+3. Host builds the FlatBuffer directly in that guest-memory range.
+4. Because FlatBuffers builds backwards, the completed message may occupy a suffix of the
+   allocation. Host calls `nervix_process_batch(ptr, size)` with that exact range.
 5. Guest writes pending output or state back into the same buffer.
 6. Host calls `nervix_read_emit()` or `nervix_dump_state()` and reads the returned byte length from `nervix_buffer_ptr()`.
 
-The host enforces a maximum guest buffer size. A guest should still validate sizes and reject impossible pointer ranges.
+If the capacity estimate is too small, the host finishes the message in temporary spill storage,
+releases its linear-memory borrow, calls `nervix_alloc` again with a larger capacity, and copies the
+finished message once. Reallocation is never attempted while the host holds a guest-memory slice.
+The host enforces a maximum guest buffer size. A guest must still validate the supplied pointer and
+size against its current buffer and reject impossible ranges.
 
 ## Init Payload
 
@@ -115,8 +121,10 @@ FlatBuffer. Its root is the `Message` union and its file identifier is `NVWX`.
 The ABI size and internal size prefix must agree exactly. Arrow IPC payloads
 are FlatBuffers byte vectors. Generated Rust and Go accessors return slices
 into the FlatBuffer, avoiding a deserialization copy. Crossing WebAssembly
-linear memory still requires one transfer; after a guest emit, the host keeps
-the generated Arrow vector as a shared slice of that retained FlatBuffer.
+linear memory still requires writing the source bytes once. On the normal host-to-guest path,
+FlatBuffers writes them directly into their final guest-memory representation instead of creating
+and then copying a complete host-side FlatBuffer. After a guest emit, the host keeps the generated
+Arrow vector as a shared slice of that retained FlatBuffer.
 
 Input envelopes have this shape:
 
@@ -332,9 +340,13 @@ pub extern "C" fn nervix_alloc(size: i32) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn nervix_process_batch(size: i32) -> i32 {
+pub extern "C" fn nervix_process_batch(ptr: i32, size: i32) -> i32 {
     with_state(|state| {
-        let input = &state.buffer[..size as usize];
+        let range = match state.buffer_range(ptr, size) {
+            Ok(range) => range,
+            Err(code) => return code,
+        };
+        let input = &state.buffer[range];
         let envelope = match WasmEnvelope::decode(input) {
             Ok(envelope) => envelope,
             Err(code) => return code,
@@ -476,8 +488,12 @@ func nervixAlloc(size int32) int32 {
 }
 
 //export nervix_process_batch
-func nervixProcessBatch(size int32) int32 {
-    envelope, code := decodeEnvelope(buffer[:int(size)])
+func nervixProcessBatch(ptr int32, size int32) int32 {
+    input, code := readBufferRange(ptr, size)
+    if code != 0 {
+        return code
+    }
+    envelope, code := decodeEnvelope(input)
     if code != 0 {
         return code
     }

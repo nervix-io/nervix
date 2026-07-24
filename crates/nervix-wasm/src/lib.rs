@@ -1,4 +1,6 @@
 use std::{
+    convert::Infallible,
+    ops::{Deref, DerefMut},
     sync::{
         Arc as StdArc,
         atomic::{AtomicBool, Ordering},
@@ -8,6 +10,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use flatbuffers::{Allocator, FlatBufferBuilder};
 use nervix_models::{ParseAsType, Timestamp};
 use nervix_wasm_protocol as protocol;
 use parking_lot::Mutex;
@@ -60,12 +63,74 @@ pub enum WasmProcessorError {
     InvalidOffset(i32),
     #[error("guest returned invalid byte size {0}")]
     InvalidSize(i32),
+    #[error(
+        "guest returned buffer range offset {offset} size {size} outside linear memory size \
+         {memory_size}"
+    )]
+    InvalidBufferRange {
+        offset: usize,
+        size: usize,
+        memory_size: usize,
+    },
     #[error(transparent)]
     Protocol(#[from] WasmProtocolError),
     #[error("guest global error bytes are not valid UTF-8: {0}")]
     InvalidGuestGlobalError(#[source] std::string::FromUtf8Error),
     #[error("guest buffer size {size} exceeds configured limit {limit}")]
     GuestBufferTooLarge { size: usize, limit: usize },
+}
+
+enum GuestBufferAllocator<'a> {
+    Direct(&'a mut [u8]),
+    Spill(Vec<u8>),
+}
+
+enum GuestBufferBuild {
+    Direct { offset: usize, size: usize },
+    Spill { buffer: Vec<u8>, start: usize },
+}
+
+impl Deref for GuestBufferAllocator<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Direct(buffer) => buffer,
+            Self::Spill(buffer) => buffer,
+        }
+    }
+}
+
+impl DerefMut for GuestBufferAllocator<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Direct(buffer) => buffer,
+            Self::Spill(buffer) => buffer,
+        }
+    }
+}
+
+// SAFETY: growth preserves the previous allocation at the end of the new allocation, as required
+// by FlatBuffers' backwards builder.
+unsafe impl Allocator for GuestBufferAllocator<'_> {
+    type Error = Infallible;
+
+    fn grow_downwards(&mut self) -> Result<(), Self::Error> {
+        let previous = std::mem::replace(self, Self::Spill(Vec::new()));
+        let previous_len = previous.len();
+        let new_len = previous_len
+            .checked_mul(2)
+            .unwrap_or(flatbuffers::FLATBUFFERS_MAX_BUFFER_SIZE)
+            .max(1);
+        let mut grown = vec![0; new_len];
+        grown[new_len - previous_len..].copy_from_slice(&previous);
+        *self = Self::Spill(grown);
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        Deref::deref(self).len()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -274,7 +339,22 @@ impl From<&ParseAsType> for WasmProcessorType {
 }
 
 impl WasmBranchInit {
-    fn encode(&self) -> Vec<u8> {
+    fn serialized_capacity_hint(&self) -> usize {
+        self.domain_name
+            .len()
+            .saturating_add(self.domain_type.len())
+            .saturating_add(self.branch_key.as_ref().map_or(0, Vec::len))
+            .saturating_add(self.input_schema.serialized_capacity_hint())
+            .saturating_add(
+                self.output_schemas
+                    .iter()
+                    .map(WasmProcessorSchema::serialized_capacity_hint)
+                    .fold(0_usize, usize::saturating_add),
+            )
+            .saturating_add(512)
+    }
+
+    fn to_protocol(&self) -> protocol::BranchInit {
         protocol::BranchInit {
             domain_name: self.domain_name.clone(),
             domain_type: self.domain_type.clone(),
@@ -286,11 +366,17 @@ impl WasmBranchInit {
                 .map(WasmProcessorSchema::to_protocol)
                 .collect(),
         }
-        .encode()
     }
 }
 
 impl WasmProcessorSchema {
+    fn serialized_capacity_hint(&self) -> usize {
+        self.fields
+            .iter()
+            .map(WasmProcessorField::serialized_capacity_hint)
+            .fold(self.name.len().saturating_add(96), usize::saturating_add)
+    }
+
     fn to_protocol(&self) -> protocol::ProcessorSchema {
         protocol::ProcessorSchema {
             name: self.name.clone(),
@@ -304,6 +390,13 @@ impl WasmProcessorSchema {
 }
 
 impl WasmProcessorField {
+    fn serialized_capacity_hint(&self) -> usize {
+        self.name
+            .len()
+            .saturating_add(self.ty.serialized_capacity_hint())
+            .saturating_add(64)
+    }
+
     fn to_protocol(&self) -> protocol::ProcessorField {
         protocol::ProcessorField {
             name: self.name.clone(),
@@ -314,6 +407,15 @@ impl WasmProcessorField {
 }
 
 impl WasmProcessorType {
+    fn serialized_capacity_hint(&self) -> usize {
+        match self {
+            Self::Array { element, .. } | Self::Vec { element } => {
+                64_usize.saturating_add(element.serialized_capacity_hint())
+            }
+            _ => 64,
+        }
+    }
+
     fn to_protocol(&self) -> protocol::ProcessorType {
         match self {
             Self::U8 => protocol::ProcessorType::U8,
@@ -457,6 +559,67 @@ pub enum WasmOutputColumnRef {
     Uninitialized,
 }
 
+enum ProtocolEnvelopeEncoding<'a> {
+    Input {
+        arrow_ipc_batch: &'a [u8],
+        acks: protocol::AckSidecar,
+    },
+    Output {
+        generated_arrow_ipc_batch: &'a [u8],
+        outputs: Vec<protocol::RoutedOutput>,
+    },
+}
+
+impl<'a> ProtocolEnvelopeEncoding<'a> {
+    fn new(envelope: &'a WasmEnvelope) -> Self {
+        match envelope {
+            WasmEnvelope::Input {
+                arrow_ipc_batch,
+                acks,
+            } => Self::Input {
+                arrow_ipc_batch,
+                acks: acks.to_protocol(),
+            },
+            WasmEnvelope::Output {
+                generated_arrow_ipc_batch,
+                outputs,
+            } => Self::Output {
+                generated_arrow_ipc_batch,
+                outputs: outputs.iter().map(WasmRoutedOutput::to_protocol).collect(),
+            },
+        }
+    }
+
+    fn encode_in<'b, A: Allocator + 'b>(&self, builder: &mut FlatBufferBuilder<'b, A>) {
+        match self {
+            Self::Input {
+                arrow_ipc_batch,
+                acks,
+            } => protocol::encode_input_in(builder, arrow_ipc_batch, acks),
+            Self::Output {
+                generated_arrow_ipc_batch,
+                outputs,
+            } => protocol::encode_output_in(builder, generated_arrow_ipc_batch, outputs),
+        }
+    }
+}
+
+trait GuestMessageEncoding {
+    fn encode_in<'a, A: Allocator + 'a>(&self, builder: &mut FlatBufferBuilder<'a, A>);
+}
+
+impl GuestMessageEncoding for ProtocolEnvelopeEncoding<'_> {
+    fn encode_in<'a, A: Allocator + 'a>(&self, builder: &mut FlatBufferBuilder<'a, A>) {
+        Self::encode_in(self, builder);
+    }
+}
+
+impl GuestMessageEncoding for protocol::BranchInit {
+    fn encode_in<'a, A: Allocator + 'a>(&self, builder: &mut FlatBufferBuilder<'a, A>) {
+        protocol::BranchInit::encode_in(self, builder);
+    }
+}
+
 impl WasmOutputColumnRef {
     pub const fn generated(column_index: u32) -> Self {
         Self::Generated { column_index }
@@ -480,6 +643,36 @@ impl WasmOutputColumnRef {
 }
 
 impl WasmEnvelope {
+    fn serialized_capacity_hint(&self) -> usize {
+        const ROOT_OVERHEAD: usize = 256;
+        const ROUTED_OUTPUT_OVERHEAD: usize = 96;
+        const COLUMN_OVERHEAD: usize = 16;
+
+        match self {
+            Self::Input {
+                arrow_ipc_batch,
+                acks,
+            } => arrow_ipc_batch
+                .len()
+                .saturating_add(acks.serialized_capacity_hint())
+                .saturating_add(ROOT_OVERHEAD),
+            Self::Output {
+                generated_arrow_ipc_batch,
+                outputs,
+            } => outputs.iter().fold(
+                generated_arrow_ipc_batch
+                    .len()
+                    .saturating_add(ROOT_OVERHEAD),
+                |size, output| {
+                    size.saturating_add(output.output_relay.len())
+                        .saturating_add(output.columns.len().saturating_mul(COLUMN_OVERHEAD))
+                        .saturating_add(output.acks.serialized_capacity_hint())
+                        .saturating_add(ROUTED_OUTPUT_OVERHEAD)
+                },
+            ),
+        }
+    }
+
     pub const fn input_acks(&self) -> Option<&WasmAckSidecar> {
         if let Self::Input { acks, .. } = self {
             Some(acks)
@@ -510,7 +703,10 @@ impl WasmEnvelope {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, WasmProtocolError> {
-        Ok(self.to_protocol().encode())
+        let encoding = ProtocolEnvelopeEncoding::new(self);
+        let mut builder = FlatBufferBuilder::new();
+        encoding.encode_in(&mut builder);
+        Ok(builder.finished_data().to_vec())
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, WasmProtocolError> {
@@ -519,25 +715,6 @@ impl WasmEnvelope {
 
     pub fn decode_borrowed(bytes: &[u8]) -> Result<protocol::EnvelopeRef<'_>, WasmProtocolError> {
         Ok(protocol::EnvelopeRef::decode(bytes)?)
-    }
-
-    fn to_protocol(&self) -> protocol::Envelope {
-        match self {
-            Self::Input {
-                arrow_ipc_batch,
-                acks,
-            } => protocol::Envelope::Input {
-                arrow_ipc_batch: arrow_ipc_batch.clone(),
-                acks: acks.to_protocol(),
-            },
-            Self::Output {
-                generated_arrow_ipc_batch,
-                outputs,
-            } => protocol::Envelope::Output {
-                generated_arrow_ipc_batch: generated_arrow_ipc_batch.to_vec(),
-                outputs: outputs.iter().map(WasmRoutedOutput::to_protocol).collect(),
-            },
-        }
     }
 
     fn decode_owned(bytes: Vec<u8>) -> Result<Self, WasmProtocolError> {
@@ -570,6 +747,38 @@ impl WasmEnvelope {
 }
 
 impl WasmAckSidecar {
+    fn serialized_capacity_hint(&self) -> usize {
+        const SIDECAR_OVERHEAD: usize = 128;
+        const SET_OVERHEAD: usize = 64;
+
+        let token_count = self
+            .rows
+            .iter()
+            .map(|row| row.tokens.len())
+            .chain(self.acked.iter().map(|set| set.tokens.len()))
+            .chain(self.nacked.iter().map(|set| set.tokens.len()))
+            .chain(self.message_errors.iter().map(|set| set.tokens.len()))
+            .fold(0_usize, usize::saturating_add);
+        let set_count = self
+            .rows
+            .len()
+            .saturating_add(self.acked.len())
+            .saturating_add(self.nacked.len())
+            .saturating_add(self.message_errors.len());
+        let reason_bytes = self
+            .nacked
+            .iter()
+            .map(|set| set.reason.len())
+            .chain(self.message_errors.iter().map(|set| set.reason.len()))
+            .fold(0_usize, usize::saturating_add);
+
+        token_count
+            .saturating_mul(std::mem::size_of::<u64>())
+            .saturating_add(set_count.saturating_mul(SET_OVERHEAD))
+            .saturating_add(reason_bytes)
+            .saturating_add(SIDECAR_OVERHEAD)
+    }
+
     fn to_protocol(&self) -> protocol::AckSidecar {
         protocol::AckSidecar {
             rows: self
@@ -811,7 +1020,7 @@ pub struct WasmBranchInstance {
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     init: TypedFunc<(i32, i32), i32>,
-    process_batch: TypedFunc<i32, i32>,
+    process_batch: TypedFunc<(i32, i32), i32>,
     on_timeout: TypedFunc<i64, i32>,
     dump_state: TypedFunc<(), i32>,
     load_state: TypedFunc<(i32, i32), i32>,
@@ -820,6 +1029,7 @@ pub struct WasmBranchInstance {
     current_domain_time_nanos: TypedFunc<(), i64>,
     buffer_ptr: TypedFunc<(), i32>,
     global_error: Option<WasmGlobalErrorExports>,
+    guest_buffer_capacity: usize,
     max_guest_buffer_bytes: usize,
 }
 
@@ -860,6 +1070,7 @@ impl WasmBranchInstance {
             )?,
             buffer_ptr: typed_export(&mut store, &instance, "nervix_buffer_ptr")?,
             global_error: optional_global_error_exports(&mut store, &instance)?,
+            guest_buffer_capacity: 0,
             max_guest_buffer_bytes,
             store,
             memory,
@@ -867,8 +1078,11 @@ impl WasmBranchInstance {
     }
 
     pub async fn init(&mut self, init: WasmBranchInit) -> Result<(), WasmProcessorError> {
-        let encoded = init.encode();
-        let (ptr, size) = self.write_to_guest_buffer(&encoded).await?;
+        let capacity_hint = init.serialized_capacity_hint();
+        let encoding = init.to_protocol();
+        let (ptr, size) = self
+            .write_message_to_guest(&encoding, capacity_hint)
+            .await?;
         let code = self
             .init
             .call_async(&mut self.store, (ptr, size))
@@ -904,9 +1118,11 @@ impl WasmBranchInstance {
         &mut self,
         envelope: &WasmEnvelope,
     ) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
-        let bytes = envelope.encode()?;
-        let (_ptr, size) = self.write_to_guest_buffer(&bytes).await?;
-        let call_result = self.process_batch.call_async(&mut self.store, size).await;
+        let (ptr, size) = self.write_envelope_to_guest(envelope).await?;
+        let call_result = self
+            .process_batch
+            .call_async(&mut self.store, (ptr, size))
+            .await;
         let code = match call_result {
             Ok(code) => code,
             Err(source) => {
@@ -1071,17 +1287,109 @@ impl WasmBranchInstance {
         Ok(Some(reason))
     }
 
-    async fn write_to_guest_buffer(
+    async fn write_envelope_to_guest(
         &mut self,
-        bytes: &[u8],
+        envelope: &WasmEnvelope,
     ) -> Result<(i32, i32), WasmProcessorError> {
-        if bytes.len() > self.max_guest_buffer_bytes {
+        let encoding = ProtocolEnvelopeEncoding::new(envelope);
+        self.write_message_to_guest(&encoding, envelope.serialized_capacity_hint())
+            .await
+    }
+
+    async fn write_message_to_guest<E: GuestMessageEncoding>(
+        &mut self,
+        encoding: &E,
+        capacity_hint: usize,
+    ) -> Result<(i32, i32), WasmProcessorError> {
+        let capacity = self
+            .guest_buffer_capacity
+            .max(capacity_hint)
+            .min(self.max_guest_buffer_bytes);
+        let base_ptr = self.allocate_guest_buffer(capacity).await?;
+        let base_offset =
+            usize::try_from(base_ptr).map_err(|_| WasmProcessorError::InvalidOffset(base_ptr))?;
+
+        let build = {
+            let memory = self.memory.data_mut(&mut self.store);
+            let memory_size = memory.len();
+            let end = base_offset.checked_add(capacity).ok_or(
+                WasmProcessorError::InvalidBufferRange {
+                    offset: base_offset,
+                    size: capacity,
+                    memory_size,
+                },
+            )?;
+            let region =
+                memory
+                    .get_mut(base_offset..end)
+                    .ok_or(WasmProcessorError::InvalidBufferRange {
+                        offset: base_offset,
+                        size: capacity,
+                        memory_size,
+                    })?;
+            let allocator = GuestBufferAllocator::Direct(region);
+            let mut builder = FlatBufferBuilder::new_in(allocator);
+            encoding.encode_in(&mut builder);
+            let (allocator, start) = builder.collapse_in();
+            let size = allocator.len() - start;
+            match allocator {
+                GuestBufferAllocator::Direct(_) => GuestBufferBuild::Direct {
+                    offset: start,
+                    size,
+                },
+                GuestBufferAllocator::Spill(buffer) => GuestBufferBuild::Spill { buffer, start },
+            }
+        };
+
+        match build {
+            GuestBufferBuild::Direct { offset, size } => {
+                let ptr = base_offset.checked_add(offset).ok_or(
+                    WasmProcessorError::InvalidBufferRange {
+                        offset: base_offset,
+                        size,
+                        memory_size: self.memory.data_size(&self.store),
+                    },
+                )?;
+                let ptr =
+                    i32::try_from(ptr).map_err(|_| WasmProcessorError::InvalidBufferRange {
+                        offset: ptr,
+                        size,
+                        memory_size: self.memory.data_size(&self.store),
+                    })?;
+                let size = i32::try_from(size).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
+                Ok((ptr, size))
+            }
+            GuestBufferBuild::Spill { buffer, start } => {
+                let bytes = &buffer[start..];
+                if bytes.len() > self.max_guest_buffer_bytes {
+                    return Err(WasmProcessorError::GuestBufferTooLarge {
+                        size: bytes.len(),
+                        limit: self.max_guest_buffer_bytes,
+                    });
+                }
+                let growth_target = capacity
+                    .saturating_mul(2)
+                    .max(bytes.len())
+                    .min(self.max_guest_buffer_bytes);
+                let ptr = self.allocate_guest_buffer(growth_target).await?;
+                self.memory
+                    .write(&mut self.store, ptr as usize, bytes)
+                    .map_err(WasmProcessorError::MemoryWrite)?;
+                let size =
+                    i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
+                Ok((ptr, size))
+            }
+        }
+    }
+
+    async fn allocate_guest_buffer(&mut self, size: usize) -> Result<i32, WasmProcessorError> {
+        if size > self.max_guest_buffer_bytes {
             return Err(WasmProcessorError::GuestBufferTooLarge {
-                size: bytes.len(),
+                size,
                 limit: self.max_guest_buffer_bytes,
             });
         }
-        let size = i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
+        let size = i32::try_from(size).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
         let ptr = self
             .alloc
             .call_async(&mut self.store, size)
@@ -1096,6 +1404,16 @@ impl WasmBranchInstance {
                 code: ptr,
             });
         }
+        self.guest_buffer_capacity = self.guest_buffer_capacity.max(size as usize);
+        Ok(ptr)
+    }
+
+    async fn write_to_guest_buffer(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(i32, i32), WasmProcessorError> {
+        let ptr = self.allocate_guest_buffer(bytes.len()).await?;
+        let size = i32::try_from(bytes.len()).map_err(|_| WasmProcessorError::InvalidSize(-1))?;
         self.memory
             .write(&mut self.store, ptr as usize, bytes)
             .map_err(WasmProcessorError::MemoryWrite)?;
@@ -1258,16 +1576,19 @@ mod tests {
             (memory (export "memory") 1)
             (global $buffer_len (mut i32) (i32.const 0))
             (global $emit_len (mut i32) (i32.const 0))
+            (global $read_ptr (mut i32) (i32.const 1024))
             (global $processed (mut i64) (i64.const 0))
             (global $last_now (mut i64) (i64.const 0))
             (global $last_timeout (mut i64) (i64.const 0))
 
             (func (export "nervix_buffer_ptr") (result i32)
-                i32.const 1024)
+                global.get $read_ptr)
 
             (func (export "nervix_alloc") (param $size i32) (result i32)
                 local.get $size
                 global.set $buffer_len
+                i32.const 1024
+                global.set $read_ptr
                 i32.const 1024)
 
             (func (export "nervix_init") (param $ptr i32) (param $size i32) (result i32)
@@ -1278,12 +1599,17 @@ mod tests {
                 global.set $last_now
                 global.get $last_now)
 
-            (func (export "nervix_process_batch") (param $size i32) (result i32)
+            (func (export "nervix_process_batch")
+                (param $ptr i32)
+                (param $size i32)
+                (result i32)
                 call $now
                 global.set $last_now
                 i64.const 5000000
                 call $timeout
                 global.set $last_timeout
+                local.get $ptr
+                global.set $read_ptr
                 global.get $processed
                 i64.const 1
                 i64.add
@@ -1305,6 +1631,8 @@ mod tests {
                 global.get $buffer_len)
 
             (func (export "nervix_dump_state") (result i32)
+                i32.const 1024
+                global.set $read_ptr
                 i32.const 1024
                 global.get $processed
                 i64.store
@@ -1356,11 +1684,14 @@ mod tests {
         (module
             (memory (export "memory") 1)
             (global $emit_len (mut i32) (i32.const 0))
+            (global $read_ptr (mut i32) (i32.const 1024))
 
             (func (export "nervix_buffer_ptr") (result i32)
-                i32.const 1024)
+                global.get $read_ptr)
 
             (func (export "nervix_alloc") (param $size i32) (result i32)
+                i32.const 1024
+                global.set $read_ptr
                 i32.const 1024)
 
             (func (export "nervix_init") (param $ptr i32) (param $size i32) (result i32)
@@ -1369,8 +1700,13 @@ mod tests {
             (func (export "nervix_current_domain_time_nanos") (result i64)
                 i64.const 0)
 
-            (func (export "nervix_process_batch") (param $size i32) (result i32)
+            (func (export "nervix_process_batch")
+                (param $ptr i32)
+                (param $size i32)
+                (result i32)
                 (local $i i64)
+                local.get $ptr
+                global.set $read_ptr
                 (loop $again
                     local.get $i
                     i64.const 1
@@ -1585,6 +1921,80 @@ mod tests {
     }
 
     #[test]
+    fn guest_buffer_allocator_serializes_directly_and_spills_without_changing_bytes() {
+        let envelope = WasmEnvelope::input(
+            vec![7; 512],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow {
+                    tokens: vec![WasmAckToken(41)],
+                    source_token: Some(WasmAckToken(41)),
+                }],
+                ..WasmAckSidecar::default()
+            },
+        );
+        let expected = envelope.encode().expect("envelope must encode");
+        let encoding = ProtocolEnvelopeEncoding::new(&envelope);
+
+        let mut direct_memory = vec![0; expected.len() + 64];
+        let mut direct_builder =
+            FlatBufferBuilder::new_in(GuestBufferAllocator::Direct(&mut direct_memory));
+        encoding.encode_in(&mut direct_builder);
+        let (direct_allocator, direct_start) = direct_builder.collapse_in();
+        assert!(matches!(direct_allocator, GuestBufferAllocator::Direct(_)));
+        assert_eq!(&direct_allocator[direct_start..], expected);
+
+        let mut undersized_memory = [0; 32];
+        let mut spill_builder =
+            FlatBufferBuilder::new_in(GuestBufferAllocator::Direct(&mut undersized_memory));
+        encoding.encode_in(&mut spill_builder);
+        let (spill_allocator, spill_start) = spill_builder.collapse_in();
+        assert!(matches!(spill_allocator, GuestBufferAllocator::Spill(_)));
+        assert_eq!(&spill_allocator[spill_start..], expected);
+    }
+
+    #[tokio::test]
+    async fn underestimated_guest_capacity_grows_and_copies_finished_spill() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(TEST_WASM)
+            .await
+            .expect("module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                None,
+            )
+            .await
+            .expect("branch must instantiate");
+        branch.guest_buffer_capacity = 0;
+
+        let envelope = WasmEnvelope::input_arrow_only(vec![9; 512]);
+        let expected = envelope.encode().expect("envelope must encode");
+        let encoding = ProtocolEnvelopeEncoding::new(&envelope);
+        let (ptr, size) = branch
+            .write_message_to_guest(&encoding, 1)
+            .await
+            .expect("spill must be copied into a grown guest buffer");
+
+        assert_eq!(
+            usize::try_from(size).expect("size must be positive"),
+            expected.len()
+        );
+        assert!(branch.guest_buffer_capacity >= expected.len());
+        let mut actual = vec![0; expected.len()];
+        branch
+            .memory
+            .read(
+                &branch.store,
+                usize::try_from(ptr).expect("pointer must be positive"),
+                &mut actual,
+            )
+            .expect("finished spill must be readable from guest memory");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn shared_generated_output_flatbuffer_round_trip_borrows_generated_ipc() {
         let generated_arrow_ipc_batch = vec![9, 8, 7];
         let envelope = WasmEnvelope::output(
@@ -1737,7 +2147,7 @@ mod tests {
                 (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
                 (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
-                (func (export "nervix_process_batch") (param i32) (result i32) i32.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
                 (func (export "nervix_read_emit") (result i32) i32.const 0)
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
@@ -1777,7 +2187,7 @@ mod tests {
                 (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
                 (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
-                (func (export "nervix_process_batch") (param i32) (result i32) i32.const {process_code})
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const {process_code})
                 (func (export "nervix_on_timeout") (param i64) (result i32) i32.const {timeout_code})
                 (func (export "nervix_read_emit") (result i32) i32.const 0)
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
@@ -1893,7 +2303,7 @@ mod tests {
                 (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
                 (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
-                (func (export "nervix_process_batch") (param i32) (result i32) i32.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)

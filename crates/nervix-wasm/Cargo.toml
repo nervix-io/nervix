@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 bytes = { workspace = true }
+flatbuffers = { workspace = true }
 nervix-models = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 parking_lot = { workspace = true }
