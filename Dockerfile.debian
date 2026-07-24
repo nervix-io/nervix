@@ -142,11 +142,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cd crates/web-console \
     && RUSTFLAGS= trunk build --release \
     && cd /app \
-    && cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --bin nervix \
+    && cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server \
     && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
     && mkdir -p /artifacts \
-    && cp "/app/target/sonic/${RUST_TARGET}/release/nervix" /artifacts/nervix \
-    && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix.bundle" /artifacts/nervix.bundle \
+    && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/nervix-server \
+    && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/nervix-server.bundle \
     && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/nervix-cli
 
 ARG DEBIAN_VERSION=trixie
@@ -195,10 +195,10 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 
 COPY --from=onnxruntime /onnxruntime/lib/libonnxruntime*.so* /usr/local/lib/
-COPY --from=builder /artifacts/nervix /usr/local/bin/nervix
-COPY --from=builder /artifacts/nervix.bundle /usr/local/bin/nervix.bundle
+COPY --from=builder /artifacts/nervix-server /usr/local/bin/nervix-server
+COPY --from=builder /artifacts/nervix-server.bundle /usr/local/bin/nervix-server.bundle
 COPY --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
 
 USER nervix:nervix
 
-CMD ["/usr/local/bin/nervix"]
+CMD ["/usr/local/bin/nervix-server"]

@@ -21,13 +21,13 @@ use lapin::{
     options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
     types::FieldTable,
 };
-use nervix::{
+use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
+pub use nervix_proto as proto;
+use nervix_server::{
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
     runtime::{DEFAULT_TEMP_DIR, EmitterFaultInjector, IngestorFaultInjector, RuntimeTestHooks},
 };
-use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
-pub use nervix_proto as proto;
 use parking_lot::Mutex;
 use proto::{
     CommandRequest, ServerEventLevel, SessionRequest, session_response::Event,

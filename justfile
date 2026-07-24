@@ -170,7 +170,7 @@ deps-down:
     docker compose down --remove-orphans --volumes
 
 server *args: build-deps
-    cargo run -- {{ args }}
+    cargo run --package nervix-server --bin nervix-server -- {{ args }}
 
 client *args: build-deps
     cargo run --package nervix-cli -- {{ args }}
@@ -182,7 +182,7 @@ build-web-console:
     env -u NO_COLOR trunk build --release
 
 build-server:
-    CARGO_TARGET_DIR={{cargo_target_dir}}/server cargo build {{release_flag}} --package nervix --bin nervix
+    CARGO_TARGET_DIR={{cargo_target_dir}}/server cargo build {{release_flag}} --package nervix-server --bin nervix-server
 
 build-cli:
     CARGO_TARGET_DIR={{cargo_target_dir}}/cli cargo build {{release_flag}} --package nervix-cli --bin nervix-cli

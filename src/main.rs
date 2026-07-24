@@ -1,6 +1,6 @@
 use clap::Parser;
 use error_stack::Report;
-use nervix::application::{AppError, Args, init_tracing, run_cli};
+use nervix_server::application::{AppError, Args, init_tracing, run_cli};
 use tokio::runtime::Builder;
 
 fn main() -> Result<(), Report<AppError>> {

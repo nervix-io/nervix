@@ -2540,7 +2540,7 @@ async fn serve_cluster_api_https(
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "nervix")]
+#[command(name = "nervix-server")]
 #[command(about = "NSPL gRPC server")]
 pub struct Args {
     #[arg(long, env = "NERVIX_ADDR", default_value = "127.0.0.1:47391")]
@@ -13427,7 +13427,7 @@ mod tests {
     #[test]
     fn args_parse_observability_listen_addr() {
         let args = Args::parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",
@@ -13444,7 +13444,7 @@ mod tests {
     #[test]
     fn args_parse_temp_dir() {
         let args = Args::parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",
@@ -13461,7 +13461,7 @@ mod tests {
     #[test]
     fn args_parse_web_console_listen_addr() {
         let args = Args::parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",
@@ -14171,7 +14171,7 @@ mod tests {
     #[test]
     fn server_args_parse_memory_pressure_options() {
         let args = Args::parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",
@@ -14199,7 +14199,7 @@ mod tests {
     #[test]
     fn server_args_reject_incomplete_memory_pressure_watermarks() {
         let args = Args::parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",
@@ -14217,7 +14217,7 @@ mod tests {
     #[test]
     fn server_args_parse_opentelemetry_options() {
         let args = Args::parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",
@@ -14242,7 +14242,7 @@ mod tests {
     #[test]
     fn server_args_do_not_require_opentelemetry_options() {
         let args = Args::parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",
@@ -14260,7 +14260,7 @@ mod tests {
     #[test]
     fn server_args_only_require_opentelemetry_enable_flag_to_enable_export() {
         let args = Args::parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",
@@ -14279,7 +14279,7 @@ mod tests {
     #[test]
     fn server_args_reject_invalid_opentelemetry_sample_ratio() {
         let result = Args::try_parse_from([
-            "nervix",
+            "nervix-server",
             "--node-id",
             "node-1",
             "--cluster-api-listen-addr",

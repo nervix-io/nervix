@@ -3,6 +3,7 @@ use std::{
     fs::{OpenOptions, create_dir_all},
     io::Write,
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc as StdArc, OnceLock},
     time::{Duration, Instant},
 };
@@ -43,11 +44,11 @@ use mysql_async::{
     Opts as MySqlOpts, OptsBuilder as MySqlOptsBuilder, Pool as MySqlPool, SslOpts as MySqlSslOpts,
     prelude::Queryable as MySqlQueryable,
 };
-use nervix::{
+use nervix_client_core::Client;
+use nervix_server::{
     application::InternalTransportMode, memory_pressure::MemoryPressureConfig,
     runtime::RuntimeTestHooks,
 };
-use nervix_client_core::Client;
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
@@ -141,6 +142,32 @@ enum IngestorLogicTransportFixture {
     Nats,
     WebsocketEndpoint,
     ZeroMq,
+}
+
+#[when("the nervix-server help is requested")]
+fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
+    let binary = option_env!("CARGO_BIN_EXE_nervix-server")
+        .expect("the nervix-server binary must be built for integration tests");
+    let output = Command::new(binary)
+        .arg("--help")
+        .output()
+        .expect("nervix-server help command must run");
+    assert!(
+        output.status.success(),
+        "nervix-server help command failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    world.last_command_output =
+        Some(String::from_utf8(output.stdout).expect("nervix-server help output must be UTF-8"));
+}
+
+#[then("the legacy nervix server executable is absent")]
+fn then_legacy_nervix_server_executable_is_absent(_world: &mut ScenarioWorld) {
+    assert!(
+        option_env!("CARGO_BIN_EXE_nervix").is_none(),
+        "the legacy nervix binary target must not be built"
+    );
 }
 
 impl IngestorLogicTransportFixture {
