@@ -1339,17 +1339,6 @@ impl RelayRuntimeFanIn {
             Err(async_broadcast::RecvError::Closed) => None,
         }
     }
-
-    fn try_recv(&mut self) -> Result<Option<RelayRecordBatch>, ()> {
-        match self.receiver.try_recv() {
-            Ok(batch) => Ok(Some(batch)),
-            Err(async_broadcast::TryRecvError::Empty) => Ok(None),
-            Err(async_broadcast::TryRecvError::Overflowed(_)) => {
-                unreachable!("relay broadcasts are backpressured and must not overflow")
-            }
-            Err(async_broadcast::TryRecvError::Closed) => Err(()),
-        }
-    }
 }
 
 const DOMAIN_TICK_HISTORY_LIMIT: usize = 256;
@@ -1548,6 +1537,24 @@ enum RuntimeFlushPolicy {
         max_batch_size: u64,
     },
     Immediate,
+}
+
+impl RuntimeFlushPolicy {
+    const IMMEDIATE_MINIMUM_TIMEOUT: Duration = Duration::from_micros(100);
+
+    fn interval(self) -> Duration {
+        match self {
+            Self::Each { interval, .. } => interval,
+            Self::Immediate => Self::IMMEDIATE_MINIMUM_TIMEOUT,
+        }
+    }
+
+    fn size_boundary_reached(self, pending_bytes: u64) -> bool {
+        match self {
+            Self::Each { max_batch_size, .. } => pending_bytes >= max_batch_size,
+            Self::Immediate => false,
+        }
+    }
 }
 
 fn relay_batches_estimated_bytes(batches: &[RelayRecordBatch]) -> u64 {
@@ -5439,56 +5446,33 @@ impl BranchedIngestorRuntime {
                             );
                             break;
                         };
-                        match template.entrypoint_flush_each {
-                            RuntimeFlushPolicy::Immediate => {
-                                record_next_branch_instance_branch_deadline(
-                                    &mut next_branch_deadline,
-                                    Self::dispatch_entrypoint_inputs(
-                                        BranchedBranchDispatchContext {
-                                            runtime_handle: &runtime_handle,
-                                            domain: &domain,
-                                            ingestor: &ingestor,
-                                            graph: &graph,
-                                            template: &template,
-                                            now,
-                                        },
-                                        &mut instances,
-                                        vec![message],
-                                    )
-                                    .await,
-                                );
-                            }
-                            RuntimeFlushPolicy::Each {
-                                interval: flush_each,
-                                max_batch_size,
-                            } => {
-                                pending_inputs.push(message);
-                                if pending_flush_at.is_none() {
-                                    pending_flush_at = Some(Instant::now() + flush_each);
-                                }
-                                if branched_entrypoint_inputs_estimated_bytes(&pending_inputs)
-                                    >= max_batch_size
-                                {
-                                    let ready = std::mem::take(&mut pending_inputs);
-                                    pending_flush_at = None;
-                                    record_next_branch_instance_branch_deadline(
-                                        &mut next_branch_deadline,
-                                        Self::dispatch_entrypoint_inputs(
-                                            BranchedBranchDispatchContext {
-                                                runtime_handle: &runtime_handle,
-                                                domain: &domain,
-                                                ingestor: &ingestor,
-                                                graph: &graph,
-                                                template: &template,
-                                                now,
-                                            },
-                                            &mut instances,
-                                            ready,
-                                        )
-                                        .await,
-                                    );
-                                }
-                            }
+                        let flush_policy = template.entrypoint_flush_each;
+                        pending_inputs.push(message);
+                        if pending_flush_at.is_none() {
+                            pending_flush_at =
+                                Some(Instant::now() + flush_policy.interval());
+                        }
+                        if flush_policy.size_boundary_reached(
+                            branched_entrypoint_inputs_estimated_bytes(&pending_inputs),
+                        ) {
+                            let ready = std::mem::take(&mut pending_inputs);
+                            pending_flush_at = None;
+                            record_next_branch_instance_branch_deadline(
+                                &mut next_branch_deadline,
+                                Self::dispatch_entrypoint_inputs(
+                                    BranchedBranchDispatchContext {
+                                        runtime_handle: &runtime_handle,
+                                        domain: &domain,
+                                        ingestor: &ingestor,
+                                        graph: &graph,
+                                        template: &template,
+                                        now,
+                                    },
+                                    &mut instances,
+                                    ready,
+                                )
+                                .await,
+                            );
                         }
                     }
                     changed = shutdown_rx.changed() => {

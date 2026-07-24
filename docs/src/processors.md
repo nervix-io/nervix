@@ -60,6 +60,12 @@ Set-only routes reject `INHERIT`. All required fields must be assigned; omitted 
 finalize as typed nulls. Generated inferencer and WASM values are immutable read sources and are
 visible independently to every route. They never initialize route outputs automatically.
 
+Every flush-based processor route declares `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or
+`FLUSH IMMEDIATE`. During normal processing, `FLUSH IMMEDIATE` starts a system-owned 100 µs minimum
+batching timeout when the route first becomes pending, then sends everything collected in that
+window. It has no size boundary. Shutdown and error handling may force pending data out before the
+normal boundary.
+
 ## Materialized relay state
 
 Normal processors declare ordered node-wide dependencies after their branch declaration:

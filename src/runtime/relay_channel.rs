@@ -5,7 +5,6 @@ use std::{
 
 use async_broadcast::{
     InactiveReceiver, Receiver as AsyncBroadcastReceiver, RecvError, SendError, Sender,
-    TryRecvError,
 };
 use parking_lot::Mutex;
 use tokio::sync::Notify;
@@ -217,14 +216,6 @@ impl<T> Drop for RelayPublishWaiter<T> {
 impl<T: Clone> RelayReceiver<T> {
     pub(crate) async fn recv(&mut self) -> Result<T, RecvError> {
         let result = self.receiver.recv().await;
-        if result.is_ok() {
-            self.inner.maintain_dirty_capacity();
-        }
-        result
-    }
-
-    pub(crate) fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        let result = self.receiver.try_recv();
         if result.is_ok() {
             self.inner.maintain_dirty_capacity();
         }

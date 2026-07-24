@@ -508,18 +508,10 @@ impl IcebergEmitter {
         });
         self.pending_rows = self.pending_rows.saturating_add(rows);
         self.pending_bytes = self.pending_bytes.saturating_add(bytes);
-        let should_flush = match self.flush_policy {
-            RuntimeFlushPolicy::Immediate => true,
-            RuntimeFlushPolicy::Each {
-                interval,
-                max_batch_size,
-            } => {
-                if self.flush_at.is_none() {
-                    self.flush_at = Some(Instant::now() + interval);
-                }
-                self.pending_bytes >= max_batch_size
-            }
-        };
+        if self.flush_at.is_none() {
+            self.flush_at = Some(Instant::now() + self.flush_policy.interval());
+        }
+        let should_flush = self.flush_policy.size_boundary_reached(self.pending_bytes);
         if should_flush {
             self.flush_to_disk().await?;
             self.commit_if_due(false).await

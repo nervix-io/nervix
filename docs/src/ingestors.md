@@ -37,7 +37,13 @@ Every ingestor defines:
 - the delivery mode
 - optional node-level `FILTER WHERE` and route-local `INHERIT` / `SET` / `WHERE`
 
-`FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required after every `TO <relay>`. Every route also requires its own `ON MESSAGE ERROR <policy>`. Each route buffers and handles message-specific construction failures independently. `ON GENERAL ERROR` remains node-level because it handles source or transport failures that are not tied to one message or output route.
+`FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required after every `TO
+<relay>`. During normal processing, `FLUSH IMMEDIATE` holds the first pending input for the
+system-owned minimum timeout of 100 µs so nearby arrivals can share a batch; it has no size
+boundary. Every route also requires its own `ON MESSAGE ERROR <policy>`. Each route buffers and
+handles message-specific construction failures independently. `ON GENERAL ERROR` remains
+node-level because it handles source or transport failures that are not tied to one message or
+output route.
 
 At runtime, the ingestor:
 
@@ -45,7 +51,8 @@ At runtime, the ingestor:
 - optionally executes `FILTER WHERE` against the decoded input batch
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
 - accumulates decoded rows independently for every matching destination and branch group
-- writes each route's buffered rows when that route's flush interval or size boundary fires
+- writes each route's buffered rows when its configured interval or size boundary fires, or when
+  the `FLUSH IMMEDIATE` 100 µs system timeout expires
 
 ## Branch Semantics
 

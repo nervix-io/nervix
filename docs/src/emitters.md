@@ -37,7 +37,13 @@ That means:
 - `branch.field` is unavailable to successful emitter expressions
 - branch identity collapses only after successful external publication
 
-All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`. `FLUSH` means Nervix collects an in-memory Arrow batch before handing it to the external sink. For most emitters the collected batch is encoded and published on the flush boundary. Iceberg additionally supports `COMMIT EACH <duration> MAX SIZE <bytes>`: flush writes local Arrow IPC staging files, and commit appends the staged data to object storage.
+All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`. `FLUSH`
+means Nervix collects an in-memory Arrow batch before handing it to the external sink. During
+normal processing, `FLUSH IMMEDIATE` starts a system-owned 100 µs minimum batching timeout when the
+first pending input arrives; it has no size boundary. For most emitters the collected batch is
+encoded and published on the flush boundary. Iceberg additionally supports `COMMIT EACH <duration>
+MAX SIZE <bytes>`: flush writes local Arrow IPC staging files, and commit appends the staged data to
+object storage.
 
 ## Codec-emitter construction
 

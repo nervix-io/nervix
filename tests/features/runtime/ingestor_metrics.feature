@@ -220,6 +220,58 @@ Feature: Ingestor metrics
       | 1            | REDIS       | REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL | notifications_{{test_id}} |
       | 1            | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
 
+  Scenario Outline: FLUSH IMMEDIATE preserves batching during a rapid input burst
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+          user_id integer
+        );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_immediate_source SCHEMA user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_immediate_source;
+        CREATE CLIENT mqtt_main
+        TYPE MQTT
+        CONFIG {
+          'addr' = 'mqtt://127.0.0.1:1883',
+          'client_id' = 'nervix-cucumber-immediate-flush-{{test_id}}'
+        };
+        CREATE INGESTOR immediate_source
+        FROM MQTT mqtt_main TOPIC immediate_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_immediate_source
+        SET user_id = message.user_id
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        START;
+      """
+    Then within "5s" node "node-1" eventually reports describe ingestor "immediate_source" as "status: running"
+    When 100 JSON messages with user id 42 are rapidly published to "MQTT" input "immediate_notifications_{{test_id}}"
+    Then within "10s" node "node-1" eventually reports describe ingestor "immediate_source" as "messages_total sent relay=notifications physical_node=node-1 total=100"
+    And the last command output metric "batches_total" "sent" relay "notifications" on any physical node has numeric values
+      """
+      total<100
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: DESCRIBE INGESTOR restores metrics for a running domain after process restart
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

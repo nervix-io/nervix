@@ -69,7 +69,9 @@ request can mix those phases.
 - Add a route-local message error policy. Add the required general/global policy for the chosen
   node.
 - Add `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` to every flush-based
-  route. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by the guest.
+  route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
+  one-message batch guarantee. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by
+  the guest.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
 - Preserve connector configuration as the documented string key/value surface. Do not translate
