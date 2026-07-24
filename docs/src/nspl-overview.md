@@ -148,6 +148,14 @@ Every `TO` destination on a flush-based node requires `FLUSH EACH <duration> MAX
 <bytes>` or `FLUSH IMMEDIATE`; there are no hidden defaults. Window processors use `WIDTH` and
 `STEP`, and WASM processors use guest-owned output cadence instead of `FLUSH`.
 
+Treat each required `FLUSH` clause as workload-specific operational tuning. `FLUSH IMMEDIATE`
+minimizes time spent waiting for a batch but increases the number of handoffs and gives up batching
+efficiency. `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` emits when either boundary is reached.
+Shorter intervals and smaller batches generally reduce latency and per-buffer memory at the cost of
+throughput; longer intervals and larger batches generally improve throughput at the cost of
+latency and memory. Choose both values for the route's traffic, downstream behavior, and branch
+cardinality. Values in examples are illustrative, not recommended defaults.
+
 `SET` assignments execute left to right and repeated targets are valid. A later assignment may read
 an earlier value through the bare field or `output.<field>`. `INHERIT ALL`, `INHERIT ALL EXCEPT
 ...`, and explicit `INHERIT field, ...` copy compatible same-named input fields. `UNSET` is not part

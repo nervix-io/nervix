@@ -396,8 +396,8 @@ storekey = "0.5"
 strum = "0.26"
 tempfile = "3"
 thiserror = "2"
-tikv-jemalloc-ctl = { version = "0.6.1", features = ["stats"] }
-tikv-jemallocator = { version = "0.6.1", features = ["stats"] }
+tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
+tikv-jemallocator = { version = "0.7.0", features = ["stats"] }
 tokio = "1"
 tokio-postgres = "0.7"
 # 0.14 adds explicit AWS-LC support; the previous 0.13 line depended on Ring.
@@ -487,7 +487,6 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package."arrow-string"]
 opt-level = 3
-
 [profile.dev.package."roto"]
 opt-level = 3
 [profile.dev.package."cranelift-codegen"]
