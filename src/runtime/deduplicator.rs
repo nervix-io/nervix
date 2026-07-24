@@ -15,7 +15,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tokio::sync::Notify;
 
 use super::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor,
     checked_add_duration_to_timestamp, compile_key_projection_program,
 };
 
@@ -55,6 +55,7 @@ pub(super) fn compile_deduplicator_key_program(
     input_relays: &[Identifier],
     deduplicate_on: &[Expression],
     input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledDeduplicatorKeyProgram, String> {
     if deduplicate_on.is_empty() {
         return Err(format!(
@@ -69,6 +70,7 @@ pub(super) fn compile_deduplicator_key_program(
         input_relays,
         deduplicate_on,
         input_schema,
+        udfs,
     )?;
     Ok(CompiledDeduplicatorKeyProgram {
         key_column_offset: 0,

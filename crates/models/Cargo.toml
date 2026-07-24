@@ -8,6 +8,7 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+blake3 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
 rkyv = { workspace = true }

@@ -1,6 +1,6 @@
 ---
 name: nspl
-description: Design, author, explain, review, and troubleshoot Nervix configurations written in the Nervix Stream Processing Language (NSPL). Use when a user wants to configure domains, schemas, codecs, branches, relays, resources, clients, ingestors, processors, emitters, lookups, subscriptions, lifecycle commands, or complete Nervix streaming graphs. Produce current, valid NSPL and identify required external provisioning.
+description: Design, author, explain, review, and troubleshoot Nervix configurations written in the Nervix Stream Processing Language (NSPL). Use when a user wants to configure domains, schemas, codecs, branches, relays, resources, clients, ingestors, processors, emitters, lookups, Roto UDFs, subscriptions, lifecycle commands, or complete Nervix streaming graphs. Produce current, valid NSPL and identify required external provisioning.
 license: FCL-1.0-ALv2
 ---
 
@@ -22,7 +22,7 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Source and sink: connector kinds, externally provisioned entity names, endpoints, delivery/ACK
   expectations, ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit.
-- Processing: filtering, construction, deduplication, ordering, windows, inference, WASM,
+- Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference, WASM,
   correlation, materialized state, lookup, generation, or repartitioning.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, and session
   subscriptions.
@@ -40,7 +40,8 @@ Build configuration in dependency order:
 1. Create the domain, then select it with `USE <domain>;` as a separate client command.
 2. Register and upload resources before statements that reference their versions or mounted files.
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
-4. Define clients, signaling protocols, virtual hosts/endpoints, and lookup models as needed.
+4. Define clients, signaling protocols, virtual hosts/endpoints, lookup models, and trusted Roto
+   UDFs as needed.
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
 7. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
@@ -58,6 +59,9 @@ request can mix those phases.
   optional destination.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
+- Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only
+  when the body needs the domain clock or randomness. Roto UDFs are trusted native code; keep
+  untrusted custom processing in WASM.
 - Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch; use a reingestor when the graph must repartition or remove branch grouping.
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,

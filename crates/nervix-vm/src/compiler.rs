@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, hash::Hash, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    hash::Hash,
+    sync::Arc,
+};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{DataType, Field, Schema};
@@ -172,6 +176,8 @@ struct Compiler {
     current_error_mask: Option<RegisterRef>,
     allow_header_reads: bool,
     allow_header_writes: bool,
+    udf_signatures: UdfSignatures,
+    injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -230,13 +236,15 @@ pub enum OutputMode {
     ExplicitOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CompileOptions {
     pub optimize_temp_registers: bool,
     pub output_mode: OutputMode,
     pub allow_sensitive_output: bool,
     pub allow_header_reads: bool,
     pub allow_header_writes: bool,
+    pub udf_signatures: UdfSignatures,
+    pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 impl Default for CompileOptions {
@@ -247,11 +255,87 @@ impl Default for CompileOptions {
             allow_sensitive_output: false,
             allow_header_reads: false,
             allow_header_writes: false,
+            udf_signatures: UdfSignatures::default(),
+            injector: None,
         }
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdfParameter {
+    pub data_type: DataType,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdfSignature {
+    pub arguments: Vec<UdfParameter>,
+    pub return_type: DataType,
+    pub return_optional: bool,
+    pub volatile: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UdfSignatures {
+    signatures: BTreeMap<String, UdfSignature>,
+}
+
+impl UdfSignatures {
+    pub fn insert(&mut self, name: impl Into<String>, signature: UdfSignature) {
+        self.signatures
+            .insert(name.into().to_ascii_lowercase(), signature);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&UdfSignature> {
+        self.signatures.get(&name.to_ascii_lowercase())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.signatures.is_empty()
+    }
+}
+
 impl Compiler {
+    fn udf_call_type(
+        &self,
+        name: &str,
+        args: &[SpannedExpr],
+        span: Span,
+    ) -> Result<DataType, CompileError> {
+        let signature = self.udf_signatures.get(name).ok_or_else(|| CompileError {
+            code: "unknown_function",
+            message: format!("unknown function '{name}' with arity {}", args.len()),
+            span,
+        })?;
+        if signature.arguments.len() != args.len() {
+            return Err(CompileError {
+                code: "invalid_function_arity",
+                message: format!(
+                    "UDF '{name}' expects exactly {} arguments, found {}",
+                    signature.arguments.len(),
+                    args.len()
+                ),
+                span,
+            });
+        }
+        for (index, (argument, parameter)) in args.iter().zip(&signature.arguments).enumerate() {
+            let actual = self.infer_expr_type(argument)?;
+            if actual != parameter.data_type {
+                return Err(CompileError {
+                    code: "type_mismatch",
+                    message: format!(
+                        "UDF '{name}' argument {} requires {:?}, found {:?}; cast explicitly",
+                        index + 1,
+                        parameter.data_type,
+                        actual
+                    ),
+                    span: argument.span,
+                });
+            }
+        }
+        Ok(signature.return_type.clone())
+    }
+
     fn header_values_type() -> DataType {
         DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)))
     }
@@ -471,6 +555,8 @@ impl Compiler {
                 current_error_mask: None,
                 allow_header_reads: false,
                 allow_header_writes: false,
+                udf_signatures: UdfSignatures::default(),
+                injector: None,
             },
             Arc::new(Schema::new(input_fields)),
         ))
@@ -583,9 +669,11 @@ impl Compiler {
         })
     }
 
-    fn apply_options(&mut self, options: CompileOptions) {
+    fn apply_options(&mut self, options: &CompileOptions) {
         self.allow_header_reads = options.allow_header_reads;
         self.allow_header_writes = options.allow_header_writes;
+        self.udf_signatures.clone_from(&options.udf_signatures);
+        self.injector.clone_from(&options.injector);
     }
 
     fn clear_expr_cache(&mut self) {
@@ -884,6 +972,9 @@ impl Compiler {
                         span: expr.span,
                     });
                 }
+                if let FunctionName::Udf(name) = function {
+                    return self.udf_call_type(name, args, expr.span);
+                }
                 let arg_types = args
                     .iter()
                     .map(|arg| self.infer_expr_type(arg))
@@ -1070,6 +1161,22 @@ impl Compiler {
                     }
                     return Ok(all_nullable);
                 }
+                if let FunctionName::Udf(name) = function {
+                    let signature = self.udf_signatures.get(name).ok_or_else(|| CompileError {
+                        code: "unknown_function",
+                        message: format!("unknown function '{name}' with arity {}", args.len()),
+                        span: expr.span,
+                    })?;
+                    if signature.return_optional {
+                        return Ok(true);
+                    }
+                    for (argument, parameter) in args.iter().zip(&signature.arguments) {
+                        if !parameter.optional && self.expr_may_be_null(argument)? {
+                            return Ok(true);
+                        }
+                    }
+                    return Ok(false);
+                }
                 for arg in args {
                     if self.expr_may_be_null(arg)? {
                         return Ok(true);
@@ -1196,6 +1303,34 @@ impl Compiler {
     }
 
     fn compile_expr(&mut self, expr: &SpannedExpr) -> Result<RegisterRef, CompileError> {
+        if let Expr::Call {
+            function: FunctionName::Udf(name),
+            args,
+        } = &expr.inner
+        {
+            let signature = self.udf_signatures.get(name).ok_or_else(|| CompileError {
+                code: "unknown_function",
+                message: format!("unknown function '{name}'"),
+                span: expr.span,
+            })?;
+            if !signature.volatile
+                && !args.iter().any(|argument| {
+                    expression_contains_volatile_udf(argument, &self.udf_signatures)
+                })
+            {
+                let cache_key = CachedExpr {
+                    generation: self.expr_cache_generation,
+                    expr: ExprKey::from_expr(expr),
+                };
+                if let Some(reg) = self.expr_cache.get(&cache_key) {
+                    return Ok(*reg);
+                }
+                let reg = self.compile_expr_uncached(expr)?;
+                self.expr_cache.insert(cache_key, reg);
+                return Ok(reg);
+            }
+            return self.compile_expr_uncached(expr);
+        }
         if let Some(semantics) = expr_semantics(expr) {
             let cache_key = if semantics.supports_common_subexpression_elimination() {
                 Some(CachedExpr {
@@ -1406,6 +1541,27 @@ impl Compiler {
                             dst,
                             function: function.clone(),
                             inputs: Vec::new(),
+                            output_type,
+                        },
+                        expr.span,
+                    );
+                    return Ok(dst);
+                }
+                if let FunctionName::Udf(name) = function {
+                    let output_type = self.udf_call_type(name, args, expr.span)?;
+                    let inputs = args
+                        .iter()
+                        .map(|argument| self.compile_expr(argument))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let dst = self.alloc_temp(
+                        RegisterType::from_data_type(&output_type)
+                            .expect("validated UDF output type must be supported"),
+                    );
+                    self.emit(
+                        InstructionKind::Inject {
+                            dst,
+                            function: function.clone(),
+                            inputs,
                             output_type,
                         },
                         expr.span,
@@ -2142,7 +2298,8 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
                 string.ends_with(suffix),
             )))
         }
-        FunctionName::Unknown(_)
+        FunctionName::Udf(_)
+        | FunctionName::Unknown(_)
         | FunctionName::WindowAggregate(_)
         | FunctionName::LookupHashMap
         | FunctionName::ReadHeader
@@ -2291,8 +2448,17 @@ pub fn infer_set_expr_types_for_bindings(
     program: &SpannedNode<Program>,
     bindings: impl IntoIterator<Item = CompileBinding>,
 ) -> Result<Vec<(String, DataType, bool)>, CompileError> {
+    infer_set_expr_types_for_bindings_with_udfs(program, bindings, UdfSignatures::default())
+}
+
+pub fn infer_set_expr_types_for_bindings_with_udfs(
+    program: &SpannedNode<Program>,
+    bindings: impl IntoIterator<Item = CompileBinding>,
+    udf_signatures: UdfSignatures,
+) -> Result<Vec<(String, DataType, bool)>, CompileError> {
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let (mut compiler, _input_schema) = Compiler::new(&bindings)?;
+    compiler.udf_signatures = udf_signatures;
     for namespace in compiler.writable_namespaces.iter().cloned() {
         compiler
             .readable_namespaces
@@ -2350,7 +2516,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
 ) -> Result<CompiledProgram, CompileError> {
     let bindings = bindings.into_iter().collect::<Vec<_>>();
     let (mut compiler, input_schema) = Compiler::new(&bindings)?;
-    compiler.apply_options(options);
+    compiler.apply_options(&options);
     output_sensitivity.validate_against_schema(&output_schema, "output")?;
     let output_field_names = output_schema
         .fields()
@@ -2414,7 +2580,9 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         };
         let compiled = compiler.compile_assignment_expr(expr, field.data_type())?;
         let reg = compiler.alloc_output(compiled.ty);
-        if expr_semantics(expr).is_some_and(|semantics| semantics.can_error) {
+        if expr_semantics(expr).is_some_and(|semantics| semantics.can_error)
+            || expression_contains_udf(expr)
+        {
             compiler.emit_assignment(reg, compiled, fallback, expr.span);
         } else {
             compiler.emit_move(reg, compiled, expr.span);
@@ -2593,6 +2761,7 @@ pub fn compile_program_with_options_for_bindings_with_sensitivity(
         outputs,
         invocations,
         layouts: compiler.layouts,
+        injector: compiler.injector,
     })
 }
 
@@ -2639,6 +2808,68 @@ fn eliminate_redundant_moves(instructions: &mut Vec<Instruction>) {
         if !changed {
             break;
         }
+    }
+}
+
+fn expression_contains_udf(expr: &SpannedExpr) -> bool {
+    match &expr.inner {
+        Expr::Call { function, args } => {
+            matches!(function, FunctionName::Udf(_)) || args.iter().any(expression_contains_udf)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expression_contains_udf(expr),
+        Expr::Binary { left, right, .. } => {
+            expression_contains_udf(left) || expression_contains_udf(right)
+        }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            operand.as_deref().is_some_and(expression_contains_udf)
+                || branches.iter().any(|branch| {
+                    expression_contains_udf(&branch.when) || expression_contains_udf(&branch.result)
+                })
+                || else_result.as_deref().is_some_and(expression_contains_udf)
+        }
+        Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
+    }
+}
+
+fn expression_contains_volatile_udf(expr: &SpannedExpr, signatures: &UdfSignatures) -> bool {
+    match &expr.inner {
+        Expr::Call { function, args } => {
+            matches!(
+                function,
+                FunctionName::Udf(name)
+                    if signatures.get(name).is_some_and(|signature| signature.volatile)
+            ) || args
+                .iter()
+                .any(|argument| expression_contains_volatile_udf(argument, signatures))
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            expression_contains_volatile_udf(expr, signatures)
+        }
+        Expr::Binary { left, right, .. } => {
+            expression_contains_volatile_udf(left, signatures)
+                || expression_contains_volatile_udf(right, signatures)
+        }
+        Expr::Case {
+            operand,
+            branches,
+            else_result,
+        } => {
+            operand
+                .as_deref()
+                .is_some_and(|operand| expression_contains_volatile_udf(operand, signatures))
+                || branches.iter().any(|branch| {
+                    expression_contains_volatile_udf(&branch.when, signatures)
+                        || expression_contains_volatile_udf(&branch.result, signatures)
+                })
+                || else_result
+                    .as_deref()
+                    .is_some_and(|result| expression_contains_volatile_udf(result, signatures))
+        }
+        Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
 }
 
@@ -2713,7 +2944,7 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
         InstructionKind::Builtin { lowering, .. } => {
             builtin_semantics_for_lowering(*lowering).supports_common_subexpression_elimination()
         }
-        InstructionKind::Inject { .. } => true,
+        InstructionKind::Inject { .. } => false,
         InstructionKind::Select { .. } => true,
     }
 }
@@ -2731,8 +2962,8 @@ fn instruction_can_emit_row_errors(kind: &InstructionKind) -> bool {
         | InstructionKind::Literal { .. }
         | InstructionKind::NullLiteral { .. }
         | InstructionKind::Uninitialized { .. }
-        | InstructionKind::Inject { .. }
         | InstructionKind::Select { .. } => false,
+        InstructionKind::Inject { .. } => true,
     }
 }
 
@@ -3032,6 +3263,38 @@ mod tests {
     ) -> Result<CompiledProgram, CompileError> {
         let output_schema = with_output_fields(&input_schema, fields);
         compile_program_with_output(program, input_schema, output_schema)
+    }
+
+    #[test]
+    fn resolves_udfs_only_through_the_udf_namespace() {
+        let schema = schema(vec![Field::new("value", DataType::Int64, true)]);
+        let mut udf_signatures = UdfSignatures::default();
+        udf_signatures.insert(
+            "add_one",
+            UdfSignature {
+                arguments: vec![UdfParameter {
+                    data_type: DataType::Int64,
+                    optional: false,
+                }],
+                return_type: DataType::Int64,
+                return_optional: false,
+                volatile: false,
+            },
+        );
+        let options = CompileOptions {
+            udf_signatures,
+            ..CompileOptions::default()
+        };
+        let qualified = parse_program("SET input.value = udf::add_one(input.value);")
+            .expect("qualified call must parse");
+        compile_program_with_options(&qualified, schema.clone(), options.clone())
+            .expect("qualified call must resolve");
+
+        let bare = parse_program("SET input.value = add_one(input.value);")
+            .expect("bare call remains syntactically valid");
+        let error = compile_program_with_options(&bare, schema, options)
+            .expect_err("bare call must not resolve against the UDF catalog");
+        assert_eq!(error.code, "unknown_function");
     }
 
     #[test]

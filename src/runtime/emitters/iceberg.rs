@@ -249,6 +249,7 @@ impl IcebergEmitter {
             &context.emitter,
             values,
             input_schema.arrow_schema(),
+            context.udfs.as_ref(),
         )
         .map_err(|error| {
             Report::new(IcebergEmitterError::CompileValues).attach_printable(error.to_string())

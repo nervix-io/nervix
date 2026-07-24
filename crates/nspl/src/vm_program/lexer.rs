@@ -32,6 +32,7 @@ pub enum Token {
     Then,
     Else,
     End,
+    Udf,
     Identifier(String),
     Integer(i64),
     Float(f64),
@@ -41,6 +42,7 @@ pub enum Token {
     LParen,
     RParen,
     Comma,
+    DoubleColon,
     Dot,
     Semicolon,
     Eq,
@@ -79,6 +81,7 @@ fn classify_identifier(raw: &str) -> Token {
         "THEN" => Token::Then,
         "ELSE" => Token::Else,
         "END" => Token::End,
+        "UDF" => Token::Udf,
         _ => Token::Identifier(raw.to_string()),
     }
 }
@@ -100,6 +103,57 @@ fn whitespace<'src>() -> impl Parser<'src, &'src str, (), extra::Err<LexError<'s
 
 fn string_literal<'src>() -> impl Parser<'src, &'src str, String, extra::Err<LexError<'src>>> + Clone
 {
+    let dollar = custom(|input| {
+        let start = input.cursor();
+        if input.peek() != Some('$') {
+            return Err(Rich::custom(
+                input.span_since(&start),
+                "expected dollar-quoted string",
+            ));
+        }
+        input.skip();
+
+        let mut tag = String::new();
+        loop {
+            match input.next() {
+                Some('$') => break,
+                Some(ch) if ch.is_ascii_alphanumeric() || ch == '_' => tag.push(ch),
+                Some(_) => {
+                    return Err(Rich::custom(
+                        input.span_since(&start),
+                        "dollar-quote tag must contain only letters, digits, or underscores",
+                    ));
+                }
+                None => {
+                    return Err(Rich::custom(
+                        input.span_since(&start),
+                        "unterminated dollar-quote delimiter",
+                    ));
+                }
+            }
+        }
+
+        let delimiter = format!("${tag}$");
+        let mut value = String::new();
+        loop {
+            match input.next() {
+                Some(ch) => {
+                    value.push(ch);
+                    if value.ends_with(&delimiter) {
+                        value.truncate(value.len() - delimiter.len());
+                        return Ok(value);
+                    }
+                }
+                None => {
+                    return Err(Rich::custom(
+                        input.span_since(&start),
+                        format!("unterminated dollar-quoted string; expected {delimiter}"),
+                    ));
+                }
+            }
+        }
+    });
+
     let escape = just('\\').ignore_then(choice((
         just('\\'),
         just('\''),
@@ -131,7 +185,7 @@ fn string_literal<'src>() -> impl Parser<'src, &'src str, String, extra::Err<Lex
         )
         .then_ignore(just('"'));
 
-    choice((single, double))
+    choice((dollar, single, double))
 }
 
 fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
@@ -169,6 +223,7 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
         });
 
     let punctuation = choice((
+        just("::").to(Token::DoubleColon),
         just("!=").to(Token::NotEq),
         just(">=").to(Token::GtEq),
         just("<=").to(Token::LtEq),
@@ -227,6 +282,35 @@ mod tests {
                 Token::Else,
                 Token::End,
             ]
+        );
+    }
+
+    #[test]
+    fn lexes_the_udf_qualifier_as_shared_language_tokens() {
+        let tokens = lex("UdF::mask").expect("UDF qualifier must lex");
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::Udf,
+                Token::DoubleColon,
+                Token::Identifier("mask".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_verbatim_dollar_quoted_expression_strings() {
+        let tokens = lex("$value$line one\n\"line two\"$value$")
+            .expect("dollar-quoted expression string should lex");
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec![Token::String("line one\n\"line two\"".to_string())]
         );
     }
 }

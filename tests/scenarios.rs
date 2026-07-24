@@ -2326,6 +2326,13 @@ fn resource_directory_ca_pem(world: &ScenarioWorld, placeholder: &str) -> String
 }
 
 fn nspl_statements(input: &str) -> Vec<String> {
+    if let Ok(statements) = nervix_nspl::client_statement::parse_client_statement_sources(input) {
+        return statements
+            .into_iter()
+            .map(|statement| format!("{};", statement.source))
+            .collect();
+    }
+
     input
         .split(';')
         .map(str::trim)

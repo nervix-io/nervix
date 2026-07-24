@@ -600,6 +600,16 @@ fn resolve_expression(
                 .map(|argument| resolve_expression(argument, resolve_field))
                 .collect::<Result<Vec<_>, String>>()?,
         },
+        ModelExpression::UdfCall {
+            function,
+            arguments,
+        } => ModelExpression::UdfCall {
+            function: function.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| resolve_expression(argument, resolve_field))
+                .collect::<Result<Vec<_>, String>>()?,
+        },
         ModelExpression::Array(items) => ModelExpression::Array(
             items
                 .iter()
@@ -819,6 +829,16 @@ fn lower_expression_with_span(
             arguments,
         } => Expr::Call {
             function: FunctionName::parse(function.as_str()),
+            args: arguments
+                .iter()
+                .map(|argument| lower_expression_with_span(argument, bare_read_namespace, span))
+                .collect::<Result<Vec<_>, String>>()?,
+        },
+        ModelExpression::UdfCall {
+            function,
+            arguments,
+        } => Expr::Call {
+            function: FunctionName::Udf(function.as_str().to_string()),
             args: arguments
                 .iter()
                 .map(|argument| lower_expression_with_span(argument, bare_read_namespace, span))

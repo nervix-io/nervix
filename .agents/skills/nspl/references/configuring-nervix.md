@@ -23,6 +23,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Domain timing and lifecycle | `Domains And Time` |
 | Internal/wire schemas, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` |
 | Expressions, casts, and built-in functions | `Filter-Map Functions` |
+| Trusted Roto user-defined expression functions | `User-Defined Functions` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
@@ -49,7 +50,7 @@ Capture these decisions before choosing syntax:
 | Runtime record | What exact internal type and nullability does each field have? |
 | Isolation | Which fields form the branch key? How long should inactive branches live? Is an instance cap required? |
 | Source | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? |
-| Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, or enriched? |
+| Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
 | Output | Which connector/sink, payload shape, codec or direct mapping, headers, and sensitivity leaks are required? |
 | Operations | What flush size/cadence, error behavior, TLS resources, metrics, and subscriptions are required? |
@@ -74,7 +75,7 @@ Within the graph transaction, declare dependencies before consumers:
 1. internal and branch-key schemas;
 2. named branches;
 3. wire schemas and codecs;
-4. clients, protocols, vhosts/endpoints, and hash maps;
+4. clients, protocols, vhosts/endpoints, hash maps, and UDF declarations;
 5. relays, including materialized relays;
 6. ingestors;
 7. branch-preserving processors, generators, and reingestors;
@@ -94,6 +95,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Produce width/step aggregates | `WINDOW PROCESSOR` |
 | Run an ONNX model | `INFERENCER` |
 | Run custom guest processing | `WASM PROCESSOR` |
+| Reuse trusted batch-column logic inside expressions | `UDF` |
 | Match records from left and right relay sets | `CORRELATOR` |
 | Change or remove branch grouping | `REINGESTOR` |
 | Produce timed records from one materialized relay | `GENERATOR` |
@@ -116,6 +118,9 @@ relay. Do not use them to scan across branches.
   `left`, `right`, `relay_state`, `metadata`, `error`, and `partial_output` availability.
 - Every `IF` condition and searched `CASE WHEN` condition is Boolean; simple `CASE` match values
   have the operand's exact type; all result arms have one exact type.
+- Every UDF call uses `udf::<name>(...)` and has the declaration's exact arity and argument types.
+  UDFs using the domain clock or randomness declare `VOLATILE`; untrusted third-party code remains
+  in a WASM processor.
 - Every flush-based route has a flush policy and every route has a message error policy.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, and validates that exact range against its reusable buffer.
@@ -135,6 +140,7 @@ Choose checks relevant to the configured graph:
 - `DESCRIBE INGESTOR`, processor-specific `DESCRIBE`, and `DESCRIBE EMITTER` inspect runtime state
   and edge metrics.
 - `DESCRIBE RESOURCE` confirms uploads and versions.
+- `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.

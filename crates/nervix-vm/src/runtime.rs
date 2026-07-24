@@ -601,6 +601,44 @@ pub trait FunctionInjector: Send + Sync + fmt::Debug {
         row_count: usize,
         span: Span,
     ) -> Result<TypedArray, RuntimeError>;
+
+    fn inject_with_errors(
+        &self,
+        function: &FunctionName,
+        arguments: &[TypedArray],
+        row_count: usize,
+        span: Span,
+    ) -> Result<InjectedResult, RuntimeError> {
+        self.inject(function, arguments, row_count, span)
+            .map(InjectedResult::success)
+    }
+
+    fn inject_with_context(
+        &self,
+        function: &FunctionName,
+        arguments: &[TypedArray],
+        row_count: usize,
+        span: Span,
+        _now: Timestamp,
+        _prior_error_rows: &[bool],
+    ) -> Result<InjectedResult, RuntimeError> {
+        self.inject_with_errors(function, arguments, row_count, span)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct InjectedResult {
+    pub output: TypedArray,
+    pub side_errors: Vec<(usize, SideError)>,
+}
+
+impl InjectedResult {
+    pub fn success(output: TypedArray) -> Self {
+        Self {
+            output,
+            side_errors: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -698,7 +736,13 @@ fn execute_program_with_selection_in_context_sync(
         let baseline = instruction
             .error_mask
             .map(|_| row_errors.iter().map(Vec::len).collect::<Vec<_>>());
-        instruction.execute(&mut registers, batch.row_count(), &mut row_errors, context)?;
+        instruction.execute(
+            &mut registers,
+            batch.row_count(),
+            &mut row_errors,
+            context,
+            program.injector.as_ref(),
+        )?;
         if let (Some(mask_reg), Some(baseline)) = (instruction.error_mask, baseline) {
             let mask = registers.boolean(mask_reg)?;
             for (row, previous_len) in baseline.into_iter().enumerate() {
@@ -777,6 +821,7 @@ impl Instruction {
         row_count: usize,
         row_errors: &mut [Vec<SideError>],
         context: &ExecutionContext,
+        default_injector: Option<&triomphe::Arc<Box<dyn FunctionInjector>>>,
     ) -> Result<(), RuntimeError> {
         match &self.kind {
             InstructionKind::Move { dst, input } => {
@@ -861,16 +906,41 @@ impl Instruction {
                 inputs,
                 output_type,
             } => {
-                let injector = context.injector.as_ref().ok_or_else(|| {
-                    RuntimeError::MissingFunctionInjector {
-                        function: function.as_str().to_string(),
-                    }
-                })?;
                 let arguments = inputs
                     .iter()
                     .map(|input| registers.read_array(*input))
                     .collect::<Result<Vec<_>, _>>()?;
-                let output = injector.inject(function, &arguments, row_count, self.span)?;
+                let prior_error_rows = row_errors
+                    .iter()
+                    .map(|errors| !errors.is_empty())
+                    .collect::<Vec<_>>();
+                let inject = |injector: &triomphe::Arc<Box<dyn FunctionInjector>>| {
+                    injector.inject_with_context(
+                        function,
+                        &arguments,
+                        row_count,
+                        self.span,
+                        context.now,
+                        &prior_error_rows,
+                    )
+                };
+                let injected = if let Some(injector) = context.injector.as_ref() {
+                    match inject(injector) {
+                        Err(RuntimeError::MissingFunctionInjector { .. })
+                            if default_injector.is_some() =>
+                        {
+                            inject(default_injector.expect("checked above"))?
+                        }
+                        result => result?,
+                    }
+                } else if let Some(injector) = default_injector {
+                    inject(injector)?
+                } else {
+                    return Err(RuntimeError::MissingFunctionInjector {
+                        function: function.as_str().to_string(),
+                    });
+                };
+                let output = injected.output;
                 if output.data_type() != *output_type || output.len() != row_count {
                     return Err(RuntimeError::InvalidInjectedResult {
                         function: function.as_str().to_string(),
@@ -879,6 +949,16 @@ impl Instruction {
                         expected_rows: row_count,
                         actual_rows: output.len(),
                     });
+                }
+                for (row, side_error) in injected.side_errors {
+                    if row >= row_count {
+                        return Err(RuntimeError::InvalidInjectedSideError {
+                            function: function.as_str().to_string(),
+                            row,
+                            row_count,
+                        });
+                    }
+                    row_errors[row].push(side_error);
                 }
                 registers.set_array(*dst, output)
             }
@@ -5448,6 +5528,7 @@ mod tests {
                     ..RegisterLayout::default()
                 },
             },
+            injector: None,
         };
         let batch = TypedBatch::try_new(
             schema,
@@ -5518,6 +5599,7 @@ mod tests {
                     ..RegisterLayout::default()
                 },
             },
+            injector: None,
         };
         let batch = TypedBatch::try_new(
             schema,

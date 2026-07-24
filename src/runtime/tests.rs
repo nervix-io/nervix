@@ -128,6 +128,7 @@ fn compile_window_aggregate_for_test(
         &[input_relay],
         &output_relay,
         &relay_schemas,
+        None,
     )
     .expect("window aggregate should compile")
 }
@@ -3829,6 +3830,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             codecs: HashMap::default(),
             signaling_protocols: HashMap::default(),
             lookups: HashMap::default(),
+            udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -3901,6 +3903,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 codecs: HashMap::default(),
                 signaling_protocols: HashMap::default(),
                 lookups: HashMap::default(),
+                udfs: nervix_roto::UdfExecutor::default(),
                 endpoint_routes: HashMap::default(),
                 tasks: Vec::new(),
             },
@@ -3958,6 +3961,7 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             codecs: HashMap::default(),
             signaling_protocols: HashMap::default(),
             lookups: HashMap::default(),
+            udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -4371,7 +4375,8 @@ fn empty_branch_assignments_preserve_incoming_key() {
             None,
             Some(&branch_key),
             &[],
-            &identifier("reingestor")
+            &identifier("reingestor"),
+            None,
         )
         .expect("preserved branch should resolve"),
         super::ConcreteBranch::Key(concrete_branch_key([(
@@ -4467,6 +4472,7 @@ async fn message_error_set_uses_vm_functions_and_captured_snapshots() {
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("message-error SET should compile through the VM");
@@ -4589,6 +4595,7 @@ async fn correlator_output_reads_branch_and_declared_materialized_state() {
             current_branching: std::slice::from_ref(&branch),
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
+            udfs: None,
         },
     }
     .compile()
@@ -6511,6 +6518,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             codecs: HashMap::default(),
             signaling_protocols: HashMap::default(),
             lookups: HashMap::default(),
+            udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -7005,6 +7013,7 @@ async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("filter-map should compile")
@@ -7101,6 +7110,7 @@ async fn filter_map_can_read_branch_namespace() {
             current_branching: &[identifier("tenant")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("filter-map should compile")
@@ -7202,6 +7212,7 @@ async fn projection_can_read_branch_namespace() {
             current_branching: &[identifier("tenant")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("filter-map should compile")
@@ -7297,6 +7308,7 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("array inheritance should compile")
@@ -7362,6 +7374,7 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("ordered SET should compile")
@@ -7461,6 +7474,7 @@ fn filter_map_rejects_branch_namespace_without_branch_schema() {
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect_err("branch namespace must require a branch schema");
@@ -7497,6 +7511,7 @@ fn filter_map_rejects_missing_branch_key() {
             current_branching: &[identifier("region")],
             current_branch_schema: Some(&branch_schema),
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect_err("branch namespace must reject missing keys");
@@ -7552,6 +7567,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("emitter filter-map must compile")
@@ -7573,6 +7589,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect_err("ZeroMQ emitters must reject write_header");
@@ -7762,6 +7779,7 @@ async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("filter-map must compile")
@@ -7854,6 +7872,7 @@ async fn reorderer_key_program_evaluates_direct_u32_field() {
         &[identifier("incoming_notifications")],
         &[expression("input.sequence")],
         input_schema.arrow_schema(),
+        None,
     )
     .expect("reorderer key program should compile");
     let records = vec![
@@ -7920,6 +7939,7 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
         &[identifier("incoming_notifications")],
         &[expression("input.sequence")],
         input_schema.arrow_schema(),
+        None,
     )
     .expect("reorderer key program should compile");
     let records = (0..=super::VM_SPAWN_BLOCKING_ROW_THRESHOLD)
@@ -8018,6 +8038,7 @@ async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("filter-map must compile")
@@ -8114,6 +8135,7 @@ async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("filter-map must compile")
@@ -8228,6 +8250,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("header filter-map must compile")
@@ -8287,6 +8310,7 @@ async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() 
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("top FILTER WHERE must compile")
@@ -8321,6 +8345,7 @@ async fn finalized_output_filter_reads_constructed_output_values() {
             current_branching: &[],
             current_branch_schema: None,
             current_branch_sensitivity: None,
+            udfs: None,
         },
     )
     .expect("finalized output filter must compile")
@@ -8406,6 +8431,7 @@ async fn generator_set_program_can_project_from_materialized_relay_namespace() {
         super::VmSchemaSensitivity::default(),
         source_schema.arrow_schema(),
         None,
+        None,
     )
     .expect("generator set program must compile");
 
@@ -8484,6 +8510,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             codecs: HashMap::default(),
             signaling_protocols: HashMap::default(),
             lookups: HashMap::default(),
+            udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
             tasks: Vec::new(),
         },

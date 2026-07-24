@@ -191,16 +191,19 @@ pub fn create_inferencer_parser<'src>()
         .then_ignore(kw(Identifier::From))
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
+        .boxed()
         .then_ignore(kw(Identifier::Using))
         .then_ignore(kw(Identifier::Resource))
         .then(resource_ref())
         .then(kw(Identifier::Version).ignore_then(u64_value()).or_not())
         .then_ignore(kw(Identifier::File))
         .then(string_lit())
+        .boxed()
         .then(input_mappings())
         .then(output_schema())
         .then(branch_selection())
         .then(materialized_state_dependencies())
+        .boxed()
         .then(flushed_processor_outputs())
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(|value| {
@@ -233,6 +236,7 @@ pub fn create_inferencer_parser<'src>()
                 if_not_exists,
             )
         })
+        .boxed()
 }
 
 pub fn parse_create_inferencer_tokens(

@@ -4,17 +4,17 @@ use nervix_models::{DropModel, DropNode, ModelKind};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, client_ref, codec_ref, correlator_ref,
+        ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref, correlator_ref,
         current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref,
         ingestor_ref, into_parse_error, junction_ref, kw, lex_input, node_id, reingestor_ref,
-        relay_ref, reorderer_ref, schema_ref, suggestions_from_errors, tok, vhost_ref,
+        relay_ref, reorderer_ref, schema_ref, suggestions_from_errors, tok, udf_ref, vhost_ref,
         wire_schema_ref,
     },
 };
 
 pub fn drop_parser<'src>()
 -> impl Parser<'src, &'src [Token], DropModel, extra::Err<ParseError<'src>>> + Clone {
-    let target = choice((
+    let target = boxed_choice!(
         kw(Identifier::Schema)
             .ignore_then(schema_ref())
             .map(|name| DropModel {
@@ -106,7 +106,13 @@ pub fn drop_parser<'src>()
                 kind: ModelKind::Emitter,
                 name,
             }),
-    ));
+        kw(Identifier::Udf)
+            .ignore_then(udf_ref())
+            .map(|name| DropModel {
+                kind: ModelKind::Udf,
+                name,
+            }),
+    );
 
     kw(Identifier::Drop)
         .ignore_then(target)
@@ -236,5 +242,6 @@ mod tests {
         assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
+        assert!(suggestions.contains(&"UDF".to_string()));
     }
 }

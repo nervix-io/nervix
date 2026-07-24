@@ -14,6 +14,15 @@ use sorted_vec::SortedSet;
 
 use crate::lexer::{Identifier, SpannedToken, Token, Word, lex};
 
+macro_rules! boxed_choice {
+    ($($parser:expr),+ $(,)?) => {
+        chumsky::Parser::boxed(chumsky::primitive::choice(vec![
+            $(chumsky::Parser::boxed($parser)),+
+        ]))
+    };
+}
+pub(crate) use boxed_choice;
+
 pub type ParseError<'src> = Rich<'src, Token>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +51,7 @@ pub fn kw<'src>(
         Token::Word(Word::KnownWord { iden: got, .. }) if got == iden => ()
     }
     .labelled(label)
+    .boxed()
 }
 
 pub fn kw_phrase2<'src>(
@@ -51,7 +61,7 @@ pub fn kw_phrase2<'src>(
     let first_label: &'static str = first.into();
     let second_label: &'static str = second.into();
     let label = format!("{first_label} {second_label}");
-    kw(first).ignore_then(kw(second)).labelled(label)
+    kw(first).ignore_then(kw(second)).labelled(label).boxed()
 }
 
 pub fn kw_phrase3<'src>(
@@ -67,6 +77,7 @@ pub fn kw_phrase3<'src>(
         .ignore_then(kw(second))
         .ignore_then(kw(third))
         .labelled(label)
+        .boxed()
 }
 
 pub fn if_not_exists_clause<'src>()
@@ -74,6 +85,7 @@ pub fn if_not_exists_clause<'src>()
     kw_phrase3(Identifier::If, Identifier::Not, Identifier::Exists)
         .or_not()
         .map(|present| present.is_some())
+        .boxed()
 }
 
 pub fn tok<'src>(
@@ -88,6 +100,7 @@ pub fn tok<'src>(
         Token::RParen => ")",
         Token::Comma => ",",
         Token::Semicolon => ";",
+        Token::DoubleColon => "::",
         Token::Colon => ":",
         Token::Dot => ".",
         Token::Hyphen => "-",
@@ -106,7 +119,7 @@ pub fn tok<'src>(
         Token::NumberLiteral(_) => "number",
     };
 
-    just(token).ignored().labelled(label)
+    just(token).ignored().labelled(label).boxed()
 }
 
 pub fn ack_mode<'src>()
@@ -115,6 +128,7 @@ pub fn ack_mode<'src>()
         kw(Identifier::Attached).to(AckMode::Attached),
         kw(Identifier::Detached).to(AckMode::Detached),
     ))
+    .boxed()
 }
 
 pub fn word_raw<'src>()
@@ -123,14 +137,17 @@ pub fn word_raw<'src>()
         Token::Word(Word::KnownWord { raw, .. }) => raw,
         Token::Word(Word::UnknownWord(raw)) => raw,
     }
+    .boxed()
 }
 
 pub fn u64_value<'src>()
 -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
-    choice((select! { Token::NumberLiteral(v) => v }, word_raw())).try_map(|raw, span| {
-        raw.parse::<u64>()
-            .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
-    })
+    choice((select! { Token::NumberLiteral(v) => v }, word_raw()))
+        .try_map(|raw, span| {
+            raw.parse::<u64>()
+                .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
+        })
+        .boxed()
 }
 
 pub fn schema_ref<'src>()
@@ -145,6 +162,7 @@ pub fn branch_definition_header<'src>()
         .ignore_then(schema_ref())
         .then_ignore(kw(Identifier::Ttl))
         .then(duration_lit())
+        .boxed()
 }
 
 pub fn branch_selection<'src>()
@@ -154,7 +172,7 @@ pub fn branch_selection<'src>()
         .map(BranchSelection::branched_by);
     let unbranched = kw(Identifier::Unbranched).to(BranchSelection::unbranched());
 
-    choice((branched, unbranched))
+    choice((branched, unbranched)).boxed()
 }
 
 pub fn output_branch<'src>()
@@ -186,7 +204,7 @@ pub fn output_branch<'src>()
         });
     let unbranched = kw(Identifier::Unbranched).to(OutputBranch::Unbranched);
 
-    choice((branched, unbranched))
+    choice((branched, unbranched)).boxed()
 }
 
 fn materialized_default_assignments<'src>()
@@ -220,6 +238,7 @@ fn materialized_default_assignments<'src>()
             }
             Ok(construction.assignments)
         })
+        .boxed()
 }
 
 pub fn materialized_state_dependency<'src>()
@@ -239,6 +258,7 @@ pub fn materialized_state_dependency<'src>()
             materialized_default_assignments().map(MaterializedStatePolicy::Default),
         )))
         .map(|(relay, policy)| MaterializedStateDependency { relay, policy })
+        .boxed()
 }
 
 pub fn materialized_state_dependencies<'src>()
@@ -247,6 +267,7 @@ pub fn materialized_state_dependencies<'src>()
     materialized_state_dependency()
         .repeated()
         .collect::<Vec<_>>()
+        .boxed()
 }
 
 pub fn domain_name<'src>()
@@ -407,6 +428,7 @@ pub fn signaling_protocol_clause<'src>()
         Identifier::Protocol,
     )
     .ignore_then(signaling_protocol_ref())
+    .boxed()
 }
 
 pub fn generator_name<'src>()
@@ -432,6 +454,16 @@ pub fn wasm_processor_name<'src>()
 pub fn wasm_processor_ref<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
     parse_identifier("ref:wasm_processor")
+}
+
+pub fn udf_name<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("udf_name")
+}
+
+pub fn udf_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:udf")
 }
 
 pub fn inferencer_ref<'src>()
@@ -548,6 +580,7 @@ pub fn string_lit<'src>()
         Token::StringLiteral(value) => value,
     }
     .labelled("string_literal")
+    .boxed()
 }
 
 pub fn duration_lit<'src>()
@@ -559,6 +592,7 @@ pub fn duration_lit<'src>()
         word_raw(),
     ))
     .labelled("duration_literal")
+    .boxed()
 }
 
 pub fn byte_size_lit<'src>()
@@ -576,11 +610,14 @@ pub fn byte_size_lit<'src>()
             .map_err(|error| Rich::custom(span, format!("invalid byte_size_literal: {error}")))
     })
     .labelled("byte_size_literal")
+    .boxed()
 }
 
 pub fn max_batch_size_clause<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    kw_phrase3(Identifier::Max, Identifier::Batch, Identifier::Size).ignore_then(byte_size_lit())
+    kw_phrase3(Identifier::Max, Identifier::Batch, Identifier::Size)
+        .ignore_then(byte_size_lit())
+        .boxed()
 }
 
 pub fn flush_each<'src>()
@@ -593,6 +630,7 @@ pub fn flush_each<'src>()
             .map(|(flush_each, max_batch_size)| (flush_each, Some(max_batch_size))),
         kw_phrase2(Identifier::Flush, Identifier::Immediate).to(("IMMEDIATE".to_string(), None)),
     ))
+    .boxed()
 }
 
 pub fn message_error_policy<'src>()
@@ -626,6 +664,7 @@ pub fn message_error_policy<'src>()
                     })
                 }),
         )))
+        .boxed()
 }
 
 pub fn general_error_policy<'src>()
@@ -637,6 +676,7 @@ pub fn general_error_policy<'src>()
             kw(Identifier::Ignore).to(GeneralErrorPolicy::Ignore),
             kw(Identifier::Log).to(GeneralErrorPolicy::Log),
         )))
+        .boxed()
 }
 
 fn route_construction_head<'src>()
@@ -647,6 +687,7 @@ fn route_construction_head<'src>()
         kw(Identifier::Where).to(Identifier::Where),
         kw(Identifier::Invoke).to(Identifier::Invoke),
     ))
+    .boxed()
 }
 
 fn processor_output_boundary_token(token: &Token) -> bool {
@@ -720,6 +761,7 @@ pub fn route_construction<'src>()
             crate::semantic_program::parse_route_construction(&source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
+        .boxed()
 }
 
 fn explicit_route_construction<'src>()
@@ -752,6 +794,7 @@ fn explicit_route_construction<'src>()
                 Ok(construction)
             }
         })
+        .boxed()
 }
 
 fn source_where_clause_with_boundary<'src>(
@@ -770,6 +813,7 @@ fn source_where_clause_with_boundary<'src>(
             crate::parse_expression(&source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
+        .boxed()
 }
 
 pub fn from_relay_clause_with_boundary<'src>(
@@ -792,6 +836,7 @@ pub fn from_relay_clause_with_boundary<'src>(
                 .collect();
             (relay, from_where)
         })
+        .boxed()
 }
 
 pub fn from_relay_clause<'src>() -> impl Parser<
@@ -818,6 +863,7 @@ pub fn from_relay_clauses<'src>()
             }
             ProcessorInputs::new(from_relays, from_where)
         })
+        .boxed()
 }
 
 pub fn filter_where_clause<'src>()
@@ -836,6 +882,7 @@ pub fn filter_where_clause<'src>()
             crate::parse_expression(&source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
+        .boxed()
 }
 
 fn explicit_processor_output_route<'src>()
@@ -853,6 +900,7 @@ fn explicit_processor_output_route<'src>()
                 branch: None,
             },
         )
+        .boxed()
 }
 
 fn flushed_processor_output_route<'src>()
@@ -876,6 +924,7 @@ fn flushed_processor_output_route<'src>()
                 }
             },
         )
+        .boxed()
 }
 
 fn flushed_explicit_processor_output_route<'src>()
@@ -899,6 +948,7 @@ fn flushed_explicit_processor_output_route<'src>()
                 }
             },
         )
+        .boxed()
 }
 
 fn flushed_ingestor_output_route<'src>()
@@ -926,6 +976,7 @@ fn flushed_ingestor_output_route<'src>()
                 }
             },
         )
+        .boxed()
 }
 
 pub fn explicit_processor_outputs<'src>()
@@ -935,6 +986,7 @@ pub fn explicit_processor_outputs<'src>()
         .at_least(1)
         .collect::<Vec<_>>()
         .map(ProcessorOutputs::new)
+        .boxed()
 }
 
 pub fn flushed_processor_outputs<'src>()
@@ -944,6 +996,7 @@ pub fn flushed_processor_outputs<'src>()
         .at_least(1)
         .collect::<Vec<_>>()
         .map(ProcessorOutputs::new)
+        .boxed()
 }
 
 pub fn flushed_explicit_processor_outputs<'src>()
@@ -953,6 +1006,7 @@ pub fn flushed_explicit_processor_outputs<'src>()
         .at_least(1)
         .collect::<Vec<_>>()
         .map(ProcessorOutputs::new)
+        .boxed()
 }
 
 pub fn flushed_ingestor_outputs<'src>()
@@ -962,6 +1016,7 @@ pub fn flushed_ingestor_outputs<'src>()
         .at_least(1)
         .collect::<Vec<_>>()
         .map(ProcessorOutputs::new)
+        .boxed()
 }
 
 pub fn hostname_lit<'src>()
@@ -1017,6 +1072,7 @@ fn parse_identifier<'src>(
                 .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
         })
         .labelled(label)
+        .boxed()
 }
 
 fn parse_identifier_excluding_reserved<'src>(
@@ -1038,6 +1094,7 @@ fn parse_identifier_excluding_reserved<'src>(
                 .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
         })
         .labelled(label)
+        .boxed()
 }
 
 fn parse_domain<'src>(
@@ -1049,6 +1106,7 @@ fn parse_domain<'src>(
                 .map_err(|err| Rich::custom(span, format!("invalid {label}: {err}")))
         })
         .labelled(label)
+        .boxed()
 }
 
 pub fn lex_input(
@@ -1238,6 +1296,7 @@ fn format_found_token(token: &Token) -> String {
         Token::RBracket => "]".to_string(),
         Token::Comma => ",".to_string(),
         Token::Semicolon => ";".to_string(),
+        Token::DoubleColon => "::".to_string(),
         Token::Colon => ":".to_string(),
         Token::Dot => ".".to_string(),
         Token::Hyphen => "-".to_string(),
@@ -1281,6 +1340,7 @@ fn vm_program_token_to_source(token: &Token) -> String {
         Token::RBracket => "]".to_string(),
         Token::Comma => ",".to_string(),
         Token::Semicolon => ";".to_string(),
+        Token::DoubleColon => "::".to_string(),
         Token::Colon => ":".to_string(),
         Token::Dot => ".".to_string(),
         Token::Hyphen => "-".to_string(),

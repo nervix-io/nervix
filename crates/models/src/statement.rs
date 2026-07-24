@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, IntoStaticStr};
 use thiserror::Error;
 
-use crate::{CreateSchema, CreateWireSchemaStmt, Domain, Identifier, ParseAsType, Timestamp};
+use crate::{
+    CreateSchema, CreateUdf, CreateWireSchemaStmt, Domain, Identifier, ParseAsType, Timestamp,
+};
 
 pub type DomainId = Domain;
 
@@ -37,8 +39,10 @@ pub enum Statement {
     DescribeEmitter(DescribeEmitter),
     DescribeWindowProcessor(DescribeWindowProcessor),
     DescribeWasmProcessor(DescribeWasmProcessor),
+    DescribeUdf(DescribeUdf),
     LookupQuery(LookupQuery),
     ShowCreate(ShowCreate),
+    ShowUdfs(ShowUdfs),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowClusterStatus(ShowClusterStatus),
 }
@@ -156,6 +160,8 @@ pub enum ModelKind {
     WindowProcessor,
     #[strum(props(completion_label = "ref:emitter"))]
     Emitter,
+    #[strum(props(completion_label = "ref:udf"))]
+    Udf,
 }
 
 impl ModelKind {
@@ -181,6 +187,9 @@ pub struct ShowCreate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShowClusterStatus;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShowUdfs;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShowRelayMaterializedState {
@@ -399,6 +408,11 @@ pub struct DescribeWasmProcessor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribeUdf {
+    pub name: Identifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupQuery {
     pub name: Identifier,
     pub key: SubscriptionLiteral,
@@ -464,6 +478,7 @@ pub enum Model {
     Reorderer(CreateReorderer),
     WindowProcessor(CreateWindowProcessor),
     Emitter(CreateEmitter),
+    Udf(CreateUdf),
 }
 
 impl Model {
@@ -510,6 +525,7 @@ impl Model {
             Self::Reorderer(_) => ModelKind::Reorderer,
             Self::WindowProcessor(_) => ModelKind::WindowProcessor,
             Self::Emitter(_) => ModelKind::Emitter,
+            Self::Udf(_) => ModelKind::Udf,
         }
     }
 
@@ -560,6 +576,7 @@ impl Model {
             Self::Reorderer(v) => &v.name,
             Self::WindowProcessor(v) => &v.name,
             Self::Emitter(v) => &v.name,
+            Self::Udf(v) => &v.name,
         }
     }
 }
@@ -2248,6 +2265,7 @@ mod tests {
             (ModelKind::Junction, "ref:junction", "junction"),
             (ModelKind::Deduplicator, "ref:deduplicator", "deduplicator"),
             (ModelKind::Emitter, "ref:emitter", "emitter"),
+            (ModelKind::Udf, "ref:udf", "udf"),
         ] {
             assert_eq!(kind.completion_label(), label);
             assert_eq!(ModelKind::from_completion_label(label), Some(kind));

@@ -132,12 +132,14 @@ pub fn create_correlator_parser<'src>()
         .then(correlator_name())
         .then(side_from_clauses(Identifier::Left))
         .then(side_from_clauses(Identifier::Right))
+        .boxed()
         .then(correlate_where_clause())
         .then(match_policy())
         .then_ignore(kw(Identifier::Max))
         .then_ignore(kw(Identifier::Time))
         .then(duration_lit())
         .then(timeout_policy())
+        .boxed()
         .then(branch_selection())
         .then(materialized_state_dependencies())
         .then(flushed_explicit_processor_outputs())
@@ -172,6 +174,7 @@ pub fn create_correlator_parser<'src>()
                 if_not_exists,
             ))
         })
+        .boxed()
 }
 
 pub fn parse_create_correlator_tokens(
