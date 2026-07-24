@@ -14,4 +14,4 @@ Use it for:
 - working with sessions and the Rust client
 - following end-to-end examples
 
-If you want implementation details, runtime internals, or control-plane/data-plane architecture, continue to [Architecture And Internals](./architecture-and-internals.md).
+To write custom WASM processor guests in Rust, continue to the [Rust WASM Guest SDK](./wasm-guest-sdk.md). If you want implementation details, runtime internals, or control-plane/data-plane architecture, continue to [Architecture And Internals](./architecture-and-internals.md).

@@ -187,6 +187,7 @@ members = [
   "crates/interconnect",
   "crates/nervix-wasm",
   "crates/nervix-wasm-protocol",
+  "crates/nervix-wasm-sdk",
   "crates/nervix-roto",
   "crates/web-console",
   "crates/nervix-vm",
@@ -319,6 +320,7 @@ nervix-server = { path = "" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
+nervix-wasm-sdk = { package = "nervix-wasm-sdk", path = "crates/nervix-wasm-sdk" }
 # Match the pinned Iceberg revision to avoid duplicate, incompatible OpenDAL APIs.
 opendal = { version = "0.56.0", features = [
   "services-s3",
@@ -485,6 +487,7 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package."arrow-string"]
 opt-level = 3
+
 [profile.dev.package."roto"]
 opt-level = 3
 [profile.dev.package."cranelift-codegen"]

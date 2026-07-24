@@ -2,6 +2,8 @@
 
 WASM processors are native WebAssembly modules loaded by Wasmtime. They do not use WASI. A guest module exports a small C ABI, owns one reusable linear-memory buffer, and exchanges Arrow IPC record batches with Nervix through that buffer.
 
+Rust guests use the [Rust WASM Guest SDK](./wasm-guest-sdk.md) rather than implementing this ABI by hand. This chapter is the authoritative wire contract that the SDK implements and that guests in other languages implement directly.
+
 The runtime creates one guest instance per concrete branch. Guest state must therefore be branch-local. Do not aggregate across branch keys inside the guest.
 
 WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does not accept `FLUSH EACH` or `FLUSH IMMEDIATE`; Nervix routes batches returned from `nervix_process_batch` and batches returned later from `nervix_on_timeout` callbacks requested by the guest through the processor's declared `TO` clauses.
@@ -317,147 +319,14 @@ After any successful timeout callback, the host repeatedly calls
 columns work identically in timeout output. Input-column references remain
 valid while their source token is live.
 
-## Rust Sketch
+## Rust SDK
 
-The prototype Rust guest is in `examples/wasm-processors/rust-guest`. The important shape is:
-
-```rust
-#[repr(transparent)]
-struct Global<T>(UnsafeCell<T>);
-
-unsafe impl<T> Sync for Global<T> {}
-
-static STATE: Global<GuestState> = Global(UnsafeCell::new(GuestState::new()));
-
-unsafe extern "C" {
-    fn nervix_domain_time_nanos() -> i64;
-    fn nervix_timeout_after_nanos(delay_nanos: i64) -> i64;
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_alloc(size: i32) -> i32 {
-    with_state(|state| state.alloc(size as usize))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_process_batch(ptr: i32, size: i32) -> i32 {
-    with_state(|state| {
-        let range = match state.buffer_range(ptr, size) {
-            Ok(range) => range,
-            Err(code) => return code,
-        };
-        let input = &state.buffer[range];
-        let envelope = match WasmEnvelope::decode(input) {
-            Ok(envelope) => envelope,
-            Err(code) => return code,
-        };
-
-        state.last_timeout_handle = unsafe {
-            nervix_timeout_after_nanos(1_000_000_000)
-        };
-
-        match filter_arrow_batch(envelope) {
-            Ok(outputs) => {
-                state.pending_emit = outputs;
-                0
-            }
-            Err(code) => code,
-        }
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_read_emit() -> i32 {
-    with_state(|state| {
-        if state.pending_emit.is_empty() {
-            return 0;
-        }
-        let next = state.pending_emit.remove(0);
-        state.buffer.clear();
-        state.buffer.extend_from_slice(&next);
-        state.buffer.len() as i32
-    })
-}
-```
-
-The core filtering flow in the prototype is:
-
-```rust
-fn filter_envelope_by_global_row(
-    envelope: WasmEnvelope,
-    start_row: u64,
-    output_schemas: &[ProcessorSchema],
-) -> Result<Vec<WasmEnvelope>, i32> {
-    let WasmEnvelope::Input { arrow_ipc_batch, acks } = envelope else {
-        return Err(-5);
-    };
-    let input = read_single_i32_batch(&arrow_ipc_batch)?;
-    let mut output_acks = AckSidecar::default();
-
-    for row in 0..input.len() {
-        let global_row = start_row + row as u64;
-        let row_sidecar = acks.rows.get(row).cloned().ok_or(-5)?;
-        if global_row % 2 == 1 {
-            output_acks.rows.push(row_sidecar);
-        } else {
-            output_acks.acked.push(AckTokenSet {
-                tokens: row_sidecar.tokens,
-            });
-        }
-    }
-
-    let outputs = output_schemas
-        .iter()
-        .map(|schema| WasmRoutedOutput {
-            output_relay: schema.name.clone(),
-            columns: vec![WasmOutputColumnRef::input(0)],
-            acks: output_acks.clone(),
-        })
-        .collect();
-    Ok(vec![WasmEnvelope::Output {
-        generated_arrow_ipc_batch: Vec::new(),
-        outputs,
-    }])
-}
-```
-
-For enrichment, build one destination-neutral Arrow batch whose fields have
-empty names, then use `WasmOutputColumnRef::generated(index)` wherever a routed
-destination field consumes that array. The constructor helpers keep input and
-generated index namespaces explicit. A guest-side builder may additionally
-check local index bounds and route row counts, but host validation remains
-authoritative.
-
-State restoration uses the `GuestSnapshot` FlatBuffers message from the shared protocol crate:
-
-```rust
-use nervix_wasm_protocol::GuestSnapshot;
-
-fn dump_state(&mut self) -> i32 {
-    let snapshot = GuestSnapshot {
-        processed_batches: self.processed_batches,
-        processed_rows: self.processed_rows,
-        pending_start_row: self.pending_start_row,
-        last_domain_time_nanos: self.last_domain_time_nanos,
-        last_timeout_handle: self.last_timeout_handle,
-        pending_batch: self.pending_batch.clone(),
-        init_metadata: self.init_metadata.clone(),
-    };
-    self.buffer = match snapshot.encode() {
-        Ok(buffer) => buffer,
-        Err(_) => return -1,
-    };
-    self.buffer.len() as i32
-}
-```
-
-For Arrow IPC, use `arrow_ipc::reader::StreamReader` and `arrow_ipc::writer::StreamWriter`. Use `nervix-wasm-protocol` for the ABI envelope and snapshot types.
-
-Build:
-
-```bash
-just wasm-processor-rust-guest
-```
+The `nervix-wasm-sdk` crate owns the complete exported ABI surface — the
+reusable buffer, envelope encoding and decoding, the emit queue, the
+global-error channel, panic conversion, error-state latching, and
+`GuestSnapshot` plumbing — and exposes the typed `Processor` trait instead.
+See [Rust WASM Guest SDK](./wasm-guest-sdk.md) for installation and usage, and
+`examples/wasm-processors/rust-guest` for the complete reference guest.
 
 ## Go Sketch
 

@@ -1,485 +1,198 @@
-use std::{
-    cell::UnsafeCell, io::Cursor, ops::Range, panic::AssertUnwindSafe, sync::Arc,
+//! Even-row filter reference guest built on the `nervix-wasm-sdk` crate.
+//!
+//! Rows are filtered by their global row ordinal: even ordinals are
+//! preserved with their complete input row sidecars, odd ordinals are dropped
+//! into the `acked` sidecar. Batches accumulate until every second batch or a
+//! guest-requested one-second domain-clock timeout flushes the pending batch.
+//! Sentinel first values exercise the error paths: `-100` routes a message
+//! error, `-200` reports a global error, and `-300` latches guest error
+//! state.
+
+use std::{sync::Arc, time::Duration};
+
+use arrow_array::{Array, ArrayRef, Int32Array, StringArray};
+use arrow_schema::ArrowError;
+use nervix_wasm_sdk::{
+    AckSidecar, AckTokenSet, BranchContext, GuestContext, GuestError, InputBatch, MessageErrorSet,
+    OutputColumnRef, OutputEnvelope, Processor, ProcessorField, ProcessorSchema, ProcessorType,
+    TimeoutHandle,
 };
 
-use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
-use arrow_schema::{DataType, Field, Schema};
-use nervix_wasm_protocol::{
-    AckSidecar, AckTokenSet, BranchInit as BranchInitMetadata, Envelope, EnvelopeRef, GuestSnapshot,
-    MessageErrorSet as WasmMessageErrorSet, OutputColumnRef, ProcessorField, ProcessorSchema,
-    ProcessorType, RoutedOutput,
-};
-
-const SUCCESS: i32 = 0;
-const ERR_INVALID_SIZE: i32 = -1;
-const ERR_OUT_OF_BOUNDS: i32 = -2;
-const ERR_NOT_INITIALIZED: i32 = -3;
-const ERR_ARROW_IPC: i32 = -4;
-const ERR_ENVELOPE: i32 = -5;
-const ERR_ERROR_STATE: i32 = -6;
-const DEFAULT_TIMEOUT_NANOS: i64 = 1_000_000_000;
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 const FLUSH_EVERY_BATCHES: u64 = 2;
+const STATE_HEADER_BYTES: usize = 24;
 
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn nervix_domain_time_nanos() -> i64;
-    fn nervix_timeout_after_nanos(delay_nanos: i64) -> i64;
-}
-
-struct GuestState {
-    buffer: Vec<u8>,
-    init_metadata: Vec<u8>,
-    pending_batch: Vec<u8>,
-    pending_emit: Vec<Vec<u8>>,
-    global_error: Vec<u8>,
-    saved_state: Vec<u8>,
-    input_schema: Option<ProcessorSchema>,
-    output_schemas: Vec<ProcessorSchema>,
-    pending_start_row: u64,
-    initialized: bool,
+struct EvenRowFilter {
     processed_batches: u64,
     processed_rows: u64,
-    last_domain_time_nanos: i64,
-    last_timeout_handle: i64,
-    error_state: Option<String>,
+    pending_start_row: u64,
+    pending: Option<InputBatch>,
 }
 
-impl GuestState {
-    const fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-            init_metadata: Vec::new(),
-            pending_batch: Vec::new(),
-            pending_emit: Vec::new(),
-            global_error: Vec::new(),
-            saved_state: Vec::new(),
-            input_schema: None,
-            output_schemas: Vec::new(),
-            pending_start_row: 0,
-            initialized: false,
+impl EvenRowFilter {
+    fn flush_pending(&mut self, ctx: &mut GuestContext<'_>) -> Result<(), GuestError> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        let output = filter_even_rows(
+            ctx.branch().input_schema(),
+            ctx.branch().output_schemas(),
+            &pending,
+            self.pending_start_row,
+        )?;
+        ctx.emit(output)?;
+        self.pending_start_row = self.processed_rows;
+        Ok(())
+    }
+}
+
+impl Processor for EvenRowFilter {
+    fn create(_branch: &BranchContext) -> Result<Self, GuestError> {
+        Ok(Self {
             processed_batches: 0,
             processed_rows: 0,
-            last_domain_time_nanos: 0,
-            last_timeout_handle: 0,
-            error_state: None,
-        }
+            pending_start_row: 0,
+            pending: None,
+        })
     }
 
-    fn alloc(&mut self, size: usize) -> i32 {
-        if self.buffer.capacity() < size {
-            self.buffer.reserve_exact(size - self.buffer.capacity());
-        }
-        self.buffer.resize(size, 0);
-        self.buffer.as_mut_ptr() as i32
-    }
-
-    fn buffer_range(&self, ptr: i32, size: i32) -> Result<Range<usize>, i32> {
-        let ptr = usize::try_from(ptr).map_err(|_| ERR_OUT_OF_BOUNDS)?;
-        let size = usize::try_from(size).map_err(|_| ERR_INVALID_SIZE)?;
-        let end = ptr.checked_add(size).ok_or(ERR_OUT_OF_BOUNDS)?;
-        let base = self.buffer.as_ptr() as usize;
-        if ptr < base || end > base + self.buffer.len() {
-            return Err(ERR_OUT_OF_BOUNDS);
-        }
-        Ok(ptr - base..end - base)
-    }
-
-    fn read_memory(&self, ptr: i32, size: i32) -> Result<Vec<u8>, i32> {
-        Ok(self.buffer[self.buffer_range(ptr, size)?].to_vec())
-    }
-
-    fn flush_pending(&mut self) -> i32 {
-        let envelope = match EnvelopeRef::decode(&self.pending_batch) {
-            Ok(EnvelopeRef::Input(envelope)) => envelope,
-            Ok(EnvelopeRef::Output(_)) | Err(_) => return ERR_ENVELOPE,
-        };
-        let arrow_ipc_batch = envelope.arrow_ipc_batch();
-        let acks = envelope.acks();
-        let Some(input_schema) = self.input_schema.as_ref() else {
-            return ERR_NOT_INITIALIZED;
-        };
-        match filter_envelope_by_global_row(
-            arrow_ipc_batch,
-            acks,
-            self.pending_start_row,
-            input_schema,
-            &self.output_schemas,
-        ) {
-            Ok(filtered) => {
-                for envelope in filtered {
-                    self.pending_emit.push(envelope.encode());
-                }
-            }
-            Err(error) => return error,
-        }
-        self.pending_batch.clear();
-        self.pending_start_row = self.processed_rows;
-        SUCCESS
-    }
-
-    fn dump_state(&mut self) -> i32 {
-        let snapshot = GuestSnapshot {
-            processed_batches: self.processed_batches,
-            processed_rows: self.processed_rows,
-            pending_start_row: self.pending_start_row,
-            last_domain_time_nanos: self.last_domain_time_nanos,
-            last_timeout_handle: self.last_timeout_handle,
-            pending_batch: self.pending_batch.clone(),
-            init_metadata: self.init_metadata.clone(),
-            saved_state: self.saved_state.clone(),
-            error_state: self.error_state.clone(),
-        };
-
-        self.buffer = snapshot.encode();
-        self.buffer.len() as i32
-    }
-
-    fn reset(&mut self) {
-        self.init_metadata.clear();
-        self.pending_batch.clear();
-        self.pending_emit.clear();
-        self.global_error.clear();
-        self.saved_state.clear();
-        self.input_schema = None;
-        self.output_schemas.clear();
-        self.pending_start_row = 0;
-        self.initialized = false;
-        self.processed_batches = 0;
-        self.processed_rows = 0;
-        self.last_domain_time_nanos = 0;
-        self.last_timeout_handle = 0;
-        self.error_state = None;
-    }
-
-    fn set_global_error(&mut self, reason: impl Into<String>) {
-        let reason = reason.into();
-        self.error_state = Some(reason.clone());
-        self.global_error.clear();
-        self.global_error.extend_from_slice(reason.as_bytes());
-    }
-
-    fn load_state_bytes(&mut self, saved_state: Vec<u8>) -> i32 {
-        let Ok(snapshot) = GuestSnapshot::decode(&saved_state) else {
-            return ERR_INVALID_SIZE;
-        };
-
-        self.processed_batches = snapshot.processed_batches;
-        self.processed_rows = snapshot.processed_rows;
-        self.pending_start_row = snapshot.pending_start_row;
-        self.last_domain_time_nanos = snapshot.last_domain_time_nanos;
-        self.last_timeout_handle = snapshot.last_timeout_handle;
-        self.pending_batch = snapshot.pending_batch;
-        self.init_metadata = snapshot.init_metadata;
-        let Ok(metadata) = schemas_from_init_metadata(&self.init_metadata) else {
-            return ERR_INVALID_SIZE;
-        };
-        if !self.pending_batch.is_empty() && EnvelopeRef::decode(&self.pending_batch).is_err() {
-            return ERR_INVALID_SIZE;
-        }
-        self.input_schema = Some(metadata.input_schema);
-        self.output_schemas = metadata.output_schemas;
-        self.saved_state = snapshot.saved_state;
-        self.error_state = snapshot.error_state;
-        SUCCESS
-    }
-}
-
-struct Global<T>(UnsafeCell<T>);
-
-unsafe impl<T> Sync for Global<T> {}
-
-static STATE: Global<GuestState> = Global(UnsafeCell::new(GuestState::new()));
-
-impl Global<GuestState> {
-    fn with_mut<R>(&self, f: impl FnOnce(&mut GuestState) -> R) -> R {
-        let state = unsafe { &mut *self.0.get() };
-        f(state)
-    }
-
-    fn guarded_export(&self, f: impl FnOnce(&mut GuestState) -> i32) -> i32 {
-        self.guarded_state_export(true, f)
-    }
-
-    fn guarded_state_export(
-        &self,
-        check_error_state: bool,
-        f: impl FnOnce(&mut GuestState) -> i32,
-    ) -> i32 {
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            self.with_mut(|state| {
-                if check_error_state {
-                    if let Some(error_state) = state.error_state.clone() {
-                        if state.global_error.is_empty() {
-                            state.global_error.extend_from_slice(error_state.as_bytes());
-                        }
-                        return ERR_ERROR_STATE;
-                    }
-                }
-                f(state)
-            })
-        }));
-        match result {
-            Ok(code) => code,
-            Err(payload) => self.with_mut(|state| {
-                state.set_global_error(panic_reason(payload));
-                ERR_ERROR_STATE
-            }),
-        }
-    }
-}
-
-fn panic_reason(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(reason) = payload.downcast_ref::<&str>() {
-        format!("guest panic: {reason}")
-    } else if let Some(reason) = payload.downcast_ref::<String>() {
-        format!("guest panic: {reason}")
-    } else {
-        "guest panic".to_string()
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_buffer_ptr() -> i32 {
-    STATE.with_mut(|state| state.buffer.as_mut_ptr() as i32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_buffer_len() -> i32 {
-    STATE.with_mut(|state| state.buffer.len() as i32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_buffer_capacity() -> i32 {
-    STATE.with_mut(|state| state.buffer.capacity() as i32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_global_error_ptr() -> i32 {
-    STATE.with_mut(|state| {
-        if state.global_error.is_empty() {
-            0
-        } else {
-            state.global_error.as_mut_ptr() as i32
-        }
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_global_error_len() -> i32 {
-    STATE.with_mut(|state| state.global_error.len() as i32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_clear_global_error() -> i32 {
-    STATE.with_mut(|state| {
-        state.global_error.clear();
-        SUCCESS
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_alloc(size: i32) -> i32 {
-    let Ok(size) = usize::try_from(size) else {
-        return ERR_INVALID_SIZE;
-    };
-    STATE.with_mut(|state| state.alloc(size))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_init(ptr: i32, size: i32) -> i32 {
-    STATE.guarded_export(|state| match state.read_memory(ptr, size) {
-        Ok(metadata) => {
-            let schemas = match schemas_from_init_metadata(&metadata) {
-                Ok(schemas) => schemas,
-                Err(error) => return error,
-            };
-            state.init_metadata = metadata;
-            state.input_schema = Some(schemas.input_schema);
-            state.output_schemas = schemas.output_schemas;
-            state.initialized = true;
-            SUCCESS
-        }
-        Err(error) => error,
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_current_domain_time_nanos() -> i64 {
-    let now = unsafe { nervix_domain_time_nanos() };
-    STATE.with_mut(|state| {
-        state.last_domain_time_nanos = now;
-    });
-    now
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_process_batch(ptr: i32, size: i32) -> i32 {
-    STATE.guarded_export(|state| {
-        if !state.initialized {
-            return ERR_NOT_INITIALIZED;
-        }
-        let range = match state.buffer_range(ptr, size) {
-            Ok(range) => range,
-            Err(error) => return error,
-        };
-
-        state.processed_batches += 1;
-        state.last_domain_time_nanos = unsafe { nervix_domain_time_nanos() };
-        state.last_timeout_handle = unsafe { nervix_timeout_after_nanos(DEFAULT_TIMEOUT_NANOS) };
-        let (first_value, row_count, acks) = {
-            let envelope = match EnvelopeRef::decode(&state.buffer[range.clone()]) {
-                Ok(EnvelopeRef::Input(envelope)) => envelope,
-                Ok(EnvelopeRef::Output(_)) | Err(_) => return ERR_ENVELOPE,
-            };
-            let arrow_ipc_batch = envelope.arrow_ipc_batch();
-            let first_value = match first_i32_value(arrow_ipc_batch) {
-                Ok(value) => value,
-                Err(error) => return error,
-            };
-            let row_count = match arrow_ipc_row_count(arrow_ipc_batch) {
-                Ok(row_count) => row_count,
-                Err(error) => return error,
-            };
-            (first_value, row_count, envelope.acks())
-        };
-        match first_value {
-            Some(-300) => {
-                state.set_global_error("guest error state for value -300");
-                return ERR_ERROR_STATE;
-            }
+    fn process_batch(
+        &mut self,
+        ctx: &mut GuestContext<'_>,
+        input: InputBatch,
+    ) -> Result<(), GuestError> {
+        self.processed_batches = self.processed_batches.saturating_add(1);
+        ctx.domain_time();
+        ctx.request_timeout(FLUSH_TIMEOUT)?;
+        match first_i32_value(&input)? {
+            Some(-300) => return Err(GuestError::failed("guest error state for value -300")),
             Some(-200) => {
-                state.set_global_error("guest global error for value -200");
-                return SUCCESS;
+                ctx.report_global_error("guest global error for value -200");
+                return Ok(());
             }
             Some(-100) => {
-                let Some(input_schema) = state.input_schema.as_ref() else {
-                    return ERR_NOT_INITIALIZED;
-                };
-                let Some(output_schema) = state.output_schemas.first() else {
-                    return ERR_NOT_INITIALIZED;
-                };
-                let encoded = match message_error_envelope(
-                    input_schema,
+                let output_schema = ctx
+                    .branch()
+                    .output_schemas()
+                    .first()
+                    .ok_or(GuestError::NotInitialized)?;
+                let output = message_error_envelope(
+                    ctx.branch().input_schema(),
                     output_schema,
-                    acks,
+                    input.acks(),
                     "guest message error for value -100".to_string(),
-                ) {
-                    Ok(envelope) => envelope.encode(),
-                    Err(error) => return error,
-                };
-                state.pending_emit.clear();
-                state.pending_emit.push(encoded);
-                return SUCCESS;
+                )?;
+                ctx.emit(output)?;
+                return Ok(());
             }
             _ => {}
         }
-        state.pending_emit.clear();
-        if !state.pending_batch.is_empty() {
-            let result = state.flush_pending();
-            if result != SUCCESS {
-                return result;
-            }
+        self.flush_pending(ctx)?;
+        self.pending_start_row = self.processed_rows;
+        self.processed_rows = self.processed_rows.saturating_add(input.row_count());
+        self.pending = Some(input);
+        if self.processed_batches.is_multiple_of(FLUSH_EVERY_BATCHES) {
+            self.flush_pending(ctx)?;
         }
-        state.pending_start_row = state.processed_rows;
-        state.processed_rows = state.processed_rows.saturating_add(row_count);
-        state.pending_batch.clear();
+        Ok(())
+    }
+
+    fn on_timeout(
+        &mut self,
+        ctx: &mut GuestContext<'_>,
+        _handle: TimeoutHandle,
+    ) -> Result<(), GuestError> {
+        self.flush_pending(ctx)
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        let pending = self
+            .pending
+            .as_ref()
+            .map(InputBatch::envelope_bytes)
+            .unwrap_or_default();
+        let mut state = Vec::with_capacity(STATE_HEADER_BYTES + pending.len());
+        state.extend_from_slice(&self.processed_batches.to_le_bytes());
+        state.extend_from_slice(&self.processed_rows.to_le_bytes());
+        state.extend_from_slice(&self.pending_start_row.to_le_bytes());
+        state.extend_from_slice(pending);
         state
-            .pending_batch
-            .extend_from_slice(&state.buffer[range]);
+    }
 
-        if state.processed_batches % FLUSH_EVERY_BATCHES == 0 {
-            return state.flush_pending();
+    fn restore(_branch: &BranchContext, state: &[u8]) -> Result<Self, GuestError> {
+        if state.len() < STATE_HEADER_BYTES {
+            return Err(GuestError::InvalidSize);
         }
-        SUCCESS
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_on_timeout(handle: i64) -> i32 {
-    STATE.guarded_export(|state| {
-        state.last_timeout_handle = handle;
-        if state.pending_batch.is_empty() {
-            SUCCESS
+        let (header, pending) = state.split_at(STATE_HEADER_BYTES);
+        let counters = header
+            .chunks_exact(8)
+            .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("chunks are eight bytes")))
+            .collect::<Vec<_>>();
+        let pending = if pending.is_empty() {
+            None
         } else {
-            state.pending_emit.clear();
-            state.flush_pending()
-        }
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_read_emit() -> i32 {
-    STATE.guarded_export(|state| {
-        if state.pending_emit.is_empty() {
-            return 0;
-        }
-        state.buffer.clear();
-        state.buffer.extend_from_slice(&state.pending_emit.remove(0));
-        state.buffer.len() as i32
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_dump_state() -> i32 {
-    STATE.guarded_state_export(false, GuestState::dump_state)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_load_state(ptr: i32, size: i32) -> i32 {
-    STATE.guarded_state_export(false, |state| match state.read_memory(ptr, size) {
-        Ok(saved_state) => state.load_state_bytes(saved_state),
-        Err(error) => error,
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nervix_reset_state() -> i32 {
-    STATE.with_mut(|state| {
-        state.reset();
-        SUCCESS
-    })
-}
-
-fn arrow_ipc_row_count(bytes: &[u8]) -> Result<u64, i32> {
-    let reader = StreamReader::try_new(Cursor::new(bytes), None).map_err(|_| ERR_ARROW_IPC)?;
-    let mut rows = 0_u64;
-    for batch in reader {
-        let batch = batch.map_err(|_| ERR_ARROW_IPC)?;
-        rows = rows.saturating_add(batch.num_rows() as u64);
+            Some(InputBatch::from_envelope_bytes(pending.to_vec())?)
+        };
+        Ok(Self {
+            processed_batches: counters[0],
+            processed_rows: counters[1],
+            pending_start_row: counters[2],
+            pending,
+        })
     }
-    Ok(rows)
 }
 
-fn filter_envelope_by_global_row(
-    arrow_ipc_batch: &[u8],
-    acks: AckSidecar,
-    start_row: u64,
-    input_schema: &ProcessorSchema,
-    output_schemas: &[ProcessorSchema],
-) -> Result<Vec<Envelope>, i32> {
-    let reader = StreamReader::try_new(Cursor::new(arrow_ipc_batch), None)
-        .map_err(|_| ERR_ARROW_IPC)?;
-    if output_schemas.is_empty() {
-        return Err(ERR_NOT_INITIALIZED);
-    }
-    let mut selected_values = Vec::new();
-    let mut selected_acks = Vec::new();
-    let mut acked = acks.acked;
-    let mut next_row = start_row;
-    let mut input_row = 0_usize;
-    for batch in reader {
-        let batch = batch.map_err(|_| ERR_ARROW_IPC)?;
+nervix_wasm_sdk::export_processor!(EvenRowFilter);
+
+fn int32_input_error() -> GuestError {
+    GuestError::ArrowIpc(ArrowError::SchemaError(
+        "input column 0 is not a non-null I32 column".to_string(),
+    ))
+}
+
+fn first_i32_value(input: &InputBatch) -> Result<Option<i32>, GuestError> {
+    for batch in input.batches() {
+        if batch.num_rows() == 0 {
+            continue;
+        }
         let values = batch
             .column(0)
             .as_any()
             .downcast_ref::<Int32Array>()
-            .ok_or(ERR_ARROW_IPC)?;
+            .ok_or_else(int32_input_error)?;
+        if values.is_valid(0) {
+            return Ok(Some(values.value(0)));
+        }
+    }
+    Ok(None)
+}
+
+fn filter_even_rows(
+    input_schema: &ProcessorSchema,
+    output_schemas: &[ProcessorSchema],
+    pending: &InputBatch,
+    start_row: u64,
+) -> Result<OutputEnvelope, GuestError> {
+    if output_schemas.is_empty() {
+        return Err(GuestError::NotInitialized);
+    }
+    let acks = pending.acks();
+    let mut selected_values = Vec::new();
+    let mut selected_rows = Vec::new();
+    let mut acked = acks.acked.clone();
+    let mut next_row = start_row;
+    let mut input_row = 0_usize;
+    for batch in pending.batches() {
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .ok_or_else(int32_input_error)?;
         for row in 0..values.len() {
             next_row = next_row.saturating_add(1);
             if next_row.is_multiple_of(2) && values.is_valid(row) {
                 selected_values.push(values.value(row));
-                selected_acks.push(acks.rows.get(input_row).cloned().unwrap_or_default());
+                selected_rows.push(acks.rows.get(input_row).cloned().unwrap_or_default());
             } else if let Some(ack) = acks.rows.get(input_row) {
                 acked.push(AckTokenSet {
                     tokens: ack.tokens.clone(),
@@ -490,80 +203,71 @@ fn filter_envelope_by_global_row(
     }
 
     let generated_fields = generated_fields(input_schema, output_schemas);
-    let generated_arrow_ipc_batch = generated_batch_ipc(&generated_fields, &selected_values)?;
-    let outputs = output_schemas
-        .iter()
-        .enumerate()
-        .map(|(index, output_schema)| {
-            Ok(RoutedOutput {
-                output_relay: output_schema.name.clone(),
-                columns: output_columns(input_schema, output_schema, &generated_fields)?,
-                acks: AckSidecar {
-                    rows: selected_acks.clone(),
-                    acked: if index == 0 { acked.clone() } else { Vec::new() },
-                    nacked: if index == 0 {
-                        acks.nacked.clone()
-                    } else {
-                        Vec::new()
-                    },
-                    message_errors: if index == 0 {
-                        acks.message_errors.clone()
-                    } else {
-                        Vec::new()
-                    },
+    let mut output = OutputEnvelope::new();
+    for field in &generated_fields {
+        output.add_generated_column(generated_column(field, &selected_values)?, field.optional);
+    }
+    for (index, output_schema) in output_schemas.iter().enumerate() {
+        let columns = output_columns(input_schema, output_schema, &generated_fields)?;
+        output.add_route(
+            output_schema.name.clone(),
+            columns,
+            AckSidecar {
+                rows: selected_rows.clone(),
+                acked: if index == 0 {
+                    acked.clone()
+                } else {
+                    Vec::new()
                 },
-            })
-        })
-        .collect::<Result<Vec<_>, i32>>()?;
-    Ok(vec![Envelope::Output {
-        generated_arrow_ipc_batch,
-        outputs,
-    }])
+                nacked: if index == 0 {
+                    acks.nacked.clone()
+                } else {
+                    Vec::new()
+                },
+                message_errors: if index == 0 {
+                    acks.message_errors.clone()
+                } else {
+                    Vec::new()
+                },
+            },
+        );
+    }
+    Ok(output)
 }
 
-fn schemas_from_init_metadata(metadata: &[u8]) -> Result<BranchInitMetadata, i32> {
-    BranchInitMetadata::decode(metadata).map_err(|_| ERR_INVALID_SIZE)
-}
-
-fn output_columns(
+fn message_error_envelope(
     input_schema: &ProcessorSchema,
     output_schema: &ProcessorSchema,
-    generated_fields: &[ProcessorField],
-) -> Result<Vec<OutputColumnRef>, i32> {
-    output_schema
-        .fields
-        .iter()
-        .map(|destination| {
-            if let Some((column_index, _)) = input_schema
-                .fields
-                .iter()
-                .enumerate()
-                .find(|(_, source)| {
-                    source.name == destination.name
-                        && source.ty == destination.ty
-                        && source.optional == destination.optional
-                })
-            {
-                return Ok(OutputColumnRef::Input {
-                    column_index: u32::try_from(column_index).map_err(|_| ERR_ENVELOPE)?,
-                });
-            }
-            if destination.optional {
-                return Ok(OutputColumnRef::Uninitialized);
-            }
-            let column_index = generated_fields
-                .iter()
-                .position(|field| {
-                    field.ty == destination.ty && field.optional == destination.optional
-                })
-                .ok_or(ERR_ENVELOPE)?;
-            Ok(OutputColumnRef::Generated {
-                column_index: u32::try_from(column_index).map_err(|_| ERR_ENVELOPE)?,
-            })
-        })
-        .collect()
+    acks: &AckSidecar,
+    reason: String,
+) -> Result<OutputEnvelope, GuestError> {
+    let tokens = acks
+        .rows
+        .first()
+        .map(|row| row.tokens.clone())
+        .unwrap_or_default();
+    let generated_fields = generated_fields(input_schema, std::slice::from_ref(output_schema));
+    let mut output = OutputEnvelope::new();
+    for field in &generated_fields {
+        output.add_generated_column(generated_column(field, &[])?, field.optional);
+    }
+    let columns = output_columns(input_schema, output_schema, &generated_fields)?;
+    output.add_route(
+        output_schema.name.clone(),
+        columns,
+        AckSidecar {
+            rows: Vec::new(),
+            acked: acks.acked.clone(),
+            nacked: acks.nacked.clone(),
+            message_errors: vec![MessageErrorSet { tokens, reason }],
+        },
+    );
+    Ok(output)
 }
 
+/// Required destination fields with no identical input field, deduplicated by
+/// type and nullability so identically typed destinations share one generated
+/// column. Optional destinations stay uninitialized instead.
 fn generated_fields(
     input_schema: &ProcessorSchema,
     output_schemas: &[ProcessorSchema],
@@ -577,9 +281,9 @@ fn generated_fields(
         });
         if !is_input
             && !destination.optional
-            && !generated.iter().any(|field| {
-                field.ty == destination.ty && field.optional == destination.optional
-            })
+            && !generated
+                .iter()
+                .any(|field| field.ty == destination.ty && field.optional == destination.optional)
         {
             generated.push(destination.clone());
         }
@@ -587,116 +291,61 @@ fn generated_fields(
     generated
 }
 
-fn generated_batch_ipc(
-    fields: &[ProcessorField],
-    selected_values: &[i32],
-) -> Result<Vec<u8>, i32> {
-    if fields.is_empty() {
-        return Ok(Vec::new());
-    }
-    let arrow_fields = fields
+fn output_columns(
+    input_schema: &ProcessorSchema,
+    output_schema: &ProcessorSchema,
+    generated_fields: &[ProcessorField],
+) -> Result<Vec<OutputColumnRef>, GuestError> {
+    output_schema
+        .fields
         .iter()
-        .map(|field| Ok(Field::new("", field_arrow_type(&field.ty)?, field.optional)))
-        .collect::<Result<Vec<_>, i32>>()?;
-    let arrays = fields
-        .iter()
-        .map(|field| generated_output_column(field, selected_values))
-        .collect::<Result<Vec<_>, _>>()?;
-    let schema = Arc::new(Schema::new(arrow_fields));
-    let batch = RecordBatch::try_new(schema.clone(), arrays).map_err(|_| ERR_ARROW_IPC)?;
-    let mut ipc = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut ipc, &schema).map_err(|_| ERR_ARROW_IPC)?;
-        writer.write(&batch).map_err(|_| ERR_ARROW_IPC)?;
-        writer.finish().map_err(|_| ERR_ARROW_IPC)?;
-    }
-    Ok(ipc)
+        .map(|destination| {
+            if let Some(column_index) = input_schema.fields.iter().position(|source| {
+                source.name == destination.name
+                    && source.ty == destination.ty
+                    && source.optional == destination.optional
+            }) {
+                return Ok(OutputColumnRef::Input {
+                    column_index: u32::try_from(column_index)
+                        .map_err(|_| GuestError::InvalidSize)?,
+                });
+            }
+            if destination.optional {
+                return Ok(OutputColumnRef::Uninitialized);
+            }
+            let column_index = generated_fields
+                .iter()
+                .position(|field| {
+                    field.ty == destination.ty && field.optional == destination.optional
+                })
+                .ok_or_else(|| {
+                    GuestError::failed(format!(
+                        "no generated column source for required destination field '{}'",
+                        destination.name
+                    ))
+                })?;
+            Ok(OutputColumnRef::Generated {
+                column_index: u32::try_from(column_index).map_err(|_| GuestError::InvalidSize)?,
+            })
+        })
+        .collect()
 }
 
-fn field_arrow_type(ty: &ProcessorType) -> Result<DataType, i32> {
-    match ty {
-        ProcessorType::I32 => Ok(DataType::Int32),
-        ProcessorType::String => Ok(DataType::Utf8),
-        ProcessorType::Array { element, len } => {
-            let _ = (element.as_ref(), len);
-            Err(ERR_ARROW_IPC)
-        }
-        ProcessorType::Vec { element } => {
-            let _ = element.as_ref();
-            Err(ERR_ARROW_IPC)
-        }
-        _ => Err(ERR_ARROW_IPC),
-    }
-}
-
-fn generated_output_column(
+fn generated_column(
     field: &ProcessorField,
     selected_values: &[i32],
-) -> Result<Arc<dyn Array>, i32> {
+) -> Result<ArrayRef, GuestError> {
     match &field.ty {
         ProcessorType::I32 if field.name == "value" => {
             Ok(Arc::new(Int32Array::from(selected_values.to_vec())))
         }
-        ProcessorType::I32 if field.optional => Ok(Arc::new(Int32Array::from(
-            vec![None; selected_values.len()],
+        ProcessorType::String => {
+            let values = selected_values.iter().map(|_| "EVEN").collect::<Vec<_>>();
+            Ok(Arc::new(StringArray::from(values)))
+        }
+        _ => Err(GuestError::failed(format!(
+            "no generated value source for required field '{}'",
+            field.name
         ))),
-        ProcessorType::String if !field.optional => {
-            let values = selected_values
-                .iter()
-                .map(|_| Some("EVEN"))
-                .collect::<Vec<_>>();
-            Ok(Arc::new(StringArray::from(values)))
-        }
-        ProcessorType::String if field.optional => {
-            let values = vec![None::<&str>; selected_values.len()];
-            Ok(Arc::new(StringArray::from(values)))
-        }
-        _ => Err(ERR_ARROW_IPC),
     }
-}
-
-fn first_i32_value(bytes: &[u8]) -> Result<Option<i32>, i32> {
-    let reader = StreamReader::try_new(Cursor::new(bytes), None).map_err(|_| ERR_ARROW_IPC)?;
-    for batch in reader {
-        let batch = batch.map_err(|_| ERR_ARROW_IPC)?;
-        if batch.num_rows() == 0 {
-            continue;
-        }
-        let values = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .ok_or(ERR_ARROW_IPC)?;
-        if values.is_valid(0) {
-            return Ok(Some(values.value(0)));
-        }
-    }
-    Ok(None)
-}
-
-fn message_error_envelope(
-    input_schema: &ProcessorSchema,
-    output_schema: &ProcessorSchema,
-    acks: AckSidecar,
-    reason: String,
-) -> Result<Envelope, i32> {
-    let tokens = acks
-        .rows
-        .first()
-        .map(|row| row.tokens.clone())
-        .unwrap_or_default();
-    let generated_fields = generated_fields(input_schema, std::slice::from_ref(output_schema));
-    Ok(Envelope::Output {
-        generated_arrow_ipc_batch: generated_batch_ipc(&generated_fields, &[])?,
-        outputs: vec![RoutedOutput {
-            output_relay: output_schema.name.clone(),
-            columns: output_columns(input_schema, output_schema, &generated_fields)?,
-            acks: AckSidecar {
-                rows: Vec::new(),
-                acked: acks.acked,
-                nacked: acks.nacked,
-                message_errors: vec![WasmMessageErrorSet { tokens, reason }],
-            },
-        }],
-    })
 }

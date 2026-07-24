@@ -32,6 +32,7 @@ include = [
   "ingestors.md",
   "processors.md",
   "wasm-processor-guests.md",
+  "wasm-guest-sdk.md",
   "emitters.md",
   "filter-map-functions.md",
   "udfs.md",

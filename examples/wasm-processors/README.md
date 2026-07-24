@@ -10,3 +10,7 @@ just wasm-processor-guests
 upload paths resolve to the built Rust and Go guest artifacts. Both WASM
 processors declare multiple `TO` routes so the examples cover guest-emitted
 batches for more than one output relay.
+
+The Rust guest is built on the high-level `nervix-wasm-sdk` crate in
+`crates/nervix-wasm-sdk`; the Go guest implements the raw C ABI documented in
+`INTERFACE.md` directly.
