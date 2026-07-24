@@ -368,7 +368,7 @@ reedline = "0.36"
 regex = "1"
 reqwest = "0.13"
 rkyv = "0.8"
-roto = "=0.11.0"
+roto = "0.11"
 rpassword = "7"
 # This rumqttc-next line exposes the MQTT 5 facade with explicit AWS-LC selection.
 rumqttc = { package = "rumqttc-next", version = "0.34.0-alpha", default-features = false, features = [
