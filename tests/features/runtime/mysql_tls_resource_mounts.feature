@@ -1,5 +1,7 @@
 Feature: MySQL TLS resource mounts
   Scenario Outline: MySQL emitter inserts over TLS with a mounted resource directory
+    Given MQTT is running
+    And MySQL is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -35,7 +37,7 @@ Feature: MySQL TLS resource mounts
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mysql-tls-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -52,7 +54,7 @@ Feature: MySQL TLS resource mounts
         TYPE MYSQL
         MOUNT dev_tls
         CONFIG {
-          'addr' = 'mysql://nervix:nervix@127.0.0.1:3307/nervix?require_ssl=true',
+          'addr' = '{{mysql_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE tls_notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } WITH MAX BATCH 2

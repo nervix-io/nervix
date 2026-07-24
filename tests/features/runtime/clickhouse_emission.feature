@@ -1,5 +1,7 @@
 Feature: ClickHouse emission
   Scenario Outline: ClickHouse emitter inserts mapped rows from a relay
+    Given MQTT is running
+    And ClickHouse is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -26,7 +28,7 @@ Feature: ClickHouse emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -42,7 +44,7 @@ Feature: ClickHouse emission
         CREATE CLIENT clickhouse_client
         TYPE CLICKHOUSE
         CONFIG {
-          'addr' = 'http://127.0.0.1:8123',
+          'addr' = '{{clickhouse_addr}}',
           'user' = 'default',
           'password' = 'nervix'
         };

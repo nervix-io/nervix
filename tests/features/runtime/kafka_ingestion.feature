@@ -1,4 +1,7 @@
 Feature: Kafka ingestion
+  Background:
+    Given Kafka is running
+
   Scenario Outline: Kafka ingestor delivers JSON payloads to a subscribed relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -23,7 +26,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -83,7 +86,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_reconnect_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_reconnect_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -146,7 +149,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -206,7 +209,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -267,7 +270,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -328,7 +331,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 500ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -382,7 +385,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -442,7 +445,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -506,7 +509,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -579,7 +582,7 @@ Feature: Kafka ingestion
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms

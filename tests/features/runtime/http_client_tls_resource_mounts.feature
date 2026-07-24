@@ -1,5 +1,6 @@
 Feature: HTTP client TLS resource mounts
   Scenario Outline: HTTP client ingestor polls over native TLS with a mounted resource directory
+    Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -33,7 +34,7 @@ Feature: HTTP client TLS resource mounts
         TYPE HTTP
         MOUNT dev_tls
         CONFIG {
-          'endpoint' = 'https://127.0.0.1:18443/http/{{test_id}}',
+          'endpoint' = '{{mock_https_addr}}/http/{{test_id}}',
           'method' = 'GET',
           'timeout_ms' = 5000,
           'tls_ca_file' = '{{dev_tls}}/ca.pem'

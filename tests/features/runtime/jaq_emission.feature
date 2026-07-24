@@ -1,5 +1,7 @@
 Feature: JAQ emission
   Scenario Outline: Kafka emitter applies JAQ transformation before emitting
+    Given Kafka is running
+    And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -22,7 +24,7 @@ Feature: JAQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -38,7 +40,7 @@ Feature: JAQ emission
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE EMITTER kafka_notifications FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
         INHERIT ALL
@@ -63,6 +65,8 @@ Feature: JAQ emission
       | 3            | 1             |
 
   Scenario Outline: RabbitMQ emitter applies JAQ transformation before emitting
+    Given RabbitMQ is running
+    And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -85,7 +89,7 @@ Feature: JAQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -101,7 +105,7 @@ Feature: JAQ emission
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
-          'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
+          'addr' = '{{rabbitmq_addr}}'
         };
         CREATE EMITTER rabbit_notifications FROM notifications ENCODE USING notification_codec TO RABBITMQ rabbit_main QUEUE notifications_out_{{test_id}}
         INHERIT ALL
@@ -126,6 +130,8 @@ Feature: JAQ emission
       | 3            | 1             |
 
   Scenario Outline: Redis emitter applies JAQ transformation before emitting
+    Given Redis is running
+    And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -148,7 +154,7 @@ Feature: JAQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -164,7 +170,7 @@ Feature: JAQ emission
         CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
-          'addr' = 'redis://127.0.0.1:6379/'
+          'addr' = '{{redis_addr}}'
         };
         CREATE EMITTER redis_notifications FROM notifications ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL notifications_out_{{test_id}}
         INHERIT ALL
@@ -189,6 +195,7 @@ Feature: JAQ emission
       | 3            | 1             |
 
   Scenario Outline: MQTT emitter applies JAQ transformation before emitting
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -211,7 +218,7 @@ Feature: JAQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -227,7 +234,7 @@ Feature: JAQ emission
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
         };
         CREATE EMITTER mqtt_notifications_out FROM notifications ENCODE USING notification_codec TO MQTT mqtt_main TOPIC notifications_out_{{test_id}}
@@ -253,6 +260,8 @@ Feature: JAQ emission
       | 3            | 1             |
 
   Scenario Outline: NATS emitter applies JAQ transformation before emitting
+    Given MQTT is running
+    And NATS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -275,7 +284,7 @@ Feature: JAQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -291,7 +300,7 @@ Feature: JAQ emission
         CREATE CLIENT nats_main
         TYPE NATS
         CONFIG {
-          'addr' = 'nats://127.0.0.1:4222'
+          'addr' = '{{nats_addr}}'
         };
         CREATE EMITTER nats_notifications FROM notifications ENCODE USING notification_codec TO NATS nats_main SUBJECT notifications_out_{{test_id}}
         INHERIT ALL
@@ -316,6 +325,7 @@ Feature: JAQ emission
       | 3            | 1             |
 
   Scenario Outline: ZeroMQ emitter applies JAQ transformation before emitting
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -338,7 +348,7 @@ Feature: JAQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -380,6 +390,8 @@ Feature: JAQ emission
       | 3            | 1             |
 
   Scenario Outline: SQS emitter applies JAQ transformation before emitting
+    Given MQTT is running
+    And SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -402,7 +414,7 @@ Feature: JAQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -418,7 +430,7 @@ Feature: JAQ emission
         CREATE CLIENT sqs_main
         TYPE SQS
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9324',
+          'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
         CREATE EMITTER sqs_notifications FROM notifications ENCODE USING notification_codec TO SQS sqs_main QUEUE notifications_out_{{test_id}}

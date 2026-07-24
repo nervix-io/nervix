@@ -34,6 +34,13 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+test-scenarios-reuse *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_TESTCONTAINERS_MODE=reusable
+    cargo test --features testing --test scenarios -- {{ args }}
+
 test-lib *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

@@ -53,6 +53,7 @@ async def start() -> None:
 
     await http_site.start()
     await https_site.start()
+    print("mock server ready", flush=True)
 
     while True:
         await asyncio.sleep(3600)

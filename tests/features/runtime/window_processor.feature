@@ -959,6 +959,7 @@ Feature: Window processor runtime behavior
       | 3            | 1             |
 
   Scenario Outline: Kafka ACK PARALLEL replays when an attached window branch output fails
+    Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -994,7 +995,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
         CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
-        'bootstrap.servers' = '127.0.0.1:9092',
+        'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
         CREATE INGESTOR kafka_metrics
@@ -1046,6 +1047,7 @@ Feature: Window processor runtime behavior
       | 3            | 1             |
 
   Scenario Outline: Kafka ACK PARALLEL does not replay when a detached window branch output fails
+    Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -1081,7 +1083,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
         CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
-        'bootstrap.servers' = '127.0.0.1:9092',
+        'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
         CREATE INGESTOR kafka_metrics

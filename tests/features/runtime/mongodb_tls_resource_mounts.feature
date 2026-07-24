@@ -1,5 +1,7 @@
 Feature: MongoDB TLS resource mounts
   Scenario Outline: MongoDB emitter inserts over TLS with a mounted resource directory
+    Given MQTT is running
+    And MongoDB is running
     Given runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
     And a <nodes> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -35,7 +37,7 @@ Feature: MongoDB TLS resource mounts
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mongodb-tls-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -52,7 +54,7 @@ Feature: MongoDB TLS resource mounts
         TYPE MONGODB
         MOUNT dev_tls
         CONFIG {
-          'addr' = 'mongodb://root:nervix@127.0.0.1:27018/nervix?authSource=admin&tls=true',
+          'addr' = '{{mongodb_tls_addr}}',
           'database' = 'nervix',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };

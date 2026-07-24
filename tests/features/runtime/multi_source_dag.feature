@@ -1,5 +1,8 @@
 Feature: Multi-source DAG routing
   Scenario Outline: Multiple ingestors flow through dedicated and shared branches
+    Given Kafka is running
+    And RabbitMQ is running
+    And Redis is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -32,17 +35,17 @@ Feature: Multi-source DAG routing
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
-          'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
+          'addr' = '{{rabbitmq_addr}}'
         };
         CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
-          'addr' = 'redis://127.0.0.1:6379/'
+          'addr' = '{{redis_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC dag_kafka_{{test_id}} OFFSET BY CONSUMER GROUP dag_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
