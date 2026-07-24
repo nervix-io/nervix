@@ -76,6 +76,8 @@ request can mix those phases.
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
 - Preserve connector configuration as the documented string key/value surface. Do not translate
   options between different client libraries.
+- For a Sentry sink, reference a `TYPE SENTRY` client containing the project DSN and use a codec
+  that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other
   external prerequisites separately. Nervix does not create them as a side effect of starting a
   node.

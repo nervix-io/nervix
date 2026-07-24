@@ -95,6 +95,9 @@ pub fn statement_parser<'src>()
         }),
         crate::client::create_client_http_parser()
             .map(|create| Statement::Create(create.map_body(Model::ClientHttp).map_body(Box::new))),
+        crate::client::create_client_sentry_parser().map(|create| {
+            Statement::Create(create.map_body(Model::ClientSentry).map_body(Box::new))
+        }),
         crate::client::create_client_prometheus_parser().map(|create| {
             Statement::Create(create.map_body(Model::ClientPrometheus).map_body(Box::new))
         }),
@@ -968,6 +971,7 @@ mod tests {
         assert!(suggestions.contains(&"KINESIS".to_string()));
         assert!(suggestions.contains(&"PULSAR".to_string()));
         assert!(suggestions.contains(&"HTTP".to_string()));
+        assert!(suggestions.contains(&"SENTRY".to_string()));
         assert!(suggestions.contains(&"PROMETHEUS".to_string()));
         assert!(suggestions.contains(&"RABBITMQ".to_string()));
         assert!(suggestions.contains(&"REDIS".to_string()));

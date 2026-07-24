@@ -179,6 +179,7 @@ pub enum Identifier {
     Pubsub,
     Zeromq,
     Sqs,
+    Sentry,
     Collection,
     Broker,
     Capacity,

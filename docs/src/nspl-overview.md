@@ -353,6 +353,7 @@ Current built-in client transport kinds include:
 - `KAFKA`
 - `PULSAR`
 - `HTTP`
+- `SENTRY`
 - `PROMETHEUS`
 - `RABBITMQ`
 - `REDIS`

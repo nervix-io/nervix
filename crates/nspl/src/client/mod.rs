@@ -4,8 +4,8 @@ use nervix_models::{
     CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
     CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateStatement,
-    KafkaConfigEntry,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
+    CreateClientZeroMq, CreateStatement, KafkaConfigEntry,
 };
 
 use crate::{
@@ -106,6 +106,18 @@ pub fn create_client_http_parser<'src>()
         name,
         mount,
         config,
+    })
+}
+
+pub fn create_client_sentry_parser<'src>()
+-> impl Parser<'src, &'src [Token], CreateStatement<CreateClientSentry>, extra::Err<ParseError<'src>>>
++ Clone {
+    create_client_parser(Identifier::Sentry, |name, mount, config| {
+        CreateClientSentry {
+            name,
+            mount,
+            config,
+        }
     })
 }
 
@@ -616,6 +628,34 @@ mod tests {
         assert_eq!(parsed.config[0].key, "endpoint");
         assert_eq!(parsed.config[0].value, "https://api.example.com/events");
         assert_eq!(parsed.config[1].key, "method");
+    }
+
+    #[test]
+    fn parses_client_sentry_config() {
+        let input = r#"
+            CREATE CLIENT sentry_main
+              TYPE SENTRY
+              CONFIG {
+                'dsn' = 'https://public@sentry.example.com/42',
+                'timeout_ms' = 5000
+              };
+        "#;
+
+        let tokens = to_tokens(input);
+        let parsed = create_client_sentry_parser()
+            .then_ignore(end())
+            .parse(tokens.as_slice())
+            .into_result()
+            .expect("parse should succeed");
+
+        assert_eq!(parsed.name.as_str(), "sentry_main");
+        assert_eq!(parsed.config.len(), 2);
+        assert_eq!(parsed.config[0].key, "dsn");
+        assert_eq!(
+            parsed.config[0].value,
+            "https://public@sentry.example.com/42"
+        );
+        assert_eq!(parsed.config[1].key, "timeout_ms");
     }
 
     #[test]
