@@ -2615,6 +2615,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rust_guest_state_restores_pending_batch_and_row_ordinals() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&rust_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        let first = WasmEnvelope::input(
+            sample_arrow_ipc(&[2]),
+            WasmAckSidecar {
+                rows: vec![output_row(10)],
+                ..WasmAckSidecar::default()
+            },
+        );
+        assert!(
+            branch
+                .process_envelope(&first)
+                .await
+                .expect("first input must process")
+                .is_empty()
+        );
+        let state = branch.save_state().await.expect("guest state must dump");
+
+        let mut restored = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(5_678))),
+                Some(&state),
+            )
+            .await
+            .expect("restored branch must instantiate");
+        let second = WasmEnvelope::input(
+            sample_arrow_ipc(&[4]),
+            WasmAckSidecar {
+                rows: vec![output_row(20)],
+                ..WasmAckSidecar::default()
+            },
+        );
+        let groups = restored
+            .process_envelope(&second)
+            .await
+            .expect("second input must flush the restored pending batch");
+
+        assert_eq!(groups.len(), 2);
+        let WasmEnvelope::Output { outputs, .. } = &groups[0] else {
+            panic!("restored pending batch must flush as an output group");
+        };
+        assert!(outputs[0].acks.rows.is_empty());
+        assert_eq!(outputs[0].acks.acked, vec![token_set(10)]);
+        let WasmEnvelope::Output { outputs, .. } = &groups[1] else {
+            panic!("second batch must flush as an output group");
+        };
+        assert_eq!(outputs[0].acks.rows, vec![output_row(20)]);
+        assert!(outputs[0].acks.acked.is_empty());
+    }
+
+    #[tokio::test]
     async fn go_guest_interoperates_with_host_flatbuffer_format() {
         guest_emits_flatbuffer_input_reference_output(&go_guest_path()).await;
     }

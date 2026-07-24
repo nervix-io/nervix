@@ -21,8 +21,8 @@ use arrow_schema::{DataType, Field, TimeUnit};
 use arrow_select::{nullif::nullif, zip::zip};
 use nervix_models::{CreateUdf, ParseAsType, Timestamp};
 use nervix_vm::{
-    ErrorCode, FunctionInjector, InjectedResult, RuntimeError, SideError, TypedArray, UdfParameter,
-    UdfSignature, UdfSignatures,
+    ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RuntimeError, SideError,
+    TypedArray, UdfParameter, UdfSignature, UdfSignatures,
 };
 use parking_lot::Mutex;
 use regex::Regex;
@@ -1111,6 +1111,17 @@ impl UdfExecutor {
 }
 
 impl FunctionInjector for UdfExecutor {
+    fn execution_policy(
+        &self,
+        function: &nervix_nspl::vm_program::FunctionName,
+    ) -> FunctionExecutionPolicy {
+        if matches!(function, nervix_nspl::vm_program::FunctionName::Udf(_)) {
+            FunctionExecutionPolicy::SpawnBlocking
+        } else {
+            FunctionExecutionPolicy::Inline
+        }
+    }
+
     fn inject(
         &self,
         function: &nervix_nspl::vm_program::FunctionName,
@@ -1465,9 +1476,14 @@ mod tests {
     #[test]
     fn compiles_and_executes_i64_column_udf() {
         let executor = UdfExecutor::compile_sync([add_one_model()]).expect("UDF should compile");
+        let function = nervix_nspl::vm_program::FunctionName::Udf("add_one".to_string());
+        assert_eq!(
+            executor.execution_policy(&function),
+            FunctionExecutionPolicy::SpawnBlocking
+        );
         let result = executor
             .inject_with_errors(
-                &nervix_nspl::vm_program::FunctionName::Udf("add_one".to_string()),
+                &function,
                 &[TypedArray::Int64(Int64Array::from(vec![
                     Some(1),
                     None,

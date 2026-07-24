@@ -8,10 +8,9 @@ version = "0.1.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-arrow-array = "54"
-arrow-ipc = "54"
-arrow-schema = "54"
-nervix-wasm-protocol = { path = "../../../crates/nervix-wasm-protocol" }
+arrow-array = "58"
+arrow-schema = "58"
+nervix-wasm-sdk = { path = "../../../crates/nervix-wasm-sdk" }
 
 [profile.release]
 codegen-units = 1
