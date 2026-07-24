@@ -22,9 +22,10 @@ pub use ir::{
     RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
 };
 pub use runtime::{
-    ExecutionContext, ExecutionResult, FunctionInjector, FunctionInvocation, InjectedResult,
-    SPAWN_BLOCKING_ROW_THRESHOLD, execute_program, execute_program_in_context,
-    execute_program_with_selection, execute_program_with_selection_in_context,
+    ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,
+    FunctionInvocation, InjectedResult, SPAWN_BLOCKING_ROW_THRESHOLD, execute_program,
+    execute_program_in_context, execute_program_with_selection,
+    execute_program_with_selection_in_context,
 };
 pub use semantics::{
     BinaryDescriptor, BuiltinDescriptor, BuiltinLowering, CastDescriptor, DependencyScope,

@@ -3235,14 +3235,16 @@ impl Runtime {
             })? {
                 nervix_models::OutputBranch::Unbranched => None,
                 nervix_models::OutputBranch::BranchedBy { assignments, .. } => {
-                    match resolve_concrete_branch_from_assignments(
+                    match planning::resolve_concrete_branch_from_assignments_blocking(
                         &output_record,
                         Some(&record),
                         None,
                         assignments,
                         dispatch.ingestor,
                         self.udf_executor(dispatch.domain).as_ref(),
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(branch) => branch.into_relay_key(),
                         Err(reason) => {
                             self.handle_structured_message_error(MessageErrorHandling {
@@ -5571,10 +5573,11 @@ impl Runtime {
                         ) {
                             continue;
                         }
-                        let value = planning::evaluate_constant_expression(
+                        let value = planning::evaluate_constant_expression_blocking(
                             &assignment.value,
                             udfs.as_ref(),
-                        )?;
+                        )
+                        .await?;
                         resolved.insert(
                             format!(
                                 "relay_state.{}.{}",

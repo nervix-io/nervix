@@ -249,9 +249,9 @@ encoding the init payload.
 
 ## Prototype State
 
-The Rust and Go prototype guests serialize their branch-local state as the
-`GuestSnapshot` variant of the same size-prefixed FlatBuffers `Message` union.
-The state includes:
+Both example guests serialize their branch-local state as the `GuestSnapshot`
+variant of the same size-prefixed FlatBuffers `Message` union. The Go guest
+fills the prototype fields directly:
 
 - processed batch count
 - processed row count
@@ -260,6 +260,13 @@ The state includes:
 - last timeout handle
 - pending batch envelope
 - opaque init metadata
+
+The Rust guest is built on the `nervix-wasm-sdk` crate. The SDK owns the
+`GuestSnapshot` framework fields (counters, last observed domain time, last
+timeout handle, init metadata, and error state) and persists the processor's
+own counters and pending input envelope opaquely inside `saved_state`. SDK
+snapshots keep `pending_batch` empty and reject snapshots that carry
+prototype pending-batch bytes.
 
 Filtering uses `processed row count` as a global row ordinal. Rows with even
 global ordinals are preserved and rows with odd global ordinals are dropped, so

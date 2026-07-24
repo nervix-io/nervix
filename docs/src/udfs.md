@@ -8,6 +8,10 @@ serializing rows.
 UDF creation is trusted-code administration, like uploading a WASM resource. Roto code is native
 JIT-compiled code, not a sandbox for third-party programs.
 
+Roto execution is synchronous. Nervix therefore schedules every UDF-bearing expression on its
+blocking worker pool, including small Arrow batches and UDFs used while constructing branch keys,
+so native UDF work does not occupy an asynchronous runtime worker.
+
 ## Declaration
 
 ```nspl

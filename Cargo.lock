@@ -6605,6 +6605,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-wasm-sdk"
+version = "0.1.0-dev"
+dependencies = [
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
+ "nervix-wasm-protocol",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "nervix-web-console"
 version = "0.1.0-dev"
 dependencies = [

@@ -946,6 +946,51 @@ pub(in crate::runtime) fn resolve_concrete_branch_from_assignments(
     BranchKey::from_fields(fields).map(ConcreteBranch::Key)
 }
 
+pub(in crate::runtime) fn assignments_contain_udf(assignments: &[Assignment]) -> bool {
+    assignments
+        .iter()
+        .any(|assignment| expression_contains_udf(&assignment.value))
+}
+
+pub(in crate::runtime) async fn resolve_concrete_branch_from_assignments_blocking(
+    output: &RuntimeRecord,
+    input: Option<&RuntimeRecord>,
+    branch_key: Option<&BranchKey>,
+    assignments: &[Assignment],
+    owner: &Identifier,
+    udfs: Option<&UdfExecutor>,
+) -> Result<ConcreteBranch, String> {
+    if !assignments_contain_udf(assignments) {
+        return resolve_concrete_branch_from_assignments(
+            output,
+            input,
+            branch_key,
+            assignments,
+            owner,
+            udfs,
+        );
+    }
+
+    let output = output.clone();
+    let input = input.cloned();
+    let branch_key = branch_key.cloned();
+    let assignments = assignments.to_vec();
+    let owner = owner.clone();
+    let udfs = udfs.cloned();
+    tokio::task::spawn_blocking(move || {
+        resolve_concrete_branch_from_assignments(
+            &output,
+            input.as_ref(),
+            branch_key.as_ref(),
+            &assignments,
+            &owner,
+            udfs.as_ref(),
+        )
+    })
+    .await
+    .map_err(|error| format!("branch UDF execution task failed: {error}"))?
+}
+
 fn evaluate_branch_expression(
     expression: &nervix_models::Expression,
     output: &RuntimeRecord,
@@ -1262,6 +1307,12 @@ fn evaluate_branch_expression(
     }
 }
 
+fn expression_contains_udf(expression: &nervix_models::Expression) -> bool {
+    let mut contains_udf = false;
+    expression.visit_udf_calls(&mut |_, _| contains_udf = true);
+    contains_udf
+}
+
 pub(in crate::runtime) fn evaluate_constant_expression(
     expression: &nervix_models::Expression,
     udfs: Option<&UdfExecutor>,
@@ -1272,6 +1323,21 @@ pub(in crate::runtime) fn evaluate_constant_expression(
         RuntimeRecordMetadata::from_ingested_at_watermarks(now, now),
     );
     evaluate_branch_expression(expression, &empty, None, &HashMap::default(), udfs)
+}
+
+pub(in crate::runtime) async fn evaluate_constant_expression_blocking(
+    expression: &nervix_models::Expression,
+    udfs: Option<&UdfExecutor>,
+) -> Result<RuntimeValue, String> {
+    if !expression_contains_udf(expression) {
+        return evaluate_constant_expression(expression, udfs);
+    }
+
+    let expression = expression.clone();
+    let udfs = udfs.cloned();
+    tokio::task::spawn_blocking(move || evaluate_constant_expression(&expression, udfs.as_ref()))
+        .await
+        .map_err(|error| format!("constant UDF execution task failed: {error}"))?
 }
 
 pub(in crate::runtime) fn format_branched_by(branched_by: &[Identifier]) -> String {

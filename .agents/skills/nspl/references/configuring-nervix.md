@@ -35,6 +35,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
+| Writing Rust WASM guests with the SDK | `Rust WASM Guest SDK` |
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.

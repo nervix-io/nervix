@@ -1,0 +1,15 @@
+[package]
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-wasm-sdk"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+nervix-wasm-protocol = { workspace = true }
+thiserror = { workspace = true }
