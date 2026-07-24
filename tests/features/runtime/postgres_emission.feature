@@ -1,5 +1,7 @@
 Feature: Postgres emission
   Scenario Outline: Postgres emitter inserts mapped rows from a relay
+    Given MQTT is running
+    And Postgres is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -26,7 +28,7 @@ Feature: Postgres emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-postgres-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -42,7 +44,7 @@ Feature: Postgres emission
         CREATE CLIENT postgres_client
         TYPE POSTGRES
         CONFIG {
-          'addr' = 'host=127.0.0.1 port=5432 user=postgres password=nervix dbname=postgres'
+          'addr' = '{{postgres_addr}}'
         };
         CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO TABLE notifications_pg_out_{{test_id}} VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } WITH MAX BATCH 2
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -77,6 +79,8 @@ Feature: Postgres emission
       | 3            | 1             |
 
   Scenario Outline: Postgres emitter handles insert conflicts with <conflict_action>
+    Given MQTT is running
+    And Postgres is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -103,7 +107,7 @@ Feature: Postgres emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-postgres-conflict-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -119,7 +123,7 @@ Feature: Postgres emission
         CREATE CLIENT postgres_client
         TYPE POSTGRES
         CONFIG {
-          'addr' = 'host=127.0.0.1 port=5432 user=postgres password=nervix dbname=postgres'
+          'addr' = '{{postgres_addr}}'
         };
         CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO TABLE notifications_pg_conflict_{{test_id}} VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } ON CONFLICT <conflict_target> <conflict_action> WITH MAX BATCH 2
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

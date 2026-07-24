@@ -54,6 +54,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: Kafka ingestor applies JAQ transformation before decoding
+    Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -76,7 +77,7 @@ Feature: JAQ transformation
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -109,6 +110,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: RabbitMQ ingestor applies JAQ transformation before decoding
+    Given RabbitMQ is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -132,7 +134,7 @@ Feature: JAQ transformation
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
-          'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
+          'addr' = '{{rabbitmq_addr}}'
         };
         CREATE INGESTOR rabbit_notifications
         FROM RABBITMQ rabbit_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -165,6 +167,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: Redis ingestor applies JAQ transformation before decoding
+    Given Redis is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -187,7 +190,7 @@ Feature: JAQ transformation
         CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
-          'addr' = 'redis://127.0.0.1:6379/'
+          'addr' = '{{redis_addr}}'
         };
         CREATE INGESTOR redis_notifications
         FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
@@ -219,6 +222,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: MQTT ingestor applies JAQ transformation before decoding
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -241,7 +245,7 @@ Feature: JAQ transformation
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-jaq-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -274,6 +278,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: NATS ingestor applies JAQ transformation before decoding
+    Given NATS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -296,7 +301,7 @@ Feature: JAQ transformation
         CREATE CLIENT nats_main
         TYPE NATS
         CONFIG {
-          'addr' = 'nats://127.0.0.1:4222'
+          'addr' = '{{nats_addr}}'
         };
         CREATE INGESTOR nats_notifications
         FROM NATS nats_main SUBJECT notifications_{{test_id}} QUEUE GROUP nats_notifications_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
@@ -383,6 +388,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: SQS ingestor applies JAQ transformation before decoding
+    Given SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -406,7 +412,7 @@ Feature: JAQ transformation
         CREATE CLIENT sqs_main
         TYPE SQS
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9324',
+          'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
         CREATE INGESTOR sqs_notifications
@@ -493,6 +499,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: HTTP client ingestor applies JAQ transformation before decoding
+    Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -515,7 +522,7 @@ Feature: JAQ transformation
         CREATE CLIENT http_main
         TYPE HTTP
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:18080/http/{{test_id}}',
+          'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',
           'timeout_ms' = 5000
         };
@@ -545,6 +552,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: Websocket client ingestor applies JAQ transformation before decoding
+    Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -567,7 +575,7 @@ Feature: JAQ transformation
         CREATE CLIENT ws_main
         TYPE WEBSOCKETS
         CONFIG {
-          'endpoint' = 'ws://127.0.0.1:18080/ws/{{test_id}}'
+          'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
         CREATE INGESTOR ws_notifications
         FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
@@ -595,6 +603,7 @@ Feature: JAQ transformation
       | 3            | 1             |
 
   Scenario Outline: Prometheus ingestor applies JAQ transformation before decoding
+    Given Prometheus is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -618,7 +627,7 @@ Feature: JAQ transformation
         CREATE CLIENT prom_main
         TYPE PROMETHEUS
         CONFIG {
-          'addr' = 'http://127.0.0.1:9090',
+          'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples

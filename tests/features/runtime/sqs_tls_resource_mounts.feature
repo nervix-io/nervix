@@ -1,5 +1,6 @@
 Feature: SQS TLS resource mounts
   Scenario Outline: SQS ingestor consumes over TLS with a mounted resource directory
+    Given SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -34,7 +35,7 @@ Feature: SQS TLS resource mounts
         TYPE SQS
         MOUNT dev_tls
         CONFIG {
-          'endpoint' = 'https://127.0.0.1:9325',
+          'endpoint' = '{{sqs_tls_endpoint}}',
           'region' = 'us-east-1',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };

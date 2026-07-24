@@ -1,5 +1,6 @@
 Feature: Prometheus TLS resource mounts
   Scenario Outline: Prometheus ingestor queries over native TLS with a mounted resource directory
+    Given Prometheus TLS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -37,7 +38,7 @@ Feature: Prometheus TLS resource mounts
         TYPE PROMETHEUS
         MOUNT dev_tls
         CONFIG {
-          'addr' = 'https://127.0.0.1:9443',
+          'addr' = '{{prometheus_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE INGESTOR prom_samples

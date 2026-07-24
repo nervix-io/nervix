@@ -1,5 +1,6 @@
 Feature: Deduplicator state replication
   Scenario Outline: Deduplicator suppression survives a cluster restart from persisted snapshots
+    Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -51,7 +52,7 @@ Feature: Deduplicator state replication
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE EMITTER kafka_notifications FROM ss2 ENCODE USING transaction_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
         INHERIT ALL

@@ -1,5 +1,6 @@
 Feature: SQS ingestion
   Scenario Outline: SQS ingestor delivers JSON payloads to a subscribed relay
+    Given SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -24,7 +25,7 @@ Feature: SQS ingestion
         CREATE CLIENT sqs_main
         TYPE SQS
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9324',
+          'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
         CREATE INGESTOR sqs_notifications
@@ -60,6 +61,7 @@ Feature: SQS ingestion
       | 3            | 2         | 1             |
 
   Scenario Outline: SQS ingestor reports transient source failures and recovers
+    Given SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -85,7 +87,7 @@ Feature: SQS ingestion
         CREATE CLIENT sqs_main
         TYPE SQS
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9324',
+          'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
         CREATE INGESTOR sqs_notifications

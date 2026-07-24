@@ -1,5 +1,6 @@
 Feature: ZeroMQ emission
   Scenario Outline: ZeroMQ emitter publishes JSON payloads from a relay
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -24,7 +25,7 @@ Feature: ZeroMQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications

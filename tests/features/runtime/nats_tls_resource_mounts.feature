@@ -1,5 +1,6 @@
 Feature: NATS TLS resource mounts
   Scenario Outline: NATS ingestor consumes over native TLS with a mounted resource directory
+    Given NATS TLS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -33,7 +34,7 @@ Feature: NATS TLS resource mounts
         TYPE NATS
         MOUNT dev_tls
         CONFIG {
-          'addr' = 'tls://127.0.0.1:4223',
+          'addr' = '{{nats_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE INGESTOR nats_notifications

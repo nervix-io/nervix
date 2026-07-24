@@ -1,5 +1,6 @@
 Feature: Prometheus ingestion
   Scenario Outline: Prometheus ingestor delivers queried samples to a subscribed relay
+    Given Prometheus is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -27,7 +28,7 @@ Feature: Prometheus ingestion
         CREATE CLIENT prom_main
         TYPE PROMETHEUS
         CONFIG {
-          'addr' = 'http://127.0.0.1:9090',
+          'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples
@@ -56,6 +57,7 @@ Feature: Prometheus ingestion
       | 3            | 1             |
 
   Scenario Outline: Prometheus ingestor reports transient source failures and recovers
+    Given Prometheus is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -84,7 +86,7 @@ Feature: Prometheus ingestion
         CREATE CLIENT prom_main
         TYPE PROMETHEUS
         CONFIG {
-          'addr' = 'http://127.0.0.1:9090',
+          'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples
@@ -120,6 +122,7 @@ Feature: Prometheus ingestion
       | 3            | 1             |
 
   Scenario Outline: Prometheus ingestor follows paced domain logical time and cadence
+    Given Prometheus is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -147,7 +150,7 @@ Feature: Prometheus ingestion
         CREATE CLIENT prom_main
         TYPE PROMETHEUS
         CONFIG {
-          'addr' = 'http://127.0.0.1:9090',
+          'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples

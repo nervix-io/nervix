@@ -1,5 +1,6 @@
 Feature: Pulsar ingestion
   Scenario Outline: Pulsar ingestor delivers JSON payloads to a subscribed relay
+    Given Pulsar is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -23,7 +24,7 @@ Feature: Pulsar ingestion
         CREATE CLIENT pulsar_main
         TYPE PULSAR
         CONFIG {
-          'addr' = 'pulsar://127.0.0.1:6650'
+          'addr' = '{{pulsar_addr}}'
         };
         CREATE INGESTOR pulsar_notifications
         FROM PULSAR pulsar_main TOPIC notifications_{{test_id}} SUBSCRIPTION nervix_cucumber_{{test_id}} INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
@@ -58,6 +59,7 @@ Feature: Pulsar ingestion
       | 3            | 2         | 1             |
 
   Scenario Outline: Pulsar ingestor reports transient source failures and recovers
+    Given Pulsar is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -82,7 +84,7 @@ Feature: Pulsar ingestion
         CREATE CLIENT pulsar_main
         TYPE PULSAR
         CONFIG {
-          'addr' = 'pulsar://127.0.0.1:6650'
+          'addr' = '{{pulsar_addr}}'
         };
         CREATE INGESTOR pulsar_notifications
         FROM PULSAR pulsar_main TOPIC notifications_reconnect_{{test_id}} SUBSCRIPTION nervix_cucumber_reconnect_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s

@@ -1,5 +1,7 @@
 Feature: Postgres TLS resource mounts
   Scenario Outline: Postgres emitter inserts over TLS with a mounted resource directory
+    Given MQTT is running
+    And Postgres is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -35,7 +37,7 @@ Feature: Postgres TLS resource mounts
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-postgres-tls-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -52,7 +54,7 @@ Feature: Postgres TLS resource mounts
         TYPE POSTGRES
         MOUNT dev_tls
         CONFIG {
-          'addr' = 'host=127.0.0.1 port=5433 user=postgres password=nervix dbname=postgres sslmode=require',
+          'addr' = '{{postgres_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO TABLE tls_notifications_pg_out_{{test_id}} VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } WITH MAX BATCH 2

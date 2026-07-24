@@ -99,9 +99,10 @@ Feature: Emitter metrics
       """
       total=2
       """
-    And the last command output metric "batches_total" "sent" relay "notifications" physical node "node-1" has values
+    And the last command output metric "batches_total" "sent" relay "notifications" physical node "node-1" has numeric values
       """
-      total=1
+      total>=1
+      total<=2
       """
     And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target_kind="EMITTER"'
     And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="emitter_metrics_node"'

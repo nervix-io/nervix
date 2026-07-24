@@ -145,6 +145,8 @@ Feature: Ingestor metrics
       | 3            |
 
   Scenario Outline: DESCRIBE INGESTOR reports flush-sized batches for rapid same-branch <source_kind> input
+    Given Redis is running
+    And MQTT is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -168,13 +170,13 @@ Feature: Ingestor metrics
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-metrics-{{test_id}}'
         };
         CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
-          'addr' = 'redis://127.0.0.1:6379/'
+          'addr' = '{{redis_addr}}'
         };
         CREATE INGESTOR ingestor_metrics_source
         FROM <source_clause>
@@ -221,7 +223,8 @@ Feature: Ingestor metrics
       | 1            | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
 
   Scenario Outline: FLUSH IMMEDIATE preserves batching during a rapid input burst
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    Given MQTT is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -244,7 +247,7 @@ Feature: Ingestor metrics
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-immediate-flush-{{test_id}}'
         };
         CREATE INGESTOR immediate_source
@@ -341,6 +344,7 @@ Feature: Ingestor metrics
       | 3            |
 
   Scenario: DESCRIBE INGESTOR from a non-owner node reports owner metrics after restart
+    Given Redis is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -364,7 +368,7 @@ Feature: Ingestor metrics
         CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
-          'addr' = 'redis://127.0.0.1:6379/'
+          'addr' = '{{redis_addr}}'
         };
         CREATE INGESTOR remote_owner_metrics_source
         FROM REDIS PUBSUB redis_main CHANNEL remote_owner_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL

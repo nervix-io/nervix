@@ -1,5 +1,7 @@
 Feature: MySQL emission
   Scenario Outline: MySQL emitter inserts mapped rows from a relay
+    Given MQTT is running
+    And MySQL is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -26,7 +28,7 @@ Feature: MySQL emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mysql-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -42,7 +44,7 @@ Feature: MySQL emission
         CREATE CLIENT mysql_client
         TYPE MYSQL
         CONFIG {
-          'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
+          'addr' = '{{mysql_addr}}'
         };
         CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } WITH MAX BATCH 2
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -77,6 +79,8 @@ Feature: MySQL emission
       | 3            | 1             |
 
   Scenario Outline: MySQL emitter handles insert conflicts with <conflict_action>
+    Given MQTT is running
+    And MySQL is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -103,7 +107,7 @@ Feature: MySQL emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mysql-conflict-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -119,7 +123,7 @@ Feature: MySQL emission
         CREATE CLIENT mysql_client
         TYPE MYSQL
         CONFIG {
-          'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
+          'addr' = '{{mysql_addr}}'
         };
         CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_conflict_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } ON CONFLICT <conflict_action> WITH MAX BATCH 2
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

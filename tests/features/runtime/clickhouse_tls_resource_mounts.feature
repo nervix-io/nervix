@@ -1,5 +1,7 @@
 Feature: ClickHouse TLS resource mounts
   Scenario Outline: ClickHouse emitter inserts over HTTPS with a mounted resource directory
+    Given MQTT is running
+    And ClickHouse is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -35,7 +37,7 @@ Feature: ClickHouse TLS resource mounts
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-clickhouse-tls-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -52,7 +54,7 @@ Feature: ClickHouse TLS resource mounts
         TYPE CLICKHOUSE
         MOUNT dev_tls
         CONFIG {
-          'addr' = 'https://127.0.0.1:8124',
+          'addr' = '{{clickhouse_tls_addr}}',
           'user' = 'default',
           'password' = 'nervix',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'

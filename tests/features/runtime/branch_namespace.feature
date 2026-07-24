@@ -1,5 +1,6 @@
 Feature: Branch namespace
   Scenario Outline: Processor filter-map reads the current branch key
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -42,7 +43,7 @@ Feature: Branch namespace
       CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branch-namespace-{{test_id}}'
         };
       CREATE INGESTOR mqtt_notifications
