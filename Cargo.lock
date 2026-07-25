@@ -2616,7 +2616,7 @@ dependencies = [
 [[package]]
 name = "cranelift"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "cranelift-codegen 0.127.4",
  "cranelift-frontend 0.127.4",
@@ -2628,7 +2628,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "cranelift-assembler-x64-meta 0.127.4",
 ]
@@ -2645,7 +2645,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64-meta"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "cranelift-srcgen 0.127.4",
 ]
@@ -2662,7 +2662,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bforest"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "cranelift-entity 0.127.4",
 ]
@@ -2680,7 +2680,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bitset"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 
 [[package]]
 name = "cranelift-bitset"
@@ -2696,7 +2696,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "bumpalo",
  "cranelift-assembler-x64 0.127.4",
@@ -2752,7 +2752,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "cranelift-assembler-x64-meta 0.127.4",
  "cranelift-codegen-shared 0.127.4",
@@ -2776,7 +2776,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 
 [[package]]
 name = "cranelift-codegen-shared"
@@ -2787,7 +2787,7 @@ checksum = "287ab88211d049178dc8dda243e2db176919d8b29db605c0efc7c6d76ebea0f7"
 [[package]]
 name = "cranelift-control"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "arbitrary",
 ]
@@ -2804,7 +2804,7 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "cranelift-bitset 0.127.4",
 ]
@@ -2824,7 +2824,7 @@ dependencies = [
 [[package]]
 name = "cranelift-frontend"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "cranelift-codegen 0.127.4",
  "log",
@@ -2848,7 +2848,7 @@ dependencies = [
 [[package]]
 name = "cranelift-isle"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 
 [[package]]
 name = "cranelift-isle"
@@ -2859,7 +2859,7 @@ checksum = "b6f1c1dc4d6b4bc4f0be12b08cee0e59f7610287827aa62590f8e9ec6f45dff4"
 [[package]]
 name = "cranelift-jit"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "anyhow",
  "cranelift-codegen 0.127.4",
@@ -2878,7 +2878,7 @@ dependencies = [
 [[package]]
 name = "cranelift-module"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "anyhow",
  "cranelift-codegen 0.127.4",
@@ -2888,7 +2888,7 @@ dependencies = [
 [[package]]
 name = "cranelift-native"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "cranelift-codegen 0.127.4",
  "libc",
@@ -2909,7 +2909,7 @@ dependencies = [
 [[package]]
 name = "cranelift-srcgen"
 version = "0.127.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 
 [[package]]
 name = "cranelift-srcgen"
@@ -12345,7 +12345,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
 version = "40.0.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "anyhow",
  "cfg-if",
@@ -12368,7 +12368,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-math"
 version = "40.0.4"
-source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
+source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#adbdac4b8cc83942ce55c595bc33189f13fb9566"
 dependencies = [
  "libm",
 ]
