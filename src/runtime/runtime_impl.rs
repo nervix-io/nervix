@@ -1,3 +1,4 @@
+use nervix_models::CreateUdf;
 use rdkafka::consumer::StreamConsumer;
 
 use super::*;

@@ -34,26 +34,7 @@ use nervix_interconnect::{
     Envelope, RelayPayload, RelayPayloadKind, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
-    AckMode, Assignment, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
-    CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy,
-    CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientKinesis, CreateClientMqtt, CreateClientNats,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateWireSchemaStmt, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState,
-    DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy,
-    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
-    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
-    KinesisIngestMode, Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction,
-    MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-    MySqlValueMapping, PostgresConflictAction, PostgresValueMapping, ProcessorOutput,
-    PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction,
-    ScheduledNode, SqsIngestMode, StructuredMessageError, Timestamp,
+    AckMode, Assignment, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule, CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMqtt, CreateClientNats, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol, CreateUdf, CreateWireSchemaStmt, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier, InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping, IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, KinesisIngestMode, Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode, SqsIngestMode, StructuredMessageError, Timestamp,
 };
 use nervix_nspl::{
     vm_program::{
