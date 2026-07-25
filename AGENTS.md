@@ -159,6 +159,23 @@ language or interface changes.
 
 ## Runtime and Infrastructure Invariants
 
+### Columnar data plane
+
+- Arrow columnar batches are the only data-plane payload representation, end to end: ingest
+  decoding, relay carriage, VM input and output, stateful processor state, error handling,
+  emission, sessions, and interconnect. A batch with one row is still a batch.
+- Do not introduce, reintroduce, or extend row-oriented payload representations: no
+  `HashMap`-of-fields records, no per-row boxed value maps, no dual row-plus-column carriers kept
+  in sync. Where a single message must be addressed, use a row view over an Arc'd Arrow batch
+  (batch reference plus row index), never a materialized row copy.
+- Scalar value enums are permitted only for genuinely scalar concerns: branch keys, literals,
+  configuration, and boundary key extraction. They are never a payload container.
+- Program inputs are built by projection: reuse the carrier batch's Arc'd columns and construct
+  only genuinely new columns (uninitialized outputs, broadcast state, computed lookups).
+  Rebuilding a column from row data that already exists in columnar form is a defect.
+- Wire codecs decode directly into typed Arrow builders and encode directly from column values at
+  the external boundary. Decoded intermediate row maps are forbidden.
+
 ### Ownership and execution policy
 
 - The type or crate that owns a dangerous operation must expose one public API that enforces its

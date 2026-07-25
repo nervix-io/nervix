@@ -184,6 +184,68 @@ impl TypedArray {
         }
     }
 
+    pub fn try_from_array_ref(array: ArrayRef) -> Result<Self, RuntimeError> {
+        let converted = match array.data_type() {
+            DataType::UInt8 => array
+                .as_any()
+                .downcast_ref::<UInt8Array>()
+                .map(|array| Self::UInt8(array.clone())),
+            DataType::Int8 => array
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .map(|array| Self::Int8(array.clone())),
+            DataType::UInt16 => array
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .map(|array| Self::UInt16(array.clone())),
+            DataType::Int16 => array
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .map(|array| Self::Int16(array.clone())),
+            DataType::UInt32 => array
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .map(|array| Self::UInt32(array.clone())),
+            DataType::Int32 => array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(|array| Self::Int32(array.clone())),
+            DataType::UInt64 => array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .map(|array| Self::UInt64(array.clone())),
+            DataType::Int64 => array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .map(|array| Self::Int64(array.clone())),
+            DataType::Float32 => array
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .map(|array| Self::Float32(array.clone())),
+            DataType::Float64 => array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(|array| Self::Float64(array.clone())),
+            DataType::Boolean => array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .map(|array| Self::Boolean(array.clone())),
+            DataType::Utf8 => array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|array| Self::Utf8(array.clone())),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(_)) => array
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .map(|array| Self::Datetime(array.clone())),
+            DataType::List(_) | DataType::FixedSizeList(_, _) => Some(Self::Generic(array.clone())),
+            _ => None,
+        };
+        converted.ok_or_else(|| RuntimeError::UnsupportedColumnType {
+            data_type: array.data_type().clone(),
+        })
+    }
+
     pub fn uninitialized(data_type: DataType, len: usize) -> Self {
         Self::Uninitialized { data_type, len }
     }
