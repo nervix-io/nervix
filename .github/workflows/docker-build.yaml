@@ -162,6 +162,15 @@ jobs:
         with:
           mdbook-version: "0.4.40"
 
+      - name: Install Pandoc and PDF engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            fonts-noto-cjk \
+            fonts-noto-core \
+            pandoc \
+            texlive-xetex
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97
 
@@ -176,9 +185,11 @@ jobs:
             docs_target="pr-${{ github.event.pull_request.number }}-${{ github.sha }}"
             docs_url="https://docs.nervix.io/${docs_target}/"
             llms_url="https://docs.nervix.io/${docs_target}/llms.txt"
+            pdf_url="https://docs.nervix.io/${docs_target}/nervix.pdf"
             echo "target=${docs_target}" >> "$GITHUB_OUTPUT"
             echo "url=${docs_url}" >> "$GITHUB_OUTPUT"
             echo "llms_url=${llms_url}" >> "$GITHUB_OUTPUT"
+            echo "pdf_url=${pdf_url}" >> "$GITHUB_OUTPUT"
 
       - name: Publish Book
         env:
@@ -195,6 +206,7 @@ jobs:
               echo
               echo "- Target: \`${{ steps.docs.outputs.target }}\`"
               echo "- Book: ${{ steps.docs.outputs.url }}"
+              echo "- PDF: ${{ steps.docs.outputs.pdf_url }}"
               echo "- NSPL agent index: ${{ steps.docs.outputs.llms_url }}"
             } >> "$GITHUB_STEP_SUMMARY"
 
@@ -208,6 +220,7 @@ jobs:
 
             - Target: \`${{ steps.docs.outputs.target }}\`
             - Book: ${{ steps.docs.outputs.url }}
+            - PDF: ${{ steps.docs.outputs.pdf_url }}
             - NSPL agent index: ${{ steps.docs.outputs.llms_url }}`;
 
             const { owner, repo } = context.repo;

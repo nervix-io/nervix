@@ -1,4 +1,5 @@
 const ALIAS_PREFIXES = new Set(["snapshot", "latest", "stable", "develop"]);
+const ROOT_ALIAS_FILES = new Set(["llms.txt", "nervix.pdf"]);
 
 export default {
   async fetch(request, env) {
@@ -61,8 +62,8 @@ async function resolveAliasRedirect(pathname, env) {
     return "snapshot/";
   }
 
-  if (pathname === "llms.txt") {
-    return resolveAliasTarget("snapshot", "llms.txt", env);
+  if (ROOT_ALIAS_FILES.has(pathname)) {
+    return resolveAliasTarget("snapshot", pathname, env);
   }
 
   const segments = pathname.split("/");

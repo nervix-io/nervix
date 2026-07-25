@@ -35,6 +35,21 @@ class DocsWorkflowTests(unittest.TestCase):
             justfile,
         )
 
+    def test_docs_ci_builds_and_publishes_nervix_pdf(self) -> None:
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        _, build_book = workflow.split("\n  build-book:", maxsplit=1)
+        justfile = Path("justfile").read_text()
+
+        self.assertIn("Install Pandoc", build_book)
+        self.assertIn("pdf_url=", build_book)
+        self.assertIn("steps.docs.outputs.pdf_url", build_book)
+        self.assertIn("fonts-noto-cjk", build_book)
+        self.assertIn("fonts-noto-core", build_book)
+        self.assertIn("texlive-xetex", build_book)
+        self.assertIn("just book-pdf", justfile)
+        self.assertIn('output_path="docs/book/nervix.pdf"', justfile)
+        self.assertIn("--pdf-engine=xelatex", justfile)
+
     def test_docs_publisher_does_not_shell_out_for_storage_operations(self) -> None:
         publisher = Path("scripts/publish_docs_alias.py").read_text()
 
