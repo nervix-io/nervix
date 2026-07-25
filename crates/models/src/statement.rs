@@ -444,6 +444,7 @@ pub enum Model {
     ClientPulsar(CreateClientPulsar),
     ClientKinesis(CreateClientKinesis),
     ClientHttp(CreateClientHttp),
+    ClientSentry(CreateClientSentry),
     ClientPrometheus(CreateClientPrometheus),
     ClientMqtt(CreateClientMqtt),
     ClientNats(CreateClientNats),
@@ -491,6 +492,7 @@ impl Model {
             | Self::ClientPulsar(_)
             | Self::ClientKinesis(_)
             | Self::ClientHttp(_)
+            | Self::ClientSentry(_)
             | Self::ClientPrometheus(_)
             | Self::ClientMqtt(_)
             | Self::ClientNats(_)
@@ -542,6 +544,7 @@ impl Model {
             Self::ClientPulsar(v) => &v.name,
             Self::ClientKinesis(v) => &v.name,
             Self::ClientHttp(v) => &v.name,
+            Self::ClientSentry(v) => &v.name,
             Self::ClientPrometheus(v) => &v.name,
             Self::ClientMqtt(v) => &v.name,
             Self::ClientNats(v) => &v.name,
@@ -577,6 +580,54 @@ impl Model {
             Self::WindowProcessor(v) => &v.name,
             Self::Emitter(v) => &v.name,
             Self::Udf(v) => &v.name,
+        }
+    }
+
+    pub fn client_type_label(&self) -> Option<&'static str> {
+        match self {
+            Self::ClientKafka(_) => Some("KAFKA"),
+            Self::ClientPulsar(_) => Some("PULSAR"),
+            Self::ClientKinesis(_) => Some("KINESIS"),
+            Self::ClientHttp(_) => Some("HTTP"),
+            Self::ClientSentry(_) => Some("SENTRY"),
+            Self::ClientPrometheus(_) => Some("PROMETHEUS"),
+            Self::ClientMqtt(_) => Some("MQTT"),
+            Self::ClientNats(_) => Some("NATS"),
+            Self::ClientRabbitMq(_) => Some("RABBITMQ"),
+            Self::ClientRedis(_) => Some("REDIS"),
+            Self::ClientZeroMq(_) => Some("ZEROMQ"),
+            Self::ClientSqs(_) => Some("SQS"),
+            Self::ClientWebsockets(_) => Some("WEBSOCKETS"),
+            Self::ClientClickHouse(_) => Some("CLICKHOUSE"),
+            Self::ClientPostgres(_) => Some("POSTGRES"),
+            Self::ClientMySql(_) => Some("MYSQL"),
+            Self::ClientMongoDb(_) => Some("MONGODB"),
+            Self::ClientS3(_) => Some("S3"),
+            Self::ClientGcs(_) => Some("GCS"),
+            Self::ClientAzureBlob(_) => Some("AZURE_BLOB"),
+            Self::ClientIcebergRest(_) => Some("ICEBERG_REST"),
+            Self::Schema(_)
+            | Self::WireSchema(_)
+            | Self::Codec(_)
+            | Self::Vhost(_)
+            | Self::Branch(_)
+            | Self::Endpoint(_)
+            | Self::SignalingProtocol(_)
+            | Self::Generator(_)
+            | Self::Inferencer(_)
+            | Self::WasmProcessor(_)
+            | Self::Ingestor(_)
+            | Self::Reingestor(_)
+            | Self::Relay(_)
+            | Self::Materializer(_)
+            | Self::Lookup(_)
+            | Self::Junction(_)
+            | Self::Deduplicator(_)
+            | Self::Correlator(_)
+            | Self::Reorderer(_)
+            | Self::WindowProcessor(_)
+            | Self::Emitter(_)
+            | Self::Udf(_) => None,
         }
     }
 }
@@ -769,10 +820,15 @@ pub enum EmitSink {
         subject: Identifier,
     },
     #[strum(serialize = "ZEROMQ")]
-    ZeroMq { client: Identifier },
+    ZeroMq {
+        client: Identifier,
+    },
     Sqs {
         client: Identifier,
         queue: Identifier,
+    },
+    Sentry {
+        client: Identifier,
     },
     ClickHouse {
         client: Identifier,
@@ -834,6 +890,7 @@ impl EmitSink {
             | Self::Nats { client, .. }
             | Self::ZeroMq { client }
             | Self::Sqs { client, .. }
+            | Self::Sentry { client }
             | Self::ClickHouse { client, .. }
             | Self::Postgres { client, .. }
             | Self::MySql { client, .. }
@@ -854,6 +911,78 @@ impl EmitSink {
         }
     }
 
+    pub fn expected_client_type(&self) -> &'static str {
+        match self {
+            Self::Kafka { .. } => "KAFKA",
+            Self::Pulsar { .. } => "PULSAR",
+            Self::Kinesis { .. } => "KINESIS",
+            Self::RabbitMq { .. } => "RABBITMQ",
+            Self::Redis { .. } => "REDIS",
+            Self::Mqtt { .. } => "MQTT",
+            Self::Nats { .. } => "NATS",
+            Self::ZeroMq { .. } => "ZEROMQ",
+            Self::Sqs { .. } => "SQS",
+            Self::Sentry { .. } => "SENTRY",
+            Self::ClickHouse { .. } => "CLICKHOUSE",
+            Self::Postgres { .. } => "POSTGRES",
+            Self::MySql { .. } => "MYSQL",
+            Self::MongoDb { .. } => "MONGODB",
+            Self::Iceberg {
+                backend: IcebergStorageBackend::S3,
+                ..
+            } => "S3",
+            Self::Iceberg {
+                backend: IcebergStorageBackend::Gcs,
+                ..
+            } => "GCS",
+            Self::Iceberg {
+                backend: IcebergStorageBackend::AzureBlob,
+                ..
+            } => "AZURE_BLOB",
+        }
+    }
+
+    pub fn accepts_client(&self, client: &Model) -> bool {
+        matches!(
+            (self, client),
+            (Self::Kafka { .. }, Model::ClientKafka(_))
+                | (Self::Pulsar { .. }, Model::ClientPulsar(_))
+                | (Self::Kinesis { .. }, Model::ClientKinesis(_))
+                | (Self::RabbitMq { .. }, Model::ClientRabbitMq(_))
+                | (Self::Redis { .. }, Model::ClientRedis(_))
+                | (Self::Mqtt { .. }, Model::ClientMqtt(_))
+                | (Self::Nats { .. }, Model::ClientNats(_))
+                | (Self::ZeroMq { .. }, Model::ClientZeroMq(_))
+                | (Self::Sqs { .. }, Model::ClientSqs(_))
+                | (Self::Sentry { .. }, Model::ClientSentry(_))
+                | (Self::ClickHouse { .. }, Model::ClientClickHouse(_))
+                | (Self::Postgres { .. }, Model::ClientPostgres(_))
+                | (Self::MySql { .. }, Model::ClientMySql(_))
+                | (Self::MongoDb { .. }, Model::ClientMongoDb(_))
+                | (
+                    Self::Iceberg {
+                        backend: IcebergStorageBackend::S3,
+                        ..
+                    },
+                    Model::ClientS3(_),
+                )
+                | (
+                    Self::Iceberg {
+                        backend: IcebergStorageBackend::Gcs,
+                        ..
+                    },
+                    Model::ClientGcs(_),
+                )
+                | (
+                    Self::Iceberg {
+                        backend: IcebergStorageBackend::AzureBlob,
+                        ..
+                    },
+                    Model::ClientAzureBlob(_),
+                )
+        )
+    }
+
     pub fn requires_codec(&self) -> bool {
         match self {
             Self::Kafka { .. }
@@ -864,7 +993,8 @@ impl EmitSink {
             | Self::Mqtt { .. }
             | Self::Nats { .. }
             | Self::ZeroMq { .. }
-            | Self::Sqs { .. } => true,
+            | Self::Sqs { .. }
+            | Self::Sentry { .. } => true,
             Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
@@ -892,7 +1022,8 @@ impl EmitSink {
             | Self::Mqtt { .. }
             | Self::Nats { .. }
             | Self::ZeroMq { .. }
-            | Self::Sqs { .. } => None,
+            | Self::Sqs { .. }
+            | Self::Sentry { .. } => None,
         }
     }
 
@@ -912,6 +1043,7 @@ impl EmitSink {
             | Self::Nats { .. }
             | Self::ZeroMq { .. }
             | Self::Sqs { .. }
+            | Self::Sentry { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
@@ -992,6 +1124,13 @@ pub struct CreateClientKinesis {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateClientHttp {
+    pub name: Identifier,
+    pub mount: Option<Identifier>,
+    pub config: Vec<ClientConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateClientSentry {
     pub name: Identifier,
     pub mount: Option<Identifier>,
     pub config: Vec<ClientConfigEntry>,
@@ -1120,6 +1259,7 @@ pub type KafkaConfigEntry = ClientConfigEntry;
 pub type PulsarConfigEntry = ClientConfigEntry;
 pub type KinesisConfigEntry = ClientConfigEntry;
 pub type HttpConfigEntry = ClientConfigEntry;
+pub type SentryConfigEntry = ClientConfigEntry;
 pub type RabbitMqConfigEntry = ClientConfigEntry;
 pub type RedisConfigEntry = ClientConfigEntry;
 pub type MqttConfigEntry = ClientConfigEntry;

@@ -99,6 +99,13 @@ fn sqs_emit_sink_parser<'src>()
         .map(|(client, queue)| EmitSink::Sqs { client, queue })
 }
 
+fn sentry_emit_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Sentry)
+        .ignore_then(client_ref())
+        .map(|client| EmitSink::Sentry { client })
+}
+
 fn balanced_value_expression_group<'src>()
 -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
     recursive(|element| {
@@ -518,6 +525,7 @@ fn emit_sink_parser<'src>()
         nats_emit_sink_parser(),
         zeromq_emit_sink_parser(),
         sqs_emit_sink_parser(),
+        sentry_emit_sink_parser(),
     )
 }
 
@@ -827,6 +835,49 @@ mod tests {
             }
         );
         assert_eq!(parsed.mode, AckMode::Attached);
+    }
+
+    #[test]
+    fn parses_create_emitter_sentry() {
+        let input = r#"
+            CREATE EMITTER emit
+                FROM errors
+                ENCODE USING error_event_codec
+                TO SENTRY sentry_main
+                INHERIT ALL
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG
+                ON GENERAL ERROR LOG;
+        "#;
+
+        let parsed = parse_create_emitter(input).expect("parse should succeed");
+
+        assert_eq!(parsed.sink.transport_label(), "SENTRY");
+        assert_eq!(parsed.sink.client().as_str(), "sentry_main");
+    }
+
+    #[test]
+    fn rejects_sentry_emitter_without_codec() {
+        let input = r#"
+            CREATE EMITTER emit
+                FROM errors
+                TO SENTRY sentry_main
+                INHERIT ALL
+                FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                ON MESSAGE ERROR LOG
+                ON GENERAL ERROR LOG;
+        "#;
+
+        let error = parse_create_emitter(input).expect_err("parse must fail");
+        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+            panic!("expected parse error, got {error:?}");
+        };
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("ENCODE USING")),
+            "expected codec diagnostic, got {diagnostics:?}"
+        );
     }
 
     #[test]
@@ -2002,6 +2053,26 @@ mod tests {
         assert!(suggestions.contains(&"POSTGRES".to_string()));
         assert!(suggestions.contains(&"MYSQL".to_string()));
         assert!(suggestions.contains(&"MONGODB".to_string()));
+        assert!(suggestions.contains(&"SENTRY".to_string()));
+    }
+
+    #[test]
+    fn sentry_sink_completion_context_does_not_leak_transport_qualifiers() {
+        let client_input =
+            "CREATE EMITTER emit FROM errors ENCODE USING error_event_codec TO SENTRY ";
+        let client_suggestions = suggest_create_emitter(client_input, client_input.len());
+        assert!(client_suggestions.contains(&"ref:client".to_string()));
+        assert!(!client_suggestions.contains(&"TOPIC".to_string()));
+        assert!(!client_suggestions.contains(&"QUEUE".to_string()));
+
+        let route_input =
+            "CREATE EMITTER emit FROM errors ENCODE USING error_event_codec TO SENTRY sentry_main ";
+        let route_suggestions = suggest_create_emitter(route_input, route_input.len());
+        assert!(route_suggestions.contains(&"INHERIT".to_string()));
+        assert!(route_suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(!route_suggestions.contains(&"TOPIC".to_string()));
+        assert!(!route_suggestions.contains(&"QUEUE".to_string()));
+        assert!(!route_suggestions.contains(&"SUBJECT".to_string()));
     }
 
     #[test]

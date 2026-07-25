@@ -23,7 +23,8 @@ The core runtime model is a graph of connected nodes:
 - processors, junctions, deduplicators, reingestors, and materializers transform or route that data
 - emitters push results out to external systems
 
-Current built-in transport integrations include Kafka, Pulsar, HTTP, Prometheus, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, and WebSockets.
+Current built-in transport integrations include Kafka, Pulsar, HTTP, Prometheus, RabbitMQ, Redis,
+MQTT, NATS, ZeroMQ, SQS, and WebSockets, with Sentry event-envelope emission over HTTP.
 
 The connections between nodes are expressed through `RELAY`s.
 

@@ -459,6 +459,17 @@ async fn given_jaeger_is_running(world: &mut ScenarioWorld) {
     refresh_dependency_configuration(world);
 }
 
+#[given("Sentry is running")]
+async fn given_sentry_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_sentry(&world.test_id)
+        .await
+        .expect("Sentry test container should start");
+    refresh_dependency_configuration(world);
+}
+
 #[then(expr = "dependency endpoint {string} responds with 200")]
 async fn then_dependency_endpoint_responds_with_200(
     world: &mut ScenarioWorld,
@@ -9766,6 +9777,42 @@ async fn then_last_observed_broker_message_has_headers(
             "expected broker header {name}={value}, got {:?}",
             world.last_broker_headers
         );
+    }
+}
+
+#[then("Sentry eventually receives an event")]
+async fn then_sentry_eventually_receives_event(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let expected =
+        serde_json::from_str::<serde_json::Value>(&expand_placeholders(world, docstring(step)))
+            .expect("expected Sentry event must be valid JSON");
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        tokio::task::consume_budget().await;
+        if let Some(event) = world
+            .dependencies
+            .sentry_event(&world.test_id)
+            .await
+            .expect("Sentry event query must succeed")
+        {
+            for (field, expected_value) in expected
+                .as_object()
+                .expect("expected Sentry event must be a JSON object")
+            {
+                assert_eq!(
+                    event.get(field),
+                    Some(expected_value),
+                    "Sentry event field {field:?} did not match; full event: {event}"
+                );
+            }
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Sentry to receive {expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 

@@ -8,13 +8,13 @@ use crate::{
     CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
     CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
-    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
-    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
-    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
+    CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression,
+    FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, Inheritance, JsonType, KafkaConfigEntry, KafkaIngestMode,
     KafkaOffsetMode, KinesisConfigEntry, KinesisIngestMode, Literal, MaterializedRelayState,
@@ -24,9 +24,9 @@ use crate::{
     OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere,
     ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
     RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SqsConfigEntry,
-    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
+    SqsConfigEntry, SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode,
+    WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
@@ -331,6 +331,7 @@ impl Model {
             Self::ClientPulsar(client) => client.to_canonical_nspl(),
             Self::ClientKinesis(client) => client.to_canonical_nspl(),
             Self::ClientHttp(client) => client.to_canonical_nspl(),
+            Self::ClientSentry(client) => client.to_canonical_nspl(),
             Self::ClientPrometheus(client) => client.to_canonical_nspl(),
             Self::ClientMqtt(client) => client.to_canonical_nspl(),
             Self::ClientNats(client) => client.to_canonical_nspl(),
@@ -486,6 +487,24 @@ impl CreateClientHttp {
 
         Ok(format!(
             "CREATE CLIENT {} TYPE HTTP{} CONFIG {{{}}};",
+            self.name.as_str(),
+            client_mount_clause(self.mount.as_ref()),
+            config
+        ))
+    }
+}
+
+impl CreateClientSentry {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let config = self
+            .config
+            .iter()
+            .map(sentry_entry_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+
+        Ok(format!(
+            "CREATE CLIENT {} TYPE SENTRY{} CONFIG {{{}}};",
             self.name.as_str(),
             client_mount_clause(self.mount.as_ref()),
             config
@@ -1607,6 +1626,10 @@ fn http_entry_to_nspl(entry: &HttpConfigEntry) -> Result<String, CanonicalNsplEr
     kafka_entry_to_nspl(entry)
 }
 
+fn sentry_entry_to_nspl(entry: &SentryConfigEntry) -> Result<String, CanonicalNsplError> {
+    kafka_entry_to_nspl(entry)
+}
+
 fn pulsar_entry_to_nspl(entry: &PulsarConfigEntry) -> Result<String, CanonicalNsplError> {
     kafka_entry_to_nspl(entry)
 }
@@ -2041,6 +2064,7 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
         EmitSink::Sqs { client, queue } => {
             Ok(format!("SQS {} QUEUE {}", client.as_str(), queue.as_str()))
         }
+        EmitSink::Sentry { client } => Ok(format!("SENTRY {}", client.as_str())),
         EmitSink::ClickHouse {
             client,
             table,
@@ -2298,20 +2322,20 @@ mod tests {
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
         CreateClientHttp, CreateClientKafka, CreateClientKinesis, CreateClientMqtt,
         CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
-        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf,
-        CreateVhost, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
-        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope,
-        GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, Literal, MessageErrorPolicy, Model,
-        MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
-        PostgresConflictAction, PostgresValueMapping, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode,
-        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SqsIngestMode, UdfArgument,
-        UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound, WireSchemaField,
-        ZeroMqIngestMode,
+        CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq,
+        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
+        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateSchema,
+        CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema,
+        CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
+        Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource,
+        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, Literal,
+        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
+        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch,
+        ParseAsType, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
+        RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
+        SentryConfigEntry, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+        WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2605,6 +2629,19 @@ mod tests {
                 .to_canonical_nspl()
                 .expect("must render"),
                 "CREATE CLIENT http_main TYPE HTTP CONFIG {'base_url' = 'https://example.com'};",
+            ),
+            (
+                CreateClientSentry {
+                    name: identifier("sentry_main"),
+                    mount: None,
+                    config: vec![SentryConfigEntry {
+                        key: "dsn".to_string(),
+                        value: "https://key@sentry.example/42".to_string(),
+                    }],
+                }
+                .to_canonical_nspl()
+                .expect("must render"),
+                "CREATE CLIENT sentry_main TYPE SENTRY CONFIG {'dsn' = 'https://key@sentry.example/42'};",
             ),
             (
                 CreateClientMqtt {
@@ -3116,6 +3153,12 @@ mod tests {
                     queue: identifier("orders_queue"),
                 },
                 "SQS sqs_main QUEUE orders_queue",
+            ),
+            (
+                EmitSink::Sentry {
+                    client: identifier("sentry_main"),
+                },
+                "SENTRY sentry_main",
             ),
         ];
 

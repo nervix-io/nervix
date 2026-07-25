@@ -10224,6 +10224,7 @@ fn format_emit_sink(sink: &EmitSink) -> String {
         EmitSink::Sqs { client, queue } => {
             format!("SQS client={} queue={}", client.as_str(), queue.as_str())
         }
+        EmitSink::Sentry { client } => format!("SENTRY client={}", client.as_str()),
         EmitSink::ClickHouse {
             client,
             table,

@@ -578,6 +578,26 @@ services:
         cat /tmp/azurite-container.err >&2
         exit 1
 
+  # Lightweight Sentry-compatible backend for local emitter development.
+  sentry:
+    image: bugsink/bugsink:2.3.1
+    container_name: nervix-sentry
+    ports:
+      - "18090:8000"
+    environment:
+      SECRET_KEY: nervix-local-sentry-secret-key-change-before-production-000000000000
+      CREATE_SUPERUSER: admin@example.org:admin
+      PORT: 8000
+      BASE_URL: http://127.0.0.1:18090
+    volumes:
+      - sentry-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import requests; requests.get(\"http://127.0.0.1:8000/health/ready\").raise_for_status()'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
   mock-server:
     build:
       context: .
@@ -601,3 +621,4 @@ volumes:
   fake-gcs-data:
   quickwit-data:
   rustfs-data:
+  sentry-data:

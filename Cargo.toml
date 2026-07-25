@@ -138,6 +138,7 @@ rumqttc = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 rustls-pki-types = { workspace = true }
+sentry-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 simd-json = { workspace = true }
@@ -385,6 +386,7 @@ rustls = { version = "0.23", default-features = false, features = [
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
 rustyline = "17"
+sentry-types = "0.48.5"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0.149"
@@ -442,6 +444,7 @@ zeromq = "0.4"
 aws-lc-sys = { git = "https://github.com/nervix-io/aws-lc-rs.git", rev = "6332c54d1cf0535312a0e5cd73232f5d1e21f958" }
 # https://github.com/bytecodealliance/wasmtime/pull/13975 and https://github.com/glebpom/wasmtime/pull/1
 cranelift = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
+cranelift-codegen = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
 cranelift-jit = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
 
 [profile.release]

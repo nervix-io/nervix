@@ -2618,7 +2618,7 @@ name = "cranelift"
 version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
- "cranelift-codegen 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-codegen 0.127.4",
  "cranelift-frontend 0.127.4",
  "cranelift-jit",
  "cranelift-module",
@@ -2628,18 +2628,9 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64"
 version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6abf69c884fde2d9d4cc232a585fb18f16af3ae04c634315c84ebe158ded92d"
-dependencies = [
- "cranelift-assembler-x64-meta 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "cranelift-assembler-x64"
-version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
- "cranelift-assembler-x64-meta 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-assembler-x64-meta 0.127.4",
 ]
 
 [[package]]
@@ -2654,18 +2645,9 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64-meta"
 version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "263d31fcdf83a10267e8c38b53bc8f7688dfbc331267fd8fdf5b22e0dc47a55b"
-dependencies = [
- "cranelift-srcgen 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "cranelift-assembler-x64-meta"
-version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
- "cranelift-srcgen 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-srcgen 0.127.4",
 ]
 
 [[package]]
@@ -2680,18 +2662,9 @@ dependencies = [
 [[package]]
 name = "cranelift-bforest"
 version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d459d5377c01c4472b71029caa2df41afaf47711676aa9b12d7414f15104637b"
-dependencies = [
- "cranelift-entity 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "cranelift-bforest"
-version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
- "cranelift-entity 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-entity 0.127.4",
 ]
 
 [[package]]
@@ -2703,12 +2676,6 @@ dependencies = [
  "cranelift-entity 0.134.2",
  "wasmtime-internal-core",
 ]
-
-[[package]]
-name = "cranelift-bitset"
-version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8283088d5823ba7856ab8d531b7c3654b24984748f9fd99dcf3210701fd1d065"
 
 [[package]]
 name = "cranelift-bitset"
@@ -2729,43 +2696,17 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen"
 version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d3138316d8dd341d725d6ab1598750545c76ad32892837fde558edd68a01b43"
-dependencies = [
- "bumpalo",
- "cranelift-assembler-x64 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-bforest 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-bitset 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-codegen-meta 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-codegen-shared 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-control 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-entity 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-isle 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "gimli 0.32.3",
- "hashbrown 0.15.5",
- "log",
- "regalloc2 0.13.5",
- "rustc-hash",
- "serde",
- "smallvec",
- "target-lexicon",
- "wasmtime-internal-math 40.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "cranelift-codegen"
-version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
  "bumpalo",
- "cranelift-assembler-x64 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-bforest 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-bitset 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-codegen-meta 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-codegen-shared 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-control 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-entity 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-isle 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-assembler-x64 0.127.4",
+ "cranelift-bforest 0.127.4",
+ "cranelift-bitset 0.127.4",
+ "cranelift-codegen-meta 0.127.4",
+ "cranelift-codegen-shared 0.127.4",
+ "cranelift-control 0.127.4",
+ "cranelift-entity 0.127.4",
+ "cranelift-isle 0.127.4",
  "gimli 0.32.3",
  "hashbrown 0.15.5",
  "log",
@@ -2774,7 +2715,7 @@ dependencies = [
  "serde",
  "smallvec",
  "target-lexicon",
- "wasmtime-internal-math 40.0.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "wasmtime-internal-math",
 ]
 
 [[package]]
@@ -2811,23 +2752,11 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "505cead19304a8dc8689e31b29038775c3f73f9d5ea7a5e33864437a1f46c6b6"
-dependencies = [
- "cranelift-assembler-x64-meta 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-codegen-shared 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "cranelift-srcgen 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "heck",
-]
-
-[[package]]
-name = "cranelift-codegen-meta"
-version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
- "cranelift-assembler-x64-meta 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-codegen-shared 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-srcgen 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-assembler-x64-meta 0.127.4",
+ "cranelift-codegen-shared 0.127.4",
+ "cranelift-srcgen 0.127.4",
  "heck",
 ]
 
@@ -2847,12 +2776,6 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce62ba94f570644ce7de6ed05bd39ca28936665dec10a2a1f6f2c531d6add45c"
-
-[[package]]
-name = "cranelift-codegen-shared"
-version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 
 [[package]]
@@ -2860,15 +2783,6 @@ name = "cranelift-codegen-shared"
 version = "0.134.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "287ab88211d049178dc8dda243e2db176919d8b29db605c0efc7c6d76ebea0f7"
-
-[[package]]
-name = "cranelift-control"
-version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db6cfe339689c3926412a7060ab00ef3b2b43d936b537e7a3f696121be9d0eaa"
-dependencies = [
- "arbitrary",
-]
 
 [[package]]
 name = "cranelift-control"
@@ -2890,18 +2804,9 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "625518090e912bdfe3c41464bf97ae421f6044d4ca0f5c3267dcacdb352b033d"
-dependencies = [
- "cranelift-bitset 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "cranelift-entity"
-version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
- "cranelift-bitset 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-bitset 0.127.4",
 ]
 
 [[package]]
@@ -2921,7 +2826,7 @@ name = "cranelift-frontend"
 version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
- "cranelift-codegen 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-codegen 0.127.4",
  "log",
  "smallvec",
  "target-lexicon",
@@ -2943,12 +2848,6 @@ dependencies = [
 [[package]]
 name = "cranelift-isle"
 version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f512767e83015f4baf6e732cabca93cea82907e3ab237f826ef64f7ece75eb6"
-
-[[package]]
-name = "cranelift-isle"
-version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 
 [[package]]
@@ -2963,9 +2862,9 @@ version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
  "anyhow",
- "cranelift-codegen 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-control 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-entity 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-codegen 0.127.4",
+ "cranelift-control 0.127.4",
+ "cranelift-entity 0.127.4",
  "cranelift-module",
  "cranelift-native 0.127.4",
  "libc",
@@ -2982,8 +2881,8 @@ version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
  "anyhow",
- "cranelift-codegen 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
- "cranelift-control 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-codegen 0.127.4",
+ "cranelift-control 0.127.4",
 ]
 
 [[package]]
@@ -2991,7 +2890,7 @@ name = "cranelift-native"
 version = "0.127.4"
 source = "git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener#7529c68878d062f79d98fc5306a53283fbe112fe"
 dependencies = [
- "cranelift-codegen 0.127.4 (git+https://github.com/glebpom/wasmtime.git?branch=backport-fixes-jit-veener)",
+ "cranelift-codegen 0.127.4",
  "libc",
  "target-lexicon",
 ]
@@ -3006,12 +2905,6 @@ dependencies = [
  "libc",
  "target-lexicon",
 ]
-
-[[package]]
-name = "cranelift-srcgen"
-version = "0.127.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97400ad8fbd3a434092fc0b486fa7784150b53187941d818b1087f3ac0a547f0"
 
 [[package]]
 name = "cranelift-srcgen"
@@ -3463,6 +3356,16 @@ name = "data-encoding"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
+
+[[package]]
+name = "debugid"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
+dependencies = [
+ "serde",
+ "uuid",
+]
 
 [[package]]
 name = "defmt"
@@ -6777,6 +6680,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",
+ "sentry-types",
  "serde",
  "serde_json",
  "simd-json",
@@ -9546,7 +9450,7 @@ dependencies = [
  "ariadne 0.6.0",
  "clap",
  "cranelift",
- "cranelift-codegen 0.127.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "cranelift-codegen 0.127.4",
  "cranelift-jit",
  "inetnum",
  "libc",
@@ -10073,6 +9977,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 dependencies = [
  "futures-core",
+]
+
+[[package]]
+name = "sentry-types"
+version = "0.48.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2239099d47e76857b0825a182ecdb90159add7aa1097b60247c6e7ca6bf49c6a"
+dependencies = [
+ "debugid",
+ "hex",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "time",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -12442,15 +12363,6 @@ dependencies = [
  "libc",
  "wasmtime-internal-core",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "wasmtime-internal-math"
-version = "40.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07612904518d47b677e8db67ca47c16d8c8cefb0099020729f886776950cb58b"
-dependencies = [
- "libm",
 ]
 
 [[package]]
