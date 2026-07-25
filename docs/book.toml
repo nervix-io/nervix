@@ -25,6 +25,7 @@ command = "../scripts/mdbook_llms.py"
 description = "Public NSPL configuration reference for Nervix."
 include = [
   "nspl-overview.md",
+  "working-message.md",
   "domains-and-time.md",
   "schemas-and-codecs.md",
   "resources.md",
@@ -34,6 +35,7 @@ include = [
   "wasm-processor-guests.md",
   "wasm-guest-sdk.md",
   "emitters.md",
+  "capacity-planning.md",
   "filter-map-functions.md",
   "udfs.md",
   "roto-language-reference.md",

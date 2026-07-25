@@ -19,6 +19,9 @@ CREATE [IF NOT EXISTS] SCHEMA notification (
 
 Schemas must declare at least one field.
 
+Field names used in expressions are subject to the
+[conditional reserved-word rule](filter-map-functions.md#conditional-expressions).
+
 These types are the values Nervix stores in runtime records and uses for branch grouping, subscription matching, and processor logic.
 
 `ARRAY<T, D1, ..., Dn>` is a fixed rectangular array. Each dimension maps to one

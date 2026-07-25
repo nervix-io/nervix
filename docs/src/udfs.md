@@ -9,6 +9,9 @@ serializing rows.
 UDF creation is trusted-code administration, like uploading a WASM resource. Roto code is native
 JIT-compiled code, not a sandbox for third-party programs.
 
+See [Choosing An Extension Tier](filter-map-functions.md#choosing-an-extension-tier) before choosing
+between builtins, Roto UDFs, and WASM processors.
+
 Roto execution is synchronous. Nervix therefore schedules every UDF-bearing expression on its
 blocking worker pool, including small Arrow batches and UDFs used while constructing branch keys,
 so native UDF work does not occupy an asynchronous runtime worker.
@@ -101,8 +104,17 @@ Roto `test` blocks execute during `CREATE UDF`. If any test rejects, creation fa
 - A Roto trap, invalid result type or row count, or watchdog expiry is a whole-batch error.
 
 The watchdog detects an overrun after native code returns; Roto provides no in-process
-preemption. This is why UDF creation is operator-trusted and non-terminating or third-party code
-must stay on the isolated WASM processor path.
+preemption. A non-terminating UDF occupies one blocking worker permanently. The watchdog converts a
+late completion into a whole-batch error, but it cannot reclaim a worker from native code that
+never returns.
+
+Treat trusted authorship, code review, and passing Roto `test` blocks as admission policy. Size the
+deployment's blocking-worker capacity for the maximum concurrent UDF-bearing expressions plus
+other blocking runtime work. The pool is process-wide and is not an NSPL setting. Limit concurrent
+UDF-bearing paths or isolate them onto separate Nervix processes when one workload could exhaust
+the pool. See [Capacity Planning For Branched Graphs](capacity-planning.md).
+
+Non-terminating or third-party code must stay on the isolated WASM processor path.
 
 UDFs are deterministic unless declared `VOLATILE`. Only a volatile UDF can call `now()`,
 `rand_f64()`, or `uuid_v4()`. `now()` uses the execution-local domain clock. Deterministic calls
@@ -143,8 +155,16 @@ DROP UDF risk_band;
 
 `DESCRIBE UDF` reports the language tag, signature, volatility, content hash, and referencing
 nodes. `SHOW CREATE` preserves the Roto source bytes and chooses a safe dollar-quote delimiter.
-Dropping a UDF is rejected while an active model references it.
+Dropping a UDF is rejected while a stored model references it.
+
+UDF bodies are immutable after creation. Nervix has no `ALTER UDF`, replace, or same-name overwrite
+path. Changing a body requires dropping the old UDF first, which dependency validation forbids
+until every referencing model has been removed. A referenced node's UDF semantics are therefore
+fixed by the UDF content hash reported by `DESCRIBE UDF` for that node's lifetime.
 
 Roto source is persisted; native JIT output is rebuilt in memory during domain activation. A
 server that does not support a stored language tag rejects activation rather than reinterpreting
 the source.
+
+Nervix does not currently expose per-UDF invocation, latency, or row-error metrics. Future work is
+listed only in the [Roadmap](roadmap.md).

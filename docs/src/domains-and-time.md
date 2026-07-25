@@ -25,6 +25,10 @@ Paced time is also important for expiration:
 - branch TTL uses domain logical time in paced domains
 - materialized-state cleanup follows the same logical-time rule
 
+Deterministic Roto UDFs preserve reproducibility when paced input is replayed at an accelerated
+time rate. See the [deterministic-by-default and `VOLATILE` contract](udfs.md#nulls-errors-and-volatility),
+including common-subexpression reuse and the rule that user code is never constant-folded.
+
 ## Unpaced Domains
 
 Unpaced domains do not produce ticks.

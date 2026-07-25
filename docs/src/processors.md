@@ -27,6 +27,9 @@ construct branch keys.
 
 ## Filters and construction
 
+Transforming routes use the [working-message model](working-message.md). The scopes below describe
+fixed points in that construction timeline.
+
 Processing order is:
 
 1. A source-specific `FROM ... WHERE` predicate.
@@ -52,21 +55,21 @@ matches. Sensitive values may be promoted but not downgraded. Explicit inheritan
 written `INHERIT password LEAK SENSITIVE`.
 
 Assignments run left to right. `output.field` reads only an already initialized output field.
-During transforming construction, `message.field` and a bare RHS field read the working output and
-fall back to the exact-compatible `input.field` only while the output field is uninitialized.
-After finalization, route `WHERE` sees the finalized output and performs no fallback.
+`message.field` and a bare RHS field read the
+[working message](working-message.md). Route `WHERE` reads the finalized route output.
 
 Set-only routes reject `INHERIT`. All required fields must be assigned; omitted optional fields
 finalize as typed nulls. Generated inferencer and WASM values are immutable read sources and are
 visible independently to every route. They never initialize route outputs automatically.
 
 Every flush-based processor route declares `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or
-`FLUSH IMMEDIATE`. During normal processing, `FLUSH IMMEDIATE` starts a system-owned 100 µs minimum
-batching timeout when the route first becomes pending, then sends everything collected in that
-window. It has no size boundary. Shutdown and error handling may force pending data out before the
-normal boundary.
+`FLUSH IMMEDIATE`. The [NSPL Overview](nspl-overview.md) defines the system-owned 100 µs minimum
+batching window and its forced-flush exceptions.
 
 ## Materialized relay state
+
+For mechanism selection, including differently keyed data, see
+[Choosing An Enrichment Mechanism](lookups.md#choosing-an-enrichment-mechanism).
 
 Normal processors declare ordered node-wide dependencies after their branch declaration:
 
