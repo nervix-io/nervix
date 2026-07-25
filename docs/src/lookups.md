@@ -3,6 +3,24 @@
 Lookups are resource-backed reference data models that can be queried directly or used inside
 structured NSPL expressions.
 
+## Choosing An Enrichment Mechanism
+
+Choose by ownership and update path:
+
+| Need | Mechanism | Cost shape |
+| --- | --- | --- |
+| Reference data changes when an operator uploads a resource version | `HASH MAP` with `LOOKUP_HASH_MAP` | Static in-memory lookup data for the selected resource version |
+| Live state is keyed by the current branch | `USING MATERIALIZED STATE` with `relay_state.<relay>.<field>` | Branch-local state persisted and snapshot-replicated with the runtime node |
+| Live data is keyed differently from the current branch | Re-key through a `REINGESTOR` into the branch that owns the data, or join outside Nervix in an external store | Reingestion adds a graph stage and creates branch instances under the new key; an external join leaves storage and query cost outside Nervix |
+
+Materialized dependencies require the exact compatible branch. See
+[Materialized relay state](processors.md#materialized-relay-state) for the linked `REQUIRED WAIT`,
+`REQUIRED SKIP`, and `DEFAULT` semantics. Do not use a materialized relay as a cross-branch index.
+
+This boundary is structural. Hash maps amortize a versioned reference dataset. Materialized state
+amortizes the latest record inside the branch that owns it. Neither mechanism turns runtime state
+into an arbitrary-key query service.
+
 The current lookup model is a hash map:
 
 ```nspl

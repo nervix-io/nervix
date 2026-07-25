@@ -62,6 +62,8 @@ request can mix those phases.
 - Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only
   when the body needs the domain clock or randomness. Roto UDFs are trusted native code; keep
   untrusted custom processing in WASM.
+- Include Roto `test` blocks with every agent-generated UDF. Creation runs those tests and rejects
+  the UDF without persisting it when any test rejects.
 - Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch; use a reingestor when the graph must repartition or remove branch grouping.
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
