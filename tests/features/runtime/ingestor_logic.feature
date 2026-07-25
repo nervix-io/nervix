@@ -1,6 +1,7 @@
 Feature: Ingestor filter-map logic
   Scenario Outline: Ingestor filter-map rewrites and filters records for supported transports
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    Given ingestor logic dependency "<transport_fixture>" is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -25,7 +26,8 @@ Feature: Ingestor filter-map logic
       | 3            | zeromq             |
 
   Scenario Outline: Ingestor filter-map can route protocol headers explicitly
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    Given ingestor logic dependency "<transport_fixture>" is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -50,7 +52,8 @@ Feature: Ingestor filter-map logic
       | 3            | nats              |
 
   Scenario Outline: Ingestor filter-map leader validation rejects invalid programs
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    Given ingestor logic dependency "<transport_fixture>" is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -78,7 +81,8 @@ Feature: Ingestor filter-map logic
       | 3            | zeromq             | input                 | WHERE read_header("tenant") = message.tenant |
 
   Scenario Outline: Ingestor filter-map runtime failures emit errors and drop messages
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    Given ingestor logic dependency "<transport_fixture>" is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """

@@ -1,5 +1,7 @@
 Feature: MongoDB emission
   Scenario Outline: MongoDB emitter inserts mapped documents from a relay
+    Given MQTT is running
+    And MongoDB is running
     Given runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
     And a <nodes> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -26,7 +28,7 @@ Feature: MongoDB emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mongodb-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -42,7 +44,7 @@ Feature: MongoDB emission
         CREATE CLIENT mongodb_client
         TYPE MONGODB
         CONFIG {
-          'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
+          'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
         CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } WITH MAX BATCH 2
@@ -78,6 +80,8 @@ Feature: MongoDB emission
       | 3     | 1        |
 
   Scenario Outline: MongoDB emitter handles insert conflicts with <conflict_action>
+    Given MQTT is running
+    And MongoDB is running
     Given runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
     And a <nodes> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -104,7 +108,7 @@ Feature: MongoDB emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mongodb-conflict-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -120,7 +124,7 @@ Feature: MongoDB emission
         CREATE CLIENT mongodb_client
         TYPE MONGODB
         CONFIG {
-          'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
+          'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
         CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_conflict_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } ON CONFLICT ("mongodb_user_id") <conflict_action> WITH MAX BATCH 2

@@ -105,6 +105,7 @@ ort = { workspace = true, features = [
 ] }
 parking_lot = { workspace = true }
 parquet = { workspace = true }
+petgraph = { workspace = true }
 postgres-types = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
@@ -123,7 +124,6 @@ rdkafka = { workspace = true, features = [
   "aws-lc",
 ] }
 redis = { workspace = true }
-registry = { workspace = true }
 reqwest = { workspace = true, features = [
   "json",
   "rustls",
@@ -142,6 +142,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
+storekey = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
@@ -173,6 +174,7 @@ nervix-client-core = { workspace = true }
 playwright-rs = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
+testcontainers = { workspace = true }
 
 [[test]]
 harness = false
@@ -194,7 +196,6 @@ members = [
   "crates/nspl",
   "crates/models",
   "crates/proto",
-  "crates/registry",
   "crates/nervix-cli",
 ]
 
@@ -316,11 +317,9 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
 ] }
 nervix-proto = { package = "nervix-proto", path = "crates/proto" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
-nervix-server = { path = "" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
 nervix-wasm-protocol = { package = "nervix-wasm-protocol", path = "crates/nervix-wasm-protocol" }
-nervix-wasm-sdk = { package = "nervix-wasm-sdk", path = "crates/nervix-wasm-sdk" }
 # Match the pinned Iceberg revision to avoid duplicate, incompatible OpenDAL APIs.
 opendal = { version = "0.56.0", features = [
   "services-s3",
@@ -368,10 +367,9 @@ redis = { version = "1.1.0", default-features = false, features = [
 ] }
 reedline = "0.36"
 regex = "1"
-registry = { package = "nervix-registry", path = "crates/registry" }
 reqwest = "0.13"
 rkyv = "0.8"
-roto = "=0.11.0"
+roto = "0.11"
 rpassword = "7"
 # This rumqttc-next line exposes the MQTT 5 facade with explicit AWS-LC selection.
 rumqttc = { package = "rumqttc-next", version = "0.34.0-alpha", default-features = false, features = [
@@ -395,6 +393,12 @@ sorted-vec = "0.8"
 storekey = "0.5"
 strum = "0.26"
 tempfile = "3"
+testcontainers = { version = "0.27.3", default-features = false, features = [
+  "aws-lc-rs",
+  "http_wait",
+  "reusable-containers",
+  "watchdog",
+] }
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tikv-jemallocator = { version = "0.7.0", features = ["stats"] }

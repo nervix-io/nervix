@@ -16,6 +16,7 @@ Feature: Cluster leader failover
     And node "node-2" eventually reports raft voters "node-1,node-2,node-3"
 
   Scenario Outline: Dead scheduled node primary failover promotes a live replica
+    Given Kafka is running
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
@@ -116,7 +117,7 @@ Feature: Cluster leader failover
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE INGESTOR notification_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
@@ -199,6 +200,7 @@ Feature: Cluster leader failover
       | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                                                                   |
 
   Scenario Outline: Dead scheduled node primary failover falls back to another live node without a replica
+    Given Kafka is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
@@ -299,7 +301,7 @@ Feature: Cluster leader failover
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE INGESTOR notification_source
         FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL

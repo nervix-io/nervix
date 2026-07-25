@@ -37,11 +37,12 @@ BY by_tenant_user SET ...`.
 
 Nervix already runs clustered deployments, schedules graph nodes across multiple servers, executes codecs in the runtime, replicates selected runtime state, and supports multi-node failover scenarios. It is still evolving, but it is beyond a parser-only prototype.
 
-This book is split into three sections:
+This book is split into four sections:
 
-- [Manual](./manual.md): how to run Nervix and how to use its public surface
+- [Manual](./manual.md): how to use Nervix's public surface
 - [Rust WASM Guest SDK](./wasm-guest-sdk.md): writing custom WASM processor guests in Rust
 - [Architecture And Internals](./architecture-and-internals.md): control-plane, data-plane, and runtime implementation details
+- [Developing Nervix](./developing-nervix.md): working on Nervix itself from a repository clone
 
 Start with the manual unless you are specifically trying to understand internals.
 

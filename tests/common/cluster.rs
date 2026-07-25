@@ -78,6 +78,11 @@ use triomphe::Arc;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
+use super::dependencies::{
+    DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
+    PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+};
+
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(40);
@@ -85,17 +90,6 @@ const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const NODE_START_ATTEMPTS: usize = 8;
-const KAFKA_ADDR: &str = "127.0.0.1:9092";
-const PULSAR_ADDR: &str = "pulsar://127.0.0.1:6650";
-const PULSAR_TLS_ADDR: &str = "pulsar+ssl://127.0.0.1:6651";
-const RABBITMQ_ADDR: &str = "amqp://guest:guest@127.0.0.1:5672/%2f";
-const REDIS_ADDR: &str = "redis://127.0.0.1:6379/";
-const MQTT_HOST: &str = "127.0.0.1";
-const MQTT_PORT: u16 = 1883;
-const NATS_ADDR: &str = "nats://127.0.0.1:4222";
-const NATS_TLS_ADDR: &str = "tls://127.0.0.1:4223";
-const SQS_ENDPOINT: &str = "http://127.0.0.1:9324";
-const SQS_TLS_ENDPOINT: &str = "https://127.0.0.1:9325";
 const SQS_REGION: &str = "us-east-1";
 const TEST_LOG_DIR: &str = "tests/logs";
 const TEST_LOG_FILE: &str = "tests/logs/scenarios.log";
@@ -263,12 +257,24 @@ fn dev_tls_ca_path() -> io::Result<PathBuf> {
         .join("ca.pem"))
 }
 
-fn kafka_client_config() -> io::Result<ClientConfig> {
+fn kafka_client_config(dependencies: &DependencyEndpoints) -> io::Result<ClientConfig> {
     let mut config = ClientConfig::new();
     config
-        .set("bootstrap.servers", KAFKA_ADDR)
+        .set("bootstrap.servers", dependencies.get(KAFKA_ADDR)?)
         .set("broker.address.family", "v4");
     Ok(config)
+}
+
+fn dependency_host_port(
+    dependencies: &DependencyEndpoints,
+    key: &str,
+    default_port: u16,
+) -> io::Result<(String, u16)> {
+    let endpoint = url::Url::parse(dependencies.get(key)?).map_err(io::Error::other)?;
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| io::Error::other(format!("dependency endpoint '{endpoint}' has no host")))?;
+    Ok((host.to_string(), endpoint.port().unwrap_or(default_port)))
 }
 
 pub(crate) fn client_connect_options(server: &str) -> io::Result<ConnectOptions> {
@@ -289,6 +295,7 @@ pub(crate) struct Cluster {
     _root_dir: TempDir,
     nodes: BTreeMap<String, NodeHandle>,
     runtime_test_hooks: RuntimeTestHooks,
+    dependencies: DependencyEndpoints,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +309,7 @@ pub(crate) struct TestClusterConfig {
     pub drain_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
     pub temp_dir: Option<PathBuf>,
+    pub dependencies: DependencyEndpoints,
 }
 
 impl Default for TestClusterConfig {
@@ -316,6 +324,7 @@ impl Default for TestClusterConfig {
             drain_timeout: Duration::from_secs(30),
             memory_pressure: None,
             temp_dir: None,
+            dependencies: DependencyEndpoints::default(),
         }
     }
 }
@@ -345,6 +354,7 @@ impl Cluster {
             _root_dir: root_dir,
             runtime_test_hooks,
             nodes,
+            dependencies: config.dependencies,
         };
 
         if let Err(error) = cluster.start_nodes_and_wait(node_count).await {
@@ -629,14 +639,14 @@ impl Cluster {
         let deadline = Instant::now() + STATUS_TIMEOUT;
         loop {
             tokio::task::consume_budget().await;
-            match kafka_consumer_group_member_count(group) {
+            match kafka_consumer_group_member_count(&self.dependencies, group) {
                 Ok(actual) if actual == expected => return Ok(()),
                 Ok(_) => {}
                 Err(error) if Instant::now() >= deadline => return Err(error),
                 Err(_) => {}
             }
             if Instant::now() >= deadline {
-                let actual = kafka_consumer_group_member_count(group)?;
+                let actual = kafka_consumer_group_member_count(&self.dependencies, group)?;
                 return Err(io::Error::other(format!(
                     "timed out waiting for kafka consumer group '{group}' to have {expected} \
                      members, got {actual}"
@@ -654,14 +664,14 @@ impl Cluster {
         let deadline = Instant::now() + STATUS_TIMEOUT;
         loop {
             tokio::task::consume_budget().await;
-            match rabbitmq_queue_consumer_count(queue).await {
+            match rabbitmq_queue_consumer_count(&self.dependencies, queue).await {
                 Ok(actual) if actual == expected => return Ok(()),
                 Ok(_) => {}
                 Err(error) if Instant::now() >= deadline => return Err(error),
                 Err(_) => {}
             }
             if Instant::now() >= deadline {
-                let actual = rabbitmq_queue_consumer_count(queue).await?;
+                let actual = rabbitmq_queue_consumer_count(&self.dependencies, queue).await?;
                 return Err(io::Error::other(format!(
                     "timed out waiting for rabbitmq queue '{queue}' to have {expected} consumers, \
                      got {actual}"
@@ -676,7 +686,7 @@ impl Cluster {
         channel: &str,
         expected: usize,
     ) -> io::Result<()> {
-        wait_for_redis_channel_subscribers(channel, expected).await
+        wait_for_redis_channel_subscribers(&self.dependencies, channel, expected).await
     }
 
     pub(crate) async fn open_session(
@@ -744,11 +754,11 @@ impl Cluster {
     }
 
     pub(crate) async fn publish_mqtt(&self, topic: &str, payload: &str) -> io::Result<()> {
-        publish_mqtt(topic, payload).await
+        publish_mqtt(&self.dependencies, topic, payload).await
     }
 
     pub(crate) async fn publish_mqtt_qos1(&self, topic: &str, payload: &str) -> io::Result<()> {
-        publish_mqtt_with_qos(topic, payload, QoS::AtLeastOnce, true).await
+        publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::AtLeastOnce, true).await
     }
 
     pub(crate) async fn publish_mqtt_burst(
@@ -757,7 +767,7 @@ impl Cluster {
         payload: &str,
         count: usize,
     ) -> io::Result<()> {
-        publish_mqtt_burst(topic, payload, count).await
+        publish_mqtt_burst(&self.dependencies, topic, payload, count).await
     }
 
     pub(crate) async fn publish_mqtt_qos1_burst(
@@ -766,19 +776,20 @@ impl Cluster {
         payload: &str,
         count: usize,
     ) -> io::Result<()> {
-        publish_mqtt_burst_with_qos(topic, payload, count, QoS::AtLeastOnce).await
+        publish_mqtt_burst_with_qos(&self.dependencies, topic, payload, count, QoS::AtLeastOnce)
+            .await
     }
 
     pub(crate) async fn ensure_rabbitmq_queue(&self, queue: &str) -> io::Result<()> {
-        ensure_rabbitmq_queue(queue).await
+        ensure_rabbitmq_queue(&self.dependencies, queue).await
     }
 
     pub(crate) async fn publish_rabbitmq(&self, queue: &str, payload: &str) -> io::Result<()> {
-        publish_rabbitmq(queue, payload).await
+        publish_rabbitmq(&self.dependencies, queue, payload).await
     }
 
     pub(crate) async fn publish_redis(&self, channel: &str, payload: &str) -> io::Result<()> {
-        publish_redis(channel, payload).await
+        publish_redis(&self.dependencies, channel, payload).await
     }
 
     pub(crate) async fn publish_redis_burst(
@@ -787,19 +798,19 @@ impl Cluster {
         payload: &str,
         count: usize,
     ) -> io::Result<()> {
-        publish_redis_burst(channel, payload, count).await
+        publish_redis_burst(&self.dependencies, channel, payload, count).await
     }
 
     pub(crate) async fn publish_pulsar(&self, topic: &str, payload: &str) -> io::Result<()> {
-        publish_pulsar(topic, payload).await
+        publish_pulsar(&self.dependencies, topic, payload).await
     }
 
     pub(crate) async fn publish_pulsar_tls(&self, topic: &str, payload: &str) -> io::Result<()> {
-        publish_pulsar_tls(topic, payload).await
+        publish_pulsar_tls(&self.dependencies, topic, payload).await
     }
 
     pub(crate) async fn publish_kafka(&self, topic: &str, payload: &str) -> io::Result<()> {
-        publish_kafka(topic, payload).await
+        publish_kafka(&self.dependencies, topic, payload).await
     }
 
     pub(crate) async fn publish_kafka_with_headers(
@@ -808,7 +819,7 @@ impl Cluster {
         payload: &str,
         headers: &[(&str, &str)],
     ) -> io::Result<()> {
-        publish_kafka_with_headers(topic, payload, headers).await
+        publish_kafka_with_headers(&self.dependencies, topic, payload, headers).await
     }
 
     pub(crate) async fn publish_kafka_burst(
@@ -817,7 +828,7 @@ impl Cluster {
         payload: &str,
         count: usize,
     ) -> io::Result<()> {
-        publish_kafka_burst(topic, payload, count).await
+        publish_kafka_burst(&self.dependencies, topic, payload, count).await
     }
 
     pub(crate) async fn publish_kafka_partition(
@@ -826,7 +837,7 @@ impl Cluster {
         partition: i32,
         payload: &str,
     ) -> io::Result<()> {
-        publish_kafka_partition(topic, partition, payload).await
+        publish_kafka_partition(&self.dependencies, topic, partition, payload).await
     }
 
     pub(crate) async fn ensure_kafka_topic_partitions(
@@ -834,7 +845,7 @@ impl Cluster {
         topic: &str,
         partitions: i32,
     ) -> io::Result<()> {
-        ensure_kafka_topic_partitions(topic, partitions).await
+        ensure_kafka_topic_partitions(&self.dependencies, topic, partitions).await
     }
 
     pub(crate) async fn reset_kafka_topic_partitions(
@@ -842,27 +853,27 @@ impl Cluster {
         topic: &str,
         partitions: i32,
     ) -> io::Result<()> {
-        reset_kafka_topic_partitions(topic, partitions).await
+        reset_kafka_topic_partitions(&self.dependencies, topic, partitions).await
     }
 
     pub(crate) async fn ensure_sqs_queue(&self, queue: &str) -> io::Result<()> {
-        ensure_sqs_queue(queue).await
+        ensure_sqs_queue(&self.dependencies, queue).await
     }
 
     pub(crate) async fn ensure_sqs_queue_tls(&self, queue: &str) -> io::Result<()> {
-        ensure_sqs_queue_tls(queue).await
+        ensure_sqs_queue_tls(&self.dependencies, queue).await
     }
 
     pub(crate) async fn publish_sqs(&self, queue: &str, payload: &str) -> io::Result<()> {
-        publish_sqs(queue, payload).await
+        publish_sqs(&self.dependencies, queue, payload).await
     }
 
     pub(crate) async fn publish_sqs_tls(&self, queue: &str, payload: &str) -> io::Result<()> {
-        publish_sqs_tls(queue, payload).await
+        publish_sqs_tls(&self.dependencies, queue, payload).await
     }
 
     pub(crate) async fn publish_nats(&self, subject: &str, payload: &str) -> io::Result<()> {
-        publish_nats(subject, payload).await
+        publish_nats(&self.dependencies, subject, payload).await
     }
 
     pub(crate) async fn publish_nats_with_headers(
@@ -871,11 +882,11 @@ impl Cluster {
         payload: &str,
         headers: &[(&str, &str)],
     ) -> io::Result<()> {
-        publish_nats_with_headers(subject, payload, headers).await
+        publish_nats_with_headers(&self.dependencies, subject, payload, headers).await
     }
 
     pub(crate) async fn publish_nats_tls(&self, subject: &str, payload: &str) -> io::Result<()> {
-        publish_nats_tls(subject, payload).await
+        publish_nats_tls(&self.dependencies, subject, payload).await
     }
 
     pub(crate) async fn publish_zeromq(&self, addr: &str, payload: &str) -> io::Result<()> {
@@ -985,35 +996,35 @@ impl Cluster {
     }
 
     pub(crate) async fn observe_mqtt(&self, topic: &str) -> io::Result<BrokerObserver> {
-        observe_mqtt(topic).await
+        observe_mqtt(&self.dependencies, topic).await
     }
 
     pub(crate) async fn observe_rabbitmq(&self, queue: &str) -> io::Result<BrokerObserver> {
-        observe_rabbitmq(queue).await
+        observe_rabbitmq(&self.dependencies, queue).await
     }
 
     pub(crate) async fn observe_redis(&self, channel: &str) -> io::Result<BrokerObserver> {
-        observe_redis(channel).await
+        observe_redis(&self.dependencies, channel).await
     }
 
     pub(crate) async fn observe_kafka(&self, topic: &str) -> io::Result<BrokerObserver> {
-        observe_kafka(topic).await
+        observe_kafka(&self.dependencies, topic).await
     }
 
     pub(crate) async fn observe_pulsar(&self, topic: &str) -> io::Result<BrokerObserver> {
-        observe_pulsar(topic).await
+        observe_pulsar(&self.dependencies, topic).await
     }
 
     pub(crate) async fn observe_pulsar_tls(&self, topic: &str) -> io::Result<BrokerObserver> {
-        observe_pulsar_tls(topic).await
+        observe_pulsar_tls(&self.dependencies, topic).await
     }
 
     pub(crate) async fn observe_sqs(&self, queue: &str) -> io::Result<BrokerObserver> {
-        observe_sqs(queue).await
+        observe_sqs(&self.dependencies, queue).await
     }
 
     pub(crate) async fn observe_nats(&self, subject: &str) -> io::Result<BrokerObserver> {
-        observe_nats(subject).await
+        observe_nats(&self.dependencies, subject).await
     }
 
     pub(crate) async fn observe_zeromq(&self, addr: &str) -> io::Result<BrokerObserver> {
@@ -2523,18 +2534,24 @@ async fn open_raw_session(server: &str, domain: &str) -> io::Result<TestSession>
     })))
 }
 
-async fn publish_mqtt(topic: &str, payload: &str) -> io::Result<()> {
-    publish_mqtt_with_qos(topic, payload, QoS::AtMostOnce, true).await
+async fn publish_mqtt(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+) -> io::Result<()> {
+    publish_mqtt_with_qos(dependencies, topic, payload, QoS::AtMostOnce, true).await
 }
 
 async fn publish_mqtt_with_qos(
+    dependencies: &DependencyEndpoints,
     topic: &str,
     payload: &str,
     qos: QoS,
     retain: bool,
 ) -> io::Result<()> {
     let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
-    let options = MqttOptions::new(client_id, (MQTT_HOST, MQTT_PORT));
+    let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
     let driver = tokio::spawn(async move {
         loop {
@@ -2580,18 +2597,25 @@ async fn publish_mqtt_with_qos(
     }))
 }
 
-async fn publish_mqtt_burst(topic: &str, payload: &str, count: usize) -> io::Result<()> {
-    publish_mqtt_burst_with_qos(topic, payload, count, QoS::AtMostOnce).await
+async fn publish_mqtt_burst(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+    count: usize,
+) -> io::Result<()> {
+    publish_mqtt_burst_with_qos(dependencies, topic, payload, count, QoS::AtMostOnce).await
 }
 
 async fn publish_mqtt_burst_with_qos(
+    dependencies: &DependencyEndpoints,
     topic: &str,
     payload: &str,
     count: usize,
     qos: QoS,
 ) -> io::Result<()> {
     let client_id = format!("nervix-cucumber-burst-{}", Uuid::now_v7().as_simple());
-    let options = MqttOptions::new(client_id, (MQTT_HOST, MQTT_PORT));
+    let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options)
         .capacity(count.max(16))
         .build();
@@ -2621,10 +2645,13 @@ async fn publish_mqtt_burst_with_qos(
     Ok(())
 }
 
-async fn ensure_rabbitmq_queue(queue: &str) -> io::Result<()> {
-    let connection = Connection::connect(RABBITMQ_ADDR, ConnectionProperties::default())
-        .await
-        .map_err(io::Error::other)?;
+async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
     let channel = connection
         .create_channel()
         .await
@@ -2632,10 +2659,17 @@ async fn ensure_rabbitmq_queue(queue: &str) -> io::Result<()> {
     declare_rabbitmq_queue(&channel, queue).await
 }
 
-async fn publish_rabbitmq(queue: &str, payload: &str) -> io::Result<()> {
-    let connection = Connection::connect(RABBITMQ_ADDR, ConnectionProperties::default())
-        .await
-        .map_err(io::Error::other)?;
+async fn publish_rabbitmq(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
     let channel = connection
         .create_channel()
         .await
@@ -2669,10 +2703,16 @@ async fn declare_rabbitmq_queue(channel: &lapin::Channel, queue: &str) -> io::Re
     Ok(())
 }
 
-async fn rabbitmq_queue_consumer_count(queue: &str) -> io::Result<usize> {
-    let connection = Connection::connect(RABBITMQ_ADDR, ConnectionProperties::default())
-        .await
-        .map_err(io::Error::other)?;
+async fn rabbitmq_queue_consumer_count(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<usize> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
     let channel = connection
         .create_channel()
         .await
@@ -2691,8 +2731,12 @@ async fn rabbitmq_queue_consumer_count(queue: &str) -> io::Result<usize> {
     Ok(declared.consumer_count() as usize)
 }
 
-async fn publish_redis(channel: &str, payload: &str) -> io::Result<()> {
-    let client = redis::Client::open(REDIS_ADDR).map_err(io::Error::other)?;
+async fn publish_redis(
+    dependencies: &DependencyEndpoints,
+    channel: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let client = redis::Client::open(dependencies.get(REDIS_ADDR)?).map_err(io::Error::other)?;
     let mut connection = client
         .get_multiplexed_async_connection()
         .await
@@ -2702,8 +2746,13 @@ async fn publish_redis(channel: &str, payload: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn publish_redis_burst(channel: &str, payload: &str, count: usize) -> io::Result<()> {
-    let client = redis::Client::open(REDIS_ADDR).map_err(io::Error::other)?;
+async fn publish_redis_burst(
+    dependencies: &DependencyEndpoints,
+    channel: &str,
+    payload: &str,
+    count: usize,
+) -> io::Result<()> {
+    let client = redis::Client::open(dependencies.get(REDIS_ADDR)?).map_err(io::Error::other)?;
     let mut connection = client
         .get_multiplexed_async_connection()
         .await
@@ -2741,8 +2790,11 @@ async fn publish_redis_to_subscriber(
     }
 }
 
-async fn redis_channel_subscriber_count(channel: &str) -> io::Result<usize> {
-    let client = redis::Client::open(REDIS_ADDR).map_err(io::Error::other)?;
+async fn redis_channel_subscriber_count(
+    dependencies: &DependencyEndpoints,
+    channel: &str,
+) -> io::Result<usize> {
+    let client = redis::Client::open(dependencies.get(REDIS_ADDR)?).map_err(io::Error::other)?;
     let mut connection = client
         .get_multiplexed_async_connection()
         .await
@@ -2765,18 +2817,22 @@ async fn redis_channel_subscriber_count(channel: &str) -> io::Result<usize> {
         .unwrap_or(0))
 }
 
-async fn wait_for_redis_channel_subscribers(channel: &str, expected: usize) -> io::Result<()> {
+async fn wait_for_redis_channel_subscribers(
+    dependencies: &DependencyEndpoints,
+    channel: &str,
+    expected: usize,
+) -> io::Result<()> {
     let deadline = Instant::now() + STATUS_TIMEOUT;
     loop {
         tokio::task::consume_budget().await;
-        match redis_channel_subscriber_count(channel).await {
+        match redis_channel_subscriber_count(dependencies, channel).await {
             Ok(actual) if actual == expected => return Ok(()),
             Ok(_) => {}
             Err(error) if Instant::now() >= deadline => return Err(error),
             Err(_) => {}
         }
         if Instant::now() >= deadline {
-            let actual = redis_channel_subscriber_count(channel).await?;
+            let actual = redis_channel_subscriber_count(dependencies, channel).await?;
             return Err(io::Error::other(format!(
                 "timed out waiting for redis channel '{channel}' to have {expected} subscribers, \
                  got {actual}"
@@ -2790,12 +2846,26 @@ fn pulsar_topic(topic: &str) -> String {
     format!("persistent://public/default/{topic}")
 }
 
-async fn publish_pulsar(topic: &str, payload: &str) -> io::Result<()> {
-    publish_pulsar_with_addr(PULSAR_ADDR, None, topic, payload).await
+async fn publish_pulsar(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+) -> io::Result<()> {
+    publish_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, topic, payload).await
 }
 
-async fn publish_pulsar_tls(topic: &str, payload: &str) -> io::Result<()> {
-    publish_pulsar_with_addr(PULSAR_TLS_ADDR, Some(dev_tls_ca_pem()?), topic, payload).await
+async fn publish_pulsar_tls(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+) -> io::Result<()> {
+    publish_pulsar_with_addr(
+        dependencies.get(PULSAR_TLS_ADDR)?,
+        Some(dependencies.tls_ca_pem()?),
+        topic,
+        payload,
+    )
+    .await
 }
 
 async fn publish_pulsar_with_addr(
@@ -2853,20 +2923,30 @@ async fn publish_pulsar_with_addr(
     }))
 }
 
-async fn publish_kafka(topic: &str, payload: &str) -> io::Result<()> {
-    publish_kafka_record(topic, None, payload, &[]).await
+async fn publish_kafka(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+) -> io::Result<()> {
+    publish_kafka_record(dependencies, topic, None, payload, &[]).await
 }
 
 async fn publish_kafka_with_headers(
+    dependencies: &DependencyEndpoints,
     topic: &str,
     payload: &str,
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
-    publish_kafka_record(topic, None, payload, headers).await
+    publish_kafka_record(dependencies, topic, None, payload, headers).await
 }
 
-async fn publish_kafka_burst(topic: &str, payload: &str, count: usize) -> io::Result<()> {
-    let mut client_config = kafka_client_config()?;
+async fn publish_kafka_burst(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+    count: usize,
+) -> io::Result<()> {
+    let mut client_config = kafka_client_config(dependencies)?;
     let producer: FutureProducer = client_config
         .set("message.timeout.ms", "5000")
         .set("delivery.timeout.ms", "5000")
@@ -2898,17 +2978,23 @@ async fn publish_kafka_burst(topic: &str, payload: &str, count: usize) -> io::Re
     Ok(())
 }
 
-async fn publish_kafka_partition(topic: &str, partition: i32, payload: &str) -> io::Result<()> {
-    publish_kafka_record(topic, Some(partition), payload, &[]).await
+async fn publish_kafka_partition(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    partition: i32,
+    payload: &str,
+) -> io::Result<()> {
+    publish_kafka_record(dependencies, topic, Some(partition), payload, &[]).await
 }
 
 async fn publish_kafka_record(
+    dependencies: &DependencyEndpoints,
     topic: &str,
     partition: Option<i32>,
     payload: &str,
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
-    let mut client_config = kafka_client_config()?;
+    let mut client_config = kafka_client_config(dependencies)?;
     let producer: FutureProducer = client_config
         .set("message.timeout.ms", "5000")
         .set("delivery.timeout.ms", "5000")
@@ -2967,13 +3053,18 @@ async fn publish_kafka_record(
     Err(last_error.unwrap_or_else(|| io::Error::other("failed to publish kafka message")))
 }
 
-fn kafka_admin_client() -> io::Result<AdminClient<DefaultClientContext>> {
-    let client_config = kafka_client_config()?;
+fn kafka_admin_client(
+    dependencies: &DependencyEndpoints,
+) -> io::Result<AdminClient<DefaultClientContext>> {
+    let client_config = kafka_client_config(dependencies)?;
     client_config.create().map_err(io::Error::other)
 }
 
-fn kafka_topic_partition_count(topic: &str) -> io::Result<Option<usize>> {
-    let mut client_config = kafka_client_config()?;
+fn kafka_topic_partition_count(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<Option<usize>> {
+    let mut client_config = kafka_client_config(dependencies)?;
     let consumer: BaseConsumer = client_config
         .set(
             "group.id",
@@ -2998,10 +3089,14 @@ fn kafka_topic_partition_count(topic: &str) -> io::Result<Option<usize>> {
         }))
 }
 
-async fn wait_for_kafka_topic_partitions(topic: &str, expected: usize) -> io::Result<()> {
+async fn wait_for_kafka_topic_partitions(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    expected: usize,
+) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match kafka_topic_partition_count(topic)? {
+        match kafka_topic_partition_count(dependencies, topic)? {
             Some(observed) if observed == expected => return Ok(()),
             _ if Instant::now() < deadline => sleep(POLL_INTERVAL).await,
             observed => {
@@ -3014,10 +3109,13 @@ async fn wait_for_kafka_topic_partitions(topic: &str, expected: usize) -> io::Re
     }
 }
 
-async fn wait_for_kafka_topic_absent(topic: &str) -> io::Result<()> {
+async fn wait_for_kafka_topic_absent(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match kafka_topic_partition_count(topic)? {
+        match kafka_topic_partition_count(dependencies, topic)? {
             None => return Ok(()),
             _ if Instant::now() < deadline => sleep(POLL_INTERVAL).await,
             observed => {
@@ -3030,14 +3128,18 @@ async fn wait_for_kafka_topic_absent(topic: &str) -> io::Result<()> {
     }
 }
 
-async fn ensure_kafka_topic_partitions(topic: &str, partitions: i32) -> io::Result<()> {
+async fn ensure_kafka_topic_partitions(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    partitions: i32,
+) -> io::Result<()> {
     if partitions <= 0 {
         return Err(io::Error::other(format!(
             "kafka topic '{topic}' must have at least one partition"
         )));
     }
 
-    let admin = kafka_admin_client()?;
+    let admin = kafka_admin_client(dependencies)?;
     let created = admin
         .create_topics(
             &[NewTopic::new(topic, partitions, TopicReplication::Fixed(1))],
@@ -3057,7 +3159,7 @@ async fn ensure_kafka_topic_partitions(topic: &str, partitions: i32) -> io::Resu
         }
     }
 
-    let current = kafka_topic_partition_count(topic)?.unwrap_or(0);
+    let current = kafka_topic_partition_count(dependencies, topic)?.unwrap_or(0);
     let expected = usize::try_from(partitions).expect("partition count must fit usize");
     if current > expected {
         return Err(io::Error::other(format!(
@@ -3082,17 +3184,21 @@ async fn ensure_kafka_topic_partitions(topic: &str, partitions: i32) -> io::Resu
         }
     }
 
-    wait_for_kafka_topic_partitions(topic, expected).await
+    wait_for_kafka_topic_partitions(dependencies, topic, expected).await
 }
 
-async fn reset_kafka_topic_partitions(topic: &str, partitions: i32) -> io::Result<()> {
+async fn reset_kafka_topic_partitions(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    partitions: i32,
+) -> io::Result<()> {
     if partitions <= 0 {
         return Err(io::Error::other(format!(
             "kafka topic '{topic}' must have at least one partition"
         )));
     }
 
-    let admin = kafka_admin_client()?;
+    let admin = kafka_admin_client(dependencies)?;
     let deleted = admin
         .delete_topics(&[topic], &AdminOptions::new())
         .await
@@ -3108,12 +3214,15 @@ async fn reset_kafka_topic_partitions(topic: &str, partitions: i32) -> io::Resul
             }
         }
     }
-    wait_for_kafka_topic_absent(topic).await?;
-    ensure_kafka_topic_partitions(topic, partitions).await
+    wait_for_kafka_topic_absent(dependencies, topic).await?;
+    ensure_kafka_topic_partitions(dependencies, topic, partitions).await
 }
 
-fn kafka_consumer_group_member_count(group: &str) -> io::Result<usize> {
-    let mut client_config = kafka_client_config()?;
+fn kafka_consumer_group_member_count(
+    dependencies: &DependencyEndpoints,
+    group: &str,
+) -> io::Result<usize> {
+    let mut client_config = kafka_client_config(dependencies)?;
     let consumer: BaseConsumer = client_config
         .set(
             "group.id",
@@ -3132,8 +3241,8 @@ fn kafka_consumer_group_member_count(group: &str) -> io::Result<usize> {
     Ok(info.members().len())
 }
 
-async fn ensure_sqs_queue(queue: &str) -> io::Result<()> {
-    let client = sqs_client().await;
+async fn ensure_sqs_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+    let client = sqs_client(dependencies).await?;
     client
         .create_queue()
         .queue_name(queue)
@@ -3143,8 +3252,8 @@ async fn ensure_sqs_queue(queue: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn ensure_sqs_queue_tls(queue: &str) -> io::Result<()> {
-    let client = sqs_tls_client().await?;
+async fn ensure_sqs_queue_tls(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
+    let client = sqs_tls_client(dependencies).await?;
     client
         .create_queue()
         .queue_name(queue)
@@ -3154,8 +3263,12 @@ async fn ensure_sqs_queue_tls(queue: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn publish_sqs(queue: &str, payload: &str) -> io::Result<()> {
-    let client = sqs_client().await;
+async fn publish_sqs(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let client = sqs_client(dependencies).await?;
     let queue_url = sqs_queue_url(&client, queue).await?;
     client
         .send_message()
@@ -3168,8 +3281,12 @@ async fn publish_sqs(queue: &str, payload: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn publish_sqs_tls(queue: &str, payload: &str) -> io::Result<()> {
-    let client = sqs_tls_client().await?;
+async fn publish_sqs_tls(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let client = sqs_tls_client(dependencies).await?;
     let queue_url = sqs_queue_url(&client, queue).await?;
     client
         .send_message()
@@ -3182,8 +3299,12 @@ async fn publish_sqs_tls(queue: &str, payload: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn publish_nats(subject: &str, payload: &str) -> io::Result<()> {
-    let client = nats_client().await?;
+async fn publish_nats(
+    dependencies: &DependencyEndpoints,
+    subject: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let client = nats_client(dependencies).await?;
     for attempt in 0..2 {
         client
             .publish(subject.to_string(), payload.as_bytes().to_vec().into())
@@ -3199,11 +3320,12 @@ async fn publish_nats(subject: &str, payload: &str) -> io::Result<()> {
 }
 
 async fn publish_nats_with_headers(
+    dependencies: &DependencyEndpoints,
     subject: &str,
     payload: &str,
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
-    let client = nats_client().await?;
+    let client = nats_client(dependencies).await?;
     let mut header_map = async_nats::HeaderMap::new();
     for (name, value) in headers {
         header_map.insert(*name, *value);
@@ -3220,8 +3342,12 @@ async fn publish_nats_with_headers(
     Ok(())
 }
 
-async fn publish_nats_tls(subject: &str, payload: &str) -> io::Result<()> {
-    let client = nats_tls_client().await?;
+async fn publish_nats_tls(
+    dependencies: &DependencyEndpoints,
+    subject: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let client = nats_tls_client(dependencies).await?;
     for attempt in 0..2 {
         client
             .publish(subject.to_string(), payload.as_bytes().to_vec().into())
@@ -3248,7 +3374,10 @@ async fn publish_zeromq(addr: &str, payload: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn observe_mqtt(topic: &str) -> io::Result<BrokerObserver> {
+async fn observe_mqtt(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
     let client_id = format!(
         "nervix-cucumber-observer-{}-{}",
         std::process::id(),
@@ -3257,7 +3386,8 @@ async fn observe_mqtt(topic: &str) -> io::Result<BrokerObserver> {
             .expect("system clock must be after unix epoch")
             .as_nanos()
     );
-    let mut options = MqttOptions::new(client_id, (MQTT_HOST, MQTT_PORT));
+    let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    let mut options = MqttOptions::new(client_id, (host, port));
     options.set_session_mode(SessionMode::Clean);
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
     let (ready_tx, ready_rx) = oneshot::channel();
@@ -3306,10 +3436,16 @@ async fn observe_mqtt(topic: &str) -> io::Result<BrokerObserver> {
     })
 }
 
-async fn observe_rabbitmq(queue: &str) -> io::Result<BrokerObserver> {
-    let connection = Connection::connect(RABBITMQ_ADDR, ConnectionProperties::default())
-        .await
-        .map_err(io::Error::other)?;
+async fn observe_rabbitmq(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<BrokerObserver> {
+    let connection = Connection::connect(
+        dependencies.get(RABBITMQ_ADDR)?,
+        ConnectionProperties::default(),
+    )
+    .await
+    .map_err(io::Error::other)?;
     let channel = connection
         .create_channel()
         .await
@@ -3343,8 +3479,11 @@ async fn observe_rabbitmq(queue: &str) -> io::Result<BrokerObserver> {
     })
 }
 
-async fn observe_redis(channel: &str) -> io::Result<BrokerObserver> {
-    let client = redis::Client::open(REDIS_ADDR).map_err(io::Error::other)?;
+async fn observe_redis(
+    dependencies: &DependencyEndpoints,
+    channel: &str,
+) -> io::Result<BrokerObserver> {
+    let client = redis::Client::open(dependencies.get(REDIS_ADDR)?).map_err(io::Error::other)?;
     let mut pubsub = client.get_async_pubsub().await.map_err(io::Error::other)?;
     pubsub.subscribe(channel).await.map_err(io::Error::other)?;
     let (payload_tx, payload_rx) = mpsc::channel(16);
@@ -3371,7 +3510,10 @@ async fn observe_redis(channel: &str) -> io::Result<BrokerObserver> {
     })
 }
 
-async fn observe_kafka(topic: &str) -> io::Result<BrokerObserver> {
+async fn observe_kafka(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
     let consumer_group = format!(
         "nervix-cucumber-observer-{}-{}",
         std::process::id(),
@@ -3380,7 +3522,7 @@ async fn observe_kafka(topic: &str) -> io::Result<BrokerObserver> {
             .expect("system clock must be after unix epoch")
             .as_nanos()
     );
-    let mut client_config = kafka_client_config()?;
+    let mut client_config = kafka_client_config(dependencies)?;
     let consumer: StreamConsumer = client_config
         .set("group.id", &consumer_group)
         .set("enable.partition.eof", "false")
@@ -3429,12 +3571,23 @@ async fn observe_kafka(topic: &str) -> io::Result<BrokerObserver> {
     })
 }
 
-async fn observe_pulsar(topic: &str) -> io::Result<BrokerObserver> {
-    observe_pulsar_with_addr(PULSAR_ADDR, None, topic).await
+async fn observe_pulsar(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
+    observe_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, topic).await
 }
 
-async fn observe_pulsar_tls(topic: &str) -> io::Result<BrokerObserver> {
-    observe_pulsar_with_addr(PULSAR_TLS_ADDR, Some(dev_tls_ca_pem()?), topic).await
+async fn observe_pulsar_tls(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
+    observe_pulsar_with_addr(
+        dependencies.get(PULSAR_TLS_ADDR)?,
+        Some(dependencies.tls_ca_pem()?),
+        topic,
+    )
+    .await
 }
 
 async fn observe_pulsar_with_addr(
@@ -3515,9 +3668,12 @@ async fn observe_pulsar_with_addr(
         .unwrap_or_else(|| io::Error::other(format!("failed to observe pulsar topic '{topic}'"))))
 }
 
-async fn observe_sqs(queue: &str) -> io::Result<BrokerObserver> {
-    ensure_sqs_queue(queue).await?;
-    let client = sqs_client().await;
+async fn observe_sqs(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<BrokerObserver> {
+    ensure_sqs_queue(dependencies, queue).await?;
+    let client = sqs_client(dependencies).await?;
     let queue_url = sqs_queue_url(&client, queue).await?;
     let (payload_tx, payload_rx) = mpsc::channel(1);
 
@@ -3554,8 +3710,11 @@ async fn observe_sqs(queue: &str) -> io::Result<BrokerObserver> {
     })
 }
 
-async fn observe_nats(subject: &str) -> io::Result<BrokerObserver> {
-    let client = nats_client().await?;
+async fn observe_nats(
+    dependencies: &DependencyEndpoints,
+    subject: &str,
+) -> io::Result<BrokerObserver> {
+    let client = nats_client(dependencies).await?;
     let mut subscriber = client
         .subscribe(subject.to_string())
         .await
@@ -3605,34 +3764,34 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
     })
 }
 
-async fn nats_client() -> io::Result<NatsClient> {
-    async_nats::connect(NATS_ADDR)
+async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
+    async_nats::connect(dependencies.get(NATS_ADDR)?)
         .await
         .map_err(io::Error::other)
 }
 
-async fn nats_tls_client() -> io::Result<NatsClient> {
-    let ca_path = dev_tls_ca_path()?;
+async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
+    let ca_path = dependencies.tls_ca_path()?;
     async_nats::ConnectOptions::new()
-        .add_root_certificates(ca_path)
+        .add_root_certificates(ca_path.to_path_buf())
         .require_tls(true)
-        .connect(NATS_TLS_ADDR)
+        .connect(dependencies.get(NATS_TLS_ADDR)?)
         .await
         .map_err(io::Error::other)
 }
 
-async fn sqs_client() -> SqsClient {
+async fn sqs_client(dependencies: &DependencyEndpoints) -> io::Result<SqsClient> {
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .region(aws_sdk_sqs::config::Region::new(SQS_REGION))
-        .endpoint_url(SQS_ENDPOINT)
+        .endpoint_url(dependencies.get(SQS_ENDPOINT)?)
         .credentials_provider(Credentials::new("x", "x", None, None, "nervix-cucumber"))
         .load()
         .await;
-    SqsClient::new(&sdk_config)
+    Ok(SqsClient::new(&sdk_config))
 }
 
-async fn sqs_tls_client() -> io::Result<SqsClient> {
-    let ca_pem = std::fs::read(dev_tls_ca_path()?).map_err(io::Error::other)?;
+async fn sqs_tls_client(dependencies: &DependencyEndpoints) -> io::Result<SqsClient> {
+    let ca_pem = dependencies.tls_ca_pem()?;
     let tls_context = aws_smithy_http_client::tls::TlsContext::builder()
         .with_trust_store(
             aws_smithy_http_client::tls::TrustStore::empty().with_pem_certificate(ca_pem),
@@ -3647,7 +3806,7 @@ async fn sqs_tls_client() -> io::Result<SqsClient> {
         .build_https();
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .region(aws_sdk_sqs::config::Region::new(SQS_REGION))
-        .endpoint_url(SQS_TLS_ENDPOINT)
+        .endpoint_url(dependencies.get(SQS_TLS_ENDPOINT)?)
         .http_client(http_client)
         .credentials_provider(Credentials::new("x", "x", None, None, "nervix-cucumber"))
         .load()

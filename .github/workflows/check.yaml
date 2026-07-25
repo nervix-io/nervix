@@ -128,9 +128,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: deps
-        run: just deps
-
       - name: Validate
         run: just validate-ci
         env:
@@ -229,11 +226,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: deps
-        run: |
-            just deps-down || true
-            just deps
-
       - name: Tests Coverage
         run: |
             just test-coverage
@@ -245,8 +237,3 @@ jobs:
           name: test-logs
           path: tests/logs
           if-no-files-found: ignore
-
-      - name: Stop docker deps
-        if: always()
-        run: |
-            just deps-down || true

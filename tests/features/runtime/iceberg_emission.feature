@@ -1,5 +1,7 @@
 Feature: Iceberg emission
   Scenario Outline: Iceberg emitter accepts GCS object storage configuration
+    Given GCS is running
+    And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -18,14 +20,14 @@ Feature: Iceberg emission
       CREATE CLIENT gcs_main
         TYPE GCS
         CONFIG {
-          'service_path' = 'http://127.0.0.1:4443',
+          'service_path' = '{{gcs_addr}}',
           'no_auth' = true
         };
 
       CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
 
@@ -48,6 +50,8 @@ Feature: Iceberg emission
       | 3            | 0             |
 
   Scenario Outline: Iceberg emitter accepts Azure Blob object storage configuration
+    Given Azure Blob is running
+    And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -73,7 +77,7 @@ Feature: Iceberg emission
       CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
 
@@ -96,6 +100,8 @@ Feature: Iceberg emission
       | 3            | 0             |
 
   Scenario Outline: Iceberg emitter flushes a disk-backed batch to S3
+    Given MQTT is running
+    And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Iceberg table "notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/notifications_{{test_id}}" with columns
@@ -130,7 +136,7 @@ Feature: Iceberg emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -146,7 +152,7 @@ Feature: Iceberg emission
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9900',
+          'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
           'access_key_id' = 'rustfsadmin',
           'secret_access_key' = 'rustfsadmin',
@@ -155,7 +161,7 @@ Feature: Iceberg emission
         CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action, 'created_at' = input.created_at } LOCATION 's3://nervix-iceberg/tables/notifications_{{test_id}}' CATALOG iceberg_catalog
@@ -190,6 +196,8 @@ Feature: Iceberg emission
       | 3            | 0             |
 
   Scenario Outline: Iceberg emitter requires an existing catalog table
+    Given MQTT is running
+    And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -215,7 +223,7 @@ Feature: Iceberg emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-missing-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -231,7 +239,7 @@ Feature: Iceberg emission
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9900',
+          'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
           'access_key_id' = 'rustfsadmin',
           'secret_access_key' = 'rustfsadmin',
@@ -240,7 +248,7 @@ Feature: Iceberg emission
         CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE missing_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/missing_notifications_{{test_id}}' CATALOG iceberg_catalog
@@ -269,6 +277,8 @@ Feature: Iceberg emission
       | 3            | 0             |
 
   Scenario Outline: Iceberg emitters use explicitly provisioned catalog tables
+    Given MQTT is running
+    And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Iceberg table "namespace_notifications_a_{{test_id}}" exists at "s3://nervix-iceberg/tables/namespace_notifications_a_{{test_id}}" with columns
@@ -314,7 +324,7 @@ Feature: Iceberg emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-namespace-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -330,7 +340,7 @@ Feature: Iceberg emission
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9900',
+          'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
           'access_key_id' = 'rustfsadmin',
           'secret_access_key' = 'rustfsadmin',
@@ -339,7 +349,7 @@ Feature: Iceberg emission
         CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE EMITTER iceberg_notifications_a FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_a_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_a_{{test_id}}' CATALOG iceberg_catalog
@@ -391,6 +401,8 @@ Feature: Iceberg emission
       | 3            | 0             |
 
   Scenario Outline: Iceberg emitter stages batches under the configured temp directory
+    Given MQTT is running
+    And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And temporary files use a custom temp directory
     And a <cluster_size> node nervix cluster is started
@@ -422,7 +434,7 @@ Feature: Iceberg emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-temp-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -438,7 +450,7 @@ Feature: Iceberg emission
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9900',
+          'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
           'access_key_id' = 'rustfsadmin',
           'secret_access_key' = 'rustfsadmin',
@@ -447,7 +459,7 @@ Feature: Iceberg emission
         CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE temp_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/temp_notifications_{{test_id}}' CATALOG iceberg_catalog
@@ -478,6 +490,8 @@ Feature: Iceberg emission
       | 3            | 0             |
 
   Scenario Outline: Iceberg emitter commits staged IPC batches during graceful shutdown
+    Given MQTT is running
+    And Iceberg dependencies are running
     Given graceful shutdown drain is enabled
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And temporary files use a custom temp directory
@@ -510,7 +524,7 @@ Feature: Iceberg emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-shutdown-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -526,7 +540,7 @@ Feature: Iceberg emission
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9900',
+          'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
           'access_key_id' = 'rustfsadmin',
           'secret_access_key' = 'rustfsadmin',
@@ -535,7 +549,7 @@ Feature: Iceberg emission
         CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE shutdown_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}' CATALOG iceberg_catalog
@@ -566,6 +580,8 @@ Feature: Iceberg emission
       | 3            | 0             |
 
   Scenario Outline: Iceberg emitter reports initialization errors instead of a half-initialized sink
+    Given MQTT is running
+    And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -591,7 +607,7 @@ Feature: Iceberg emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-init-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -607,7 +623,7 @@ Feature: Iceberg emission
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9900',
+          'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
           'access_key_id' = 'rustfsadmin',
           'secret_access_key' = 'rustfsadmin',
@@ -616,7 +632,7 @@ Feature: Iceberg emission
         CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE init_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'http://nervix-iceberg/tables/init_notifications_{{test_id}}' CATALOG iceberg_catalog
@@ -645,6 +661,8 @@ Feature: Iceberg emission
       | 3            | 0             |
 
   Scenario Outline: Iceberg emitter holds ACK until the append succeeds
+    Given MQTT is running
+    And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Iceberg table "ack_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/ack_notifications_{{test_id}}" with columns
@@ -675,13 +693,13 @@ Feature: Iceberg emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-ack-{{test_id}}'
         };
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
-          'endpoint' = 'http://127.0.0.1:9900',
+          'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
           'access_key_id' = 'rustfsadmin',
           'secret_access_key' = 'rustfsadmin',
@@ -690,7 +708,7 @@ Feature: Iceberg emission
         CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = 'http://127.0.0.1:8181',
+          'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE INGESTOR mqtt_notifications

@@ -1,6 +1,7 @@
 Feature: Cordon node
 
   Scenario: A cordoned node is excluded from new scheduling decisions
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     When these NSPL commands are executed through the client on node "node-1"
       """
@@ -32,7 +33,7 @@ Feature: Cordon node
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE INGESTOR kafka_notifications

@@ -418,10 +418,19 @@ column index to `0`. The same filter contract applies in Go: preserve the
 complete row sidecar for rows you emit, add dropped rows to `Acked`, and add
 rejected rows to `Nacked` with a reason.
 
-Build:
+Build with TinyGo's non-WASI `wasm-unknown` target; standard Go only produces
+`js/wasm` and `wasip1/wasm` modules:
 
 ```bash
-just wasm-processor-go-guest
+cd examples/wasm-processors/go-guest
+tinygo build \
+  -target=wasm-unknown \
+  -scheduler=none \
+  -opt=z \
+  -panic=trap \
+  -no-debug \
+  -o nervix_wasm_processor_go_guest.wasm \
+  .
 ```
 
 ## Common Mistakes

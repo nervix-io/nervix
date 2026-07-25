@@ -67,6 +67,7 @@ Feature: Optional fields
       | 3            | 1             | {"tenant":"beta","active":null,"amount":null,"raw":null} | "tenant":"beta"   | {"tenant":"beta"} |
 
   Scenario Outline: Kafka ingestor preserves optional fields when omitted or null
+    Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -96,7 +97,7 @@ Feature: Optional fields
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s

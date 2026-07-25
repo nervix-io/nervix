@@ -1,5 +1,7 @@
 Feature: RabbitMQ emission
   Scenario Outline: RabbitMQ emitter publishes JSON payloads from a relay
+    Given RabbitMQ is running
+    And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -24,7 +26,7 @@ Feature: RabbitMQ emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -40,7 +42,7 @@ Feature: RabbitMQ emission
         CREATE CLIENT rabbit_main
         TYPE RABBITMQ
         CONFIG {
-          'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
+          'addr' = '{{rabbitmq_addr}}'
         };
         CREATE EMITTER rabbit_notifications FROM notifications ENCODE USING notification_codec TO RABBITMQ rabbit_main QUEUE notifications_out_{{test_id}}
         INHERIT ALL

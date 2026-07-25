@@ -1,5 +1,6 @@
 Feature: Redis ingestion
   Scenario Outline: Redis ingestor delivers JSON payloads to a subscribed relay
+    Given Redis is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -23,7 +24,7 @@ Feature: Redis ingestion
         CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
-          'addr' = 'redis://127.0.0.1:6379/'
+          'addr' = '{{redis_addr}}'
         };
         CREATE INGESTOR redis_notifications
         FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
@@ -55,6 +56,7 @@ Feature: Redis ingestion
       | 3            | 1             |
 
   Scenario Outline: Redis ingestor reports transient source failures and recovers
+    Given Redis is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -79,7 +81,7 @@ Feature: Redis ingestion
         CREATE CLIENT redis_main
         TYPE REDIS
         CONFIG {
-          'addr' = 'redis://127.0.0.1:6379/'
+          'addr' = '{{redis_addr}}'
         };
         CREATE INGESTOR redis_notifications
         FROM REDIS PUBSUB redis_main CHANNEL notifications_reconnect_{{test_id}} MODE NO_ACK SEQUENTIAL

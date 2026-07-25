@@ -1,5 +1,7 @@
 Feature: Kafka emission
   Scenario Outline: Kafka emitter filter-map publishes message fields and headers
+    Given Kafka is running
+    And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -51,7 +53,7 @@ Feature: Kafka emission
       CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
       CREATE INGESTOR mqtt_notifications
@@ -70,7 +72,7 @@ Feature: Kafka emission
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE EMITTER kafka_notifications
@@ -110,6 +112,8 @@ Feature: Kafka emission
       | 3            | 0             |
 
   Scenario Outline: Kafka emitter publishes JSON payloads from a relay
+    Given Kafka is running
+    And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -134,7 +138,7 @@ Feature: Kafka emission
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
       CREATE INGESTOR mqtt_notifications
@@ -150,7 +154,7 @@ Feature: Kafka emission
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE EMITTER kafka_notifications FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
         INHERIT ALL

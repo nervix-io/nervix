@@ -1,5 +1,6 @@
 Feature: MQTT ingestion
   Scenario Outline: MQTT ingestor delivers JSON payloads to a subscribed relay
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -23,7 +24,7 @@ Feature: MQTT ingestion
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883?keep_alive=30',
+          'addr' = '{{mqtt_addr}}?keep_alive=30',
           'client_id' = 'nervix-cucumber-ingestor-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -60,6 +61,7 @@ Feature: MQTT ingestion
       | 3            | 1             |
 
   Scenario Outline: MQTT ingestor reports transient source failures and recovers
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -84,7 +86,7 @@ Feature: MQTT ingestion
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883?keep_alive=30',
+          'addr' = '{{mqtt_addr}}?keep_alive=30',
           'client_id' = 'nervix-cucumber-ingestor-reconnect-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -125,6 +127,7 @@ Feature: MQTT ingestion
       | 3            | 1             |
 
   Scenario Outline: MQTT NO_ACK PARALLEL delivers QoS 1 payloads
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -148,7 +151,7 @@ Feature: MQTT ingestion
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-noack-parallel-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -183,6 +186,7 @@ Feature: MQTT ingestion
       | 3            | 1             |
 
   Scenario Outline: MQTT instances report fixed client id conflicts
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -206,7 +210,7 @@ Feature: MQTT ingestion
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-fixed-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -232,6 +236,7 @@ Feature: MQTT ingestion
       | 3            | 1             |
 
   Scenario Outline: MQTT instances use the non-duplicating subscription model
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -255,7 +260,7 @@ Feature: MQTT ingestion
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-template-{{test_id}}-{{instance}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -290,6 +295,7 @@ Feature: MQTT ingestion
       | 3            | 1             |
 
   Scenario Outline: MQTT start failures do not leave a silently stopped ingestor
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -315,7 +321,7 @@ Feature: MQTT ingestion
       CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883'
+          'addr' = '{{mqtt_addr}}'
         };
 
       CREATE INGESTOR mqtt_notifications
@@ -357,6 +363,7 @@ Feature: MQTT ingestion
       | 3            | 1             |
 
   Scenario Outline: MQTT ACK SEQUENTIAL retries while an attached emitter is faulted
+    Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -381,13 +388,13 @@ Feature: MQTT ingestion
         CREATE CLIENT mqtt_ingress
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-ack-seq-in-{{test_id}}'
         };
         CREATE CLIENT mqtt_out
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-ack-seq-out-{{test_id}}'
         };
         CREATE INGESTOR mqtt_notifications
@@ -437,6 +444,7 @@ Feature: MQTT ingestion
       | 3            | 1             |
 
   Scenario: MQTT ACK PARALLEL instances continue after a node is drained
+    Given MQTT is running
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -460,7 +468,7 @@ Feature: MQTT ingestion
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
-          'addr' = 'mqtt://127.0.0.1:1883',
+          'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-ack-parallel-{{test_id}}-{{instance}}'
         };
         CREATE INGESTOR mqtt_notifications

@@ -48,6 +48,7 @@ Feature: Cluster scheduling
       """
 
   Scenario: Scheduled deduplicators receive relay traffic across nodes
+    Given Kafka is running
     Given a 2 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -78,7 +79,7 @@ Feature: Cluster scheduling
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         }; CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         DECODE USING notification_codec
@@ -171,6 +172,7 @@ Feature: Cluster scheduling
       """
 
   Scenario: Describe deduplicator on the leader reports scheduled owner metrics
+    Given Kafka is running
     Given a 2 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -211,7 +213,7 @@ Feature: Cluster scheduling
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE INGESTOR source_logs
@@ -271,6 +273,7 @@ Feature: Cluster scheduling
       """
 
   Scenario: Deduplicator executes on its scheduled owner separate from its upstream ingestor
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -312,7 +315,7 @@ Feature: Cluster scheduling
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE INGESTOR source_logs
@@ -482,6 +485,7 @@ Feature: Cluster scheduling
       """
 
   Scenario: Attached ACK propagates back across nodes
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -508,7 +512,7 @@ Feature: Cluster scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -540,6 +544,7 @@ Feature: Cluster scheduling
       """
 
   Scenario: Attached ACK stays alive across explicitly placed remote nodes
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -571,7 +576,7 @@ Feature: Cluster scheduling
         CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE INGESTOR kafka_notifications
         FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -664,6 +669,7 @@ Feature: Cluster scheduling
       """
 
   Scenario: Deduplicator schedule movement resumes processing on the new owner
+    Given Kafka is running
     Given a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -705,7 +711,7 @@ Feature: Cluster scheduling
       CREATE CLIENT kafka_main
         TYPE KAFKA
         CONFIG {
-          'bootstrap.servers' = '127.0.0.1:9092'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE INGESTOR source_logs

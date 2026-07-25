@@ -19,7 +19,6 @@ use nervix_vm::{
 };
 use nervix_wasm::{CompiledWasmProcessor, WasmBranchInstance};
 use ordered_float::OrderedFloat;
-use registry::ActiveGraph;
 use triomphe::Arc;
 
 use super::{
@@ -29,6 +28,7 @@ use super::{
     RuntimeFlushPolicy, SharedActiveGraph, WindowProcessorState, inferencer::OnnxInferencerSession,
 };
 use crate::{
+    registry::ActiveGraph,
     runtime_ack::AckSet,
     runtime_schema::{
         CompiledSchema, RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
