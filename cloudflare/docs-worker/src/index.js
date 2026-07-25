@@ -11,7 +11,6 @@ export default {
       return new Response(null, {
         status: 307,
         headers: {
-          "cache-control": "public, max-age=300",
           location: url.toString(),
         },
       });
