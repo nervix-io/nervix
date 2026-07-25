@@ -14173,6 +14173,41 @@ async fn flush_branch_inferencer_output(
         return;
     }
     let inferencer_tensors = InferencerFilterMapTensors { output_schema };
+    let tensor_schema = inferencer_tensors.output_arrow_schema();
+    let tensor_batch = match tensor_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            runtime_values_input_column(
+                output_fields.iter().map(|fields| fields.get(field.name())),
+                output_fields.len(),
+                field,
+            )
+            .map(|column| column.to_array_ref())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|columns| {
+            RecordBatch::try_new(tensor_schema.clone(), columns).map_err(|error| error.to_string())
+        })
+        .and_then(|batch| RuntimeRecordBatch::from_record_batch(tensor_schema, batch))
+    {
+        Ok(batch) => batch,
+        Err(error) => {
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                messages.iter().map(|message| &message.acks),
+                format!(
+                    "inferencer '{}' failed to build output tensor columns: {}",
+                    processor.as_str(),
+                    error
+                ),
+            );
+            return;
+        }
+    };
     let output_records = match messages
         .iter()
         .zip(output_fields)
@@ -14206,7 +14241,7 @@ async fn flush_branch_inferencer_output(
         .collect::<Vec<_>>();
     let output_batch = match RelayRecordBatch::from_filtered_parts(
         input_key,
-        input_batch,
+        tensor_batch,
         output_records,
         output_metadata,
         output_acks,
