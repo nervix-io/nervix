@@ -7207,28 +7207,20 @@ impl Runtime {
             .ok()
             .flatten()
             .unwrap_or_else(current_timestamp);
-        let input_records = prepare_filter_map_input_records(
+        let executed = execute_filter_map_program_on_batch(
             "reingestor",
             reingestor,
             program,
-            batch.records.clone(),
-            FilterMapInputPreparation {
-                execution_now,
+            FilterMapBatchInputs {
+                carrier: &batch.batch,
+                keys: &batch.keys,
                 side_inputs: &side_inputs,
-                branch_keys: &batch.keys,
-                acks: &batch.acks,
             },
-        )
-        .await?;
-        let executed = execute_filter_map_program(
-            "reingestor",
-            reingestor,
-            program,
-            &input_records,
             execution_now,
             batch.acks.clone(),
         )
         .await?;
+        let state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
         let mut success_output_rows = Vec::new();
         let mut success_input_rows = Vec::new();
         let mut errors = Vec::new();
@@ -7256,7 +7248,7 @@ impl Runtime {
                         MessageErrorOperation::Set,
                     ),
                     partial_output,
-                    materialized_state: materialized_state_snapshot(&input_records[input_row]),
+                    materialized_state: state_snapshot.clone(),
                 });
                 continue;
             }

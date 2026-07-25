@@ -55,6 +55,8 @@ pub enum RuntimeError {
         reg: RegisterRef,
         expected: &'static str,
     },
+    #[error("unsupported column type {data_type:?}")]
+    UnsupportedColumnType { data_type: DataType },
     #[error("blocking execution task failed: {message}")]
     BlockingExecutionFailed { message: String },
     #[error("function '{function}' requires caller-supplied values")]
