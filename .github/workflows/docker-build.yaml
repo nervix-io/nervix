@@ -170,6 +170,7 @@ jobs:
             fonts-noto-core \
             lmodern \
             pandoc \
+            texlive-lang-cjk \
             texlive-xetex
 
       - name: Setup Rust
