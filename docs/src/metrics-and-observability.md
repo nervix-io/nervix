@@ -125,6 +125,25 @@ percentiles instead of trying to render one current number per branch.
 
 A `-` value means the derived value is not available. This is common for domain-clock values when no domain timestamp has been observed or when the observed domain-time span is zero.
 
+## Branch Lifecycle Signals
+
+Current Prometheus metrics are branch-aggregated traffic, latency, and buffer observations. They do
+not include live branch-instance counts, branch-creation counters, eviction counters, or
+branch-local state-size gauges.
+
+Current branch-local visibility is limited to inspection:
+
+- `DESCRIBE RELAY <relay> WHERE (...)` reports whether the matching concrete branch-local relay
+  exists and includes its relay-buffer metrics when available.
+- `DESCRIBE RELAY <relay>` reports logical configuration and aggregated buffer observations. It
+  does not count live branch instances.
+- Processor and ingestor `DESCRIBE` output reports the runtime state implemented by that node, but
+  it does not provide a common branch inventory or eviction history.
+
+Prometheus deliberately has no branch-key label. Any future lifecycle metrics must preserve this
+cardinality policy. See [Capacity Planning For Branched Graphs](capacity-planning.md) for the cost
+model and [Roadmap](roadmap.md) for signals that do not exist yet.
+
 ## Wall Clock And Domain Clock
 
 Nervix reports two time bases because they answer different questions:

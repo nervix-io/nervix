@@ -39,6 +39,30 @@ The leader validates them eagerly so invalid scopes, construction, types, nullab
 or branch relationships fail at command time. Runtime nodes consume Models directly and never
 reparse stored NSPL.
 
+## Working-Message Execution
+
+Transforming construction is compiled as one ordered columnar program. The runtime projects the
+input batch into the route program, reuses input columns for inherited or still-current values,
+and constructs new columns only for rewritten or newly initialized output fields. Repeated `SET`
+targets replace the current output column in written order. Finalization validates required and
+optional output columns before route filtering.
+
+This is the implementation of the Manual's [working-message model](working-message.md), not a
+second field-resolution contract. The Manual owns the normative scopes and edge cases.
+
+## ACK Composition
+
+Relay fan-out gives each attached runtime consumer a descendant of the incoming ACK state.
+Detached consumers receive the batch without an upstream ACK dependency. The source ACK succeeds
+only when all attached descendants succeed. Any attached failure fails the shared source attempt,
+even when another descendant has already completed an external side effect.
+
+ACK guards, tokens, and maps remain in memory. They do not record a transactional per-sink commit
+ledger. After source redelivery, every attached path processes the record again. This is why an
+already successful non-idempotent sink can receive a duplicate after a sibling path fails. See
+[ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery) for the
+sink consequences and mitigations.
+
 The current VM surface covers:
 
 - arithmetic operators: `+`, `-`, `*`, `/`, `%`
@@ -76,5 +100,9 @@ Examples of state that is not treated as a durable commit log:
 For relay movement between nodes, Nervix uses Arrow IPC batch serialization on the interconnect path. Control traffic such as lookups and state-sync RPCs still uses separate control-envelope formats.
 
 Runtime graph metrics are maintained alongside the data plane. Prometheus export uses branch-aggregated series to keep label cardinality bounded, while `DESCRIBE` can report branch-local metrics where a concrete relay branch is being inspected. See [Metrics And Observability](metrics-and-observability.md).
+
+The runtime ownership above produces a per-branch resource cost. See
+[Capacity Planning For Branched Graphs](capacity-planning.md) for the operator-facing cost
+structure and the current signal gaps.
 
 This design keeps latency low and avoids turning the runtime into a transactional storage engine.

@@ -127,6 +127,7 @@ construction, finalizes the declared schema, and evaluates its route `WHERE`. Re
 be initialized; omitted optional fields become typed nulls. There is no implicit identity
 transformation and no global `SET` or `INHERIT`.
 
+Transforming routes use one [working message](working-message.md) from input through finalization.
 Transforming routes—ingestors after decoding, reingestors, junctions, deduplicators, reorderers,
 and codec emitters—may use `INHERIT`. Generators, windows, inferencers, WASM processors,
 correlators, and direct emitters are set-only and reject `INHERIT`. Generated inferencer and WASM
@@ -148,6 +149,7 @@ Every `TO` destination on a flush-based node requires `FLUSH EACH <duration> MAX
 <bytes>` or `FLUSH IMMEDIATE`; there are no hidden defaults. Window processors use `WIDTH` and
 `STEP`, and WASM processors use guest-owned output cadence instead of `FLUSH`.
 
+This is the authoritative `FLUSH IMMEDIATE` timing rule.
 During normal processing, `FLUSH IMMEDIATE` starts a system-owned 100 µs minimum batching timeout
 when data first enters an empty route buffer. The route flushes when that timeout expires, allowing
 nearby arrivals to remain in one Arrow batch instead of collapsing to one batch per message.
@@ -174,7 +176,7 @@ Supported expression surface:
 - arithmetic: `+`, `-`, `*`, `/`, `%`
 - comparisons: `=`, `!=`, `>`, `<`, `>=`, `<=`
 - boolean logic: `AND`, `OR`, `NOT`
-- conditionals: `IF condition THEN value ELSE value END`, searched
+- [conditionals](filter-map-functions.md#conditional-expressions): `IF condition THEN value ELSE value END`, searched
   `CASE WHEN condition THEN value ... [ELSE value] END`, and simple
   `CASE operand WHEN match THEN value ... [ELSE value] END`
 - parentheses for nesting and precedence control
@@ -186,9 +188,8 @@ written order and the first match wins. A null condition or null simple-`CASE` c
 match. Omitting `ELSE` produces a typed null, so the destination must be optional. `IF` always
 requires `ELSE`.
 
-`IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, and `END` are reserved in structured expressions. A schema
-may still declare a field with one of these names, but that field cannot be referenced by an NSPL
-expression.
+The [Conditional Expressions](filter-map-functions.md#conditional-expressions) reference owns the
+reserved-word rule for conditional keywords.
 
 Supported filter-map types match the full Nervix internal schema type set:
 
@@ -214,6 +215,10 @@ Supported built-ins include string, null-handling, numeric, regex, and contextua
 
 See [Filter-Map Functions](filter-map-functions.md) for the full current function list, signatures, and aliases.
 
+User-defined calls always use `udf::<name>(...)`. The explicit namespace means adding a builtin can
+never shadow a UDF or change existing user code. See
+[Choosing An Extension Tier](filter-map-functions.md#choosing-an-extension-tier).
+
 General expression rules:
 
 - builtin calls may be nested or chained, for example `lower(trim(raw))`
@@ -222,8 +227,8 @@ General expression rules:
 - relay names are graph references, never expression qualifiers
 - language scopes are `message`, `input`, `output`, `branch`, `left`, `right`,
   `relay_state.<relay>`, `metadata`, `partial_output`, and `error`; availability depends on context
-- transforming construction uses `message.field` as the working output with exact-compatible input
-  fallback; `output.field` reads only an already initialized output field
+- transforming construction reads the [working message](working-message.md); `output.field` reads
+  only an already initialized output field
 - generated routes allow bare reads from immutable generated state until the same-named output is
   initialized; `message` and `input` are unavailable
 - `branch.field` must be explicit and is unavailable in successful emitter expressions

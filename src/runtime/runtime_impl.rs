@@ -3662,10 +3662,10 @@ impl Runtime {
         &self,
         domain: &Domain,
         identifier: &Identifier,
-        branched: Option<(SharedActiveGraph, BranchInstanceTemplate)>,
-    ) -> Option<Arc<BranchedIngestorRuntime>> {
+        branched: Option<(SharedActiveGraph, IngestorRouteTemplate)>,
+    ) -> Option<Arc<IngestorRouteRuntime>> {
         branched.map(|(graph, template)| {
-            BranchedIngestorRuntime::new(
+            IngestorRouteRuntime::new(
                 self.clone(),
                 domain.clone(),
                 identifier.clone(),
@@ -3693,8 +3693,8 @@ impl Runtime {
         &self,
         domain: &Domain,
         ingestor: &Identifier,
-        branched: HashMap<Identifier, (SharedActiveGraph, BranchInstanceTemplate)>,
-    ) -> BranchedIngestorRuntimes {
+        branched: HashMap<Identifier, (SharedActiveGraph, IngestorRouteTemplate)>,
+    ) -> IngestorRouteRuntimes {
         let mut roots = branched.into_iter().collect::<Vec<_>>();
         roots.sort_by(|left, right| left.0.cmp(&right.0));
         let mut runtimes = Vec::with_capacity(roots.len());
@@ -3708,7 +3708,7 @@ impl Runtime {
             senders.insert(root_relay, runtime.sender());
             runtimes.push(runtime);
         }
-        BranchedIngestorRuntimes { runtimes, senders }
+        IngestorRouteRuntimes { runtimes, senders }
     }
 
     pub async fn apply_cluster_schedule(
@@ -4547,7 +4547,7 @@ impl Runtime {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let template = materialize_branch_instance_template(
+            let template = materialize_ingestor_route_template(
                 spec,
                 &model_index,
                 &relay_registries,
@@ -6214,7 +6214,7 @@ impl Runtime {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let template = materialize_branch_instance_template(
+            let template = materialize_ingestor_route_template(
                 spec,
                 &model_index,
                 &relay_registries,
@@ -8826,7 +8826,7 @@ impl Runtime {
         let mut branched_templates = HashMap::default();
         if let Some(specs) = execution.branched_ingestors.get(&ingestor.name) {
             for spec in specs {
-                let template = materialize_branch_instance_template(
+                let template = materialize_ingestor_route_template(
                     spec,
                     &model_index,
                     &execution.relay_registries,
