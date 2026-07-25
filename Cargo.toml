@@ -436,6 +436,9 @@ zeromq = "0.4"
 [patch.crates-io]
 # Unify all AWS-LC consumers on PR #1184 so Cargo links one aws-lc-sys native library.
 aws-lc-sys = { git = "https://github.com/nervix-io/aws-lc-rs.git", rev = "6332c54d1cf0535312a0e5cd73232f5d1e21f958" }
+# https://github.com/bytecodealliance/wasmtime/pull/13975 and https://github.com/glebpom/wasmtime/pull/1
+cranelift = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
+cranelift-jit = { git = "https://github.com/glebpom/wasmtime.git", branch = "backport-fixes-jit-veener" }
 
 [profile.release]
 codegen-units = 1
