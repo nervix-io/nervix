@@ -166,7 +166,7 @@ use planning::resolve_concrete_branch;
 use planning::{
     assignments_contain_udf, branched_ingestor_specs_from_active_graph,
     branched_ingestor_specs_from_models, branched_ingestor_specs_from_scheduled_nodes,
-    format_branched_by, materialize_branch_instance_template,
+    format_branched_by, materialize_ingestor_route_template,
     materialize_processor_instance_template, resolve_concrete_branch_from_assignments,
 };
 use processors::{
@@ -175,8 +175,8 @@ use processors::{
     BranchedProcessorOutputsSpec, BranchedProcessorSpec, CompiledCorrelatorOutputProgram,
     CompiledCorrelatorWhereProgram, CompiledReordererProgram, CompiledWindowAggregateExpr,
     CompiledWindowAggregateProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
-    InferencerFlushContext, InferencerOutputBuffer, JunctionFlushContext, PlannedGeneralError,
-    PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
+    InferencerFlushContext, InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext,
+    PlannedGeneralError, PlannedMessageError, RelayProcessorNode, RelayProcessorOperationNode,
     RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
     RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
     RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage,
@@ -287,12 +287,12 @@ impl RuntimeKey {
 enum IngestorRuntime {
     Background {
         shutdown: watch::Sender<bool>,
-        branched: Vec<Arc<BranchedIngestorRuntime>>,
+        branched: Vec<Arc<IngestorRouteRuntime>>,
         tasks: Vec<JoinHandle<()>>,
     },
     Endpoint {
         route_keys: Vec<HttpRouteKey>,
-        branched: Vec<Arc<BranchedIngestorRuntime>>,
+        branched: Vec<Arc<IngestorRouteRuntime>>,
     },
 }
 
@@ -437,7 +437,7 @@ struct DomainExecution {
     materialized_stream_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_stream_owner_nodes: HashMap<Identifier, Option<String>>,
     branched_ingestors: HashMap<Identifier, Vec<BranchedIngestorSpec>>,
-    branched_entrypoints: HashMap<Identifier, Vec<Arc<BranchedIngestorRuntime>>>,
+    branched_entrypoints: HashMap<Identifier, Vec<Arc<IngestorRouteRuntime>>>,
     codecs: HashMap<Identifier, Arc<CompiledCodec>>,
     signaling_protocols: HashMap<Identifier, Arc<CreateSignalingProtocol>>,
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
@@ -602,7 +602,7 @@ struct IngestorDependencies {
     output_routes: RelayProcessorOutputsNode,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
-    branched_templates: HashMap<Identifier, (SharedActiveGraph, BranchInstanceTemplate)>,
+    branched_templates: HashMap<Identifier, (SharedActiveGraph, IngestorRouteTemplate)>,
 }
 
 struct IngestDispatch<'a> {
@@ -619,8 +619,8 @@ struct IngestDispatch<'a> {
 }
 
 #[derive(Clone, Default)]
-struct BranchedIngestorRuntimes {
-    runtimes: Vec<Arc<BranchedIngestorRuntime>>,
+struct IngestorRouteRuntimes {
+    runtimes: Vec<Arc<IngestorRouteRuntime>>,
     senders: HashMap<Identifier, mpsc::Sender<BranchedEntrypointInput>>,
 }
 
@@ -1407,7 +1407,7 @@ fn internal_processor_error_policies(general: GeneralErrorPolicy) -> ErrorPolici
     }
 }
 
-struct BranchedIngestorRuntime {
+struct BranchExecutionRuntime {
     domain: Domain,
     ingestor: Identifier,
     sender: mpsc::Sender<BranchedEntrypointInput>,
@@ -1415,7 +1415,29 @@ struct BranchedIngestorRuntime {
     task: parking_lot::Mutex<Option<JoinHandle<()>>>,
 }
 
-struct BranchedBranchDispatchContext<'a> {
+struct IngestorRouteRuntime {
+    sender: mpsc::Sender<BranchedEntrypointInput>,
+    shutdown: watch::Sender<bool>,
+    task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    branch_runtime: Arc<BranchExecutionRuntime>,
+}
+
+struct PendingIngestorRouteBatch {
+    batches: Vec<RelayRecordBatch>,
+    estimated_bytes: u64,
+    flush_at: Instant,
+}
+
+struct IngestorRouteTask {
+    runtime_handle: Runtime,
+    domain: Domain,
+    ingestor: Identifier,
+    template: IngestorRouteTemplate,
+    branch_sender: mpsc::Sender<BranchedEntrypointInput>,
+    pending: HashMap<Option<BranchKey>, PendingIngestorRouteBatch>,
+}
+
+struct BranchExecutionDispatchContext<'a> {
     runtime_handle: &'a Runtime,
     domain: &'a Domain,
     ingestor: &'a Identifier,
@@ -1560,13 +1582,6 @@ fn relay_batches_into_batched_input(batches: Vec<RelayRecordBatch>) -> BatchedIn
         RelayRecordBatch::concat(batches)
             .expect("relay receive boundary batches must concatenate into one arrow batch"),
     )
-}
-
-fn branched_entrypoint_inputs_estimated_bytes(inputs: &[BranchedEntrypointInput]) -> u64 {
-    inputs
-        .iter()
-        .map(BranchedEntrypointInput::estimated_bytes)
-        .fold(0_u64, u64::saturating_add)
 }
 
 fn branched_entrypoint_inputs_acks(inputs: &[BranchedEntrypointInput]) -> Vec<AckSet> {
@@ -5042,101 +5057,77 @@ impl BranchRuntime {
     }
 }
 
-impl BranchedIngestorRuntime {
-    async fn dispatch_entrypoint_inputs(
-        context: BranchedBranchDispatchContext<'_>,
-        instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
-        inputs: Vec<BranchedEntrypointInput>,
-    ) -> Option<Timestamp> {
-        let BranchedBranchDispatchContext {
-            runtime_handle,
-            domain,
-            ingestor,
-            graph,
-            template,
-            now,
-        } = context;
-        if inputs.is_empty() {
-            return None;
+impl IngestorRouteTask {
+    fn handle_general_error(&self, acks: &[AckSet], reason: String) {
+        if self.template.branch.source_kind == ModelKind::Ingestor {
+            self.runtime_handle.handle_general_error_for_acks(
+                &self.domain,
+                self.template.branch.source_kind.as_str(),
+                &self.ingestor,
+                &self.template.branch.error_policies,
+                acks.iter(),
+                reason,
+            );
+        } else {
+            self.runtime_handle
+                .handle_internal_processor_error_for_acks(
+                    &self.domain,
+                    self.template.branch.source_kind.as_str(),
+                    &self.ingestor,
+                    &self.template.branch.error_policies,
+                    acks.iter(),
+                    reason,
+                );
         }
+    }
 
-        let input_batch = match branched_entrypoint_batch_from_inputs_blocking(inputs).await {
+    async fn prepare_input(&self, input: BranchedEntrypointInput) -> Vec<RelayRecordBatch> {
+        let input_batch = match branched_entrypoint_batch_from_inputs_blocking(vec![input]).await {
             Ok(batch) => batch,
             Err((error, acks)) => {
-                let reason = format!(
-                    "branched entrypoint '{}' failed to build input batch: {}",
-                    ingestor.as_str(),
-                    error
+                self.handle_general_error(
+                    &acks,
+                    format!(
+                        "{} '{}' failed to build route input batch: {}",
+                        self.template.branch.source_kind.as_str(),
+                        self.ingestor.as_str(),
+                        error
+                    ),
                 );
-                if template.source_kind == ModelKind::Ingestor {
-                    runtime_handle.handle_general_error_for_acks(
-                        domain,
-                        template.source_kind.as_str(),
-                        ingestor,
-                        &template.error_policies,
-                        acks.iter(),
-                        reason,
-                    );
-                } else {
-                    runtime_handle.handle_internal_processor_error_for_acks(
-                        domain,
-                        template.source_kind.as_str(),
-                        ingestor,
-                        &template.error_policies,
-                        acks.iter(),
-                        reason,
-                    );
-                }
-                return None;
+                return Vec::new();
             }
         };
-        let udfs = runtime_handle.udf_executor(domain);
         let branch_plan = match branched_branch_plan_blocking(
             input_batch.clone(),
-            template.entrypoint_branch_assignments.clone(),
-            template.source.clone(),
-            template.root_relay.clone(),
-            udfs,
+            self.template.branch_assignments.clone(),
+            self.template.branch.source.clone(),
+            self.template.branch.root_relay.clone(),
+            self.runtime_handle.udf_executor(&self.domain),
         )
         .await
         {
             Ok(plan) => plan,
             Err(error) => {
-                let reason = format!(
-                    "branched entrypoint '{}' failed to evaluate branch assignments: {}",
-                    ingestor.as_str(),
-                    error
+                self.handle_general_error(
+                    &input_batch.acks,
+                    format!(
+                        "{} '{}' failed to evaluate output branch assignments: {}",
+                        self.template.branch.source_kind.as_str(),
+                        self.ingestor.as_str(),
+                        error
+                    ),
                 );
-                if template.source_kind == ModelKind::Ingestor {
-                    runtime_handle.handle_general_error_for_acks(
-                        domain,
-                        template.source_kind.as_str(),
-                        ingestor,
-                        &template.error_policies,
-                        input_batch.acks.iter(),
-                        reason,
-                    );
-                } else {
-                    runtime_handle.handle_internal_processor_error_for_acks(
-                        domain,
-                        template.source_kind.as_str(),
-                        ingestor,
-                        &template.error_policies,
-                        input_batch.acks.iter(),
-                        reason,
-                    );
-                }
-                return None;
+                return Vec::new();
             }
         };
         for row_error in branch_plan.row_errors {
             tokio::task::consume_budget().await;
-            runtime_handle
+            self.runtime_handle
                 .handle_message_error(
-                    domain,
-                    template.source_kind.as_str(),
-                    &template.source,
-                    &template.error_policies,
+                    &self.domain,
+                    self.template.branch.source_kind.as_str(),
+                    &self.template.branch.source,
+                    &self.template.branch.error_policies,
                     RelayMessage {
                         key: None,
                         record: row_error.record,
@@ -5146,7 +5137,7 @@ impl BranchedIngestorRuntime {
                 )
                 .await;
         }
-        if template.source_kind == ModelKind::Ingestor {
+        if self.template.branch.source_kind == ModelKind::Ingestor {
             let row_count = input_batch.batch.batch().num_rows();
             let row_bytes = input_batch
                 .batch
@@ -5162,24 +5153,24 @@ impl BranchedIngestorRuntime {
                 let Some(metadata) = input_batch.metadata.get(*row) else {
                     continue;
                 };
-                runtime_handle
+                self.runtime_handle
                     .metrics
                     .observe_branch_node_without_stream_received(
                         branch_key_display(key),
                         NodeWithoutRelayObservation {
-                            domain,
-                            kind: template.source_kind,
-                            node: &template.source,
-                            physical_node_id: runtime_handle.local_node_id.read().as_deref(),
+                            domain: &self.domain,
+                            kind: self.template.branch.source_kind,
+                            node: &self.template.branch.source,
+                            physical_node_id: self.runtime_handle.local_node_id.read().as_deref(),
                             messages: 1,
                             bytes: row_bytes,
                             domain_timestamp: Some(metadata.ingested_at_high_watermark()),
                         },
                     );
-                runtime_handle.mark_branch_aggregated_metrics_updated(
-                    domain,
-                    template.source_kind,
-                    &template.source,
+                self.runtime_handle.mark_branch_aggregated_metrics_updated(
+                    &self.domain,
+                    self.template.branch.source_kind,
+                    &self.template.branch.source,
                 );
             }
         }
@@ -5190,139 +5181,311 @@ impl BranchedIngestorRuntime {
             batch_builds.push(branched_branch_filter_blocking(
                 input_batch.clone(),
                 selection,
-                template.entrypoint_ack_boundary,
+                self.template.ack_boundary,
             ));
+        }
+        let mut prepared = Vec::new();
+        while let Some(batch_result) = futures_util::StreamExt::next(&mut batch_builds).await {
+            tokio::task::consume_budget().await;
+            match batch_result {
+                Ok((_, batch)) => prepared.push(batch),
+                Err((error, acks)) => self.handle_general_error(
+                    &acks,
+                    format!(
+                        "{} '{}' failed to prepare output branch batch: {}",
+                        self.template.branch.source_kind.as_str(),
+                        self.ingestor.as_str(),
+                        error
+                    ),
+                ),
+            }
+        }
+        prepared
+    }
+
+    async fn flush_key(&mut self, key: &Option<BranchKey>) {
+        let Some(pending) = self.pending.remove(key) else {
+            return;
+        };
+        let acks = pending
+            .batches
+            .iter()
+            .flat_map(|batch| batch.acks.iter().cloned())
+            .collect::<Vec<_>>();
+        let batch = match RelayRecordBatch::concat(pending.batches) {
+            Ok(batch) => batch,
+            Err(error) => {
+                self.handle_general_error(
+                    &acks,
+                    format!(
+                        "{} '{}' failed to concatenate output route batch: {}",
+                        self.template.branch.source_kind.as_str(),
+                        self.ingestor.as_str(),
+                        error
+                    ),
+                );
+                return;
+            }
+        };
+        if let Err(error) = self.branch_sender.send(batch).await {
+            let batch = error.0;
+            self.handle_general_error(
+                &batch.acks,
+                format!(
+                    "{} '{}' failed to forward prepared batch for relay '{}'",
+                    self.template.branch.source_kind.as_str(),
+                    self.ingestor.as_str(),
+                    self.template.branch.root_relay.as_str()
+                ),
+            );
+        }
+    }
+
+    async fn accept(&mut self, input: BranchedEntrypointInput) {
+        for batch in self.prepare_input(input).await {
+            tokio::task::consume_budget().await;
+            let key = batch.key.clone();
+            let estimated_bytes = batch.estimated_bytes();
+            let pending =
+                self.pending
+                    .entry(key.clone())
+                    .or_insert_with(|| PendingIngestorRouteBatch {
+                        batches: Vec::new(),
+                        estimated_bytes: 0,
+                        flush_at: Instant::now() + self.template.flush_policy.interval(),
+                    });
+            pending.estimated_bytes = pending.estimated_bytes.saturating_add(estimated_bytes);
+            pending.batches.push(batch);
+            if self
+                .template
+                .flush_policy
+                .size_boundary_reached(pending.estimated_bytes)
+            {
+                self.flush_key(&key).await;
+            }
+        }
+    }
+
+    async fn flush_due(&mut self, now: Instant) {
+        let keys = self
+            .pending
+            .iter()
+            .filter_map(|(key, pending)| (pending.flush_at <= now).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in keys {
+            tokio::task::consume_budget().await;
+            self.flush_key(&key).await;
+        }
+    }
+
+    async fn flush_all(&mut self) {
+        let keys = self.pending.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            tokio::task::consume_budget().await;
+            self.flush_key(&key).await;
+        }
+    }
+
+    fn next_flush(&self) -> Option<Instant> {
+        self.pending.values().map(|pending| pending.flush_at).min()
+    }
+
+    async fn run(
+        mut self,
+        mut input: mpsc::Receiver<BranchedEntrypointInput>,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) {
+        loop {
+            tokio::task::consume_budget().await;
+            let next_flush = self.next_flush();
+            let flush_at =
+                next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
+            tokio::select! {
+                biased;
+                changed = shutdown_rx.changed() => {
+                    let _ = changed;
+                    input.close();
+                    while let Some(message) = input.recv().await {
+                        tokio::task::consume_budget().await;
+                        self.accept(message).await;
+                    }
+                    self.flush_all().await;
+                    break;
+                }
+                _ = sleep_until(flush_at), if next_flush.is_some() => {
+                    self.flush_due(Instant::now()).await;
+                }
+                message = input.recv() => {
+                    let Some(message) = message else {
+                        self.flush_all().await;
+                        break;
+                    };
+                    self.accept(message).await;
+                }
+            }
+        }
+    }
+}
+
+impl IngestorRouteRuntime {
+    fn new(
+        runtime_handle: Runtime,
+        domain: Domain,
+        ingestor: Identifier,
+        graph: SharedActiveGraph,
+        template: IngestorRouteTemplate,
+        expiration_scan_interval: Duration,
+    ) -> Arc<Self> {
+        let branch_runtime = BranchExecutionRuntime::new(
+            runtime_handle.clone(),
+            domain.clone(),
+            ingestor.clone(),
+            graph,
+            template.branch.clone(),
+            expiration_scan_interval,
+        );
+        let (sender, input) = mpsc::channel(1);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let runtime = Arc::new(Self {
+            sender,
+            shutdown,
+            task: parking_lot::Mutex::new(None),
+            branch_runtime: branch_runtime.clone(),
+        });
+        let task = tokio::spawn(
+            IngestorRouteTask {
+                runtime_handle,
+                domain,
+                ingestor,
+                template,
+                branch_sender: branch_runtime.sender(),
+                pending: HashMap::default(),
+            }
+            .run(input, shutdown_rx),
+        );
+        *runtime.task.lock() = Some(task);
+        runtime
+    }
+
+    fn sender(&self) -> mpsc::Sender<BranchedEntrypointInput> {
+        self.sender.clone()
+    }
+
+    async fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
+        let task = self.task.lock().take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        self.branch_runtime.shutdown().await;
+    }
+}
+
+impl BranchExecutionRuntime {
+    async fn dispatch_prepared_inputs(
+        context: BranchExecutionDispatchContext<'_>,
+        instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
+        inputs: Vec<BranchedEntrypointInput>,
+    ) -> Option<Timestamp> {
+        let BranchExecutionDispatchContext {
+            runtime_handle,
+            domain,
+            ingestor,
+            graph,
+            template,
+            now,
+        } = context;
+        if inputs.is_empty() {
+            return None;
         }
 
         let mut dispatches = FuturesUnordered::new();
         let mut next_deadline = None;
-        loop {
+        for message in inputs {
             tokio::task::consume_budget().await;
-            tokio::select! {
-                built = futures_util::StreamExt::next(&mut batch_builds), if !batch_builds.is_empty() => {
-                    let Some(batch_result) = built else {
-                        continue;
-                    };
-                    let (key, message) = match batch_result {
-                        Ok(output) => output,
-                        Err((error, acks)) => {
-                            let reason = format!(
-                                "branched entrypoint '{}' failed to filter branch batch: {}",
-                                ingestor.as_str(),
-                                error
-                            );
-                            if template.source_kind == ModelKind::Ingestor {
-                                runtime_handle.handle_general_error_for_acks(
-                                    domain,
-                                    template.source_kind.as_str(),
-                                    ingestor,
-                                    &template.error_policies,
-                                    acks.iter(),
-                                    reason,
-                                );
-                            } else {
-                                runtime_handle.handle_internal_processor_error_for_acks(
-                                    domain,
-                                    template.source_kind.as_str(),
-                                    ingestor,
-                                    &template.error_policies,
-                                    acks.iter(),
-                                    reason,
-                                );
-                            }
-                            continue;
-                        }
-                    };
-                    let instance = match instances.get_or_try_create_with(key.clone(), now, |key| {
-                        template.instantiate(runtime_handle, domain, key.clone())
-                    }) {
-                        Ok(instance) => instance,
-                        Err(error) => {
-                            let reason = format!(
-                                "failed to instantiate branch '{}': {}",
-                                branch_key_display(&key),
-                                error
-                            );
-                            if template.source_kind == ModelKind::Ingestor {
-                                runtime_handle.handle_general_error_for_acks(
-                                    domain,
-                                    template.source_kind.as_str(),
-                                    ingestor,
-                                    &template.error_policies,
-                                    message.acks.iter(),
-                                    reason,
-                                );
-                            } else {
-                                runtime_handle.handle_internal_processor_error_for_acks(
-                                    domain,
-                                    template.source_kind.as_str(),
-                                    ingestor,
-                                    &template.error_policies,
-                                    message.acks.iter(),
-                                    reason,
-                                );
-                            }
-                            continue;
-                        }
-                    };
-                    if instance.created {
-                        debug!(
-                            domain = domain.as_str(),
-                            ingestor = ingestor.as_str(),
-                            key = branch_key_display(&key),
-                            "created branch runtime"
+            let key = message.key.clone();
+            let instance = match instances.get_or_try_create_with(key.clone(), now, |key| {
+                template.instantiate(runtime_handle, domain, key.clone())
+            }) {
+                Ok(instance) => instance,
+                Err(error) => {
+                    let reason = format!(
+                        "failed to instantiate branch '{}': {}",
+                        branch_key_display(&key),
+                        error
+                    );
+                    if template.source_kind == ModelKind::Ingestor {
+                        runtime_handle.handle_general_error_for_acks(
+                            domain,
+                            template.source_kind.as_str(),
+                            ingestor,
+                            &template.error_policies,
+                            message.acks.iter(),
+                            reason,
+                        );
+                    } else {
+                        runtime_handle.handle_internal_processor_error_for_acks(
+                            domain,
+                            template.source_kind.as_str(),
+                            ingestor,
+                            &template.error_policies,
+                            message.acks.iter(),
+                            reason,
                         );
                     }
-                    if let Some(max_instances) = template.branch_max_instances {
-                        evict_branch_instance_instances_to_capacity(
-                            domain,
-                            ingestor,
-                            max_instances,
-                            instances,
-                        )
-                        .await;
-                    }
-                    let state = instance.state.clone();
-                    let graph = graph.clone();
-                    let dispatch_key = key.clone();
-                    let dispatch_acks = message.acks.clone();
-                    dispatches.push(async move {
-                        let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-                            let mut branch = state.lock().await;
-                            branch.dispatch(&graph, message).await;
-                            branch.next_deadline()
-                        }));
-                        (dispatch_key, dispatch_acks, handle.await)
-                    });
+                    continue;
                 }
-                dispatched = futures_util::StreamExt::next(&mut dispatches), if !dispatches.is_empty() => {
-                    let Some((key, acks, result)) = dispatched else {
-                        continue;
-                    };
-                    match result {
-                        Ok(deadline) => {
-                            record_next_branch_instance_branch_deadline(
-                                &mut next_deadline,
-                                deadline,
-                            );
-                        }
-                        Err(error) => {
-                            runtime_handle.handle_internal_processor_error_for_acks(
-                                domain,
-                                template.source_kind.as_str(),
-                                ingestor,
-                                &template.error_policies,
-                                acks.iter(),
-                                format!(
-                                    "branch '{}' dispatch task failed: {}",
-                                    branch_key_display(&key),
-                                    error
-                                ),
-                            );
-                        }
-                    }
+            };
+            if instance.created {
+                debug!(
+                    domain = domain.as_str(),
+                    ingestor = ingestor.as_str(),
+                    key = branch_key_display(&key),
+                    "created branch runtime"
+                );
+            }
+            if let Some(max_instances) = template.branch_max_instances {
+                evict_branch_instance_instances_to_capacity(
+                    domain,
+                    ingestor,
+                    max_instances,
+                    instances,
+                )
+                .await;
+            }
+            let state = instance.state.clone();
+            let graph = graph.clone();
+            let dispatch_key = key.clone();
+            let dispatch_acks = message.acks.clone();
+            dispatches.push(async move {
+                let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+                    let mut branch = state.lock().await;
+                    branch.dispatch(&graph, message).await;
+                    branch.next_deadline()
+                }));
+                (dispatch_key, dispatch_acks, handle.await)
+            });
+        }
+        while let Some((key, acks, result)) = futures_util::StreamExt::next(&mut dispatches).await {
+            tokio::task::consume_budget().await;
+            match result {
+                Ok(deadline) => {
+                    record_next_branch_instance_branch_deadline(&mut next_deadline, deadline);
                 }
-                else => break,
+                Err(error) => {
+                    runtime_handle.handle_internal_processor_error_for_acks(
+                        domain,
+                        template.source_kind.as_str(),
+                        ingestor,
+                        &template.error_policies,
+                        acks.iter(),
+                        format!(
+                            "branch '{}' dispatch task failed: {}",
+                            branch_key_display(&key),
+                            error
+                        ),
+                    );
+                }
             }
         }
         next_deadline
@@ -5378,8 +5541,6 @@ impl BranchedIngestorRuntime {
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             let mut next_lru_snapshot = Instant::now() + runtime_handle.state_snapshot_interval();
-            let mut pending_inputs = Vec::<BranchedEntrypointInput>::new();
-            let mut pending_flush_at = None::<Instant>;
             let now = runtime_handle
                 .current_stream_expiration_time(&domain)
                 .ok()
@@ -5395,29 +5556,6 @@ impl BranchedIngestorRuntime {
                     .ok()
                     .flatten()
                     .unwrap_or_else(current_timestamp);
-                if let Some(deadline) = pending_flush_at
-                    && Instant::now() >= deadline
-                {
-                    let ready = std::mem::take(&mut pending_inputs);
-                    pending_flush_at = None;
-                    record_next_branch_instance_branch_deadline(
-                        &mut next_branch_deadline,
-                        Self::dispatch_entrypoint_inputs(
-                            BranchedBranchDispatchContext {
-                                runtime_handle: &runtime_handle,
-                                domain: &domain,
-                                ingestor: &ingestor,
-                                graph: &graph,
-                                template: &template,
-                                now,
-                            },
-                            &mut instances,
-                            ready,
-                        )
-                        .await,
-                    );
-                    continue;
-                }
                 let mut did_scheduled_work = false;
                 if Instant::now() >= next_expiration_scan {
                     if let Some(branch_ttl) = template.branch_ttl {
@@ -5475,85 +5613,57 @@ impl BranchedIngestorRuntime {
                                 .checked_duration_since(Instant::now())
                                 .unwrap_or(Duration::ZERO),
                         )
-                        .min(
-                            pending_flush_at
-                                .and_then(|deadline| {
-                                    deadline.checked_duration_since(Instant::now())
-                                })
-                                .unwrap_or(Duration::MAX),
-                        )
                 };
                 tokio::select! {
                     biased;
                     message = input.recv() => {
                         let Some(message) = message else {
-                            let ready = std::mem::take(&mut pending_inputs);
-                            record_next_branch_instance_branch_deadline(
-                                &mut next_branch_deadline,
-                                Self::dispatch_entrypoint_inputs(
-                                    BranchedBranchDispatchContext {
-                                        runtime_handle: &runtime_handle,
-                                        domain: &domain,
-                                        ingestor: &ingestor,
-                                        graph: &graph,
-                                        template: &template,
-                                        now,
-                                    },
-                                    &mut instances,
-                                    ready,
-                                )
-                                .await,
-                            );
                             break;
                         };
-                        let flush_policy = template.entrypoint_flush_each;
-                        pending_inputs.push(message);
-                        if pending_flush_at.is_none() {
-                            pending_flush_at =
-                                Some(Instant::now() + flush_policy.interval());
-                        }
-                        if flush_policy.size_boundary_reached(
-                            branched_entrypoint_inputs_estimated_bytes(&pending_inputs),
-                        ) {
-                            let ready = std::mem::take(&mut pending_inputs);
-                            pending_flush_at = None;
-                            record_next_branch_instance_branch_deadline(
-                                &mut next_branch_deadline,
-                                Self::dispatch_entrypoint_inputs(
-                                    BranchedBranchDispatchContext {
-                                        runtime_handle: &runtime_handle,
-                                        domain: &domain,
-                                        ingestor: &ingestor,
-                                        graph: &graph,
-                                        template: &template,
-                                        now,
-                                    },
-                                    &mut instances,
-                                    ready,
-                                )
-                                .await,
-                            );
-                        }
+                        record_next_branch_instance_branch_deadline(
+                            &mut next_branch_deadline,
+                            Self::dispatch_prepared_inputs(
+                                BranchExecutionDispatchContext {
+                                    runtime_handle: &runtime_handle,
+                                    domain: &domain,
+                                    ingestor: &ingestor,
+                                    graph: &graph,
+                                    template: &template,
+                                    now,
+                                },
+                                &mut instances,
+                                vec![message],
+                            )
+                            .await,
+                        );
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
-                            let ready = std::mem::take(&mut pending_inputs);
-                            record_next_branch_instance_branch_deadline(
-                                &mut next_branch_deadline,
-                                Self::dispatch_entrypoint_inputs(
-                                    BranchedBranchDispatchContext {
-                                        runtime_handle: &runtime_handle,
-                                        domain: &domain,
-                                        ingestor: &ingestor,
-                                        graph: &graph,
-                                        template: &template,
-                                        now,
-                                    },
-                                    &mut instances,
-                                    ready,
-                                )
-                                .await,
-                            );
+                            input.close();
+                            while let Some(message) = input.recv().await {
+                                tokio::task::consume_budget().await;
+                                let drain_now = runtime_handle
+                                    .current_stream_expiration_time(&domain)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(current_timestamp);
+                                record_next_branch_instance_branch_deadline(
+                                    &mut next_branch_deadline,
+                                    Self::dispatch_prepared_inputs(
+                                        BranchExecutionDispatchContext {
+                                            runtime_handle: &runtime_handle,
+                                            domain: &domain,
+                                            ingestor: &ingestor,
+                                            graph: &graph,
+                                            template: &template,
+                                            now: drain_now,
+                                        },
+                                        &mut instances,
+                                        vec![message],
+                                    )
+                                    .await,
+                                );
+                            }
                             break;
                         }
                     }

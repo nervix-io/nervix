@@ -392,10 +392,10 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     root_relay,
                     branch_ttl,
                     branch_max_instances,
-                    entrypoint_branch_assignments,
-                    entrypoint_ack_boundary,
-                    entrypoint_flush_each,
-                    entrypoint_max_batch_size,
+                    output_branch_assignments,
+                    output_ack_boundary,
+                    output_flush_each,
+                    output_max_batch_size,
                     error_policies,
                 )| {
                     BranchedIngestorSpec {
@@ -404,10 +404,10 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         root_relay,
                         branch_ttl,
                         branch_max_instances,
-                        entrypoint_branch_assignments,
-                        entrypoint_ack_boundary,
-                        entrypoint_flush_each,
-                        entrypoint_max_batch_size,
+                        output_branch_assignments,
+                        output_ack_boundary,
+                        output_flush_each,
+                        output_max_batch_size,
                         error_policies,
                     }
                 },
@@ -787,12 +787,12 @@ fn resolve_branch_relay_templates(
     Ok((relays, materialized_streams))
 }
 
-pub(in crate::runtime) fn materialize_branch_instance_template(
+pub(in crate::runtime) fn materialize_ingestor_route_template(
     spec: &BranchedIngestorSpec,
     model_index: &HashMap<(ModelKind, Identifier), Model>,
     relay_registries: &HashMap<Identifier, RelayRegistry>,
     relay_services: &HashMap<Identifier, Arc<RelayBoundaryServices>>,
-) -> Result<BranchInstanceTemplate, String> {
+) -> Result<IngestorRouteTemplate, String> {
     let mut branch_relay_ids = HashSet::default();
     branch_relay_ids.insert(spec.root_relay.clone());
     let (relays, materialized_streams) = resolve_branch_relay_templates(
@@ -801,32 +801,34 @@ pub(in crate::runtime) fn materialize_branch_instance_template(
         relay_registries,
         relay_services,
     )?;
-    Ok(BranchInstanceTemplate {
-        source_kind: spec.kind,
-        source: spec.identifier.clone(),
-        root_relay: spec.root_relay.clone(),
-        branch_ttl: parse_branch_ttl_setting(
-            spec.branch_ttl.as_deref(),
-            spec.kind,
-            &spec.identifier,
-        )?,
-        branch_max_instances: parse_branch_max_instances_setting(
-            spec.branch_max_instances,
-            spec.kind,
-            &spec.identifier,
-        )?,
-        entrypoint_branch_assignments: spec.entrypoint_branch_assignments.clone(),
-        entrypoint_ack_boundary: spec.entrypoint_ack_boundary,
-        entrypoint_flush_each: parse_branch_flush_policy(
+    Ok(IngestorRouteTemplate {
+        branch: BranchInstanceTemplate {
+            source_kind: spec.kind,
+            source: spec.identifier.clone(),
+            root_relay: spec.root_relay.clone(),
+            branch_ttl: parse_branch_ttl_setting(
+                spec.branch_ttl.as_deref(),
+                spec.kind,
+                &spec.identifier,
+            )?,
+            branch_max_instances: parse_branch_max_instances_setting(
+                spec.branch_max_instances,
+                spec.kind,
+                &spec.identifier,
+            )?,
+            error_policies: spec.error_policies.clone(),
+            relays,
+            materialized_streams,
+            processors: HashMap::default(),
+        },
+        branch_assignments: spec.output_branch_assignments.clone(),
+        ack_boundary: spec.output_ack_boundary,
+        flush_policy: parse_branch_flush_policy(
             spec.kind.as_str(),
             &spec.identifier,
-            &spec.entrypoint_flush_each,
-            spec.entrypoint_max_batch_size.as_deref(),
+            &spec.output_flush_each,
+            spec.output_max_batch_size.as_deref(),
         )?,
-        error_policies: spec.error_policies.clone(),
-        relays,
-        materialized_streams,
-        processors: HashMap::default(),
     })
 }
 
@@ -871,9 +873,6 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
             spec.kind,
             &spec.processor,
         )?,
-        entrypoint_branch_assignments: Vec::new(),
-        entrypoint_ack_boundary: BranchInstanceAckBoundary::Preserve,
-        entrypoint_flush_each: RuntimeFlushPolicy::Immediate,
         error_policies: spec.error_policies.clone(),
         relays,
         materialized_streams,
