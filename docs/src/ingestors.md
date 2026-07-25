@@ -54,6 +54,9 @@ At runtime, the ingestor:
 - writes each route's buffered rows when its configured interval or size boundary fires, or when
   the `FLUSH IMMEDIATE` 100 µs system timeout expires
 
+Branch execution receives these completed Arrow batches and does not buffer them behind another
+flush policy.
+
 ## Branch Semantics
 
 Ingestors are where external mixed flows enter branch-isolated processing. Every route independently

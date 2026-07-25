@@ -267,7 +267,9 @@ CREATE REINGESTOR repartition_events
 
 When the outgoing branch name equals the incoming branch, no branch `SET` is allowed and the key is
 preserved. State lookup always uses the incoming branch, never a partially constructed outgoing
-key.
+key. The reingestor resolves the outgoing branch before buffering the route, so each concrete
+outgoing branch has an independent flush interval and size boundary. Downstream branch execution
+receives the completed Arrow batch and does not apply a second flush policy.
 
 ## Message errors
 

@@ -144,7 +144,7 @@ Feature: Ingestor metrics
       | 1            |
       | 3            |
 
-  Scenario Outline: DESCRIBE INGESTOR reports flush-sized batches for rapid same-branch <source_kind> input
+  Scenario Outline: DESCRIBE INGESTOR reports flush-sized batches for rapid <branch_strategy> <source_kind> input
     Given Redis is running
     And MQTT is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -166,7 +166,7 @@ Feature: Ingestor metrics
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
-        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
+        CREATE RELAY notifications SCHEMA notification <relay_branching>;
         CREATE CLIENT mqtt_main
         TYPE MQTT
         CONFIG {
@@ -183,8 +183,7 @@ Feature: Ingestor metrics
         DECODE USING notification_codec
         TO notifications
         INHERIT ALL
-        BRANCHED BY by_ingestor_metrics_source
-        SET user_id = message.user_id
+        <output_branching>
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -218,9 +217,11 @@ Feature: Ingestor metrics
       """
 
     Examples:
-      | cluster_size | source_kind | source_clause                                                                    | input                     |
-      | 1            | REDIS       | REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL | notifications_{{test_id}} |
-      | 1            | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
+      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | source_kind | source_clause                                                                    | input                     |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL | notifications_{{test_id}} |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL | notifications_{{test_id}} |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
 
   Scenario Outline: FLUSH IMMEDIATE preserves batching during a rapid input burst
     Given MQTT is running
