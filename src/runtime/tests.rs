@@ -3828,6 +3828,48 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
     );
 }
 
+#[test]
+fn relay_fanout_shares_arrow_columns_and_materializes_rows_only_on_demand() {
+    let schema = test_schema(&[("user_id", ParseAsType::U32)]);
+    let batch = super::RelayRecordBatch::from_messages(
+        schema,
+        vec![
+            RelayMessage {
+                key: u32_branch_key("user_id", 42),
+                record: RuntimeRecord::from_fields([(
+                    "user_id".to_string(),
+                    RuntimeValue::U32(42),
+                )]),
+                acks: AckSet::empty(),
+            },
+            RelayMessage {
+                key: u32_branch_key("user_id", 42),
+                record: RuntimeRecord::from_fields([(
+                    "user_id".to_string(),
+                    RuntimeValue::U32(43),
+                )]),
+                acks: AckSet::empty(),
+            },
+        ],
+    )
+    .expect("relay batch should build");
+    let source_column = batch.batch.batch().column(0).clone();
+
+    let fanout = batch.into_attached_fanout(3);
+
+    assert_eq!(fanout.len(), 3);
+    for output in &fanout {
+        assert!(StdArc::ptr_eq(
+            &source_column,
+            output.batch.batch().column(0)
+        ));
+    }
+    let records = fanout[0]
+        .runtime_records()
+        .expect("a node may explicitly materialize local rows");
+    assert_eq!(records[1].value("user_id"), Some(&RuntimeValue::U32(43)));
+}
+
 #[tokio::test]
 async fn remote_stream_payload_touches_expiring_stream_state() {
     let runtime = super::Runtime::default();
@@ -7376,10 +7418,11 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
     .expect("array inheritance should execute");
 
     assert!(plan.message_errors.is_empty());
-    assert_eq!(
-        plan.batch.expect("array output batch should exist").records[0].value("vector"),
-        Some(&expected)
-    );
+    let output = plan.batch.expect("array output batch should exist");
+    let record = output
+        .runtime_record(0)
+        .expect("array output row should materialize at the test boundary");
+    assert_eq!(record.value("vector"), Some(&expected));
 }
 
 #[tokio::test]
@@ -7455,8 +7498,11 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
         .as_ref()
         .expect("the successful row should remain in the output batch");
     assert_eq!(successful.message_count(), 1);
+    let successful_record = successful
+        .runtime_record(0)
+        .expect("successful output row should materialize at the test boundary");
     assert_eq!(
-        successful.records[0].value("amount"),
+        successful_record.value("amount"),
         Some(&RuntimeValue::I64(5))
     );
     let [error] = plan.message_errors.as_slice() else {
