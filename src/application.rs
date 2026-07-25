@@ -78,7 +78,7 @@ use nervix_interconnect::{
 use nervix_models::{
     BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter,
     CreateEndpoint, CreateInferencer, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateReorderer, CreateResource, CreateStatement, CreateUser, CreateWindowProcessor,
+    CreateReorderer, CreateResource, CreateStatement, CreateUdf, CreateUser, CreateWindowProcessor,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
     DescribeIngestor, DescribeLookup, DescribeReingestor, DescribeRelay, DescribeReorderer,
     DescribeResource, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, Domain,
@@ -103,7 +103,6 @@ use nervix_nspl::{
         WindowAggregateDemand, WindowAggregateProgram, lower_window_assignments,
     },
 };
-use nervix_roto::UdfExecutor;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -6059,6 +6058,31 @@ impl SessionServiceImpl {
         }
     }
 
+    async fn prepare_created_udfs(
+        &self,
+        domain: &Domain,
+        created_udfs: &[CreateUdf],
+    ) -> Result<Option<crate::runtime::CompiledDomainUdfs>, nervix_roto::UdfError> {
+        if created_udfs.is_empty() {
+            return Ok(None);
+        }
+        let mut domain_udfs = self
+            .registry
+            .active_graph(domain)
+            .into_iter()
+            .flat_map(|graph| graph.nodes())
+            .filter_map(|node| match node.config.as_ref() {
+                Model::Udf(udf) => Some(udf.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        domain_udfs.extend_from_slice(created_udfs);
+        self.runtime
+            .prepare_domain_udfs(domain_udfs)
+            .await
+            .map(Some)
+    }
+
     async fn process_create_model_batch(
         &self,
         creates: Vec<CreateStatement<Box<Model>>>,
@@ -6090,6 +6114,7 @@ impl SessionServiceImpl {
         let mut results = vec![None; creates.len()];
         let mut models = Vec::new();
         let mut created = Vec::new();
+        let mut created_udfs = Vec::new();
 
         for (index, create) in creates.into_iter().enumerate() {
             let if_not_exists = create.if_not_exists;
@@ -6143,10 +6168,8 @@ impl SessionServiceImpl {
                     processor.name.as_str()
                 ));
             }
-            if let Model::Udf(udf) = model.as_ref()
-                && let Err(error) = UdfExecutor::compile(vec![udf.clone()]).await
-            {
-                return command_error(format!("invalid UDF '{}': {error}", udf.name.as_str()));
+            if let Model::Udf(udf) = model.as_ref() {
+                created_udfs.push(udf.clone());
             }
 
             created.push((index, model_id, model_kind));
@@ -6154,6 +6177,17 @@ impl SessionServiceImpl {
         }
 
         if !models.is_empty() {
+            let prepared_udfs = match self.prepare_created_udfs(&domain, &created_udfs).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let names = created_udfs
+                        .iter()
+                        .map(|udf| udf.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return command_error(format!("invalid UDF '{names}': {error}"));
+                }
+            };
             let error_target = created
                 .first()
                 .map(|(_, id, _)| id.clone())
@@ -6169,6 +6203,10 @@ impl SessionServiceImpl {
                     return create_registry_error_response(query, &domain, &error_target, &err);
                 }
             };
+            if let Some(prepared_udfs) = prepared_udfs {
+                self.runtime
+                    .install_prepared_domain_udfs(&domain, prepared_udfs);
+            }
 
             if let Err(err) = self
                 .publish_domain_schedule(&domain, runtime_changes.graph.clone())
@@ -6397,11 +6435,22 @@ impl SessionServiceImpl {
                         processor.name.as_str()
                     ));
                 }
-                if let Model::Udf(udf) = model.as_ref()
-                    && let Err(error) = UdfExecutor::compile(vec![udf.clone()]).await
-                {
-                    return command_error(format!("invalid UDF '{}': {error}", udf.name.as_str()));
-                }
+                let created_udfs = match model.as_ref() {
+                    Model::Udf(udf) => vec![udf.clone()],
+                    _ => Vec::new(),
+                };
+                let prepared_udfs = match self.prepare_created_udfs(domain, &created_udfs).await {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        let udf = created_udfs
+                            .first()
+                            .expect("UDF preparation only fails for a UDF create");
+                        return command_error(format!(
+                            "invalid UDF '{}': {error}",
+                            udf.name.as_str()
+                        ));
+                    }
+                };
                 let model_id = model.as_ref().identifier().clone();
                 let model_kind = model.as_ref().kind();
                 info!(
@@ -6436,6 +6485,10 @@ impl SessionServiceImpl {
                         return create_registry_error_response(query, domain, &model_id, &err);
                     }
                 };
+                if let Some(prepared_udfs) = prepared_udfs {
+                    self.runtime
+                        .install_prepared_domain_udfs(domain, prepared_udfs);
+                }
 
                 if let Err(err) = self
                     .publish_domain_schedule(domain, runtime_changes.graph.clone())
@@ -7841,7 +7894,21 @@ impl SessionServiceImpl {
         self.consensus
             .replace_domain_schedule(domain.clone(), schedule)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.runtime
+            .sync_domains(&self.consensus.current_domains().await);
+        self.runtime
+            .apply_cluster_schedule(
+                self.consensus.local_node_id(),
+                &self.consensus.current_schedule().await,
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to instantiate runtime schedule for domain '{}': {error}",
+                    domain.as_str()
+                )
+            })
     }
 
     async fn drop_node(&self, node_id: String) -> CommandResult {
@@ -9380,35 +9447,23 @@ impl SessionServiceImpl {
         };
 
         let relay = subscription.relay.clone();
-        let subscribe_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let receiver = loop {
-            match self.runtime.subscribe_stream(domain, &relay).await {
-                Ok(receiver) => break receiver,
-                Err(err) => {
-                    if let crate::runtime::RuntimeError::RelayNotInstantiated { .. } = err
-                        && tokio::time::Instant::now() < subscribe_deadline
-                    {
-                        sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                    return CommandResult {
-                        success: false,
+        let receiver = match self.runtime.subscribe_stream(domain, &relay).await {
+            Ok(receiver) => receiver,
+            Err(err) => {
+                return CommandResult {
+                    success: false,
+                    message: format!("failed to subscribe to relay '{}': {err}", relay.as_str()),
+                    diagnostics: vec![Diagnostic {
                         message: format!(
                             "failed to subscribe to relay '{}': {err}",
                             relay.as_str()
                         ),
-                        diagnostics: vec![Diagnostic {
-                            message: format!(
-                                "failed to subscribe to relay '{}': {err}",
-                                relay.as_str()
-                            ),
-                            span_start: 0,
-                            span_end: 0,
-                        }],
-                        kind: CommandResultKind::Error as i32,
-                        ..Default::default()
-                    };
-                }
+                        span_start: 0,
+                        span_end: 0,
+                    }],
+                    kind: CommandResultKind::Error as i32,
+                    ..Default::default()
+                };
             }
         };
 

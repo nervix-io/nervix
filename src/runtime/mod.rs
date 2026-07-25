@@ -42,7 +42,7 @@ use nervix_models::{
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
     CreateClientZeroMq, CreateCodec, CreateEmitter, CreateEndpoint, CreateGenerator,
     CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateSignalingProtocol,
-    CreateWireSchemaStmt, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState,
+    CreateUdf, CreateWireSchemaStmt, Domain, DomainConfig, DomainPace, DomainSchedule, DomainState,
     DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath, GeneralErrorPolicy,
     IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping, IngestSource,
@@ -1911,6 +1911,12 @@ struct RuntimeVmSchemaPair {
     output_sensitivity: VmSchemaSensitivity,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledDomainUdfs {
+    models: Vec<CreateUdf>,
+    executor: UdfExecutor,
+}
+
 impl ExpiringRelayState {
     fn new() -> Self {
         Self {
@@ -1947,6 +1953,7 @@ pub struct Runtime {
     emitter_transient_errors: Arc<DashMap<RuntimeKey, String, RandomState>>,
     emitter_reconnect_backoffs: Arc<DashMap<RuntimeKey, RuntimeReconnectStatus, RandomState>>,
     executions: Arc<DashMap<Domain, DomainExecution, RandomState>>,
+    compiled_domain_udfs: Arc<DashMap<Domain, CompiledDomainUdfs, RandomState>>,
     schedule_apply_lock: Arc<Mutex<()>>,
     domain_instantiation_errors: Arc<DashMap<Domain, String, RandomState>>,
     domains: Arc<DashMap<Domain, RuntimeDomainState, RandomState>>,
