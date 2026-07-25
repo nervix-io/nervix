@@ -78,7 +78,7 @@ struct EmitterPublishBatch {
 
 impl EmitterPublishBatch {
     fn from_batch(batch: RelayRecordBatch) -> Self {
-        let header_count = batch.records.len();
+        let header_count = batch.batch.batch().num_rows();
         Self {
             batch,
             headers: vec![Vec::new(); header_count],
@@ -86,11 +86,12 @@ impl EmitterPublishBatch {
     }
 
     fn new(batch: RelayRecordBatch, headers: Vec<EmitterHeaders>) -> Result<Self, String> {
-        if batch.records.len() != headers.len() {
+        let row_count = batch.batch.batch().num_rows();
+        if row_count != headers.len() {
             return Err(format!(
                 "emitter header count {} does not match row count {}",
                 headers.len(),
-                batch.records.len()
+                row_count
             ));
         }
         Ok(Self { batch, headers })
@@ -489,10 +490,19 @@ async fn sql_mapped_batch_values(
     batch: &RelayRecordBatch,
     execution_now: Timestamp,
 ) -> EmitterRuntimeResult<Vec<Vec<serde_json::Value>>> {
-    let records = augment_runtime_records_with_branch_keys(batch.records.clone(), &batch.keys)
-        .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
-    let input = vm_typed_batch_from_runtime_records(&records, &program.program.input_schema)
-        .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
+    let side_inputs = HashMap::default();
+    let lookup_columns = HashMap::default();
+    let input = project_vm_input_batch(
+        &program.program.input_schema,
+        &VmInputProjectionSources {
+            carrier: &batch.batch,
+            keys: &batch.keys,
+            side_inputs: &side_inputs,
+            lookup_columns: &lookup_columns,
+            uninitialized: None,
+        },
+    )
+    .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
     let result = execute_program_with_selection_in_context(
         program.program.as_ref(),
         &input,
@@ -508,13 +518,14 @@ async fn sql_mapped_batch_values(
             program.label
         ))
     })?;
-    if result.batch.row_count() != batch.records.len() {
+    let row_count = batch.batch.batch().num_rows();
+    if result.batch.row_count() != row_count {
         return Err(
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
                 "{} VALUES produced {} rows for {} input records",
                 program.label,
                 result.batch.row_count(),
-                batch.records.len()
+                row_count
             )),
         );
     }
@@ -529,8 +540,8 @@ async fn sql_mapped_batch_values(
             )),
         );
     }
-    let mut rows = Vec::with_capacity(batch.records.len());
-    for row in 0..batch.records.len() {
+    let mut rows = Vec::with_capacity(row_count);
+    for row in 0..row_count {
         let output = vm_output_row_to_decoded_record(&result.batch, row).map_err(|error| {
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error)
         })?;
@@ -1174,9 +1185,13 @@ impl SinkEmitter {
                 .attach_printable("encoded emitter has no compiled codec"));
         };
         for batch in batches {
-            for ((record, key), headers) in batch
-                .batch
-                .records
+            let records = batch.batch.runtime_records().map_err(|error| {
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "emitter '{}' failed to materialize codec input rows: {error}",
+                    context.emitter.as_str()
+                ))
+            })?;
+            for ((record, key), headers) in records
                 .iter()
                 .zip(batch.batch.keys.iter())
                 .zip(batch.headers.iter())

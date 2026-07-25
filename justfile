@@ -140,6 +140,13 @@ book-pdf version="" output="":
     pandoc \
         --from=html \
         --to=pdf \
+        --pdf-engine=xelatex \
+        --variable=mainfont:"Noto Serif" \
+        --variable=sansfont:"Noto Sans" \
+        --variable=monofont:"Noto Sans Mono" \
+        --variable=CJKmainfont:"Noto Serif CJK JP" \
+        --variable=CJKsansfont:"Noto Sans CJK JP" \
+        --variable=CJKmonofont:"Noto Sans Mono CJK JP" \
         --resource-path=docs/book \
         --output="${output_path}" \
         "${tmp_html}"

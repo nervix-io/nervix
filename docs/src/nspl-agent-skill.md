@@ -123,6 +123,7 @@ Give the agent as much of this deployment contract as you know:
 - whether records are unbranched or isolated by fields such as tenant, device, or customer;
 - filtering, transformation, deduplication, windows, correlation, inference, lookup, or custom
   WASM processing;
+- operator-trusted Roto UDF requirements, including representative cases for `test` blocks;
 - the output system and desired payload shape;
 - delivery, ordering, batching, flush, error-handling, TLS, and credential requirements; and
 - whether you want a new graph, an explanation, a review, or help diagnosing an error.
@@ -155,6 +156,11 @@ A generated configuration should contain:
 2. separate client-local and transactional server command phases;
 3. complete NSPL with deployment placeholders called out; and
 4. relevant `SHOW`, `DESCRIBE`, lookup, or subscription commands for verification.
+
+An agent-generated Roto UDF should also contain `test` blocks for its contract. Nervix runs those
+tests during `CREATE UDF`; any rejecting test prevents the UDF from being persisted. See
+[User-Defined Functions](udfs.md#calling-udfs). For replay-sensitive functions, tests should also
+protect the [deterministic-by-default and `VOLATILE` contract](udfs.md#nulls-errors-and-volatility).
 
 The skill does not connect to or configure a running Nervix deployment by itself. Review the
 result, replace placeholders, provision required external entities such as Kafka topics, and then

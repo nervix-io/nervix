@@ -41,7 +41,6 @@ pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
 pub(super) struct WasmAckContext {
     pub(super) acks: AckSet,
     pub(super) metadata: RuntimeRecordMetadata,
-    pub(super) record: RuntimeRecord,
     pub(super) input_batch: Arc<RuntimeRecordBatch>,
     pub(super) input_row: usize,
 }

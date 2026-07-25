@@ -5603,7 +5603,7 @@ impl Runtime {
         domain: &Domain,
         input_relay: &Identifier,
         dependencies: &[nervix_models::MaterializedStateDependency],
-        mut batch: RelayRecordBatch,
+        batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> Result<Option<RelayRecordBatch>, String> {
         loop {
@@ -5613,11 +5613,7 @@ impl Runtime {
                 .resolve_materialized_dependencies(domain, &batch.key, dependencies)
                 .await?
             {
-                MaterializedDependencyResolution::Ready(values) => {
-                    batch.records =
-                        augment_runtime_records_with_side_inputs(batch.records, &values);
-                    return Ok(Some(batch));
-                }
+                MaterializedDependencyResolution::Ready(_values) => return Ok(Some(batch)),
                 MaterializedDependencyResolution::Skip => {
                     for ack in batch.acks.iter() {
                         ack.ack_success();
@@ -7196,15 +7192,24 @@ impl Runtime {
                     Vec::new(),
                 ));
             }
-            let messages = batch
-                .records
-                .iter()
+            let records = batch
+                .runtime_records()
+                .map_err(|error| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!(
+                        "reingestor '{}' failed to materialize node-local output rows: {}",
+                        reingestor.as_str(),
+                        error
+                    ),
+                })?;
+            let messages = records
+                .into_iter()
                 .enumerate()
                 .map(|(row, record)| PendingProcessorOutputMessage {
                     row,
                     output_index,
                     key: batch.keys[row].clone(),
-                    record: record.clone(),
+                    record,
                 })
                 .collect();
             return Ok((messages, Vec::new(), Vec::new()));
@@ -7277,13 +7282,25 @@ impl Runtime {
                 let partial_output = vm_partial_output_row_to_runtime_record(
                     &executed.batch,
                     output_row,
-                    batch.records[input_row].metadata().clone(),
+                    batch.metadata[input_row].clone(),
                 )
                 .ok();
+                let record =
+                    batch
+                        .runtime_record(input_row)
+                        .map_err(|error| PlannedGeneralError {
+                            acks: batch.acks.clone(),
+                            reason: format!(
+                                "reingestor '{}' failed to materialize FILTER-MAP error input \
+                                 row: {}",
+                                reingestor.as_str(),
+                                error
+                            ),
+                        })?;
                 errors.push(PendingProcessorOutputMessageError {
                     row: input_row,
                     key: batch.keys[input_row].clone(),
-                    record: batch.records[input_row].clone(),
+                    record,
                     error: program.structured_side_error(
                         format!(
                             "reingestor '{}' FILTER-MAP side error {}: {} at {}",
@@ -7318,22 +7335,16 @@ impl Runtime {
                     error
                 ),
             })?;
-            let records = output_schema
-                .decoded_records_from_arrow_batch(&output_batch)
-                .map_err(|error| PlannedGeneralError {
+            if output_batch.schema().as_ref() != output_schema.arrow_schema().as_ref() {
+                return Err(PlannedGeneralError {
                     acks: batch.acks.clone(),
                     reason: format!(
-                        "reingestor '{}' failed to decode FILTER-MAP output sidecar records: {}",
+                        "reingestor '{}' FILTER-MAP output schema does not match relay '{}'",
                         reingestor.as_str(),
-                        error
+                        output.relay.as_str()
                     ),
-                })?
-                .into_iter()
-                .zip(success_input_rows.iter())
-                .map(|(record, input_row)| {
-                    record.into_runtime_record(batch.metadata[*input_row].clone())
-                })
-                .collect::<Vec<_>>();
+                });
+            }
             let metadata = success_input_rows
                 .iter()
                 .map(|input_row| batch.metadata[*input_row].clone())
@@ -7343,7 +7354,6 @@ impl Runtime {
                 input_rows: success_input_rows,
                 key: batch.key.clone(),
                 batch: output_batch,
-                records,
                 metadata,
             }]
         };
