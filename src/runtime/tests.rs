@@ -2607,6 +2607,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         source_kind: ModelKind::Deduplicator,
         source: identifier("dedup_users"),
         root_relay: identifier("orders"),
+        branch: None,
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -2722,8 +2723,10 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
     assert_eq!(instances.states().len(), 2);
 
     super::shutdown_all_processor_branch_instances(
+        &runtime,
         &domain,
         &identifier("dedup_users"),
+        None,
         &mut instances,
     )
     .await;
@@ -5461,10 +5464,12 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
     let spec = &specs.entrypoints[0];
     assert_eq!(spec.identifier, identifier("orders_ingestor"));
     assert_eq!(spec.root_relay, identifier("orders"));
+    assert_eq!(spec.branch.as_ref(), Some(&identifier("by_orders")));
     assert_eq!(specs.processors.len(), 2);
     let dedup_orders = &specs.processors[0];
     assert_eq!(dedup_orders.spec.processor, identifier("dedup_orders"));
     assert_eq!(dedup_orders.spec.input_relays, vec![identifier("orders")]);
+    assert_eq!(dedup_orders.branch.as_ref(), Some(&identifier("by_orders")));
     assert_eq!(dedup_orders.branch_ttl.as_deref(), Some("5m"));
     assert_eq!(dedup_orders.branch_max_instances, None);
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
@@ -5752,6 +5757,7 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
     assert_eq!(spec.kind, ModelKind::Reingestor);
     assert_eq!(spec.identifier, identifier("tenant_partition"));
     assert_eq!(spec.root_relay, identifier("tenant_orders"));
+    assert_eq!(spec.branch.as_ref(), Some(&identifier("by_tenant_orders")));
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(
         specs.processors[0].spec.processor,
@@ -5760,6 +5766,10 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
     assert_eq!(
         specs.processors[0].spec.input_relays,
         vec![identifier("tenant_orders")]
+    );
+    assert_eq!(
+        specs.processors[0].branch.as_ref(),
+        Some(&identifier("by_tenant_orders"))
     );
     assert_eq!(specs.processors[0].branch_ttl.as_deref(), Some("5m"));
 }
@@ -6161,6 +6171,7 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
         identifier("orders_ingestor")
     );
     assert_eq!(specs.entrypoints[0].root_relay, identifier("orders"));
+    assert_eq!(specs.entrypoints[0].branch, None);
     assert_eq!(specs.entrypoints[0].branch_ttl, None);
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(
@@ -6168,6 +6179,7 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
         identifier("dedup_orders")
     );
     assert_eq!(specs.processors[0].branch_ttl, None);
+    assert_eq!(specs.processors[0].branch, None);
     assert_eq!(specs.processors[0].branch_max_instances, None);
 }
 
@@ -6386,6 +6398,7 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         source_kind: ModelKind::Reingestor,
         source: identifier("tenant_partition"),
         root_relay: root_relay.clone(),
+        branch: None,
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -6495,6 +6508,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         source_kind: ModelKind::Reingestor,
         source: identifier("tenant_partition"),
         root_relay: root_relay.clone(),
+        branch: None,
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -6619,6 +6633,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                 source_kind: ModelKind::Reingestor,
                 source: identifier("tenant_partition"),
                 root_relay: relay.clone(),
+                branch: None,
                 branch_ttl: Some(Duration::from_secs(30)),
                 branch_max_instances: None,
                 error_policies: ErrorPolicies::handled_by_log(),
@@ -6835,6 +6850,7 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
             source_kind: ModelKind::Ingestor,
             source: identifier("tenant_ingestor"),
             root_relay: root_relay.clone(),
+            branch: None,
             branch_ttl: Some(Duration::from_secs(30)),
             branch_max_instances: None,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -6917,6 +6933,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
             source_kind: ModelKind::Ingestor,
             source: identifier("notifications_ingestor"),
             root_relay: root_relay.clone(),
+            branch: None,
             branch_ttl: None,
             branch_max_instances: None,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -7004,6 +7021,7 @@ async fn ingestor_route_applies_size_boundaries_independently_per_branch() {
                 source_kind: ModelKind::Ingestor,
                 source: identifier("notifications_ingestor"),
                 root_relay: root_relay.clone(),
+                branch: None,
                 branch_ttl: None,
                 branch_max_instances: None,
                 error_policies: ErrorPolicies::handled_by_log(),
@@ -7099,6 +7117,7 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
         source_kind: ModelKind::Ingestor,
         source: identifier("metric_ingestor"),
         root_relay: root_relay.clone(),
+        branch: None,
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: ErrorPolicies::handled_by_log(),
