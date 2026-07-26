@@ -139,6 +139,10 @@ book-pdf version="" output="":
         --from=html \
         --to=pdf \
         --pdf-engine=xelatex \
+        --include-before-body=docs/theme/nervix-pdf-title.tex \
+        --variable=graphics \
+        --toc \
+        --toc-depth=2 \
         --variable=geometry:margin=0.8in \
         --variable=linestretch:1.08 \
         --variable=mainfont:"Noto Serif" \
