@@ -15,6 +15,8 @@ may initialize fields with `INHERIT` and `SET`; a set-only route begins empty an
 `SET`. Route `WHERE` runs after output finalization. `INVOKE` and `write_header` are emitter-only;
 side-effect functions are invalid inside ordinary expressions.
 
+See [The Working Message](working-message.md) for transforming-route field scopes and resolution.
+
 `ON MESSAGE ERROR SEND TO ... SET` uses this same scalar expression engine with its error-specific
 scopes. Aggregates are unavailable there. Header reads remain available when the failed operation
 belongs to a header-capable ingestor and the original source envelope was captured.
@@ -31,7 +33,22 @@ General rules:
 - `UUID_V7()` uses that same execution-local domain time when building the UUID
 
 Domain-owned [Roto UDFs](./udfs.md) use the same call syntax and exact typing rules. Builtins take
-name-resolution precedence, and a UDF declaration may not reuse a builtin name.
+the unqualified call surface. UDFs use the explicit `udf::` namespace.
+
+## Choosing An Extension Tier
+
+Use the smallest extension tier that fits the operation:
+
+| Tier | Trust required | Statefulness | Unit of work | Execution | Failure containment |
+| --- | --- | --- | --- | --- | --- |
+| Builtins | None beyond Nervix itself | Stateless | One expression call | Async-safe runtime execution | Per-row error channel |
+| Roto UDFs | Operator-trusted native code | Stateless | Vectorized column function with 1–8 arguments | Blocking worker pool | Per-row errors, whole-batch errors, and a post-return watchdog |
+| WASM processors | Isolation suitable for third-party code | Branch-local guest state | Batch-and-route processor with guest-owned emission | One guest instance per branch | Message errors, global errors, and guest traps |
+
+Tenant-supplied or potentially non-terminating logic belongs on the WASM processor path. Roto UDF
+creation is operator-trusted administration. See [User-Defined Functions](udfs.md) for the native
+execution contract and [Module Sharing And Branch Memory](wasm-processor-guests.md#module-sharing-and-branch-memory)
+for the WASM isolation and memory boundary.
 
 ## Conditional Expressions
 
@@ -64,7 +81,8 @@ observed only for the selected result arm, so an error in an unselected arm does
 their existing batch-level failure behavior.
 
 The words `IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, and `END` are reserved in expressions, including
-after a field scope such as `input.<field>`.
+after a field scope such as `input.<field>`. A schema may declare one of these field names, but an
+NSPL expression cannot reference it.
 
 ## Header Functions
 

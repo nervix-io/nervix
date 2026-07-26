@@ -38,12 +38,13 @@ That means:
 - branch identity collapses only after successful external publication
 
 All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`. `FLUSH`
-means Nervix collects an in-memory Arrow batch before handing it to the external sink. During
-normal processing, `FLUSH IMMEDIATE` starts a system-owned 100 µs minimum batching timeout when the
-first pending input arrives; it has no size boundary. For most emitters the collected batch is
-encoded and published on the flush boundary. Iceberg additionally supports `COMMIT EACH <duration>
-MAX SIZE <bytes>`: flush writes local Arrow IPC staging files, and commit appends the staged data to
-object storage.
+means Nervix collects an in-memory Arrow batch before handing it to the external sink. The
+[NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
+For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
+additionally supports `COMMIT EACH <duration> MAX SIZE <bytes>`: flush writes local Arrow IPC
+staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
+buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
+interval or maximum batch-size boundary.
 
 ## Codec-emitter construction
 
@@ -66,9 +67,9 @@ CREATE [IF NOT EXISTS] EMITTER kafka_notifications
   ON GENERAL ERROR LOG;
 ```
 
-`message.field` uses transforming working-output semantics, `input.field` always reads the source
-relay row, and `output.field` requires prior initialization. Relay-qualified fields are invalid.
-There is no implicit identity transformation and no `UNSET`; use `INHERIT ALL EXCEPT`.
+`message.field` reads the [working message](working-message.md), `input.field` always reads the
+source relay row, and `output.field` requires prior initialization. Relay-qualified fields are
+invalid. There is no implicit identity transformation and no `UNSET`; use `INHERIT ALL EXCEPT`.
 
 External sensitivity is strict. Every sensitive payload value requires `leak_sensitive(...)` or an
 explicit `INHERIT field LEAK SENSITIVE`, even when the codec target field is also sensitive.
@@ -521,7 +522,20 @@ CREATE EMITTER iceberg_notifications
 
 The REST catalog is the authority for namespace and table metadata. Nervix does not write a separate object-store catalog pointer file and does not provision catalog entries from the emitter runtime path.
 
-Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE <bytes>` reads the staged Arrow IPC batches, concatenates them into one Arrow batch, appends that batch to the Iceberg table, and commits the catalog update. The temporary-file root defaults to `/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`. Messages are ACKed only after the staged batches are successfully committed. If the node crashes or hits a fatal error before that point, the in-flight staged data is treated as lost; upstream ingestor policy decides whether the source redelivers. In `DETACHED` mode, Nervix accepts that loss and does not keep the upstream path waiting for the Iceberg commit.
+Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
+local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
+<bytes>` reads the staged Arrow IPC batches, concatenates them into one Arrow batch, appends that
+batch to the Iceberg table, and commits the catalog update. The temporary-file root defaults to
+`/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.
+
+The sink completion point is the successful catalog commit in both emitter modes. Local staging is
+not an ACK boundary. In `ATTACHED` mode, the upstream ACK remains open until that commit succeeds.
+In `DETACHED` mode, the relay removes the emitter from the upstream ACK chain before publication,
+so the source path does not wait for staging or commit. A crash before commit loses the in-memory
+and locally staged work; an ACK-tracked source can redeliver it only in `ATTACHED` mode. A crash or
+ambiguous failure after the table commit but before the attached ACK reaches the source can append
+the rows again. See [ACK Semantics And Effective Delivery](#ack-semantics-and-effective-delivery)
+for the general retry and fan-out rules.
 
 ## Codec Behavior On Emission
 
@@ -539,9 +553,75 @@ CREATE [IF NOT EXISTS] CODEC notification_codec
 
 That lets the emitter publish a different JSON envelope for each outbound row without changing the declared relay schema.
 
-## ACK Semantics
+## ACK Semantics And Effective Delivery
 
-Emitters participate in ACK propagation through `ATTACHED` and `DETACHED` mode:
+Nervix composes per-hop ACKs. The effective delivery semantics of a source-to-sink path are the
+observable duplicate and loss behavior produced by the source delivery mode, emitter mode, and
+sink behavior. They are not the ACK mechanics of any one hop.
 
-- `ATTACHED`: downstream emitter success or failure stays part of the upstream ACK chain
-- `DETACHED`: the upstream path no longer waits for downstream emission success
+Emitter modes set one boundary:
+
+- `ATTACHED`: downstream emitter success or failure stays part of the upstream ACK chain.
+- `DETACHED`: relay fan-out removes this emitter from the upstream ACK chain. The emitter still
+  attempts delivery, but its result cannot delay, retry, or fail the source ACK.
+
+When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
+completes only after every attached downstream delivery completes. A failure on any attached path
+reopens source retry for the record on all paths. A sink that already published successfully may
+therefore receive the record again because a sibling sink failed. This applies to every sink
+without idempotent writes. Iceberg is the canonical case: rows can be appended to the table again
+after a sibling emitter fails.
+
+The table assumes a source mode that retries when an attached ACK fails or is lost. A no-ACK source
+cannot create that retry duplicate, but it can lose the record instead.
+
+| Sink | Duplicate conditions (`ATTACHED`) | Loss conditions (`DETACHED` and crash windows) | Idempotency available in Nervix |
+| --- | --- | --- | --- |
+| Kafka | Retry after an ambiguous producer result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; broker durability still follows the configured Kafka producer and topic | None |
+| Pulsar | Retry after an ambiguous broker receipt, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; retention and durability remain broker policy | None |
+| NATS | Retry after publish acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; Core NATS publish is not a durable consumer acknowledgement | None |
+| RabbitMQ | Retry after publish acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; Nervix does not enable publisher confirms, and queue durability and message persistence remain broker policy | None |
+| SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
+| MQTT | Retry after client acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; Nervix emits with MQTT QoS 0, so broker or subscriber loss is possible after client acceptance | None |
+| Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
+| ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
+| Kinesis | Retry after an ambiguous `PutRecord` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; stream retention remains Kinesis policy | None |
+| Sentry | Retry after an ambiguous HTTP result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
+| ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |
+| Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
+| MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
+| MongoDB | Retry after an ambiguous write result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed write can survive a crash before Nervix observes success | `ON CONFLICT` |
+| Iceberg | Retry after a commit with a lost ACK or attached sibling failure; appends repeat rows | Crash before catalog commit loses staged work unless the attached source redelivers; detached mode accepts that loss | None; appends are not idempotent |
+
+`ATTACHED` waits only for the completion point exposed by the sink client. It does not make an
+ephemeral transport durable. MQTT QoS 0, Core NATS, RabbitMQ without publisher confirms, Redis
+Pub/Sub, and ZeroMQ can still lose a message after Nervix observes client-side acceptance.
+
+Emit a stable idempotency key at ingestion, for example with `uuid_v7()`, and carry it through the
+graph. Downstream consumers and queries can use that key to suppress retries within that admitted
+record's fan-out. A source-provided identifier is stronger because it also survives a fresh source
+redelivery. Generate the key once; regenerating it on a downstream route defeats the purpose.
+
+For Postgres, MySQL, and MongoDB, use `ON CONFLICT` against a stable key. This preserves
+at-least-once delivery attempts while making the resulting table or collection state
+effectively-once for that conflict contract.
+
+Iceberg appends are not idempotent. Deduplicate by the stable key at query time or in downstream
+compaction or `MERGE` work. Nervix does not isolate sibling-sink retries by changing ACK mechanics.
+That is an [accepted tradeoff](#accepted-tradeoff-shared-retry).
+
+### Accepted Tradeoff: Shared Retry
+
+One input ACK represents all attached descendants. This keeps ACK composition small and preserves
+backpressure across the graph. It also means one attached failure retries successful siblings.
+Nervix accepts that coupling instead of maintaining a transactional per-sink commit ledger.
+
+### Graph Design
+
+When the same records feed a non-idempotent sink and other emitters, consider `DETACHED` mode for a
+non-critical path or separate relays with separate ACK boundaries per sink so one sink's failure
+does not drive duplicates into another. `DETACHED` makes that path at-most-once relative to the
+upstream ACK: a crash or publish failure after relay acceptance can lose it.
+
+See [Data Plane](data-plane.md#ack-composition) for the relay fan-out mechanics and
+[What It Is Not](what-it-is-not.md) for the persistence boundary.

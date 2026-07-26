@@ -23,8 +23,9 @@ The core runtime model is a graph of connected nodes:
 - processors, junctions, deduplicators, reingestors, and materializers transform or route that data
 - emitters push results out to external systems
 
-Current built-in transport integrations include Kafka, Pulsar, HTTP, Prometheus, RabbitMQ, Redis,
-MQTT, NATS, ZeroMQ, SQS, and WebSockets, with Sentry event-envelope emission over HTTP.
+Current built-in transport integrations include Kafka, Pulsar, Kinesis, HTTP, Prometheus,
+RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, and WebSockets, with Sentry event-envelope emission over
+HTTP.
 
 The connections between nodes are expressed through `RELAY`s.
 
@@ -45,6 +46,7 @@ This book is split into four sections:
 - [Architecture And Internals](./architecture-and-internals.md): control-plane, data-plane, and runtime implementation details
 - [Developing Nervix](./developing-nervix.md): working on Nervix itself from a repository clone
 
-Start with the manual unless you are specifically trying to understand internals.
+Start with the manual unless you are specifically trying to understand internals. Agents can start
+with the portable [NSPL Agent Skill](./nspl-agent-skill.md).
 
 Nervix is licensed under the Fair Core License (FCL). See [License](./license.md).

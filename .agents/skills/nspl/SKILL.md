@@ -62,6 +62,8 @@ request can mix those phases.
 - Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only
   when the body needs the domain clock or randomness. Roto UDFs are trusted native code; keep
   untrusted custom processing in WASM.
+- Include Roto `test` blocks with every agent-generated UDF. Creation runs those tests and rejects
+  the UDF without persisting it when any test rejects.
 - Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch; use a reingestor when the graph must repartition or remove branch grouping.
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
@@ -72,6 +74,9 @@ request can mix those phases.
   route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
   one-message batch guarantee. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by
   the guest.
+- On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
+  governed by that route's same interval and maximum batch-size boundaries. General/global errors
+  are node-wide and do not inherit route-local `FLUSH`.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
 - Preserve connector configuration as the documented string key/value surface. Do not translate

@@ -76,7 +76,7 @@ Feature: Route-local value construction
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: Header-capable ingestor error routes can read the source envelope
+  Scenario Outline: Header-capable ingestor error routes read the source envelope and follow FLUSH
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -118,7 +118,7 @@ Feature: Route-local value construction
           SET id = input.id,
               result = input.numerator / input.denominator
           UNBRANCHED
-          FLUSH IMMEDIATE
+          FLUSH EACH 1s MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR SEND TO header_calculation_errors
           SET input_id = input.id,
               source_route = read_header('route'),
@@ -131,7 +131,8 @@ Feature: Route-local value construction
       """
       {"id":"header-division-by-zero","numerator":10,"denominator":0}
       """
-    Then within "5s" the relay subscription receives a payload
+    Then the relay subscription does not receive a payload within "300ms"
+    And within "5s" the relay subscription receives a payload
       """
       "input_id":"header-division-by-zero","operation":"set","source_route":"error-route-header"
       """

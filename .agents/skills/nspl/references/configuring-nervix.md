@@ -123,6 +123,8 @@ relay. Do not use them to scan across branches.
 - Every UDF call uses `udf::<name>(...)` and has the declaration's exact arity and argument types.
   UDFs using the domain clock or randomness declare `VOLATILE`; untrusted third-party code remains
   in a WASM processor.
+- Every agent-generated UDF includes Roto `test` blocks. Those tests run during `CREATE UDF` and
+  must pass before the declaration is persisted.
 - Every flush-based route has a flush policy and every route has a message error policy.
 - Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
@@ -145,6 +147,7 @@ Choose checks relevant to the configured graph:
   and edge metrics.
 - `DESCRIBE RESOURCE` confirms uploads and versions.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
+  Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.

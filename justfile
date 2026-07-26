@@ -123,10 +123,8 @@ book-pdf version="" output="":
     fi
     if [[ -n "{{ output }}" ]]; then
         output_path="{{ output }}"
-    elif [[ -n "{{ version }}" ]]; then
-        output_path="docs/book/nervix-book-{{ version }}.pdf"
     else
-        output_path="docs/book/nervix-book.pdf"
+        output_path="docs/book/nervix.pdf"
     fi
     tmp_html="$(mktemp --suffix=.html)"
     trap 'rm -f "${tmp_html}"' EXIT
@@ -140,6 +138,13 @@ book-pdf version="" output="":
     pandoc \
         --from=html \
         --to=pdf \
+        --pdf-engine=xelatex \
+        --variable=mainfont:"Noto Serif" \
+        --variable=sansfont:"Noto Sans" \
+        --variable=monofont:"Noto Sans Mono" \
+        --variable=CJKmainfont:"Noto Serif CJK JP" \
+        --variable=CJKsansfont:"Noto Sans CJK JP" \
+        --variable=CJKmonofont:"Noto Sans Mono CJK JP" \
         --resource-path=docs/book \
         --output="${output_path}" \
         "${tmp_html}"
@@ -163,7 +168,7 @@ worker-deploy zone_id="":
     fi
 
 publish-book target zone_id alias="snapshot" bucket="nervix-docs":
-    just book {{ target }}
+    just book-pdf {{ target }} docs/book/nervix.pdf
     just publish-dir docs/book {{ target }} {{ zone_id }} {{ alias }} {{ bucket }}
     just worker-deploy {{ zone_id }}
 

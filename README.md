@@ -8,7 +8,9 @@ Nervix is experimental software in active development. It is intended for evalua
 
 ## Documentation
 
-Detailed documentation lives in **The Nervix Book** under [https://docs.nervix.io/](https://docs.nervix.io/).
+Detailed documentation lives in **The Nervix Book** at
+[docs.nervix.io](https://docs.nervix.io/). A downloadable
+[PDF edition](https://docs.nervix.io/nervix.pdf) follows the same latest snapshot.
 
 ## Quick Start
 

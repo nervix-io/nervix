@@ -12,7 +12,25 @@ The current roadmap items are:
 - restore all branch-grouped states from the DB, not just read it on demand - connected with proper expiration
 - ALTER
 - rebalance across cluster
-- formalize field reference resolution by context, including `message.<field>`, `<relay>.<field>`, and bare-field forms
+- decide whether any relay-qualified field form beyond `relay_state.<relay>.<field>` belongs in expressions
+- explore batched direct external-database access from processing nodes as a possible supported
+  pattern for cross-key enrichment; this is a direction, not a committed interface
+- add branch-lifecycle metric families: live branch instances per branch declaration, branch
+  creations total, and evictions total labeled by `reason=lru|ttl`
+- add measurable per-node state-size signals, including deduplication entry counts and open-window
+  counts
+- keep capacity-planning Prometheus signals branch-aggregated under the existing cardinality
+  policy, with branch-local values exposed through `DESCRIBE`; these signals discharge the
+  observability half of the capacity-planning contract
+- add UDF invocation-count, invocation-latency, and per-row-error metrics labeled by UDF name in
+  Prometheus and `DESCRIBE`, following the existing metric label scheme
+- grow the Roto column catalog toward builtin parity, prioritizing datetime arithmetic and
+  extraction, vectorized string operations such as upper, lower, and split instead of `get` and
+  builder slow paths, and `VEC` operations; most of this is mechanical exposure of existing Arrow
+  compute kernels
+- define the Roto language-tag migration policy before a tag after `ROTO_0_11` ships: side-by-side
+  per-declaration tags, a deprecation window, and preservation of the current activation rejection
+  for unsupported tags
 - publish a complete codec grammar/EBNF with explicit alternatives for schema-backed and schemaless wire formats
 - add operational visibility for in-progress drain operations and failed per-node handoffs
 - tighten WASM processor restart/failover scheduling so multi-node restart scenarios do not depend on retry timing or transient resubscription races

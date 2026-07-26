@@ -38,12 +38,12 @@ Every ingestor defines:
 - optional node-level `FILTER WHERE` and route-local `INHERIT` / `SET` / `WHERE`
 
 `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required after every `TO
-<relay>`. During normal processing, `FLUSH IMMEDIATE` holds the first pending input for the
-system-owned minimum timeout of 100 µs so nearby arrivals can share a batch; it has no size
-boundary. Every route also requires its own `ON MESSAGE ERROR <policy>`. Each route buffers and
-handles message-specific construction failures independently. `ON GENERAL ERROR` remains
-node-level because it handles source or transport failures that are not tied to one message or
-output route.
+<relay>`. The [NSPL Overview](nspl-overview.md) defines the system-owned 100 µs minimum batching
+window for `FLUSH IMMEDIATE`. It has no size boundary. Every route also requires its own
+`ON MESSAGE ERROR <policy>`. Each route buffers and handles message-specific construction failures
+independently. `ON MESSAGE ERROR SEND TO` uses that same route's interval and maximum batch-size
+boundaries for error-record delivery. `ON GENERAL ERROR` remains node-level because it handles
+source or transport failures that are not tied to one message or output route.
 
 At runtime, the ingestor:
 
@@ -52,7 +52,10 @@ At runtime, the ingestor:
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
 - accumulates decoded rows independently for every matching destination and branch group
 - writes each route's buffered rows when its configured interval or size boundary fires, or when
-  the `FLUSH IMMEDIATE` 100 µs system timeout expires
+  the documented [`FLUSH IMMEDIATE` system timeout](nspl-overview.md) expires
+
+Branch execution receives these completed Arrow batches and does not buffer them behind another
+flush policy.
 
 ## Branch Semantics
 
@@ -118,7 +121,7 @@ General notes:
 - `SET` is a single clause with comma-separated assignments
 - assignments execute left to right; repeated destination fields are allowed and later expressions read the latest preceding value
 - later assignments may read earlier output values; repeated targets are valid
-- `message.field` reads the working route output with exact-compatible decoded-input fallback;
+- `message.field` reads the [working message](working-message.md);
   `input.field` always reads the original decoded row and `output.field` requires prior initialization
 - route `WHERE` sees finalized output through bare fields, `message`, or `output`, without fallback
 - relay-qualified fields and `UNSET` are invalid

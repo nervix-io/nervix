@@ -10,6 +10,7 @@ Use it for:
 - learning the NSPL surface
 - understanding the currently supported transport integrations, including Kafka and Pulsar
 - defining schemas, resources, relays, ingestors, processors, and emitters
+- planning branch capacity from the documented cost structure and current signals
 - working with sessions and the Rust client
 - following end-to-end examples
 

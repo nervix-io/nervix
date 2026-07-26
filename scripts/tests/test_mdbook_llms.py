@@ -166,6 +166,12 @@ class RenderLlmsTests(unittest.TestCase):
             "text/markdown; charset=utf-8",
         )
 
+    def test_pdf_upload_uses_registered_media_type(self) -> None:
+        self.assertEqual(
+            content_type_for(Path("nervix.pdf")),
+            "application/pdf",
+        )
+
     def test_upload_uses_boto3_put_object_with_content_type(self) -> None:
         client = Mock()
         with TemporaryDirectory() as directory:

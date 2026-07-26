@@ -332,6 +332,7 @@ impl Runtime {
             emitter_transient_errors: Arc::new(DashMap::default()),
             emitter_reconnect_backoffs: Arc::new(DashMap::default()),
             executions: Arc::new(DashMap::default()),
+            message_error_routes: Arc::new(DashMap::default()),
             compiled_domain_udfs: Arc::new(DashMap::default()),
             schedule_apply_lock: Arc::new(Mutex::new(())),
             domain_instantiation_errors: Arc::new(DashMap::default()),
@@ -2346,19 +2347,24 @@ impl Runtime {
         node: &Identifier,
         policies: &ErrorPolicies,
         message: RelayMessage,
-        reason: String,
+        failure: MessageErrorFailure,
     ) {
+        let MessageErrorFailure {
+            source_route,
+            reason,
+            operation,
+        } = failure;
         self.handle_structured_message_error(MessageErrorHandling {
             domain,
             node_kind,
             node,
-            source_route: None,
+            source_route: source_route.as_ref(),
             policy: &policies.message,
             message,
             error: structured_message_error(
                 MessageErrorCode::External,
                 reason,
-                MessageErrorOperation::Publish,
+                operation,
                 None,
                 std::iter::empty(),
             ),
@@ -2378,12 +2384,16 @@ impl Runtime {
         message: RelayMessage,
         failure: MessageErrorFailure,
     ) {
-        let MessageErrorFailure { reason, operation } = failure;
+        let MessageErrorFailure {
+            source_route,
+            reason,
+            operation,
+        } = failure;
         self.handle_structured_message_error(MessageErrorHandling {
             domain,
             node_kind,
             node,
-            source_route: None,
+            source_route: source_route.as_ref(),
             policy,
             message,
             error: structured_message_error(
@@ -2474,9 +2484,7 @@ impl Runtime {
                         relay.as_str(),
                         dispatch_error
                     ));
-                    return;
                 }
-                message.acks.ack_success();
             }
         }
     }
@@ -2614,7 +2622,7 @@ impl Runtime {
             materialized_state,
             ingest_metadata,
         } = context;
-        let (schema, registry, services, branching, program) = {
+        let (schema, target, branching, program, flush_policy) = {
             let Some(execution) = self.executions.get(domain) else {
                 return Err(format!("domain '{}' is not instantiated", domain.as_str()));
             };
@@ -2652,6 +2660,15 @@ impl Runtime {
                 .get(relay)
                 .cloned()
                 .unwrap_or_default();
+            let flush_policy = Self::message_error_flush_policy(
+                &execution,
+                domain,
+                node_kind,
+                node,
+                source_route,
+                relay,
+                assignments,
+            )?;
             let schemas = Self::message_error_compile_schemas(
                 &execution,
                 node_kind,
@@ -2675,7 +2692,13 @@ impl Runtime {
                     udfs: Some(&execution.udfs),
                 },
             )?;
-            (schema, registry, services, branching, program)
+            (
+                schema,
+                MessageErrorRouteTarget { registry, services },
+                branching,
+                program,
+                flush_policy,
+            )
         };
         let dlq_record = Self::execute_message_error_set_program(
             &program,
@@ -2692,7 +2715,31 @@ impl Runtime {
         .await?;
         let key = preserved_message_error_branch(&branching, &message.key, relay, error.reference)?;
         let batch = RelayRecordBatch::single(schema, key, dlq_record, AckSet::empty())?;
-        self.ingest_stream_boundary_message(domain, relay, &registry, &services, &batch)
+        if let Some(flush_policy) = flush_policy {
+            self.enqueue_message_error_delivery(
+                MessageErrorRouteKey {
+                    domain: domain.clone(),
+                    node_kind: node_kind.to_string(),
+                    node: node.clone(),
+                    source_route: source_route.cloned(),
+                    error_relay: relay.clone(),
+                },
+                target,
+                flush_policy,
+                MessageErrorDelivery {
+                    batch,
+                    source_acks: vec![message.acks.clone()],
+                },
+            )
+            .await?;
+        } else {
+            self.ingest_stream_boundary_message(
+                domain,
+                relay,
+                &target.registry,
+                &target.services,
+                &batch,
+            )
             .await
             .map_err(|_| {
                 format!(
@@ -2702,7 +2749,81 @@ impl Runtime {
                     node.as_str()
                 )
             })?;
+            message.acks.ack_success();
+        }
         Ok(())
+    }
+
+    fn message_error_flush_policy(
+        execution: &DomainExecution,
+        domain: &Domain,
+        node_kind: &str,
+        node: &Identifier,
+        source_route: Option<&Identifier>,
+        error_relay: &Identifier,
+        assignments: &[Assignment],
+    ) -> Result<Option<RuntimeFlushPolicy>, String> {
+        let scheduled = execution
+            .schedule
+            .nodes
+            .iter()
+            .find(|scheduled| &scheduled.identifier == node && scheduled.kind.as_str() == node_kind)
+            .ok_or_else(|| {
+                format!(
+                    "runtime model for {node_kind} '{}' is unavailable",
+                    node.as_str()
+                )
+            })?;
+        let outputs = match scheduled.config.as_ref() {
+            Model::Ingestor(model) => &model.output_routes,
+            Model::Reingestor(model) => &model.output_routes,
+            Model::Junction(model) => &model.output_routes,
+            Model::Deduplicator(model) => &model.output_routes,
+            Model::Reorderer(model) => &model.output_routes,
+            Model::WindowProcessor(model) => &model.output_routes,
+            Model::Generator(model) => &model.output_routes,
+            Model::Inferencer(model) => &model.output_routes,
+            Model::WasmProcessor(model) => &model.output_routes,
+            Model::Correlator(model) => &model.output_routes,
+            Model::Emitter(model) => {
+                return Self::parse_runtime_node_flush_policy(
+                    domain,
+                    node_kind,
+                    node,
+                    &model.flush_each,
+                    model.max_batch_size.as_deref(),
+                )
+                .map(Some)
+                .map_err(|error| error.to_string());
+            }
+            other => {
+                return Err(format!(
+                    "{} '{}' cannot own a message-error route",
+                    other.kind().as_str(),
+                    node.as_str()
+                ));
+            }
+        };
+        let output = matching_message_error_output(outputs, source_route, error_relay, assignments)
+            .ok_or_else(|| {
+                format!(
+                    "{} '{}' message-error output route is unavailable",
+                    node_kind,
+                    node.as_str()
+                )
+            })?;
+        let Some(policy) = output.flush_policy.as_ref() else {
+            return Ok(None);
+        };
+        Self::parse_runtime_node_flush_policy(
+            domain,
+            node_kind,
+            node,
+            &policy.flush_each,
+            policy.max_batch_size.as_deref(),
+        )
+        .map(Some)
+        .map_err(|error| error.to_string())
     }
 
     fn message_error_compile_schemas(
@@ -2713,27 +2834,6 @@ impl Runtime {
         error_relay: &Identifier,
         assignments: &[Assignment],
     ) -> Result<MessageErrorCompileSchemas, String> {
-        fn matching_output<'a>(
-            outputs: &'a nervix_models::ProcessorOutputs,
-            source_route: Option<&Identifier>,
-            error_relay: &Identifier,
-            assignments: &[Assignment],
-        ) -> Option<&'a ProcessorOutput> {
-            source_route
-                .and_then(|route| outputs.routes.iter().find(|output| &output.relay == route))
-                .or_else(|| {
-                    outputs.routes.iter().find(|output| {
-                        matches!(
-                            &output.message_error_policy,
-                            MessageErrorPolicy::Dlq {
-                                relay,
-                                assignments: configured,
-                            } if relay == error_relay && configured == assignments
-                        )
-                    })
-                })
-        }
-
         let scheduled = execution
             .schedule
             .nodes
@@ -2752,6 +2852,11 @@ impl Runtime {
                     relay.as_str()
                 )
             })
+        };
+        let partial_output_schema = |outputs: &nervix_models::ProcessorOutputs| {
+            matching_message_error_output(outputs, source_route, error_relay, assignments)
+                .map(|output| relay_schema(&output.relay))
+                .transpose()
         };
         let mut schemas = MessageErrorCompileSchemas {
             input: None,
@@ -2776,10 +2881,7 @@ impl Runtime {
                     })?
                     .into();
                 schemas.allow_header_reads = ingest_source_supports_headers(&model.source);
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Reingestor(model) => {
                 let input = model.from.first().ok_or_else(|| {
@@ -2787,10 +2889,7 @@ impl Runtime {
                 })?;
                 schemas.input = Some(relay_schema(input)?);
                 current_branch_relay = Some(input.clone());
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Junction(model) => {
                 let input = model.from.first().ok_or_else(|| {
@@ -2798,10 +2897,7 @@ impl Runtime {
                 })?;
                 schemas.input = Some(relay_schema(input)?);
                 current_branch_relay = Some(input.clone());
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Deduplicator(model) => {
                 let input = model.from.first().ok_or_else(|| {
@@ -2809,10 +2905,7 @@ impl Runtime {
                 })?;
                 schemas.input = Some(relay_schema(input)?);
                 current_branch_relay = Some(input.clone());
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Reorderer(model) => {
                 let input = model.from.first().ok_or_else(|| {
@@ -2820,24 +2913,15 @@ impl Runtime {
                 })?;
                 schemas.input = Some(relay_schema(input)?);
                 current_branch_relay = Some(input.clone());
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::WindowProcessor(model) => {
                 current_branch_relay = model.from.first().cloned();
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Generator(model) => {
                 current_branch_relay = Some(model.materialized_relay.clone());
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Inferencer(model) => {
                 let input = model.from.first().ok_or_else(|| {
@@ -2845,10 +2929,7 @@ impl Runtime {
                 })?;
                 schemas.input = Some(relay_schema(input)?);
                 current_branch_relay = Some(input.clone());
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::WasmProcessor(model) => {
                 let input = model.from.first().ok_or_else(|| {
@@ -2859,10 +2940,7 @@ impl Runtime {
                 })?;
                 schemas.input = Some(relay_schema(input)?);
                 current_branch_relay = Some(input.clone());
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Correlator(model) => {
                 let left = model.left.first().ok_or_else(|| {
@@ -2874,10 +2952,7 @@ impl Runtime {
                 schemas.left = Some(relay_schema(left)?);
                 schemas.right = Some(relay_schema(right)?);
                 current_branch_relay = Some(left.clone());
-                schemas.partial_output =
-                    matching_output(&model.output_routes, source_route, error_relay, assignments)
-                        .map(|output| relay_schema(&output.relay))
-                        .transpose()?;
+                schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Emitter(model) => {
                 schemas.input = Some(relay_schema(&model.from_relay)?);
@@ -3662,10 +3737,10 @@ impl Runtime {
         &self,
         domain: &Domain,
         identifier: &Identifier,
-        branched: Option<(SharedActiveGraph, BranchInstanceTemplate)>,
-    ) -> Option<Arc<BranchedIngestorRuntime>> {
+        branched: Option<(SharedActiveGraph, IngestorRouteTemplate)>,
+    ) -> Option<Arc<IngestorRouteRuntime>> {
         branched.map(|(graph, template)| {
-            BranchedIngestorRuntime::new(
+            IngestorRouteRuntime::new(
                 self.clone(),
                 domain.clone(),
                 identifier.clone(),
@@ -3693,8 +3768,8 @@ impl Runtime {
         &self,
         domain: &Domain,
         ingestor: &Identifier,
-        branched: HashMap<Identifier, (SharedActiveGraph, BranchInstanceTemplate)>,
-    ) -> BranchedIngestorRuntimes {
+        branched: HashMap<Identifier, (SharedActiveGraph, IngestorRouteTemplate)>,
+    ) -> IngestorRouteRuntimes {
         let mut roots = branched.into_iter().collect::<Vec<_>>();
         roots.sort_by(|left, right| left.0.cmp(&right.0));
         let mut runtimes = Vec::with_capacity(roots.len());
@@ -3708,7 +3783,7 @@ impl Runtime {
             senders.insert(root_relay, runtime.sender());
             runtimes.push(runtime);
         }
-        BranchedIngestorRuntimes { runtimes, senders }
+        IngestorRouteRuntimes { runtimes, senders }
     }
 
     pub async fn apply_cluster_schedule(
@@ -4547,7 +4622,7 @@ impl Runtime {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let template = materialize_branch_instance_template(
+            let template = materialize_ingestor_route_template(
                 spec,
                 &model_index,
                 &relay_registries,
@@ -5603,7 +5678,7 @@ impl Runtime {
         domain: &Domain,
         input_relay: &Identifier,
         dependencies: &[nervix_models::MaterializedStateDependency],
-        mut batch: RelayRecordBatch,
+        batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> Result<Option<RelayRecordBatch>, String> {
         loop {
@@ -5613,11 +5688,7 @@ impl Runtime {
                 .resolve_materialized_dependencies(domain, &batch.key, dependencies)
                 .await?
             {
-                MaterializedDependencyResolution::Ready(values) => {
-                    batch.records =
-                        augment_runtime_records_with_side_inputs(batch.records, &values);
-                    return Ok(Some(batch));
-                }
+                MaterializedDependencyResolution::Ready(_values) => return Ok(Some(batch)),
                 MaterializedDependencyResolution::Skip => {
                     for ack in batch.acks.iter() {
                         ack.ack_success();
@@ -6218,7 +6289,7 @@ impl Runtime {
             if spec.kind != ModelKind::Reingestor {
                 continue;
             }
-            let template = materialize_branch_instance_template(
+            let template = materialize_ingestor_route_template(
                 spec,
                 &model_index,
                 &relay_registries,
@@ -7196,15 +7267,24 @@ impl Runtime {
                     Vec::new(),
                 ));
             }
-            let messages = batch
-                .records
-                .iter()
+            let records = batch
+                .runtime_records()
+                .map_err(|error| PlannedGeneralError {
+                    acks: batch.acks.clone(),
+                    reason: format!(
+                        "reingestor '{}' failed to materialize node-local output rows: {}",
+                        reingestor.as_str(),
+                        error
+                    ),
+                })?;
+            let messages = records
+                .into_iter()
                 .enumerate()
                 .map(|(row, record)| PendingProcessorOutputMessage {
                     row,
                     output_index,
                     key: batch.keys[row].clone(),
-                    record: record.clone(),
+                    record,
                 })
                 .collect();
             return Ok((messages, Vec::new(), Vec::new()));
@@ -7277,13 +7357,25 @@ impl Runtime {
                 let partial_output = vm_partial_output_row_to_runtime_record(
                     &executed.batch,
                     output_row,
-                    batch.records[input_row].metadata().clone(),
+                    batch.metadata[input_row].clone(),
                 )
                 .ok();
+                let record =
+                    batch
+                        .runtime_record(input_row)
+                        .map_err(|error| PlannedGeneralError {
+                            acks: batch.acks.clone(),
+                            reason: format!(
+                                "reingestor '{}' failed to materialize FILTER-MAP error input \
+                                 row: {}",
+                                reingestor.as_str(),
+                                error
+                            ),
+                        })?;
                 errors.push(PendingProcessorOutputMessageError {
                     row: input_row,
                     key: batch.keys[input_row].clone(),
-                    record: batch.records[input_row].clone(),
+                    record,
                     error: program.structured_side_error(
                         format!(
                             "reingestor '{}' FILTER-MAP side error {}: {} at {}",
@@ -7318,22 +7410,16 @@ impl Runtime {
                     error
                 ),
             })?;
-            let records = output_schema
-                .decoded_records_from_arrow_batch(&output_batch)
-                .map_err(|error| PlannedGeneralError {
+            if output_batch.schema().as_ref() != output_schema.arrow_schema().as_ref() {
+                return Err(PlannedGeneralError {
                     acks: batch.acks.clone(),
                     reason: format!(
-                        "reingestor '{}' failed to decode FILTER-MAP output sidecar records: {}",
+                        "reingestor '{}' FILTER-MAP output schema does not match relay '{}'",
                         reingestor.as_str(),
-                        error
+                        output.relay.as_str()
                     ),
-                })?
-                .into_iter()
-                .zip(success_input_rows.iter())
-                .map(|(record, input_row)| {
-                    record.into_runtime_record(batch.metadata[*input_row].clone())
-                })
-                .collect::<Vec<_>>();
+                });
+            }
             let metadata = success_input_rows
                 .iter()
                 .map(|input_row| batch.metadata[*input_row].clone())
@@ -7343,7 +7429,6 @@ impl Runtime {
                 input_rows: success_input_rows,
                 key: batch.key.clone(),
                 batch: output_batch,
-                records,
                 metadata,
             }]
         };
@@ -7535,9 +7620,12 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         message,
-                        format!(
-                            "missing reingestor branched entrypoint for relay '{}'",
-                            relay.as_str()
+                        MessageErrorFailure::publish(
+                            Some(&relay),
+                            format!(
+                                "missing reingestor branched entrypoint for relay '{}'",
+                                relay.as_str()
+                            ),
                         ),
                     )
                     .await;
@@ -7568,7 +7656,7 @@ impl Runtime {
                                 reingestor,
                                 error_policies,
                                 message,
-                                error.to_string(),
+                                MessageErrorFailure::publish(Some(&relay), error.to_string()),
                             )
                             .await;
                         }
@@ -8236,6 +8324,7 @@ impl Runtime {
                 );
             }
         }
+        self.stop_message_error_routes_for_domain(domain).await;
         let placements = self
             .replicated_deduplicator_states
             .iter()
@@ -8815,7 +8904,7 @@ impl Runtime {
         let mut branched_templates = HashMap::default();
         if let Some(specs) = execution.branched_ingestors.get(&ingestor.name) {
             for spec in specs {
-                let template = materialize_branch_instance_template(
+                let template = materialize_ingestor_route_template(
                     spec,
                     &model_index,
                     &execution.relay_registries,

@@ -348,6 +348,16 @@ impl CompiledSchema {
         batch: &RuntimeRecordBatch,
         excluded_columns: &HashSet<usize>,
     ) -> Result<Vec<DecodedRecord>, String> {
+        self.validate_arrow_batch(batch)?;
+
+        (0..batch.batch.num_rows())
+            .map(|row_index| {
+                self.decoded_record_from_arrow_batch_excluding(batch, row_index, excluded_columns)
+            })
+            .collect()
+    }
+
+    fn validate_arrow_batch(&self, batch: &RuntimeRecordBatch) -> Result<(), String> {
         if batch.schema.as_ref() != self.arrow_schema.as_ref() {
             return Err("arrow batch schema does not match compiled schema".to_string());
         }
@@ -358,29 +368,32 @@ impl CompiledSchema {
                 self.fields.len()
             ));
         }
+        Ok(())
+    }
 
-        let mut records = Vec::with_capacity(batch.batch.num_rows());
-        for row_index in 0..batch.batch.num_rows() {
-            let mut fields = HashMap::with_capacity(self.fields.len());
-            for (column_index, field) in self.fields.iter().enumerate() {
-                if excluded_columns.contains(&column_index) {
-                    continue;
-                }
-                let value = runtime_value_from_arrow_array(
-                    batch.batch.column(column_index).as_ref(),
-                    &field.ty,
-                    field.optional,
-                    row_index,
-                    &field.name,
-                )?;
-                if let Some(value) = value {
-                    fields.insert(field.name.clone(), value);
-                }
+    fn decoded_record_from_arrow_batch_excluding(
+        &self,
+        batch: &RuntimeRecordBatch,
+        row_index: usize,
+        excluded_columns: &HashSet<usize>,
+    ) -> Result<DecodedRecord, String> {
+        let mut fields = HashMap::with_capacity(self.fields.len());
+        for (column_index, field) in self.fields.iter().enumerate() {
+            if excluded_columns.contains(&column_index) {
+                continue;
             }
-            records.push(DecodedRecord { fields });
+            let value = runtime_value_from_arrow_array(
+                batch.batch.column(column_index).as_ref(),
+                &field.ty,
+                field.optional,
+                row_index,
+                &field.name,
+            )?;
+            if let Some(value) = value {
+                fields.insert(field.name.clone(), value);
+            }
         }
-
-        Ok(records)
+        Ok(DecodedRecord { fields })
     }
 
     pub fn arrow_batch_from_ipc_bytes(&self, bytes: &[u8]) -> Result<RuntimeRecordBatch, String> {
@@ -724,6 +737,64 @@ impl RuntimeRecordBatch {
         &self.batch
     }
 
+    pub(crate) fn runtime_record(
+        &self,
+        row: usize,
+        metadata: RuntimeRecordMetadata,
+    ) -> Result<RuntimeRecord, String> {
+        if row >= self.batch.num_rows() {
+            return Err(format!(
+                "arrow batch row {row} is outside batch with {} rows",
+                self.batch.num_rows()
+            ));
+        }
+        let fields = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(column_index, field)| {
+                let field_name = field.name().clone();
+                let column = self.batch.column(column_index);
+                Some(
+                    parse_as_type_from_arrow(field.data_type())
+                        .and_then(|ty| {
+                            runtime_value_from_arrow_array(
+                                column.as_ref(),
+                                &ty,
+                                field.is_nullable(),
+                                row,
+                                &field_name,
+                            )
+                        })
+                        .map(|value| value.map(|value| (field_name, value))),
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten();
+        Ok(RuntimeRecord::from_fields_with_metadata(fields, metadata))
+    }
+
+    pub(crate) fn runtime_records(
+        &self,
+        metadata: &[RuntimeRecordMetadata],
+    ) -> Result<Vec<RuntimeRecord>, String> {
+        if metadata.len() != self.batch.num_rows() {
+            return Err(format!(
+                "arrow batch metadata count {} does not match row count {}",
+                metadata.len(),
+                self.batch.num_rows()
+            ));
+        }
+        metadata
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(row, metadata)| self.runtime_record(row, metadata))
+            .collect()
+    }
+
     pub(crate) fn filter(&self, predicate: &BooleanArray) -> Result<Self, String> {
         if predicate.len() != self.batch.num_rows() {
             return Err(format!(
@@ -835,6 +906,35 @@ impl RuntimeRecordBatch {
         .map_err(|error| error.to_string())?;
 
         Ok(Self { schema, batch })
+    }
+}
+
+pub(crate) fn parse_as_type_from_arrow(data_type: &ArrowDataType) -> Result<ParseAsType, String> {
+    match data_type {
+        ArrowDataType::UInt8 => Ok(ParseAsType::U8),
+        ArrowDataType::Int8 => Ok(ParseAsType::I8),
+        ArrowDataType::UInt16 => Ok(ParseAsType::U16),
+        ArrowDataType::Int16 => Ok(ParseAsType::I16),
+        ArrowDataType::UInt32 => Ok(ParseAsType::U32),
+        ArrowDataType::Int32 => Ok(ParseAsType::I32),
+        ArrowDataType::UInt64 => Ok(ParseAsType::U64),
+        ArrowDataType::Int64 => Ok(ParseAsType::I64),
+        ArrowDataType::Boolean => Ok(ParseAsType::Bool),
+        ArrowDataType::Utf8 => Ok(ParseAsType::String),
+        ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => Ok(ParseAsType::Datetime),
+        ArrowDataType::Float32 => Ok(ParseAsType::F32),
+        ArrowDataType::Float64 => Ok(ParseAsType::F64),
+        ArrowDataType::List(element) => Ok(ParseAsType::Vec {
+            element: Box::new(parse_as_type_from_arrow(element.data_type())?),
+        }),
+        ArrowDataType::FixedSizeList(element, len) => Ok(ParseAsType::Array {
+            element: Box::new(parse_as_type_from_arrow(element.data_type())?),
+            len: u32::try_from(*len)
+                .map_err(|_| format!("negative fixed-size list length {len}"))?,
+        }),
+        other => Err(format!(
+            "runtime record materialization does not support Arrow type {other:?}"
+        )),
     }
 }
 

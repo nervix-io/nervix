@@ -4,7 +4,21 @@ WASM processors are native WebAssembly modules loaded by Wasmtime. They do not u
 
 Rust guests use the [Rust WASM Guest SDK](./wasm-guest-sdk.md) rather than implementing this ABI by hand. This chapter is the authoritative wire contract that the SDK implements and that guests in other languages implement directly.
 
+See [Choosing An Extension Tier](filter-map-functions.md#choosing-an-extension-tier) when deciding
+between builtins, operator-trusted Roto UDFs, and a WASM processor.
+
 The runtime creates one guest instance per concrete branch. Guest state must therefore be branch-local. Do not aggregate across branch keys inside the guest.
+
+## Module Sharing And Branch Memory
+
+The runtime compiles a WASM processor module once for the scheduled processor and reuses that
+compiled module to instantiate branches. Each branch instance still has its own Wasmtime store,
+linear memory, guest state, clock, and timeout handles. Compiled code is shared. Mutable guest
+memory is not.
+
+Capacity therefore grows with the linear-memory pages dirtied by each live branch, not with a full
+copy of compiled machine code per branch. See
+[Capacity Planning For Branched Graphs](capacity-planning.md#per-branch-cost-structure).
 
 WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does not accept `FLUSH EACH` or `FLUSH IMMEDIATE`; Nervix routes batches returned from `nervix_process_batch` and batches returned later from `nervix_on_timeout` callbacks requested by the guest through the processor's declared `TO` clauses.
 

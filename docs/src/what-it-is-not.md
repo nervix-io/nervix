@@ -12,6 +12,11 @@ Important consequences:
 - Records moving through ingestors, processors, and emitters do not cross an exactly-once transactional boundary.
 - ACKs control retry and replay behavior. They do not provide exactly-once execution and are not persisted.
 - Runtime state persistence and replication are practical recovery mechanisms for selected execution node state, not atomic commit boundaries across the whole graph.
+- Nervix does not provide arbitrary-key queries against live runtime state from expressions.
+  Materialized state is readable only inside its own branch. Cross-key access is out of scope
+  because serving arbitrary keyed reads is database behavior. Nervix's database-like surfaces,
+  including materialized streams and resource-backed lookups, are structurally amortized instead.
+  See [Choosing An Enrichment Mechanism](lookups.md#choosing-an-enrichment-mechanism).
 
 The data plane operates in two broad modes:
 
