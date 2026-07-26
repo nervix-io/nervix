@@ -7,7 +7,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, correlator_name,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, collect_for, correlator_name,
         current_word_prefix, duration_lit, flushed_explicit_processor_outputs,
         from_relay_clause_with_boundary, from_where_boundary_token, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies,
@@ -90,14 +90,17 @@ fn side_from_clauses<'src>(
                 .at_least(1)
                 .collect::<Vec<_>>(),
         )
-        .map(|inputs| {
+        .then(collect_for().or_not())
+        .map(|(inputs, collect_policy)| {
             let mut from = Vec::with_capacity(inputs.len());
             let mut r#where = Vec::new();
             for (relay, mut relay_where) in inputs {
                 from.push(relay);
                 r#where.append(&mut relay_where);
             }
-            ProcessorInputs::new(from, r#where)
+            let mut inputs = ProcessorInputs::new(from, r#where);
+            inputs.collect_policy = collect_policy;
+            inputs
         })
 }
 
@@ -300,6 +303,41 @@ mod tests {
                 .is_some()
         );
         assert_eq!(parsed.max_time, "1s");
+    }
+
+    #[test]
+    fn parses_independent_input_collection_for_each_side() {
+        let parsed = parse_create_correlator(
+            "CREATE CORRELATOR correlate LEFT FROM relay1, relay1_extra COLLECT FOR 1s RIGHT FROM \
+             relay2 COLLECT FOR 2s MAX BATCH SIZE 10MiB CORRELATE WHERE left.name = \
+             right.first_name MATCH LATEST MAX TIME 5s ON CORRELATION TIMEOUT DROP, DROP \
+             UNBRANCHED TO relay3 SET name = left.name FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("correlator side collection policies must parse");
+        assert_eq!(
+            parsed
+                .left
+                .collect_policy
+                .as_ref()
+                .expect("left collection policy must parse")
+                .collect_for,
+            "1s"
+        );
+        let right = parsed
+            .right
+            .collect_policy
+            .as_ref()
+            .expect("right collection policy must parse");
+        assert_eq!(right.collect_for, "2s");
+        assert_eq!(right.max_batch_size.as_deref(), Some("10MiB"));
+    }
+
+    #[test]
+    fn suggests_input_collection_after_correlator_side() {
+        let input = "CREATE CORRELATOR correlate LEFT FROM relay1 COL";
+        let suggestions = suggest_create_correlator(input, input.len());
+        assert!(suggestions.contains(&"COLLECT FOR".to_string()));
+        assert!(!suggestions.contains(&"FLUSH EACH".to_string()));
     }
 
     #[test]

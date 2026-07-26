@@ -180,8 +180,8 @@ use processors::{
     RelayProcessorOperationTemplate, RelayProcessorOutputNode, RelayProcessorOutputTemplate,
     RelayProcessorOutputsNode, RelayProcessorOutputsTemplate, RelayProcessorRelayTemplate,
     RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer, ReordererPendingMessage,
-    WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor, WasmFlushContext, WindowBounds,
-    WindowFlushContext,
+    RuntimeInputCollector, WasmAckContext, WasmAckMap, WasmCompiledBranchProcessor,
+    WasmFlushContext, WindowBounds, WindowFlushContext,
 };
 pub use relay_batch::RelayMessage;
 pub(crate) use relay_batch::RelayRecordBatch;
@@ -1539,6 +1539,7 @@ impl RuntimeReconnectBackoff {
 
 enum BatchedInput {
     Batch(RelayRecordBatch),
+    Wake,
     Closed,
     Shutdown,
 }
@@ -1550,6 +1551,19 @@ enum RuntimeFlushPolicy {
         max_batch_size: u64,
     },
     Immediate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeInputCollectPolicy {
+    interval: Duration,
+    max_batch_size: Option<u64>,
+}
+
+impl RuntimeInputCollectPolicy {
+    fn size_boundary_reached(self, pending_bytes: u64) -> bool {
+        self.max_batch_size
+            .is_some_and(|max_batch_size| pending_bytes >= max_batch_size)
+    }
 }
 
 impl RuntimeFlushPolicy {
@@ -1570,6 +1584,7 @@ impl RuntimeFlushPolicy {
     }
 }
 
+#[cfg(test)]
 fn relay_batches_estimated_bytes(batches: &[RelayRecordBatch]) -> u64 {
     batches
         .iter()
@@ -1577,6 +1592,81 @@ fn relay_batches_estimated_bytes(batches: &[RelayRecordBatch]) -> u64 {
         .sum::<u64>()
 }
 
+#[derive(Debug)]
+struct RuntimeTaskInputCollection {
+    policy: Option<RuntimeInputCollectPolicy>,
+    pending: HashMap<Option<BranchKey>, RuntimeTaskInputBranchCollection>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeTaskInputBranchCollection {
+    batches: Vec<RelayRecordBatch>,
+    bytes: u64,
+    deadline: Option<Instant>,
+}
+
+impl RuntimeTaskInputCollection {
+    fn new(policy: Option<RuntimeInputCollectPolicy>) -> Self {
+        Self {
+            policy,
+            pending: HashMap::default(),
+        }
+    }
+
+    fn push(&mut self, batch: RelayRecordBatch) -> Result<Option<RelayRecordBatch>, String> {
+        let Some(policy) = self.policy else {
+            return Ok(Some(batch));
+        };
+        let key = batch.key.clone();
+        let collection = self.pending.entry(key.clone()).or_default();
+        collection.bytes = collection.bytes.saturating_add(batch.estimated_bytes());
+        collection.batches.push(batch);
+        collection
+            .deadline
+            .get_or_insert_with(|| Instant::now() + policy.interval);
+        if policy.size_boundary_reached(collection.bytes) {
+            return self.take(&key).map(Some);
+        }
+        Ok(None)
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.pending
+            .values()
+            .filter_map(|collection| collection.deadline)
+            .min()
+    }
+
+    fn take_due(&mut self) -> Result<Option<RelayRecordBatch>, String> {
+        let now = Instant::now();
+        let Some(key) = self.pending.iter().find_map(|(key, collection)| {
+            collection
+                .deadline
+                .is_some_and(|deadline| deadline <= now)
+                .then_some(key.clone())
+        }) else {
+            return Ok(None);
+        };
+        self.take(&key).map(Some)
+    }
+
+    fn take(&mut self, key: &Option<BranchKey>) -> Result<RelayRecordBatch, String> {
+        let collection = self
+            .pending
+            .remove(key)
+            .expect("selected input collection must exist");
+        RelayRecordBatch::concat(collection.batches)
+    }
+
+    fn take_any(&mut self) -> Result<Option<RelayRecordBatch>, String> {
+        let Some(key) = self.pending.keys().next().cloned() else {
+            return Ok(None);
+        };
+        self.take(&key).map(Some)
+    }
+}
+
+#[cfg(test)]
 fn relay_batches_into_batched_input(batches: Vec<RelayRecordBatch>) -> BatchedInput {
     BatchedInput::Batch(
         RelayRecordBatch::concat(batches)
@@ -2576,6 +2666,129 @@ impl RelayProcessorNode {
             ProcessorInputFilterKind::FilterWhere,
         )
         .await
+    }
+
+    fn concat_collected_input(
+        &self,
+        branch: &BranchRuntime,
+        incoming_relay: &Identifier,
+        batches: Vec<RelayRecordBatch>,
+    ) -> Option<RelayRecordBatch> {
+        let acks = batches
+            .iter()
+            .flat_map(|batch| batch.acks.iter().cloned())
+            .collect::<Vec<_>>();
+        match RelayRecordBatch::concat(batches) {
+            Ok(batch) => Some(batch),
+            Err(error) => {
+                branch.runtime.handle_internal_processor_error_for_acks(
+                    &branch.domain,
+                    self.kind.as_str(),
+                    &self.processor,
+                    &self.error_policies,
+                    acks.iter(),
+                    format!(
+                        "{} '{}' failed to concatenate collected input from relay '{}': {error}",
+                        self.kind.as_str(),
+                        self.processor.as_str(),
+                        incoming_relay.as_str(),
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    fn accept_input<'a>(
+        &'a mut self,
+        graph: &'a SharedActiveGraph,
+        branch: &'a mut BranchRuntime,
+        incoming_relay: &'a Identifier,
+        batch: RelayRecordBatch,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let now = branch
+                .runtime
+                .current_stream_expiration_time(&branch.domain)
+                .ok()
+                .flatten()
+                .unwrap_or_else(current_timestamp);
+            let Some(collector) = self.input_collectors.get_mut(incoming_relay) else {
+                self.execute(graph, branch, incoming_relay, batch).await;
+                return;
+            };
+            if !collector.push(batch, now) {
+                return;
+            }
+            let batches = collector.take_pending();
+            let Some(batch) = self.concat_collected_input(branch, incoming_relay, batches) else {
+                return;
+            };
+            self.execute(graph, branch, incoming_relay, batch).await;
+        })
+    }
+
+    fn flush_due_collected_inputs<'a>(
+        &'a mut self,
+        graph: &'a SharedActiveGraph,
+        branch: &'a mut BranchRuntime,
+        now: Timestamp,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let due_relays = self
+                .input_collectors
+                .iter()
+                .filter_map(|(relay, collector)| collector.is_due(now).then_some(relay.clone()))
+                .collect::<Vec<_>>();
+            for relay in due_relays {
+                let batches = self
+                    .input_collectors
+                    .get_mut(&relay)
+                    .map(RuntimeInputCollector::take_pending)
+                    .unwrap_or_default();
+                let Some(batch) = self.concat_collected_input(branch, &relay, batches) else {
+                    continue;
+                };
+                self.execute(graph, branch, &relay, batch).await;
+            }
+        })
+    }
+
+    fn flush_all_collected_inputs<'a>(
+        &'a mut self,
+        graph: &'a SharedActiveGraph,
+        branch: &'a mut BranchRuntime,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let pending_relays = self
+                .input_collectors
+                .iter()
+                .filter_map(|(relay, collector)| {
+                    (!collector.pending.is_empty()).then_some(relay.clone())
+                })
+                .collect::<Vec<_>>();
+            for relay in pending_relays {
+                let batches = self
+                    .input_collectors
+                    .get_mut(&relay)
+                    .map(RuntimeInputCollector::take_pending)
+                    .unwrap_or_default();
+                let Some(batch) = self.concat_collected_input(branch, &relay, batches) else {
+                    continue;
+                };
+                self.execute(graph, branch, &relay, batch).await;
+            }
+        })
+    }
+
+    fn drop_collected_inputs(&mut self, reason: &str) {
+        for collector in self.input_collectors.values_mut() {
+            for batch in collector.take_pending() {
+                for ack in batch.acks {
+                    ack.no_ack(reason.to_string());
+                }
+            }
+        }
     }
 
     async fn filter_input_batch_with_kind(
@@ -4007,6 +4220,7 @@ impl RelayProcessorNode {
         now: Timestamp,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            self.flush_due_collected_inputs(graph, branch, now).await;
             flush_due_processor_outputs(
                 ProcessorOutputDispatchContext {
                     graph,
@@ -4369,6 +4583,11 @@ impl RelayProcessorNode {
         };
         operation_deadline
             .into_iter()
+            .chain(
+                self.input_collectors
+                    .values()
+                    .filter_map(|collector| collector.deadline),
+            )
             .chain(self.operation.output_routes().next_flush())
             .min()
     }
@@ -4426,6 +4645,11 @@ impl RelayProcessorTemplate {
             kind: self.kind,
             processor: self.processor.clone(),
             input_relays: self.input_relays.clone(),
+            input_collectors: self
+                .input_collect_policies
+                .iter()
+                .map(|(relay, policy)| (relay.clone(), RuntimeInputCollector::new(*policy)))
+                .collect(),
             error_policies: self.error_policies.clone(),
             from_where: self.from_where.clone(),
             compiled_from_where: HashMap::default(),
@@ -4706,6 +4930,9 @@ impl BranchRuntime {
     }
 
     async fn evict(&mut self) {
+        for processor in self.processors.values_mut() {
+            processor.drop_collected_inputs("processor branch was evicted");
+        }
         self.detach();
         for (relay, materialized_state) in &self.materializers {
             let local_node_id = self.runtime.local_node_id.read().clone();
@@ -4996,7 +5223,21 @@ impl BranchRuntime {
                 &processor.processor,
             );
         }
-        processor.execute(graph, self, incoming_relay, batch).await;
+        processor
+            .accept_input(graph, self, incoming_relay, batch)
+            .await;
+        self.processors.insert(processor_id.clone(), processor);
+    }
+
+    async fn flush_processor_collected_inputs(
+        &mut self,
+        graph: &SharedActiveGraph,
+        processor_id: &Identifier,
+    ) {
+        let Some(mut processor) = self.processors.remove(processor_id) else {
+            return;
+        };
+        processor.flush_all_collected_inputs(graph, self).await;
         self.processors.insert(processor_id.clone(), processor);
     }
 
@@ -6290,7 +6531,12 @@ async fn run_processor_branch_task(
     }
     match stop_mode {
         Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
-        _ => branch.detach(),
+        _ => {
+            branch
+                .flush_processor_collected_inputs(&graph, &processor)
+                .await;
+            branch.detach();
+        }
     }
 }
 

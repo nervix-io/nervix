@@ -25,7 +25,8 @@ use super::{
     BranchRuntime, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
     RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
     ReplicatedDeduplicatorState, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
-    RuntimeFlushPolicy, SharedActiveGraph, WindowProcessorState, inferencer::OnnxInferencerSession,
+    RuntimeFlushPolicy, RuntimeInputCollectPolicy, SharedActiveGraph, WindowProcessorState,
+    inferencer::OnnxInferencerSession,
 };
 use crate::{
     registry::ActiveGraph,
@@ -83,6 +84,7 @@ pub(super) struct BranchedProcessorSpec {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
     pub(super) input_relays: Vec<Identifier>,
+    pub(super) input_collect_policies: HashMap<Identifier, nervix_models::InputCollectPolicy>,
     pub(super) mode: AckMode,
     pub(super) error_policies: ErrorPolicies,
     pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
@@ -224,6 +226,7 @@ pub(super) struct RelayProcessorTemplate {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
     pub(super) input_relays: Vec<Identifier>,
+    pub(super) input_collect_policies: HashMap<Identifier, RuntimeInputCollectPolicy>,
     pub(super) error_policies: ErrorPolicies,
     pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
     pub(super) filter_where: Option<nervix_models::Expression>,
@@ -299,6 +302,7 @@ pub(super) struct RelayProcessorNode {
     pub(super) kind: ModelKind,
     pub(super) processor: Identifier,
     pub(super) input_relays: Vec<Identifier>,
+    pub(super) input_collectors: HashMap<Identifier, RuntimeInputCollector>,
     pub(super) error_policies: ErrorPolicies,
     pub(super) from_where: HashMap<Identifier, nervix_models::Expression>,
     pub(super) compiled_from_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
@@ -309,6 +313,44 @@ pub(super) struct RelayProcessorNode {
     pub(super) operation: RelayProcessorOperationNode,
     pub(super) last_graph: Option<StdArc<ActiveGraph>>,
     pub(super) generation: u64,
+}
+
+#[derive(Debug)]
+pub(super) struct RuntimeInputCollector {
+    pub(super) policy: RuntimeInputCollectPolicy,
+    pub(super) pending: Vec<RelayRecordBatch>,
+    pub(super) pending_bytes: u64,
+    pub(super) deadline: Option<Timestamp>,
+}
+
+impl RuntimeInputCollector {
+    pub(super) fn new(policy: RuntimeInputCollectPolicy) -> Self {
+        Self {
+            policy,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            deadline: None,
+        }
+    }
+
+    pub(super) fn push(&mut self, batch: RelayRecordBatch, now: Timestamp) -> bool {
+        self.pending_bytes = self.pending_bytes.saturating_add(batch.estimated_bytes());
+        self.pending.push(batch);
+        self.deadline.get_or_insert_with(|| {
+            super::checked_add_duration_to_timestamp(now, self.policy.interval)
+        });
+        self.policy.size_boundary_reached(self.pending_bytes)
+    }
+
+    pub(super) fn is_due(&self, now: Timestamp) -> bool {
+        !self.pending.is_empty() && self.deadline.is_some_and(|deadline| deadline <= now)
+    }
+
+    pub(super) fn take_pending(&mut self) -> Vec<RelayRecordBatch> {
+        self.pending_bytes = 0;
+        self.deadline = None;
+        std::mem::take(&mut self.pending)
+    }
 }
 
 #[derive(Debug)]

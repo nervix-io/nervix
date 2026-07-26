@@ -210,6 +210,68 @@ mod tests {
     }
 
     #[test]
+    fn parses_optional_input_collection_after_source_list() {
+        let parsed = parse_create_junction(
+            "CREATE JUNCTION join_streams FROM ss1, ss2 COLLECT FOR 1s MAX BATCH SIZE 10mb \
+             UNBRANCHED TO ss10 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("input collection must parse");
+        let policy = parsed
+            .from
+            .collect_policy
+            .as_ref()
+            .expect("input collection policy must be structured");
+        assert_eq!(policy.collect_for, "1s");
+        assert_eq!(policy.max_batch_size.as_deref(), Some("10mb"));
+    }
+
+    #[test]
+    fn parses_input_collection_without_size_boundary() {
+        let parsed = parse_create_junction(
+            "CREATE JUNCTION join_streams FROM ss1 COLLECT FOR 1s UNBRANCHED TO ss10 INHERIT ALL \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("timer-only input collection must parse");
+        assert_eq!(
+            parsed
+                .from
+                .collect_policy
+                .as_ref()
+                .expect("input collection policy must parse")
+                .max_batch_size,
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_input_collection_without_duration() {
+        parse_create_junction(
+            "CREATE JUNCTION join_streams FROM ss1 COLLECT FOR UNBRANCHED TO ss10 INHERIT ALL \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect_err("input collection requires a duration");
+    }
+
+    #[test]
+    fn suggests_collect_for_after_source_list() {
+        let input = "CREATE JUNCTION join_streams FROM ss1 COL";
+        let suggestions = suggest_create_junction(input, input.len());
+        assert!(suggestions.contains(&"COLLECT FOR".to_string()));
+        assert!(!suggestions.contains(&"FLUSH EACH".to_string()));
+    }
+
+    #[test]
+    fn suggests_max_batch_size_inside_input_collection() {
+        let input = "CREATE JUNCTION join_streams FROM ss1 COLLECT FOR 1s MA";
+        let suggestions = suggest_create_junction(input, input.len());
+        assert!(
+            suggestions.contains(&"MAX BATCH SIZE".to_string()),
+            "unexpected suggestions: {suggestions:?}"
+        );
+        assert!(!suggestions.contains(&"MAX TIME".to_string()));
+    }
+
+    #[test]
     fn parses_message_error_policy_on_each_output_route() {
         let input = r#"
             CREATE JUNCTION route_messages

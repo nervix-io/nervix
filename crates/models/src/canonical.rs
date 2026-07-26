@@ -16,17 +16,18 @@ use crate::{
     CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression,
     FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, Inheritance, JsonType, KafkaConfigEntry, KafkaIngestMode,
-    KafkaOffsetMode, KinesisConfigEntry, KinesisIngestMode, Literal, MaterializedRelayState,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-    MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry, NatsIngestMode,
-    OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
-    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
-    RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry,
-    SqsConfigEntry, SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode,
-    WindowBound, WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
+    IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
+    KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry, KinesisIngestMode, Literal,
+    MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
+    MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry,
+    NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry,
+    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
+    RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry,
+    SchemaField, SentryConfigEntry, SqsConfigEntry, SqsIngestMode, UnaryOperator,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry,
+    ZeroMqIngestMode,
 };
 
 pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
@@ -1145,6 +1146,15 @@ fn commit_policy_to_nspl(policy: &str, max_size: &str) -> String {
     format!("COMMIT EACH {policy} MAX SIZE {max_size}")
 }
 
+fn collect_policy_to_nspl(policy: &InputCollectPolicy) -> String {
+    let max_batch_size = policy
+        .max_batch_size
+        .as_ref()
+        .map(|size| format!(" MAX BATCH SIZE {size}"))
+        .unwrap_or_default();
+    format!("COLLECT FOR {}{max_batch_size}", policy.collect_for)
+}
+
 fn message_error_policy_to_nspl(policy: &MessageErrorPolicy) -> Result<String, CanonicalNsplError> {
     Ok(match policy {
         MessageErrorPolicy::Ignore => "ON MESSAGE ERROR IGNORE".to_string(),
@@ -1324,10 +1334,14 @@ impl CreateEmitter {
             .map(|(policy, max_size)| format!(" {}", commit_policy_to_nspl(policy, max_size)))
             .unwrap_or_default();
         Ok(format!(
-            "CREATE {} EMITTER {} FROM {}{}{} TO {}{}{}{} {} {};",
+            "CREATE {} EMITTER {} FROM {}{}{}{} TO {}{}{}{} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
+            self.collect_policy
+                .as_ref()
+                .map(|policy| format!(" {}", collect_policy_to_nspl(policy)))
+                .unwrap_or_default(),
             self.encode_using_codec
                 .as_ref()
                 .map(|codec| format!(" ENCODE USING {}", codec.as_str()))
@@ -1496,29 +1510,28 @@ fn from_relay_to_nspl(
 }
 
 fn processor_inputs_to_nspl(inputs: &ProcessorInputs) -> Result<String, CanonicalNsplError> {
-    inputs
+    let relays = inputs
         .from
         .iter()
         .map(|relay| from_relay_to_nspl(relay, &inputs.r#where))
         .collect::<Result<Vec<_>, _>>()
-        .map(|items| items.join(", "))
+        .map(|items| items.join(", "))?;
+    let collect = inputs
+        .collect_policy
+        .as_ref()
+        .map(|policy| format!(" {}", collect_policy_to_nspl(policy)))
+        .unwrap_or_default();
+    Ok(format!("{relays}{collect}"))
 }
 
 fn prefixed_processor_inputs_to_nspl(
     prefix: &str,
     inputs: &ProcessorInputs,
 ) -> Result<String, CanonicalNsplError> {
-    inputs
-        .from
-        .iter()
-        .map(|relay| {
-            Ok(format!(
-                "{prefix} FROM {}",
-                from_relay_to_nspl(relay, &inputs.r#where)?
-            ))
-        })
-        .collect::<Result<Vec<_>, CanonicalNsplError>>()
-        .map(|items| items.join(" "))
+    Ok(format!(
+        "{prefix} FROM {}",
+        processor_inputs_to_nspl(inputs)?
+    ))
 }
 
 fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> Result<String, CanonicalNsplError> {
@@ -2328,14 +2341,15 @@ mod tests {
         CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema,
         CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
         Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource,
-        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, Literal,
-        MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-        MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch,
-        ParseAsType, PostgresConflictAction, PostgresValueMapping, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
-        SentryConfigEntry, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
-        WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
+        InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+        KinesisIngestMode, Literal, MessageErrorPolicy, Model, MongoDbConflictAction,
+        MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+        MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType, PostgresConflictAction,
+        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
+        RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry, SqsIngestMode, UdfArgument,
+        UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound, WireSchemaField,
+        ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2930,7 +2944,8 @@ mod tests {
             from: ProcessorInputs::new(
                 vec![identifier("orders_a"), identifier("orders_b")],
                 Vec::new(),
-            ),
+            )
+            .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
             output_routes: flushed_outputs("orders_all"),
             branched_by: processor_branched_by("tenant_branch"),
             mode: AckMode::Attached,
@@ -2939,9 +2954,9 @@ mod tests {
         };
         assert_eq!(
             junction.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED JUNCTION orders_junction FROM orders_a, orders_b BRANCHED BY \
-             by_tenant_branch TO orders_all FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-             LOG;"
+            "CREATE ATTACHED JUNCTION orders_junction FROM orders_a, orders_b COLLECT FOR 25ms \
+             MAX BATCH SIZE 2MiB BRANCHED BY by_tenant_branch TO orders_all FLUSH EACH 100ms MAX \
+             BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"
         );
 
         let deduplicator = CreateDeduplicator {
@@ -2964,8 +2979,13 @@ mod tests {
 
         let correlator = CreateCorrelator {
             name: identifier("orders_correlator"),
-            left: ProcessorInputs::single(identifier("orders_left")),
-            right: ProcessorInputs::single(identifier("orders_right")),
+            left: ProcessorInputs::new(
+                vec![identifier("orders_left"), identifier("orders_left_archive")],
+                Vec::new(),
+            )
+            .with_collect_policy("10ms".to_string(), None),
+            right: ProcessorInputs::single(identifier("orders_right"))
+                .with_collect_policy("20ms".to_string(), Some("1MiB".to_string())),
             output_routes: ProcessorOutputs::new(vec![flushed_output(
                 "orders_matched",
                 Some(route_set(
@@ -2993,8 +3013,9 @@ mod tests {
         };
         assert_eq!(
             correlator.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED CORRELATOR orders_correlator LEFT FROM orders_left RIGHT FROM \
-             orders_right CORRELATE WHERE (left.id = right.id) MATCH EARLIEST MAX TIME 5s ON \
+            "CREATE ATTACHED CORRELATOR orders_correlator LEFT FROM orders_left, \
+             orders_left_archive COLLECT FOR 10ms RIGHT FROM orders_right COLLECT FOR 20ms MAX \
+             BATCH SIZE 1MiB CORRELATE WHERE (left.id = right.id) MATCH EARLIEST MAX TIME 5s ON \
              CORRELATION TIMEOUT DROP, DROP BRANCHED BY by_tenant_branch TO orders_matched SET id \
              = left.id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;"
         );
@@ -3166,6 +3187,10 @@ mod tests {
             let emitter = CreateEmitter {
                 name: identifier("emit_orders"),
                 from_relay: identifier("orders_stream"),
+                collect_policy: Some(InputCollectPolicy {
+                    collect_for: "50ms".to_string(),
+                    max_batch_size: Some("4MiB".to_string()),
+                }),
                 encode_using_codec: Some(identifier("orders_codec")),
                 sink,
                 flush_each: "100ms".to_string(),
@@ -3179,9 +3204,9 @@ mod tests {
             assert_eq!(
                 emitter.to_canonical_nspl().expect("must render"),
                 format!(
-                    "CREATE ATTACHED EMITTER emit_orders FROM orders_stream ENCODE USING \
-                     orders_codec TO {rendered_sink} FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-                     MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+                    "CREATE ATTACHED EMITTER emit_orders FROM orders_stream COLLECT FOR 50ms MAX \
+                     BATCH SIZE 4MiB ENCODE USING orders_codec TO {rendered_sink} FLUSH EACH \
+                     100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
                 )
             );
         }
@@ -3192,6 +3217,7 @@ mod tests {
         let emitter = CreateEmitter {
             name: identifier("emit_notifications"),
             from_relay: identifier("notifications"),
+            collect_policy: None,
             encode_using_codec: None,
             sink: EmitSink::Postgres {
                 client: identifier("postgres_main"),
@@ -3236,6 +3262,7 @@ mod tests {
         let emitter = CreateEmitter {
             name: identifier("emit_notifications"),
             from_relay: identifier("notifications"),
+            collect_policy: None,
             encode_using_codec: None,
             sink: EmitSink::MySql {
                 client: identifier("mysql_main"),
@@ -3277,6 +3304,7 @@ mod tests {
         let emitter = CreateEmitter {
             name: identifier("emit_notifications"),
             from_relay: identifier("notifications"),
+            collect_policy: None,
             encode_using_codec: None,
             sink: EmitSink::MongoDb {
                 client: identifier("mongodb_main"),

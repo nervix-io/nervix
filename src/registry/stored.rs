@@ -16,8 +16,8 @@ use nervix_models::{
     ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend,
     Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
+    InferencerTensorSchema, IngestSource, IngestTimestampSource, InputCollectPolicy, JsonType,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
     MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType,
     PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
@@ -842,6 +842,13 @@ pub struct StoredProcessorInputWhere {
 pub struct StoredProcessorInputs {
     pub from: Vec<String>,
     pub r#where: Vec<StoredProcessorInputWhere>,
+    pub collect_policy: Option<StoredInputCollectPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct StoredInputCollectPolicy {
+    pub collect_for: String,
+    pub max_batch_size: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -957,6 +964,7 @@ pub struct StoredWindowBound {
 pub struct StoredCreateEmitter {
     pub name: String,
     pub from_relay: String,
+    pub collect_policy: Option<StoredInputCollectPolicy>,
     pub encode_using_codec: Option<String>,
     pub sink: StoredEmitSink,
     pub flush_each: String,
@@ -2702,6 +2710,24 @@ impl TryFrom<StoredProcessorInputWhere> for ProcessorInputWhere {
     }
 }
 
+impl From<InputCollectPolicy> for StoredInputCollectPolicy {
+    fn from(value: InputCollectPolicy) -> Self {
+        Self {
+            collect_for: value.collect_for,
+            max_batch_size: value.max_batch_size,
+        }
+    }
+}
+
+impl From<StoredInputCollectPolicy> for InputCollectPolicy {
+    fn from(value: StoredInputCollectPolicy) -> Self {
+        Self {
+            collect_for: value.collect_for,
+            max_batch_size: value.max_batch_size,
+        }
+    }
+}
+
 impl From<ProcessorInputs> for StoredProcessorInputs {
     fn from(value: ProcessorInputs) -> Self {
         Self {
@@ -2711,6 +2737,7 @@ impl From<ProcessorInputs> for StoredProcessorInputs {
                 .map(|relay| relay.to_string())
                 .collect(),
             r#where: value.r#where.into_iter().map(Into::into).collect(),
+            collect_policy: value.collect_policy.map(Into::into),
         }
     }
 }
@@ -2730,6 +2757,7 @@ impl TryFrom<StoredProcessorInputs> for ProcessorInputs {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<_>, _>>()?,
+            collect_policy: value.collect_policy.map(Into::into),
         })
     }
 }
@@ -3982,6 +4010,7 @@ impl From<CreateEmitter> for StoredCreateEmitter {
         Self {
             name: value.name.to_string(),
             from_relay: value.from_relay.to_string(),
+            collect_policy: value.collect_policy.map(Into::into),
             encode_using_codec: value.encode_using_codec.map(|codec| codec.to_string()),
             sink: value.sink.into(),
             flush_each: value.flush_each,
@@ -4001,6 +4030,7 @@ impl TryFrom<StoredCreateEmitter> for CreateEmitter {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             from_relay: Identifier::parse(&value.from_relay)?,
+            collect_policy: value.collect_policy.map(Into::into),
             encode_using_codec: value
                 .encode_using_codec
                 .map(|codec| Identifier::parse(&codec))
@@ -4474,7 +4504,8 @@ mod tests {
                 from: ProcessorInputs::new(
                     vec![identifier("events_a"), identifier("events_b")],
                     Vec::new(),
-                ),
+                )
+                .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
                 output_routes: (ProcessorOutputs::single(identifier("events_stream")))
                     .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                 branched_by: processor_branched_by("events"),
@@ -4554,6 +4585,10 @@ mod tests {
             Model::Emitter(CreateEmitter {
                 name: identifier("events_emitter"),
                 from_relay: identifier("events_stream"),
+                collect_policy: Some(InputCollectPolicy {
+                    collect_for: "50ms".to_string(),
+                    max_batch_size: None,
+                }),
                 encode_using_codec: Some(identifier("events_codec")),
                 sink: EmitSink::Nats {
                     client: identifier("nats_client"),
@@ -4626,6 +4661,7 @@ mod tests {
         let err = Model::try_from(StoredModelVersioned::Emitter(StoredCreateEmitter {
             name: "events_emitter".to_string(),
             from_relay: "events_stream".to_string(),
+            collect_policy: None,
             encode_using_codec: Some("events_codec".to_string()),
             sink: StoredEmitSink::Kafka {
                 client: "bad client".to_string(),

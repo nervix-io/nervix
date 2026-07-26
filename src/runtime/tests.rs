@@ -2626,6 +2626,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
                 kind: ModelKind::Deduplicator,
                 processor: identifier("dedup_users"),
                 input_relays: vec![identifier("orders")],
+                input_collect_policies: HashMap::default(),
                 error_policies: ErrorPolicies::handled_by_log(),
                 from_where: HashMap::default(),
                 filter_where: None,
@@ -3691,7 +3692,7 @@ async fn recv_stream_message_batch_flush_immediate_drains_cached_batches() {
 }
 
 #[tokio::test]
-async fn recv_runtime_consumer_batch_flush_immediate_drains_cached_batches() {
+async fn recv_runtime_collected_input_without_policy_preserves_relay_batches() {
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(
         TWO_ITEM_TEST_CHANNEL_CAPACITY,
     ));
@@ -3733,18 +3734,104 @@ async fn recv_runtime_consumer_batch_flush_immediate_drains_cached_batches() {
         .await
         .expect("second batch should send");
 
-    let batch = super::Runtime::recv_runtime_consumer_batch(
+    let mut collection = super::RuntimeTaskInputCollection::new(None);
+    let first = super::Runtime::recv_runtime_collected_input(
         &mut receiver,
         &mut shutdown_rx,
-        super::RuntimeFlushPolicy::Immediate,
+        &mut collection,
+        None,
     )
     .await;
 
-    let super::BatchedInput::Batch(batch) = batch else {
+    let super::BatchedInput::Batch(first) = first else {
         panic!("expected runtime consumer batch");
     };
-    assert_eq!(batch.message_count(), 2);
+    assert_eq!(first.message_count(), 1);
+
+    let second = super::Runtime::recv_runtime_collected_input(
+        &mut receiver,
+        &mut shutdown_rx,
+        &mut collection,
+        None,
+    )
+    .await;
+    let super::BatchedInput::Batch(second) = second else {
+        panic!("expected second runtime consumer batch");
+    };
+    assert_eq!(second.message_count(), 1);
     drop(shutdown_tx);
+}
+
+#[test]
+fn task_input_collection_is_branch_local_and_honors_size_boundary() {
+    let schema = test_schema(&[("value", ParseAsType::String)]);
+    let batch = |tenant: &str, value: &str| {
+        super::RelayRecordBatch::single(
+            schema.clone(),
+            string_branch_key("tenant", tenant),
+            RuntimeRecord::from_fields([(
+                "value".to_string(),
+                RuntimeValue::String(value.to_string()),
+            )]),
+            AckSet::empty(),
+        )
+        .expect("input collection batch should build")
+    };
+    let mut collection =
+        super::RuntimeTaskInputCollection::new(Some(super::RuntimeInputCollectPolicy {
+            interval: Duration::from_secs(60),
+            max_batch_size: None,
+        }));
+    let alpha = string_branch_key("tenant", "alpha");
+    let beta = string_branch_key("tenant", "beta");
+
+    assert!(
+        collection
+            .push(batch("alpha", "alpha-1"))
+            .expect("alpha input must collect")
+            .is_none()
+    );
+    assert!(
+        collection
+            .push(batch("beta", "beta-1"))
+            .expect("beta input must collect")
+            .is_none()
+    );
+    assert!(
+        collection
+            .push(batch("alpha", "alpha-2"))
+            .expect("second alpha input must collect")
+            .is_none()
+    );
+    assert!(
+        collection
+            .push(batch("beta", "beta-2"))
+            .expect("second beta input must collect")
+            .is_none()
+    );
+
+    let alpha_batch = collection
+        .take(&alpha)
+        .expect("alpha collection must concatenate");
+    let beta_batch = collection
+        .take(&beta)
+        .expect("beta collection must concatenate");
+    assert_eq!(alpha_batch.message_count(), 2);
+    assert_eq!(beta_batch.message_count(), 2);
+    assert_eq!(alpha_batch.key, alpha);
+    assert_eq!(beta_batch.key, beta);
+
+    let mut size_bounded =
+        super::RuntimeTaskInputCollection::new(Some(super::RuntimeInputCollectPolicy {
+            interval: Duration::from_secs(60),
+            max_batch_size: Some(1),
+        }));
+    let released = size_bounded
+        .push(batch("alpha", "size-trigger"))
+        .expect("size-bounded input must collect")
+        .expect("input size boundary must release the collection");
+    assert_eq!(released.message_count(), 1);
+    assert!(size_bounded.pending.is_empty());
 }
 
 #[tokio::test]
@@ -5408,7 +5495,8 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                 identifier("dedup_orders"),
                 nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: identifier("dedup_orders"),
-                    from: ProcessorInputs::single(identifier("orders")),
+                    from: ProcessorInputs::single(identifier("orders"))
+                        .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
                     output_routes: (ProcessorOutputs::single(identifier("projected_orders")))
                         .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
                     branched_by: processor_branched_by("orders", &["tenant"]),
@@ -5441,6 +5529,7 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
                 nervix_models::Model::Emitter(CreateEmitter {
                     name: identifier("orders_emitter"),
                     from_relay: identifier("aggregated_orders"),
+                    collect_policy: None,
                     encode_using_codec: Some(identifier("orders_codec")),
                     sink: EmitSink::ZeroMq {
                         client: identifier("zmq_client"),
@@ -5465,6 +5554,13 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
     let dedup_orders = &specs.processors[0];
     assert_eq!(dedup_orders.spec.processor, identifier("dedup_orders"));
     assert_eq!(dedup_orders.spec.input_relays, vec![identifier("orders")]);
+    let collect_policy = dedup_orders
+        .spec
+        .input_collect_policies
+        .get(&identifier("orders"))
+        .expect("input collection policy must be planned for its source relay");
+    assert_eq!(collect_policy.collect_for, "25ms");
+    assert_eq!(collect_policy.max_batch_size.as_deref(), Some("2MiB"));
     assert_eq!(dedup_orders.branch_ttl.as_deref(), Some("5m"));
     assert_eq!(dedup_orders.branch_max_instances, None);
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
@@ -7808,6 +7904,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     let emitter = CreateEmitter {
         name: identifier("kafka_notifications"),
         from_relay: identifier("notifications"),
+        collect_policy: None,
         encode_using_codec: Some(identifier("notification_codec")),
         sink: EmitSink::Kafka {
             client: identifier("kafka_main"),

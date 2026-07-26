@@ -1279,6 +1279,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_input_collection() {
+        let input = r#"
+            CREATE INGESTOR i
+              FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL
+              COLLECT FOR 1s
+              DECODE USING sch
+              TO s UNBRANCHED
+              FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+              ON GENERAL ERROR LOG;
+        "#;
+
+        parse_create_ingestor_tokens(&to_tokens(input))
+            .expect_err("ingestors do not read relay inputs and cannot collect them");
+    }
+
+    #[test]
+    fn input_context_does_not_suggest_collection() {
+        let input = "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ";
+        let suggestions = suggest_create_ingestor(input, input.len());
+        assert!(!suggestions.contains(&"COLLECT FOR".to_string()));
+    }
+
+    #[test]
     fn suggests_branched_by_as_compound_keyword() {
         let input =
             "CREATE INGESTOR i FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL DECODE USING sch TO s ";

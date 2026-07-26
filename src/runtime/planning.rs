@@ -47,6 +47,20 @@ fn processor_input_where_by_inputs(
     processor_input_where_by_relay(inputs.where_clauses())
 }
 
+fn processor_input_collect_policies(
+    inputs: &ProcessorInputs,
+) -> HashMap<Identifier, nervix_models::InputCollectPolicy> {
+    let Some(policy) = inputs.collect_policy.as_ref() else {
+        return HashMap::default();
+    };
+    inputs
+        .relays()
+        .iter()
+        .cloned()
+        .map(|relay| (relay, policy.clone()))
+        .collect()
+}
+
 struct BranchEntrypoint {
     ttl: Option<String>,
     max_instances: Option<u64>,
@@ -145,6 +159,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     kind,
                     processor: identifier,
                     input_relays: deduplicator.from.relays().to_vec(),
+                    input_collect_policies: processor_input_collect_policies(&deduplicator.from),
                     mode: deduplicator.mode,
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&deduplicator.from),
@@ -170,6 +185,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     kind,
                     processor: identifier,
                     input_relays: reorderer.from.relays().to_vec(),
+                    input_collect_policies: processor_input_collect_policies(&reorderer.from),
                     mode: reorderer.mode,
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&reorderer.from),
@@ -191,10 +207,13 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                 input_relays.extend(correlator.right.relays().iter().cloned());
                 let mut from_where = processor_input_where_by_inputs(&correlator.left);
                 from_where.extend(processor_input_where_by_inputs(&correlator.right));
+                let mut input_collect_policies = processor_input_collect_policies(&correlator.left);
+                input_collect_policies.extend(processor_input_collect_policies(&correlator.right));
                 let spec = BranchedProcessorSpec {
                     kind,
                     processor: identifier,
                     input_relays,
+                    input_collect_policies,
                     mode: correlator.mode,
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where,
@@ -224,6 +243,9 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     kind,
                     processor: identifier,
                     input_relays: window_processor.from.relays().to_vec(),
+                    input_collect_policies: processor_input_collect_policies(
+                        &window_processor.from,
+                    ),
                     mode: window_processor.mode,
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&window_processor.from),
@@ -249,6 +271,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     kind,
                     processor: identifier,
                     input_relays: junction.from.relays().to_vec(),
+                    input_collect_policies: processor_input_collect_policies(&junction.from),
                     mode: junction.mode,
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&junction.from),
@@ -268,6 +291,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     kind,
                     processor: identifier,
                     input_relays: inferencer.from.relays().to_vec(),
+                    input_collect_policies: processor_input_collect_policies(&inferencer.from),
                     mode: inferencer.mode,
                     error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
                     from_where: processor_input_where_by_inputs(&inferencer.from),
@@ -296,6 +320,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     kind,
                     processor: identifier,
                     input_relays: processor.from.relays().to_vec(),
+                    input_collect_policies: processor_input_collect_policies(&processor.from),
                     mode: processor.mode,
                     error_policies: internal_processor_error_policies(
                         processor.global_error_policy.clone(),
@@ -511,6 +536,44 @@ fn parse_branch_flush_policy(
     })
 }
 
+fn parse_input_collect_policy(
+    kind: &str,
+    processor: &Identifier,
+    policy: &nervix_models::InputCollectPolicy,
+) -> Result<RuntimeInputCollectPolicy, String> {
+    let interval = humantime::parse_duration(&policy.collect_for).map_err(|error| {
+        format!(
+            "invalid {} '{}' COLLECT FOR duration '{}': {}",
+            kind,
+            processor.as_str(),
+            policy.collect_for,
+            error
+        )
+    })?;
+    let max_batch_size = policy
+        .max_batch_size
+        .as_deref()
+        .map(|max_batch_size| {
+            max_batch_size
+                .parse::<ubyte::ByteUnit>()
+                .map(|size| size.as_u64())
+                .map_err(|error| {
+                    format!(
+                        "invalid {} '{}' COLLECT MAX BATCH SIZE '{}': {}",
+                        kind,
+                        processor.as_str(),
+                        max_batch_size,
+                        error
+                    )
+                })
+        })
+        .transpose()?;
+    Ok(RuntimeInputCollectPolicy {
+        interval,
+        max_batch_size,
+    })
+}
+
 fn materialize_nodes(
     nodes: &[BranchedProcessorSpec],
     relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
@@ -522,6 +585,14 @@ fn materialize_nodes(
             kind: node.kind,
             processor: node.processor.clone(),
             input_relays: node.input_relays.clone(),
+            input_collect_policies: node
+                .input_collect_policies
+                .iter()
+                .map(|(relay, policy)| {
+                    parse_input_collect_policy(node.kind.as_str(), &node.processor, policy)
+                        .map(|policy| (relay.clone(), policy))
+                })
+                .collect::<Result<HashMap<_, _>, _>>()?,
             error_policies: node.error_policies.clone(),
             from_where: node.from_where.clone(),
             filter_where: node.filter_where.clone(),
