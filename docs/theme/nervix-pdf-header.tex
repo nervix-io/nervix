@@ -1,0 +1,49 @@
+\usepackage{fvextra}
+\RecustomVerbatimEnvironment{Highlighting}{Verbatim}{
+  commandchars=\\\{\},
+  breaklines=true,
+  breakanywhere=true,
+  breaknonspaceingroup=true,
+  breaksymbolleft={},
+  breaksymbolright={},
+  breakanywheresymbolpre={},
+  breakanywheresymbolpost={}
+}
+
+\usepackage{mdframed}
+\definecolor{NervixCodeBackground}{HTML}{F5F6FA}
+\definecolor{NervixCodeBorder}{HTML}{D5D9E5}
+\renewmdenv[
+  backgroundcolor=NervixCodeBackground,
+  linecolor=NervixCodeBorder,
+  linewidth=0.6pt,
+  leftmargin=0.5em,
+  rightmargin=0.5em,
+  innerleftmargin=0.8em,
+  innerrightmargin=0.8em,
+  innertopmargin=0.6em,
+  innerbottommargin=0.6em,
+  skipabove=0.7\baselineskip,
+  skipbelow=0.7\baselineskip
+]{Shaded}
+
+\definecolor{NervixQuoteBackground}{HTML}{F3F4FA}
+\definecolor{NervixQuoteRule}{HTML}{212982}
+\renewmdenv[
+  backgroundcolor=NervixQuoteBackground,
+  linecolor=NervixQuoteRule,
+  linewidth=2.5pt,
+  leftline=true,
+  rightline=false,
+  topline=false,
+  bottomline=false,
+  leftmargin=1.5em,
+  rightmargin=0.5em,
+  innerleftmargin=1em,
+  innerrightmargin=1em,
+  innertopmargin=0.7em,
+  innerbottommargin=0.7em,
+  skipabove=0.8\baselineskip,
+  skipbelow=0.8\baselineskip,
+  font=\itshape
+]{quote}
