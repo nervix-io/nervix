@@ -169,6 +169,7 @@ impl ReplicatedWindowProcessorState {
                 });
         Ok(PersistedRuntimeStateEntry {
             lsm: self.current_lsm.load(Ordering::SeqCst),
+            schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_window_processor_snapshot(&snapshot)?,
         })
     }

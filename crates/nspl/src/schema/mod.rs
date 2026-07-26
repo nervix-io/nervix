@@ -1,8 +1,9 @@
 use chumsky::prelude::*;
 use nervix_models::{
-    AvroType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
-    CreateStatement, CreateWireSchema, CreateWireSchemaStmt, JsonType, ParseAsType, SchemaField,
-    WireSchemaField, WireSchemaStrictness,
+    AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
+    AlterWireSchemaStmt, AvroType, CreateAvroWireSchema, CreateCborWireSchema,
+    CreateJsonWireSchema, CreateSchema, CreateStatement, CreateWireSchema, CreateWireSchemaStmt,
+    JsonType, ParseAsType, SchemaField, WireSchemaField, WireSchemaStrictness,
 };
 
 pub use crate::parser_support::{Diagnostic, ParseFromSourceError};
@@ -10,7 +11,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, boxed_choice, current_word_prefix, field_ref, if_not_exists_clause,
-        into_parse_error, kw, lex_input, schema_name, suggestions_from_errors, tok,
+        into_parse_error, kw, kw_phrase2, lex_input, schema_name, suggestions_from_errors, tok,
         wire_schema_name,
     },
 };
@@ -191,6 +192,159 @@ fn internal_schema_field<'src>()
         })
 }
 
+#[derive(Clone)]
+enum InternalFieldAlter {
+    Type(ParseAsType),
+    Optional(bool),
+    Sensitive(bool),
+}
+
+fn alter_schema_operation<'src>()
+-> impl Parser<'src, &'src [Token], AlterSchemaOperation, extra::Err<ParseError<'src>>> + Clone {
+    let add = kw_phrase2(Identifier::Add, Identifier::Field)
+        .ignore_then(internal_schema_field())
+        .map(|field| AlterSchemaOperation::AddField { field });
+    let drop = kw_phrase2(Identifier::Drop, Identifier::Field)
+        .ignore_then(field_ref())
+        .map(|field| AlterSchemaOperation::DropField { field });
+    let rename = kw_phrase2(Identifier::Rename, Identifier::Field)
+        .ignore_then(field_ref())
+        .then_ignore(kw(Identifier::To))
+        .then(field_ref())
+        .map(|(field, to)| AlterSchemaOperation::RenameField { field, to });
+    let field_alter = boxed_choice!(
+        kw_phrase2(Identifier::Set, Identifier::Type)
+            .ignore_then(nervix_type())
+            .map(InternalFieldAlter::Type),
+        kw_phrase2(Identifier::Set, Identifier::Optional).to(InternalFieldAlter::Optional(true)),
+        kw_phrase2(Identifier::Drop, Identifier::Optional).to(InternalFieldAlter::Optional(false)),
+        kw_phrase2(Identifier::Set, Identifier::Sensitive).to(InternalFieldAlter::Sensitive(true)),
+        kw_phrase2(Identifier::Drop, Identifier::Sensitive)
+            .to(InternalFieldAlter::Sensitive(false)),
+    );
+    let alter = kw_phrase2(Identifier::Alter, Identifier::Field)
+        .ignore_then(field_ref())
+        .then(field_alter)
+        .map(|(field, alter)| match alter {
+            InternalFieldAlter::Type(ty) => AlterSchemaOperation::SetFieldType { field, ty },
+            InternalFieldAlter::Optional(optional) => {
+                AlterSchemaOperation::SetFieldOptional { field, optional }
+            }
+            InternalFieldAlter::Sensitive(sensitive) => {
+                AlterSchemaOperation::SetFieldSensitive { field, sensitive }
+            }
+        });
+
+    boxed_choice!(add, drop, rename, alter)
+}
+
+pub fn alter_schema_parser<'src>()
+-> impl Parser<'src, &'src [Token], AlterSchema, extra::Err<ParseError<'src>>> + Clone {
+    let operations = alter_schema_operation()
+        .separated_by(tok(Token::Comma))
+        .allow_trailing()
+        .at_least(1)
+        .collect::<Vec<_>>();
+
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Schema))
+        .ignore_then(schema_name())
+        .then(operations)
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .map(|(schema, operations)| AlterSchema { schema, operations })
+        .boxed()
+}
+
+#[derive(Clone)]
+enum WireFieldAlter<T> {
+    Type(T),
+    Optional(bool),
+}
+
+fn alter_wire_schema_operation<'src, T, P>(
+    native_type: P,
+) -> impl Parser<'src, &'src [Token], AlterWireSchemaOperation<T>, extra::Err<ParseError<'src>>> + Clone
+where
+    T: Clone + 'src,
+    P: Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    let add = kw_phrase2(Identifier::Add, Identifier::Field)
+        .ignore_then(wire_schema_field(native_type.clone()))
+        .map(|field| AlterWireSchemaOperation::AddField { field });
+    let drop = kw_phrase2(Identifier::Drop, Identifier::Field)
+        .ignore_then(field_ref())
+        .map(|field| AlterWireSchemaOperation::DropField { field });
+    let rename = kw_phrase2(Identifier::Rename, Identifier::Field)
+        .ignore_then(field_ref())
+        .then_ignore(kw(Identifier::To))
+        .then(field_ref())
+        .map(|(field, to)| AlterWireSchemaOperation::RenameField { field, to });
+    let field_alter = boxed_choice!(
+        kw_phrase2(Identifier::Set, Identifier::Type)
+            .ignore_then(native_type)
+            .map(WireFieldAlter::Type),
+        kw_phrase2(Identifier::Set, Identifier::Optional).to(WireFieldAlter::Optional(true)),
+        kw_phrase2(Identifier::Drop, Identifier::Optional).to(WireFieldAlter::Optional(false)),
+    );
+    let alter = kw_phrase2(Identifier::Alter, Identifier::Field)
+        .ignore_then(field_ref())
+        .then(field_alter)
+        .map(|(field, alter)| match alter {
+            WireFieldAlter::Type(ty) => AlterWireSchemaOperation::SetFieldType { field, ty },
+            WireFieldAlter::Optional(optional) => {
+                AlterWireSchemaOperation::SetFieldOptional { field, optional }
+            }
+        });
+    let strictness = boxed_choice!(
+        kw_phrase2(Identifier::Set, Identifier::Strict).to(
+            AlterWireSchemaOperation::SetStrictness {
+                strictness: WireSchemaStrictness::Strict,
+            }
+        ),
+        kw_phrase2(Identifier::Set, Identifier::Loose).to(
+            AlterWireSchemaOperation::SetStrictness {
+                strictness: WireSchemaStrictness::Loose,
+            }
+        ),
+    );
+
+    boxed_choice!(add, drop, rename, alter, strictness)
+}
+
+fn alter_wire_schema_parser<'src, T, P>(
+    format_kw: Identifier,
+    native_type: P,
+) -> impl Parser<'src, &'src [Token], AlterWireSchema<T>, extra::Err<ParseError<'src>>> + Clone
+where
+    T: Clone + 'src,
+    P: Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    let operations = alter_wire_schema_operation(native_type)
+        .separated_by(tok(Token::Comma))
+        .allow_trailing()
+        .at_least(1)
+        .collect::<Vec<_>>();
+
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Wire))
+        .ignore_then(kw(format_kw))
+        .ignore_then(kw(Identifier::Schema))
+        .ignore_then(wire_schema_name())
+        .then(operations)
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .map(|(schema, operations)| AlterWireSchema { schema, operations })
+        .boxed()
+}
+
+pub fn alter_wire_schema_parser_any<'src>()
+-> impl Parser<'src, &'src [Token], AlterWireSchemaStmt, extra::Err<ParseError<'src>>> + Clone {
+    boxed_choice!(
+        alter_wire_schema_parser(Identifier::Json, json_type()).map(AlterWireSchemaStmt::Json),
+        alter_wire_schema_parser(Identifier::Cbor, cbor_type()).map(AlterWireSchemaStmt::Cbor),
+        alter_wire_schema_parser(Identifier::Avro, avro_type()).map(AlterWireSchemaStmt::Avro),
+    )
+}
+
 fn create_wire_schema_parser<'src, T, P>(
     format_kw: Identifier,
     native_type: P,
@@ -303,6 +457,32 @@ pub fn parse_create_wire_schema_tokens(
     }
 }
 
+pub fn parse_alter_schema_tokens(tokens: &[Token]) -> Result<AlterSchema, Vec<ParseError<'_>>> {
+    let out = alter_schema_parser().then_ignore(end()).parse(tokens);
+    if out.has_errors() {
+        Err(out.into_errors())
+    } else {
+        Ok(out
+            .into_output()
+            .expect("successful parse must have output"))
+    }
+}
+
+pub fn parse_alter_wire_schema_tokens(
+    tokens: &[Token],
+) -> Result<AlterWireSchemaStmt, Vec<ParseError<'_>>> {
+    let out = alter_wire_schema_parser_any()
+        .then_ignore(end())
+        .parse(tokens);
+    if out.has_errors() {
+        Err(out.into_errors())
+    } else {
+        Ok(out
+            .into_output()
+            .expect("successful parse must have output"))
+    }
+}
+
 pub fn parse_create_schema_tokens(
     tokens: &[Token],
 ) -> Result<CreateStatement<CreateSchema>, Vec<ParseError<'_>>> {
@@ -329,6 +509,18 @@ pub fn parse_create_schema(
 ) -> Result<CreateStatement<CreateSchema>, ParseFromSourceError> {
     let (source, spanned_tokens, tokens) = lex_input(input)?;
     parse_create_schema_tokens(&tokens)
+        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+}
+
+pub fn parse_alter_schema(input: &str) -> Result<AlterSchema, ParseFromSourceError> {
+    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    parse_alter_schema_tokens(&tokens)
+        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+}
+
+pub fn parse_alter_wire_schema(input: &str) -> Result<AlterWireSchemaStmt, ParseFromSourceError> {
+    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    parse_alter_wire_schema_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
@@ -363,6 +555,46 @@ pub fn suggest_create_schema(input: &str, cursor: usize) -> Vec<String> {
     };
 
     let out = create_schema_parser()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if !out.has_errors() {
+        return Vec::new();
+    }
+
+    suggestions_from_errors(out.into_errors(), &prefix)
+}
+
+pub fn suggest_alter_schema(input: &str, cursor: usize) -> Vec<String> {
+    let safe_cursor = cursor.min(input.len());
+    let prefix_src = &input[..safe_cursor];
+    let prefix = current_word_prefix(prefix_src);
+
+    let (_, _, tokens) = match lex_input(prefix_src) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let out = alter_schema_parser()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if !out.has_errors() {
+        return Vec::new();
+    }
+
+    suggestions_from_errors(out.into_errors(), &prefix)
+}
+
+pub fn suggest_alter_wire_schema(input: &str, cursor: usize) -> Vec<String> {
+    let safe_cursor = cursor.min(input.len());
+    let prefix_src = &input[..safe_cursor];
+    let prefix = current_word_prefix(prefix_src);
+
+    let (_, _, tokens) = match lex_input(prefix_src) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let out = alter_wire_schema_parser_any()
         .then_ignore(end())
         .parse(tokens.as_slice());
     if !out.has_errors() {
@@ -822,5 +1054,123 @@ mod tests {
         let suggestions = suggest_create_wire_schema(input, input.len());
         assert!(suggestions.contains(&"OPTIONAL".to_string()));
         assert!(!suggestions.contains(&"DATETIME".to_string()));
+    }
+
+    #[test]
+    fn parses_all_internal_schema_alter_operations() {
+        let parsed = parse_alter_schema(
+            "ALTER SCHEMA user_events ADD FIELD note STRING OPTIONAL SENSITIVE, DROP FIELD \
+             legacy_id, RENAME FIELD ts TO event_time, ALTER FIELD amount SET TYPE F64, ALTER \
+             FIELD email SET OPTIONAL, ALTER FIELD phone DROP OPTIONAL, ALTER FIELD token SET \
+             SENSITIVE, ALTER FIELD public_id DROP SENSITIVE;",
+        )
+        .expect("parse should succeed");
+
+        assert_eq!(parsed.schema.as_str(), "user_events");
+        assert_eq!(parsed.operations.len(), 8);
+        assert!(matches!(
+            &parsed.operations[0],
+            AlterSchemaOperation::AddField { field }
+                if field.name.as_str() == "note"
+                    && field.ty == ParseAsType::String
+                    && field.optional
+                    && field.sensitive
+        ));
+        assert!(matches!(
+            &parsed.operations[3],
+            AlterSchemaOperation::SetFieldType { field, ty }
+                if field.as_str() == "amount" && *ty == ParseAsType::F64
+        ));
+        assert!(matches!(
+            &parsed.operations[7],
+            AlterSchemaOperation::SetFieldSensitive { field, sensitive: false }
+                if field.as_str() == "public_id"
+        ));
+    }
+
+    #[test]
+    fn parses_all_wire_schema_alter_operations_for_each_format() {
+        let cases = [("JSON", "STRING"), ("CBOR", "OBJECT"), ("AVRO", "LONG")];
+        for (format, ty) in cases {
+            let input = format!(
+                "ALTER WIRE {format} SCHEMA payload ADD FIELD added {ty} OPTIONAL, DROP FIELD \
+                 removed, RENAME FIELD old TO renamed, ALTER FIELD renamed SET TYPE {ty}, ALTER \
+                 FIELD renamed SET OPTIONAL, ALTER FIELD renamed DROP OPTIONAL, SET STRICT, SET \
+                 LOOSE;"
+            );
+
+            let parsed = parse_alter_wire_schema(&input).expect("parse should succeed");
+            assert_eq!(parsed.schema().as_str(), "payload");
+            assert_eq!(parsed.operations_len(), 8);
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_cross_format_schema_alters() {
+        assert!(parse_alter_schema("ALTER SCHEMA events;").is_err());
+        assert!(
+            parse_alter_schema("ALTER SCHEMA events ADD FIELD payload OBJECT;").is_err(),
+            "wire-only type must not leak into internal ALTER"
+        );
+        assert!(
+            parse_alter_wire_schema(
+                "ALTER WIRE AVRO SCHEMA payload ALTER FIELD id SET TYPE INTEGER;"
+            )
+            .is_err(),
+            "JSON-only type must not leak into AVRO ALTER"
+        );
+        assert!(
+            parse_alter_wire_schema(
+                "ALTER WIRE JSON SCHEMA payload ADD FIELD secret STRING SENSITIVE;"
+            )
+            .is_err(),
+            "wire fields do not support sensitivity"
+        );
+    }
+
+    #[test]
+    fn suggests_composed_internal_alter_operations_without_wire_leakage() {
+        let input = "ALTER SCHEMA events ";
+        let suggestions = suggest_alter_schema(input, input.len());
+        for expected in ["ADD FIELD", "DROP FIELD", "RENAME FIELD", "ALTER FIELD"] {
+            assert!(suggestions.contains(&expected.to_string()));
+        }
+        assert!(!suggestions.contains(&"SET STRICT".to_string()));
+        assert!(!suggestions.contains(&"SET LOOSE".to_string()));
+
+        let input = "ALTER SCHEMA events ALTER FIELD id ";
+        let suggestions = suggest_alter_schema(input, input.len());
+        for expected in [
+            "SET TYPE",
+            "SET OPTIONAL",
+            "DROP OPTIONAL",
+            "SET SENSITIVE",
+            "DROP SENSITIVE",
+        ] {
+            assert!(suggestions.contains(&expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn suggests_exact_wire_alter_operations_and_types() {
+        let input = "ALTER WIRE JSON SCHEMA payload ";
+        let suggestions = suggest_alter_wire_schema(input, input.len());
+        for expected in [
+            "ADD FIELD",
+            "DROP FIELD",
+            "RENAME FIELD",
+            "ALTER FIELD",
+            "SET STRICT",
+            "SET LOOSE",
+        ] {
+            assert!(suggestions.contains(&expected.to_string()));
+        }
+        assert!(!suggestions.contains(&"SET SENSITIVE".to_string()));
+
+        let input = "ALTER WIRE AVRO SCHEMA payload ALTER FIELD id SET TYPE ";
+        let suggestions = suggest_alter_wire_schema(input, input.len());
+        assert!(suggestions.contains(&"LONG".to_string()));
+        assert!(!suggestions.contains(&"INTEGER".to_string()));
+        assert!(!suggestions.contains(&"U64".to_string()));
     }
 }

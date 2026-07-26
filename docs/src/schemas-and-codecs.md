@@ -78,6 +78,84 @@ CREATE [IF NOT EXISTS] STRICT WIRE AVRO SCHEMA notification_wire (
 
 Wire schemas must also declare at least one field.
 
+## Altering Schemas
+
+Internal and wire schemas can be changed without dropping their whole dependent graph first.
+Operations in one statement run from left to right, and each operation sees the result of the
+previous one.
+
+Internal schema operations are:
+
+- `ADD FIELD <field> <type> [OPTIONAL] [SENSITIVE]`
+- `DROP FIELD <field>`
+- `RENAME FIELD <field> TO <field>`
+- `ALTER FIELD <field> SET TYPE <type>`
+- `ALTER FIELD <field> SET OPTIONAL` and `ALTER FIELD <field> DROP OPTIONAL`
+- `ALTER FIELD <field> SET SENSITIVE` and `ALTER FIELD <field> DROP SENSITIVE`
+
+For example:
+
+```nspl
+ALTER SCHEMA notification
+  ADD FIELD note STRING OPTIONAL,
+  RENAME FIELD created_at TO received_at,
+  ALTER FIELD payload SET SENSITIVE;
+```
+
+`DROP SENSITIVE` is the explicit way to downgrade a field. Nervix still rebuilds and validates the
+whole candidate graph, including every downstream leakage rule. A schema must retain at least one
+field, added and renamed names must be unique, and the target of every drop, rename, or field alter
+must exist.
+
+Wire schema operations are:
+
+- `ADD FIELD <field> <wire_type> [OPTIONAL]`
+- `DROP FIELD <field>`
+- `RENAME FIELD <field> TO <field>`
+- `ALTER FIELD <field> SET TYPE <wire_type>`
+- `ALTER FIELD <field> SET OPTIONAL` and `ALTER FIELD <field> DROP OPTIONAL`
+- `SET STRICT` and `SET LOOSE`
+
+The format is required and must match the stored schema:
+
+```nspl
+ALTER WIRE JSON SCHEMA notification_wire
+  ADD FIELD note string OPTIONAL,
+  SET LOOSE;
+```
+
+Use one explicit transaction when a type or shape change requires coordinated updates. Model
+mutations for one domain—`CREATE`, schema `ALTER`, relay `ALTER`, and `DROP`—are validated against
+one candidate graph and committed atomically. The following replacement changes the wire and
+internal types together and recreates their codec without exposing an intermediate invalid graph:
+
+```nspl
+BEGIN;
+ALTER WIRE JSON SCHEMA notification_wire
+  ALTER FIELD user_id SET TYPE number;
+ALTER SCHEMA notification
+  ALTER FIELD user_id SET TYPE F64;
+DROP CODEC notification_codec;
+CREATE CODEC notification_codec
+  FROM WIRE JSON SCHEMA notification_wire
+  TO SCHEMA notification;
+COMMIT;
+```
+
+If any operation or dependent model fails validation, none of the mutations are persisted.
+`SHOW CREATE SCHEMA` and `SHOW CREATE WIRE SCHEMA` render the resulting canonical definitions.
+
+On a running domain, a schema ALTER is applied through an automatic quiesce cycle: Nervix validates
+first, stops new ingestion and generators, force-flushes buffered output, drains in-flight work,
+installs the new graph, and resumes. This internal state is not a user-facing lifecycle command.
+A drain timeout rejects the batch and resumes the old graph. On a stopped domain, Nervix validates
+and persists the change without a quiesce cycle.
+
+Runtime state whose record layout derives from an altered schema is recreated. Independent
+stateful nodes retain their state. Persisted state carries a schema fingerprint so a stale layout
+is never restored as the new type. Relay subscriptions closed by the rebuild report that they must
+be recreated against the current schema.
+
 ## Codecs
 
 A codec maps one transport payload format to one internal schema.

@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc as StdArc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -109,7 +109,7 @@ use crate::{
     },
     registry::{ActiveGraph, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,
-    runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckSet},
+    runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckRootTracker, AckSet},
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, DecodedRecord, ProtobufCodecDescriptor,
         RuntimeRecord, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue,
@@ -214,6 +214,7 @@ const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
 const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
@@ -280,6 +281,23 @@ pub enum RuntimeEvent {
 struct RuntimeKey {
     domain: Domain,
     identifier: Identifier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RuntimeStateSchemaKey {
+    domain: Domain,
+    kind: ModelKind,
+    identifier: Identifier,
+}
+
+impl RuntimeStateSchemaKey {
+    fn new(domain: Domain, kind: ModelKind, identifier: Identifier) -> Self {
+        Self {
+            domain,
+            kind,
+            identifier,
+        }
+    }
 }
 
 impl RuntimeKey {
@@ -446,6 +464,62 @@ struct DomainExecution {
     signaling_protocols: HashMap<Identifier, Arc<CreateSignalingProtocol>>,
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
     tasks: Vec<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainDrainStatus {
+    pub active_ingestors: usize,
+    pub active_generators: usize,
+    pub outstanding_acks: usize,
+    pub buffered_emitter_messages: usize,
+}
+
+impl DomainDrainStatus {
+    pub fn is_drained(self) -> bool {
+        self.active_ingestors == 0
+            && self.active_generators == 0
+            && self.outstanding_acks == 0
+            && self.buffered_emitter_messages == 0
+    }
+
+    pub fn outstanding_work(self) -> usize {
+        self.active_ingestors
+            .saturating_add(self.active_generators)
+            .saturating_add(self.outstanding_acks)
+            .saturating_add(self.buffered_emitter_messages)
+    }
+}
+
+struct DomainActivityGuard {
+    counter: Arc<AtomicUsize>,
+    active: bool,
+}
+
+impl DomainActivityGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        Self {
+            counter,
+            active: false,
+        }
+    }
+
+    fn set_active(&mut self, active: bool) {
+        if self.active == active {
+            return;
+        }
+        if active {
+            self.counter.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.active = active;
+    }
+}
+
+impl Drop for DomainActivityGuard {
+    fn drop(&mut self) {
+        self.set_active(false);
+    }
 }
 
 #[derive(Debug)]
@@ -1981,6 +2055,13 @@ pub struct Runtime {
     schedule_apply_lock: Arc<Mutex<()>>,
     domain_instantiation_errors: Arc<DashMap<Domain, String, RandomState>>,
     domains: Arc<DashMap<Domain, RuntimeDomainState, RandomState>>,
+    domain_status_changed: watch::Sender<u64>,
+    in_flight_by_domain: Arc<DashMap<Domain, Arc<AckRootTracker>, RandomState>>,
+    generator_activity_by_domain: Arc<DashMap<Domain, Arc<AtomicUsize>, RandomState>>,
+    emitter_buffers: Arc<DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>>,
+    force_flush_by_domain: Arc<DashMap<Domain, watch::Sender<u64>, RandomState>>,
+    active_schema_changes: Arc<DashMap<Domain, (), RandomState>>,
+    state_schema_fingerprints: Arc<DashMap<RuntimeStateSchemaKey, [u8; 32], RandomState>>,
     domain_graphs: Arc<DashMap<Domain, SharedActiveGraph, RandomState>>,
     endpoint_bindings: Arc<DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>>,
     relay_boundary_fanouts: RelayBoundaryFanoutMap,
@@ -1995,7 +2076,8 @@ pub struct Runtime {
     pending_remote_acks: Arc<DashMap<u64, AckSet, RandomState>>,
     next_state_sync_correlation_id: Arc<AtomicU64>,
     pending_state_syncs: Arc<DashMap<u64, PendingStateSyncSender, RandomState>>,
-    expiring_stream_states: Arc<DashMap<RuntimeKey, Arc<ExpiringRelayState>, RandomState>>,
+    expiring_stream_states:
+        Arc<DashMap<RuntimeStatePlacement, Arc<ExpiringRelayState>, RandomState>>,
     latest_resource_versions: Arc<DashMap<Identifier, u64, RandomState>>,
     replicated_deduplicator_states:
         Arc<DashMap<RuntimeStatePlacement, Arc<ReplicatedDeduplicatorState>, RandomState>>,
@@ -2015,6 +2097,7 @@ pub struct Runtime {
     state_store: Option<Arc<RuntimeStateStore>>,
     state_snapshot_interval: Duration,
     state_replication_poll_interval: Duration,
+    domain_drain_timeout: Duration,
     temp_dir: Arc<PathBuf>,
     metrics: RuntimeMetrics,
 }
@@ -4473,13 +4556,13 @@ impl RelayProcessorTemplate {
                     compiled_key_program: None,
                     state: runtime
                         .replicated_deduplicator_state(
-                            RuntimeStatePlacement {
-                                domain: domain.clone(),
-                                state: RuntimeStateKind::Deduplicator,
-                                kind: self.kind,
-                                identifier: self.processor.clone(),
-                                branch_key: key.clone(),
-                            },
+                            runtime.state_placement(
+                                domain,
+                                RuntimeStateKind::Deduplicator,
+                                self.kind,
+                                &self.processor,
+                                key.clone(),
+                            ),
                             Vec::new(),
                             0,
                         )
@@ -4496,13 +4579,13 @@ impl RelayProcessorTemplate {
                 } => {
                     let replicated_state = runtime
                         .replicated_window_processor_state(
-                            RuntimeStatePlacement {
-                                domain: domain.clone(),
-                                state: RuntimeStateKind::WindowProcessor,
-                                kind: self.kind,
-                                identifier: self.processor.clone(),
-                                branch_key: key.clone(),
-                            },
+                            runtime.state_placement(
+                                domain,
+                                RuntimeStateKind::WindowProcessor,
+                                self.kind,
+                                &self.processor,
+                                key.clone(),
+                            ),
                             None,
                             Vec::new(),
                             0,
@@ -4601,13 +4684,13 @@ impl RelayProcessorTemplate {
                 } => {
                     let replicated_state = runtime
                         .replicated_wasm_processor_state(
-                            RuntimeStatePlacement {
-                                domain: domain.clone(),
-                                state: RuntimeStateKind::WasmProcessor,
-                                kind: self.kind,
-                                identifier: self.processor.clone(),
-                                branch_key: key.clone(),
-                            },
+                            runtime.state_placement(
+                                domain,
+                                RuntimeStateKind::WasmProcessor,
+                                self.kind,
+                                &self.processor,
+                                key.clone(),
+                            ),
                             Vec::new(),
                             0,
                         )
@@ -4686,13 +4769,13 @@ impl BranchInstanceTemplate {
             .materialized_streams
             .iter()
             .map(|relay| {
-                let placement = RuntimeStatePlacement {
-                    domain: domain.clone(),
-                    state: RuntimeStateKind::MaterializedRelay,
-                    kind: ModelKind::Materializer,
-                    identifier: relay.clone(),
-                    branch_key: key.clone(),
-                };
+                let placement = runtime.state_placement(
+                    domain,
+                    RuntimeStateKind::MaterializedRelay,
+                    ModelKind::Materializer,
+                    relay,
+                    key.clone(),
+                );
                 runtime
                     .replicated_materialized_stream_state(placement, None, Vec::new(), 0)
                     .map(|state| (relay.clone(), state))
@@ -4725,6 +4808,14 @@ impl BranchInstanceTemplate {
 }
 
 impl BranchRuntime {
+    fn restore_presence(&self, last_ingestion: Timestamp) {
+        for relay in self.relays.values() {
+            relay.registry.touch(&self.key, last_ingestion);
+            self.runtime
+                .touch_stream_key(&self.domain, &relay.relay, &self.key, last_ingestion);
+        }
+    }
+
     fn detach(&self) {
         for relay in self.relays.values() {
             relay.registry.remove(&self.key);
@@ -5072,6 +5163,21 @@ impl BranchRuntime {
             let Some(mut processor) = self.processors.remove(&processor_id) else {
                 continue;
             };
+            processor.tick(graph, self, now).await;
+            self.processors.insert(processor_id, processor);
+        }
+    }
+
+    async fn force_flush(&mut self, graph: &SharedActiveGraph, now: Timestamp) {
+        let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
+        for processor_id in processor_ids {
+            tokio::task::consume_budget().await;
+            let Some(mut processor) = self.processors.remove(&processor_id) else {
+                continue;
+            };
+            for output in &mut processor.operation.output_routes_mut().routes {
+                output.force_flush_at(now);
+            }
             processor.tick(graph, self, now).await;
             self.processors.insert(processor_id, processor);
         }
@@ -5831,16 +5937,17 @@ async fn shutdown_all_branch_instance_instances(
 }
 
 fn branch_lru_placement(
+    runtime: &Runtime,
     domain: &Domain,
     template: &BranchInstanceTemplate,
 ) -> RuntimeStatePlacement {
-    RuntimeStatePlacement {
-        domain: domain.clone(),
-        state: RuntimeStateKind::BranchLru,
-        kind: template.source_kind,
-        identifier: template.source.clone(),
-        branch_key: None,
-    }
+    runtime.state_placement(
+        domain,
+        RuntimeStateKind::BranchLru,
+        template.source_kind,
+        &template.source,
+        None,
+    )
 }
 
 fn restore_branch_instance_lru_snapshot(
@@ -5852,7 +5959,7 @@ fn restore_branch_instance_lru_snapshot(
     let Some(store) = &runtime.state_store else {
         return Ok(0);
     };
-    let placement = branch_lru_placement(domain, template);
+    let placement = branch_lru_placement(runtime, domain, template);
     let Some(snapshot) = store
         .latest_snapshot(&placement)
         .map_err(|error| error.to_string())?
@@ -5860,7 +5967,8 @@ fn restore_branch_instance_lru_snapshot(
         return Ok(0);
     };
     for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
-        let state = template.instantiate(runtime, domain, key.clone())?;
+        let mut state = template.instantiate(runtime, domain, key.clone())?;
+        state.get_mut().restore_presence(last_ingestion);
         instances.insert_restored(key, last_ingestion, state);
     }
     instances.set_version(snapshot.lsm);
@@ -5881,7 +5989,7 @@ fn persist_branch_instance_lru_snapshot<V>(
     if lsm <= *last_persisted_lsm {
         return Ok(());
     }
-    let placement = branch_lru_placement(domain, template);
+    let placement = branch_lru_placement(runtime, domain, template);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     store
         .persist_latest_snapshot(&placement, lsm, &payload)
@@ -6159,6 +6267,7 @@ async fn dispatch_processor_node_input(
             graph.clone(),
             template,
             key.clone(),
+            None,
         )
     }) {
         Ok(instance) => instance,
@@ -6227,10 +6336,14 @@ fn spawn_processor_branch_task(
     graph: SharedActiveGraph,
     template: &BranchInstanceTemplate,
     key: Option<BranchKey>,
+    restored_at: Option<Timestamp>,
 ) -> Result<ProcessorBranchTask, String> {
     let branch = template
         .instantiate(&runtime_handle, &domain, key)?
         .into_inner();
+    if let Some(restored_at) = restored_at {
+        branch.restore_presence(restored_at);
+    }
     let (input_tx, input_rx) = mpsc::channel(1);
     let (stop_tx, stop_rx) = watch::channel(None);
     let processor = template.source.clone();
@@ -6259,6 +6372,7 @@ async fn run_processor_branch_task(
     mut input: mpsc::Receiver<(Identifier, RelayRecordBatch)>,
     mut stop_rx: watch::Receiver<Option<ProcessorBranchStopMode>>,
 ) {
+    let mut force_flush_rx = runtime_handle.force_flush_receiver(&domain);
     let mut stop_mode;
     loop {
         tokio::task::consume_budget().await;
@@ -6310,6 +6424,13 @@ async fn run_processor_branch_task(
                 branch
                     .retry_processor_pending_materialized(&graph, &processor)
                     .await;
+            }
+            changed = force_flush_rx.changed() => {
+                if changed.is_err() {
+                    stop_mode = Some(ProcessorBranchStopMode::Detach);
+                    break;
+                }
+                branch.force_flush(&graph, now).await;
             }
             _ = sleep(sleep_duration) => {}
         }
@@ -6454,7 +6575,7 @@ fn restore_processor_branch_lru_snapshot(
     let Some(store) = &runtime.state_store else {
         return Ok(0);
     };
-    let placement = branch_lru_placement(domain, template);
+    let placement = branch_lru_placement(runtime, domain, template);
     let Some(snapshot) = store
         .latest_snapshot(&placement)
         .map_err(|error| error.to_string())?
@@ -6468,6 +6589,7 @@ fn restore_processor_branch_lru_snapshot(
             graph.clone(),
             template,
             key.clone(),
+            Some(last_ingestion),
         )?;
         instances.insert_restored(key, last_ingestion, entry);
     }

@@ -249,6 +249,7 @@ impl ReplicatedKafkaOffsetState {
         let (offsets, schedules) = self.snapshot_components();
         Ok(PersistedRuntimeStateEntry {
             lsm: self.current_lsm.load(Ordering::SeqCst),
+            schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_kafka_offset_snapshot(&offsets, &schedules)?,
         })
     }

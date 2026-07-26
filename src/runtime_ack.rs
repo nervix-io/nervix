@@ -31,6 +31,11 @@ pub struct AckSet {
     handles: Vec<AckHandle>,
 }
 
+#[derive(Debug, Default)]
+pub struct AckRootTracker {
+    outstanding: AtomicUsize,
+}
+
 #[derive(Debug)]
 struct AckState {
     pending: AtomicUsize,
@@ -38,6 +43,13 @@ struct AckState {
     alive_counter: AtomicU64,
     alive_tx: watch::Sender<u64>,
     sender: Mutex<Option<oneshot::Sender<AckOutcome>>>,
+    root_tracker: Option<Arc<AckRootTracker>>,
+}
+
+impl AckRootTracker {
+    pub fn outstanding(&self) -> usize {
+        self.outstanding.load(Ordering::Acquire)
+    }
 }
 
 impl AckCompletion {
@@ -74,6 +86,15 @@ impl AckCompletion {
 
 impl AckHandle {
     pub fn root() -> (Self, AckCompletion) {
+        Self::new_root(None)
+    }
+
+    fn tracked_root(tracker: Arc<AckRootTracker>) -> (Self, AckCompletion) {
+        tracker.outstanding.fetch_add(1, Ordering::AcqRel);
+        Self::new_root(Some(tracker))
+    }
+
+    fn new_root(root_tracker: Option<Arc<AckRootTracker>>) -> (Self, AckCompletion) {
         let (sender, receiver) = oneshot::channel();
         let (alive_tx, alive_rx) = watch::channel(0);
         (
@@ -83,6 +104,7 @@ impl AckHandle {
                 alive_counter: AtomicU64::new(0),
                 alive_tx,
                 sender: Mutex::new(Some(sender)),
+                root_tracker,
             })),
             AckCompletion { receiver, alive_rx },
         )
@@ -131,8 +153,21 @@ impl AckHandle {
             return;
         }
 
+        if let Some(tracker) = &self.0.root_tracker {
+            tracker.outstanding.fetch_sub(1, Ordering::AcqRel);
+        }
         if let Some(sender) = self.0.sender.lock().take() {
             let _ = sender.send(result);
+        }
+    }
+}
+
+impl Drop for AckState {
+    fn drop(&mut self) {
+        if !self.completed.load(Ordering::Acquire)
+            && let Some(tracker) = &self.root_tracker
+        {
+            tracker.outstanding.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -144,6 +179,16 @@ impl AckSet {
 
     pub fn root() -> (Self, AckCompletion) {
         let (handle, completion) = AckHandle::root();
+        (
+            Self {
+                handles: vec![handle],
+            },
+            completion,
+        )
+    }
+
+    pub fn tracked_root(tracker: Arc<AckRootTracker>) -> (Self, AckCompletion) {
+        let (handle, completion) = AckHandle::tracked_root(tracker);
         (
             Self {
                 handles: vec![handle],
@@ -208,8 +253,9 @@ impl AckSet {
 #[cfg(test)]
 mod tests {
     use tokio::time::{Duration, timeout};
+    use triomphe::Arc;
 
-    use super::{AckOutcome, AckProgress, AckSet};
+    use super::{AckOutcome, AckProgress, AckRootTracker, AckSet};
 
     #[tokio::test]
     async fn root_completes_after_manual_ack() {
@@ -218,6 +264,32 @@ mod tests {
         acks.ack_success();
 
         assert_eq!(completion.wait().await, AckOutcome::Ack);
+    }
+
+    #[tokio::test]
+    async fn tracked_root_counts_until_terminal_completion() {
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::tracked_root(tracker.clone());
+        let attached = acks.attached();
+
+        assert_eq!(tracker.outstanding(), 1);
+        acks.ack_success();
+        assert_eq!(tracker.outstanding(), 1);
+        attached.ack_success();
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        assert_eq!(tracker.outstanding(), 0);
+    }
+
+    #[test]
+    fn dropping_unresolved_tracked_root_releases_count() {
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::tracked_root(tracker.clone());
+        assert_eq!(tracker.outstanding(), 1);
+
+        drop(acks);
+        drop(completion);
+
+        assert_eq!(tracker.outstanding(), 0);
     }
 
     #[tokio::test]

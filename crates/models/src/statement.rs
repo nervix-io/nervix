@@ -6,7 +6,8 @@ use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, Into
 use thiserror::Error;
 
 use crate::{
-    CreateSchema, CreateUdf, CreateWireSchemaStmt, Domain, Identifier, ParseAsType, Timestamp,
+    AlterSchema, AlterWireSchemaStmt, CreateSchema, CreateUdf, CreateWireSchemaStmt, Domain,
+    Identifier, ParseAsType, Timestamp,
 };
 
 pub type DomainId = Domain;
@@ -20,6 +21,8 @@ pub enum Statement {
     StartDomain(StartDomain),
     StopDomain(StopDomain),
     Create(CreateStatement<Box<Model>>),
+    AlterSchema(AlterSchema),
+    AlterWireSchema(AlterWireSchemaStmt),
     AlterRelay(AlterRelay),
     Drop(DropModel),
     DropNode(DropNode),
@@ -45,6 +48,47 @@ pub enum Statement {
     ShowUdfs(ShowUdfs),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowClusterStatus(ShowClusterStatus),
+}
+
+impl Statement {
+    pub fn is_model_mutation(&self) -> bool {
+        match self {
+            Self::Create(_)
+            | Self::AlterSchema(_)
+            | Self::AlterWireSchema(_)
+            | Self::AlterRelay(_)
+            | Self::Drop(_) => true,
+            Self::CreateDomain(_)
+            | Self::CreateUser(_)
+            | Self::CreateResource(_)
+            | Self::UploadResource(_)
+            | Self::StartDomain(_)
+            | Self::StopDomain(_)
+            | Self::DropNode(_)
+            | Self::CordonNode(_)
+            | Self::UncordonNode(_)
+            | Self::DrainNode(_)
+            | Self::DescribeRelay(_)
+            | Self::DescribeDomain(_)
+            | Self::DescribeIngestor(_)
+            | Self::DescribeResource(_)
+            | Self::DescribeLookup(_)
+            | Self::DescribeEndpoint(_)
+            | Self::DescribeDeduplicator(_)
+            | Self::DescribeReingestor(_)
+            | Self::DescribeCorrelator(_)
+            | Self::DescribeReorderer(_)
+            | Self::DescribeEmitter(_)
+            | Self::DescribeWindowProcessor(_)
+            | Self::DescribeWasmProcessor(_)
+            | Self::DescribeUdf(_)
+            | Self::LookupQuery(_)
+            | Self::ShowCreate(_)
+            | Self::ShowUdfs(_)
+            | Self::ShowRelayMaterializedState(_)
+            | Self::ShowClusterStatus(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +307,7 @@ pub enum DomainStartPoint {
 pub enum DomainStatus {
     Stopped,
     Running,
+    Paused,
 }
 
 #[derive(
@@ -2096,6 +2141,8 @@ pub struct ScheduledNode {
     pub config: Box<Model>,
     pub effective_branching: Option<Vec<Identifier>>,
     pub effective_branching_schema: Option<Identifier>,
+    #[serde(default)]
+    pub schema_fingerprint: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_partition_schedule: Option<KafkaPartitionSchedule>,
     #[serde(default)]
@@ -2442,6 +2489,7 @@ mod tests {
             })),
             effective_branching: Some(vec![identifier("tenant")]),
             effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string()],
@@ -2474,6 +2522,7 @@ mod tests {
             })),
             effective_branching: None,
             effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string()],
@@ -2519,6 +2568,7 @@ mod tests {
             })),
             effective_branching: None,
             effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec![
@@ -2557,6 +2607,7 @@ mod tests {
             })),
             effective_branching: None,
             effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],
@@ -2583,6 +2634,7 @@ mod tests {
             })),
             effective_branching: None,
             effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some("node-a".to_string()),
             assigned_nodes: vec!["node-a".to_string(), "node-b".to_string()],

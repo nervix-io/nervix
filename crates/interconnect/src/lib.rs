@@ -129,6 +129,8 @@ pub enum ControlEnvelope {
     DescribeIngestorResponse(DescribeIngestorResponse),
     DataflowNodeStatusRequest(DataflowNodeStatusRequest),
     DataflowNodeStatusResponse(DataflowNodeStatusResponse),
+    DomainDrainStatusRequest(DomainDrainStatusRequest),
+    DomainDrainStatusResponse(DomainDrainStatusResponse),
     DescribeMetricsRequest(DescribeMetricsRequest),
     DescribeMetricsResponse(DescribeMetricsResponse),
     DescribeRelayRequest(DescribeRelayRequest),
@@ -177,12 +179,14 @@ pub struct StatePlacementEnvelope {
     pub state: RuntimeStateKind,
     pub kind: ModelKind,
     pub identifier: Identifier,
+    pub schema_fingerprint: [u8; 32],
     pub branch_key: Option<Vec<RemoteRuntimeField>>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateSnapshotEnvelope {
     pub lsm: u64,
+    pub schema_fingerprint: [u8; 32],
     pub payload: Vec<u8>,
 }
 
@@ -247,6 +251,26 @@ pub struct DataflowNodeStatusRequest {
 pub struct DataflowNodeStatusResponse {
     pub correlation_id: u64,
     pub result: Result<DataflowNodeStatusEnvelope, String>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DomainDrainStatusEnvelope {
+    pub active_ingestors: u64,
+    pub active_generators: u64,
+    pub outstanding_acks: u64,
+    pub buffered_emitter_messages: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DomainDrainStatusRequest {
+    pub correlation_id: u64,
+    pub domain: Domain,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DomainDrainStatusResponse {
+    pub correlation_id: u64,
+    pub result: Result<DomainDrainStatusEnvelope, String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

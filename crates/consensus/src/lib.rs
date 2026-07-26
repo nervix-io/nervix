@@ -59,6 +59,12 @@ pub enum ConsensusCommand {
     StopDomain {
         domain_id: DomainId,
     },
+    PauseDomain {
+        domain_id: DomainId,
+    },
+    ResumeDomain {
+        domain_id: DomainId,
+    },
     CreateUser {
         user: Box<UserCredentials>,
     },
@@ -102,6 +108,8 @@ impl std::fmt::Display for ConsensusCommand {
             Self::PutDomain { domain } => write!(f, "put-domain:{}", domain.id.as_str()),
             Self::StartDomain { domain_id, .. } => write!(f, "start-domain:{}", domain_id.as_str()),
             Self::StopDomain { domain_id } => write!(f, "stop-domain:{}", domain_id.as_str()),
+            Self::PauseDomain { domain_id } => write!(f, "pause-domain:{}", domain_id.as_str()),
+            Self::ResumeDomain { domain_id } => write!(f, "resume-domain:{}", domain_id.as_str()),
             Self::CreateUser { user } => write!(f, "create-user:{}", user.name.as_str()),
             Self::CreateResourceCatalog { identifier } => {
                 write!(f, "create-resource-catalog:{identifier}")
@@ -678,6 +686,22 @@ impl ConsensusHandle {
     pub async fn stop_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
         self.raft
             .client_write(ConsensusCommand::StopDomain { domain_id })
+            .await
+            .map(|_| ())
+            .map_err(Self::map_write_error)
+    }
+
+    pub async fn pause_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
+        self.raft
+            .client_write(ConsensusCommand::PauseDomain { domain_id })
+            .await
+            .map(|_| ())
+            .map_err(Self::map_write_error)
+    }
+
+    pub async fn resume_domain(&self, domain_id: DomainId) -> Result<(), ConsensusError> {
+        self.raft
+            .client_write(ConsensusCommand::ResumeDomain { domain_id })
             .await
             .map(|_| ())
             .map_err(Self::map_write_error)
@@ -1635,6 +1659,20 @@ fn apply_consensus_command(state: &mut StateMachineData, command: &ConsensusComm
                 domain.status = DomainStatus::Stopped;
             }
         }
+        ConsensusCommand::PauseDomain { domain_id } => {
+            if let Some(domain) = state.domains.get_mut(domain_id)
+                && let DomainStatus::Running = domain.status
+            {
+                domain.status = DomainStatus::Paused;
+            }
+        }
+        ConsensusCommand::ResumeDomain { domain_id } => {
+            if let Some(domain) = state.domains.get_mut(domain_id)
+                && let DomainStatus::Paused = domain.status
+            {
+                domain.status = DomainStatus::Running;
+            }
+        }
         ConsensusCommand::CreateUser { user } => {
             state
                 .users
@@ -1765,7 +1803,8 @@ fn write_key<T: Serialize>(keyspace: &Keyspace, key: &[u8], value: &T) -> io::Re
 mod tests {
     use fjall::Database;
     use nervix_models::{
-        Domain, DomainSchedule, Identifier, ResourceId, ResourceNodeState, ResourceNodeStatus,
+        Domain, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
+        DomainStatus, Identifier, ResourceId, ResourceNodeState, ResourceNodeStatus,
         ResourceReplicaKey, ResourceVersion, ResourceVersionStatus,
     };
     use tempfile::tempdir;
@@ -1785,6 +1824,20 @@ mod tests {
         DomainSchedule {
             domain: domain(raw),
             nodes: Vec::new(),
+        }
+    }
+
+    fn running_domain_state(raw: &str) -> DomainState {
+        DomainState {
+            id: domain(raw),
+            config: DomainConfig {
+                pace: DomainPace::Unpaced,
+                period: "1s".to_string(),
+                skew: "0ms".to_string(),
+            },
+            status: DomainStatus::Running,
+            start_version: 7,
+            last_start: DomainStartPoint::Resume,
         }
     }
 
@@ -1899,6 +1952,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["alpha"]
         );
+    }
+
+    #[test]
+    fn pause_and_resume_preserve_domain_start_state() {
+        let domain = domain("tenant");
+        let original = running_domain_state("tenant");
+        let mut state = StateMachineData::default();
+        state.domains.insert(domain.clone(), original.clone());
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::PauseDomain {
+                domain_id: domain.clone(),
+            },
+        );
+        let paused = state.domains.get(&domain).expect("domain should remain");
+        assert_eq!(paused.status, DomainStatus::Paused);
+        assert_eq!(paused.start_version, original.start_version);
+        assert_eq!(paused.last_start, original.last_start);
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ResumeDomain {
+                domain_id: domain.clone(),
+            },
+        );
+        let resumed = state.domains.get(&domain).expect("domain should remain");
+        assert_eq!(resumed.status, DomainStatus::Running);
+        assert_eq!(resumed.start_version, original.start_version);
+        assert_eq!(resumed.last_start, original.last_start);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    AssignmentTargetScope, AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction,
-    BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
+    AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
+    AlterWireSchemaStmt, AssignmentTargetScope, AvroType, AzureBlobConfigEntry, BinaryOperator,
+    BranchEviction, BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
     CodecEncodingRule, CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction,
     CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
@@ -429,12 +430,37 @@ impl CreateSchema {
     }
 }
 
+impl AlterSchema {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_schema_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER SCHEMA {} {operations};",
+            self.schema.as_str()
+        ))
+    }
+}
+
 impl CreateWireSchemaStmt {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         match self {
             Self::Json(schema) => wire_schema_to_nspl("JSON", schema),
             Self::Cbor(schema) => wire_schema_to_nspl("CBOR", schema),
             Self::Avro(schema) => wire_schema_to_nspl("AVRO", schema),
+        }
+    }
+}
+
+impl AlterWireSchemaStmt {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        match self {
+            Self::Json(alter) => alter_wire_schema_to_nspl("JSON", alter),
+            Self::Cbor(alter) => alter_wire_schema_to_nspl("CBOR", alter),
+            Self::Avro(alter) => alter_wire_schema_to_nspl("AVRO", alter),
         }
     }
 }
@@ -1555,6 +1581,37 @@ fn schema_field_to_nspl(field: &SchemaField) -> Result<String, CanonicalNsplErro
     ))
 }
 
+fn alter_schema_operation_to_nspl(
+    operation: &AlterSchemaOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterSchemaOperation::AddField { field } => {
+            Ok(format!("ADD FIELD {}", schema_field_to_nspl(field)?))
+        }
+        AlterSchemaOperation::DropField { field } => Ok(format!("DROP FIELD {}", field.as_str())),
+        AlterSchemaOperation::RenameField { field, to } => Ok(format!(
+            "RENAME FIELD {} TO {}",
+            field.as_str(),
+            to.as_str()
+        )),
+        AlterSchemaOperation::SetFieldType { field, ty } => Ok(format!(
+            "ALTER FIELD {} SET TYPE {}",
+            field.as_str(),
+            parse_as_to_keyword(ty)
+        )),
+        AlterSchemaOperation::SetFieldOptional { field, optional } => Ok(format!(
+            "ALTER FIELD {} {} OPTIONAL",
+            field.as_str(),
+            if *optional { "SET" } else { "DROP" }
+        )),
+        AlterSchemaOperation::SetFieldSensitive { field, sensitive } => Ok(format!(
+            "ALTER FIELD {} {} SENSITIVE",
+            field.as_str(),
+            if *sensitive { "SET" } else { "DROP" }
+        )),
+    }
+}
+
 fn sensitive_suffix(sensitive: bool) -> &'static str {
     if sensitive { " SENSITIVE" } else { "" }
 }
@@ -1579,6 +1636,59 @@ where
         schema.name.as_str(),
         fields
     ))
+}
+
+fn alter_wire_schema_to_nspl<T>(
+    format_kw: &str,
+    alter: &AlterWireSchema<T>,
+) -> Result<String, CanonicalNsplError>
+where
+    T: NativeTypeToNspl,
+{
+    let operations = alter
+        .operations
+        .iter()
+        .map(alter_wire_schema_operation_to_nspl::<T>)
+        .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+        .join(", ");
+    Ok(format!(
+        "ALTER WIRE {format_kw} SCHEMA {} {operations};",
+        alter.schema.as_str()
+    ))
+}
+
+fn alter_wire_schema_operation_to_nspl<T>(
+    operation: &AlterWireSchemaOperation<T>,
+) -> Result<String, CanonicalNsplError>
+where
+    T: NativeTypeToNspl,
+{
+    match operation {
+        AlterWireSchemaOperation::AddField { field } => {
+            Ok(format!("ADD FIELD {}", wire_schema_field_to_nspl(field)?))
+        }
+        AlterWireSchemaOperation::DropField { field } => {
+            Ok(format!("DROP FIELD {}", field.as_str()))
+        }
+        AlterWireSchemaOperation::RenameField { field, to } => Ok(format!(
+            "RENAME FIELD {} TO {}",
+            field.as_str(),
+            to.as_str()
+        )),
+        AlterWireSchemaOperation::SetFieldType { field, ty } => Ok(format!(
+            "ALTER FIELD {} SET TYPE {}",
+            field.as_str(),
+            ty.to_nspl_keyword()
+        )),
+        AlterWireSchemaOperation::SetFieldOptional { field, optional } => Ok(format!(
+            "ALTER FIELD {} {} OPTIONAL",
+            field.as_str(),
+            if *optional { "SET" } else { "DROP" }
+        )),
+        AlterWireSchemaOperation::SetStrictness { strictness } => {
+            Ok(format!("SET {}", strictness.as_ref()))
+        }
+    }
 }
 
 fn wire_schema_field_to_nspl<T>(field: &WireSchemaField<T>) -> Result<String, CanonicalNsplError>

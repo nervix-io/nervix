@@ -9,7 +9,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc as StdArc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -70,7 +70,9 @@ use nervix_interconnect::{
     DescribeMetricsResponse as RemoteDescribeMetricsResponse,
     DescribeRelayRequest as RemoteDescribeRelayRequest,
     DescribeRelayResponse as RemoteDescribeRelayResponse, DomainClockStart, DomainClockStop,
-    DomainTickEnvelope, Envelope, IngestorDescribeEnvelope, LocalIdentity, LookupDescribeEnvelope,
+    DomainDrainStatusEnvelope, DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
+    DomainDrainStatusResponse as RemoteDomainDrainStatusResponse, DomainTickEnvelope, Envelope,
+    IngestorDescribeEnvelope, LocalIdentity, LookupDescribeEnvelope,
     LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse, PeerVerifier,
     StateSyncResponse as RemoteStateSyncResponse, TlsConfigBundle, Transport,
     TransportMode as InterconnectTransportMode,
@@ -142,7 +144,7 @@ use tokio_tungstenite::{
     tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
 };
 
-use crate::registry::{ActiveGraph, Registry, RegistryError};
+use crate::registry::{ActiveGraph, Registry, RegistryError, RegistryMutation};
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
@@ -338,6 +340,7 @@ static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 struct SessionSubscription {
     domain: Domain,
     relay: Identifier,
+    active: Arc<AtomicBool>,
     stop_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -489,6 +492,8 @@ impl SessionSubscriptions {
             tx,
         } = config;
         let (stop_tx, mut stop_rx) = watch::channel(false);
+        let active = Arc::new(AtomicBool::new(true));
+        let task_active = active.clone();
         let task_domain = domain.clone();
         let event_name = name.clone();
         let event_stream = relay.clone();
@@ -622,7 +627,26 @@ impl SessionSubscriptions {
                                     }
                                 }
                             }
-                            Err(RelaySubscriptionRecvError::Closed) => break 'subscription_loop,
+                            Err(RelaySubscriptionRecvError::Closed) => {
+                                let event = SessionResponse {
+                                    event: Some(proto::session_response::Event::Server(
+                                        ServerEvent {
+                                            level: ServerEventLevel::Error as i32,
+                                            message: format!(
+                                                "session subscription '{}' was dropped because \
+                                                 relay '{}' in domain '{}' was rebuilt after a \
+                                                 schema or execution change; recreate the \
+                                                 subscription against the current schema",
+                                                event_name,
+                                                event_stream,
+                                                task_domain,
+                                            ),
+                                        },
+                                    )),
+                                };
+                                let _ = tx.send(Ok(event)).await;
+                                break 'subscription_loop;
+                            }
                             Err(RelaySubscriptionRecvError::Overflowed(_)) => continue,
                         }
                     }
@@ -633,6 +657,7 @@ impl SessionSubscriptions {
                     }
                 }
             }
+            task_active.store(false, Ordering::Release);
         });
 
         self.subscriptions.insert(
@@ -640,6 +665,7 @@ impl SessionSubscriptions {
             SessionSubscription {
                 domain,
                 relay,
+                active,
                 stop_tx,
                 task,
             },
@@ -647,16 +673,27 @@ impl SessionSubscriptions {
     }
 
     fn contains_domain_stream(&self, domain: &Domain, relay: &Identifier) -> bool {
+        self.subscriptions.values().any(|subscription| {
+            subscription.active.load(Ordering::Acquire)
+                && subscription.domain == *domain
+                && subscription.relay == *relay
+        })
+    }
+
+    fn contains_name(&self, name: &Identifier) -> bool {
         self.subscriptions
-            .values()
-            .any(|subscription| subscription.domain == *domain && subscription.relay == *relay)
+            .get(name)
+            .is_some_and(|subscription| subscription.active.load(Ordering::Acquire))
     }
 
     fn matching_names(&self, prefix: &str) -> Vec<String> {
         let prefix = prefix.to_ascii_lowercase();
         self.subscriptions
             .keys()
-            .filter(|name| prefix.is_empty() || name.as_str().starts_with(&prefix))
+            .filter(|name| {
+                self.contains_name(name)
+                    && (prefix.is_empty() || name.as_str().starts_with(&prefix))
+            })
             .map(ToString::to_string)
             .collect()
     }
@@ -2750,6 +2787,7 @@ enum PendingClusterCommand {
     DescribeRelay(oneshot::Sender<Result<bool, String>>),
     DescribeIngestor(oneshot::Sender<Result<IngestorDescribeEnvelope, String>>),
     DataflowNodeStatus(oneshot::Sender<Result<DataflowNodeStatusEnvelope, String>>),
+    DomainDrainStatus(oneshot::Sender<Result<DomainDrainStatusEnvelope, String>>),
     DescribeMetrics(oneshot::Sender<Result<Vec<String>, String>>),
     DescribeLookup(oneshot::Sender<Result<LookupDescribeEnvelope, String>>),
     LookupQuery(oneshot::Sender<Result<Option<runtime_schema::DecodedRecord>, String>>),
@@ -4867,6 +4905,247 @@ impl SessionServiceImpl {
         }
     }
 
+    fn local_domain_drain_status(&self, domain: &Domain) -> DomainDrainStatusEnvelope {
+        let status = self.runtime.domain_drain_status(domain);
+        DomainDrainStatusEnvelope {
+            active_ingestors: u64::try_from(status.active_ingestors).unwrap_or(u64::MAX),
+            active_generators: u64::try_from(status.active_generators).unwrap_or(u64::MAX),
+            outstanding_acks: u64::try_from(status.outstanding_acks).unwrap_or(u64::MAX),
+            buffered_emitter_messages: u64::try_from(status.buffered_emitter_messages)
+                .unwrap_or(u64::MAX),
+        }
+    }
+
+    async fn domain_drain_status_on_node(
+        &self,
+        node_id: &str,
+        domain: &Domain,
+    ) -> Result<DomainDrainStatusEnvelope, String> {
+        if node_id == self.consensus.local_node_id() {
+            self.runtime.force_flush_domain(domain);
+            return Ok(self.local_domain_drain_status(domain));
+        }
+        let correlation_id = self.next_cluster_command_correlation_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending_cluster_commands
+            .insert(correlation_id, PendingClusterCommand::DomainDrainStatus(tx));
+        if let Err(error) = self
+            .dispatch_interconnect_control(
+                node_id,
+                ControlEnvelope::DomainDrainStatusRequest(RemoteDomainDrainStatusRequest {
+                    correlation_id,
+                    domain: domain.clone(),
+                }),
+            )
+            .await
+        {
+            self.pending_cluster_commands.remove(&correlation_id);
+            return Err(error);
+        }
+        match tokio::time::timeout(Duration::from_secs(2), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(format!(
+                "node '{}' closed the domain drain status request",
+                node_id
+            )),
+            Err(_) => {
+                self.pending_cluster_commands.remove(&correlation_id);
+                Err(format!(
+                    "node '{}' timed out reporting domain drain status",
+                    node_id
+                ))
+            }
+        }
+    }
+
+    fn handle_domain_drain_status_response(&self, response: RemoteDomainDrainStatusResponse) {
+        if let Some((_, PendingClusterCommand::DomainDrainStatus(sender))) = self
+            .pending_cluster_commands
+            .remove(&response.correlation_id)
+        {
+            let _ = sender.send(response.result);
+        }
+    }
+
+    async fn pause_and_drain_domain_for_schema_change(
+        &self,
+        domain: &Domain,
+    ) -> Result<(), String> {
+        if !self.runtime.begin_schema_change(domain) {
+            return Err(format!(
+                "domain '{}' already has a schema migration in progress",
+                domain.as_str()
+            ));
+        }
+        if let Err(error) = self.consensus.pause_domain(domain.clone()).await {
+            self.runtime.finish_schema_change(domain);
+            return Err(format!(
+                "failed to pause domain '{}' for schema change: {error}",
+                domain.as_str()
+            ));
+        }
+
+        self.runtime
+            .sync_domains(&self.consensus.current_domains().await);
+        if let Err(error) = self
+            .runtime
+            .apply_cluster_schedule(
+                self.consensus.local_node_id(),
+                &self.consensus.current_schedule().await,
+            )
+            .await
+        {
+            return Err(self
+                .abort_schema_change_pause(
+                    domain,
+                    format!(
+                        "failed to stop ingestion in domain '{}' for schema change: {error}",
+                        domain.as_str()
+                    ),
+                )
+                .await);
+        }
+
+        match self.wait_for_paused_domain_drain(domain).await {
+            Ok(()) => Ok(()),
+            Err(reason) => Err(self.abort_schema_change_pause(domain, reason).await),
+        }
+    }
+
+    async fn wait_for_paused_domain_drain(&self, domain: &Domain) -> Result<(), String> {
+        let mut nodes = self.cluster.live_node_ids().await;
+        if !nodes
+            .iter()
+            .any(|node| node == self.consensus.local_node_id())
+        {
+            nodes.push(self.consensus.local_node_id().to_string());
+        }
+        nodes.sort();
+        nodes.dedup();
+
+        let deadline = tokio::time::Instant::now() + self.runtime.domain_drain_timeout();
+        let mut polling = interval(Duration::from_millis(50));
+        polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_pending = None::<(String, DomainDrainStatusEnvelope)>;
+
+        loop {
+            tokio::task::consume_budget().await;
+            polling.tick().await;
+            let mut all_drained = true;
+            for node in &nodes {
+                tokio::task::consume_budget().await;
+                match self.domain_drain_status_on_node(node, domain).await {
+                    Ok(status)
+                        if status.active_ingestors == 0
+                            && status.active_generators == 0
+                            && status.outstanding_acks == 0
+                            && status.buffered_emitter_messages == 0 => {}
+                    Ok(status) => {
+                        all_drained = false;
+                        last_pending = Some((node.clone(), status));
+                    }
+                    Err(error) => {
+                        all_drained = false;
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            if all_drained {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() < deadline {
+                continue;
+            }
+
+            let reason = if let Some((node, status)) = last_pending {
+                let outstanding = status
+                    .active_ingestors
+                    .saturating_add(status.active_generators)
+                    .saturating_add(status.outstanding_acks)
+                    .saturating_add(status.buffered_emitter_messages);
+                format!(
+                    "timed out draining domain '{}' on node '{}': {} outstanding work item(s) \
+                     (ingestors={}, generators={}, acknowledgements={}, emitter_buffers={})",
+                    domain.as_str(),
+                    node,
+                    outstanding,
+                    status.active_ingestors,
+                    status.active_generators,
+                    status.outstanding_acks,
+                    status.buffered_emitter_messages,
+                )
+            } else {
+                format!(
+                    "timed out draining domain '{}' because no node reported drain status",
+                    domain.as_str()
+                )
+            };
+            return Err(reason);
+        }
+    }
+
+    async fn abort_schema_change_pause(&self, domain: &Domain, reason: String) -> String {
+        match self.resume_domain_after_schema_change(domain).await {
+            Ok(()) => reason,
+            Err(resume_error) => format!("{reason}; automatic resume failed: {resume_error}"),
+        }
+    }
+
+    async fn resume_domain_after_schema_change(&self, domain: &Domain) -> Result<(), String> {
+        let result = async {
+            self.consensus
+                .resume_domain(domain.clone())
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed to resume domain '{}' after schema change: {error}",
+                        domain.as_str()
+                    )
+                })?;
+            self.runtime
+                .sync_domains(&self.consensus.current_domains().await);
+            self.runtime
+                .apply_cluster_schedule(
+                    self.consensus.local_node_id(),
+                    &self.consensus.current_schedule().await,
+                )
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed to restore ingestion in domain '{}' after schema change: {error}",
+                        domain.as_str()
+                    )
+                })
+        }
+        .await;
+        self.runtime.finish_schema_change(domain);
+        result
+    }
+
+    async fn rollback_schema_change_and_resume(
+        &self,
+        domain: &Domain,
+        planned: crate::registry::PlannedMutations,
+    ) -> Result<(), String> {
+        let rollback_result = async {
+            let runtime_changes = self
+                .registry
+                .rollback_committed(planned)
+                .map_err(|error| format!("registry rollback failed: {error}"))?;
+            self.publish_domain_schedule(domain, runtime_changes.graph)
+                .await
+                .map_err(|error| format!("old schedule restore failed: {error}"))
+        }
+        .await;
+        if let Err(error) = rollback_result {
+            self.runtime.finish_schema_change(domain);
+            return Err(error);
+        }
+        self.resume_domain_after_schema_change(domain).await
+    }
+
     async fn describe_metrics_for_scheduled_node(
         &self,
         domain: &Domain,
@@ -5976,46 +6255,35 @@ impl SessionServiceImpl {
 
         while let Some(command) = commands.next() {
             match command.statement {
-                ClientStatement::Server(Statement::Create(create)) => {
+                ClientStatement::Server(statement) if statement.is_model_mutation() => {
                     let domain = command.domain;
                     let mut sources = vec![command.source];
-                    let mut creates = vec![create];
+                    let mut statements = vec![statement];
 
                     while let Some(next) = commands.peek() {
                         if next.domain != domain {
                             break;
                         }
-                        let ClientStatement::Server(Statement::Create(_)) = &next.statement else {
+                        let ClientStatement::Server(statement) = &next.statement else {
                             break;
                         };
+                        if !statement.is_model_mutation() {
+                            break;
+                        }
                         let next = commands
                             .next()
                             .expect("peeked command must still be available");
-                        let ClientStatement::Server(Statement::Create(create)) = next.statement
-                        else {
-                            unreachable!("peeked create statement must be next");
+                        let ClientStatement::Server(statement) = next.statement else {
+                            unreachable!("peeked model mutation statement must be next");
                         };
                         sources.push(next.source);
-                        creates.push(create);
+                        statements.push(statement);
                     }
 
-                    let create_query = sources.join("; ");
-                    let result =
-                        if creates.len() == 1 {
-                            self.process_client_statement(
-                                ClientStatement::Server(Statement::Create(creates.pop().expect(
-                                    "single create batch must contain one create statement",
-                                ))),
-                                &create_query,
-                                &domain,
-                                tx,
-                                subscriptions,
-                            )
-                            .await
-                        } else {
-                            self.process_create_model_batch(creates, &create_query, &domain)
-                                .await
-                        };
+                    let mutation_query = sources.join("; ");
+                    let result = self
+                        .process_model_mutation_batch(statements, &mutation_query, &domain)
+                        .await;
                     if !result.success {
                         return command_batch_result(results, result, is_batch);
                     }
@@ -6083,9 +6351,9 @@ impl SessionServiceImpl {
             .map(Some)
     }
 
-    async fn process_create_model_batch(
+    async fn process_model_mutation_batch(
         &self,
-        creates: Vec<CreateStatement<Box<Model>>>,
+        statements: Vec<Statement>,
         query: &str,
         request_domain: &str,
     ) -> CommandResult {
@@ -6107,76 +6375,149 @@ impl SessionServiceImpl {
         let Some(domain_state) = self.consensus.current_domain(&domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
+        if let DomainStatus::Paused = domain_state.status {
+            return command_error(format!(
+                "domain '{}' is paused by a schema migration",
+                domain.as_str()
+            ));
+        }
         if let Err(error) = self.reconcile_running_domain_runtime(&domain).await {
             return command_error(error);
         }
 
-        let mut results = vec![None; creates.len()];
-        let mut models = Vec::new();
-        let mut created = Vec::new();
+        let mut results = vec![None; statements.len()];
+        let mut mutations = Vec::new();
+        let mut applied = Vec::new();
         let mut created_udfs = Vec::new();
+        let mut refresh_http_tls = false;
 
-        for (index, create) in creates.into_iter().enumerate() {
-            let if_not_exists = create.if_not_exists;
-            let model = create.body;
-            let model_id = model.identifier().clone();
-            let model_kind = model.kind();
-            if let Ok(Some(_)) = self.registry.get(&domain, model_kind, &model_id)
-                && if_not_exists
-            {
-                results[index] = Some(command_ok_already_existed(format!(
-                    "model '{}' already exists in domain '{}'",
-                    model_id.as_str(),
-                    domain.as_str()
-                )));
-                continue;
-            }
+        for (index, statement) in statements.into_iter().enumerate() {
+            match statement {
+                Statement::Create(create) => {
+                    let if_not_exists = create.if_not_exists;
+                    let model = create.body;
+                    let model_id = model.identifier().clone();
+                    let model_kind = model.kind();
+                    if let Ok(Some(_)) = self.registry.get(&domain, model_kind, &model_id)
+                        && if_not_exists
+                    {
+                        results[index] = Some(command_ok_already_existed(format!(
+                            "model '{}' already exists in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        )));
+                        continue;
+                    }
 
-            if let Model::Ingestor(ingestor) = model.as_ref()
-                && let DomainPace::Paced = domain_state.config.pace
-                && ingestor.timestamp_source.is_none()
-            {
-                return command_error(format!(
-                    "paced domain '{}' requires ingestor '{}' to declare TIMESTAMP NOW or \
-                     TIMESTAMP AT <field>",
-                    domain.as_str(),
-                    ingestor.name.as_str()
-                ));
+                    if let Model::Ingestor(ingestor) = model.as_ref()
+                        && let DomainPace::Paced = domain_state.config.pace
+                        && ingestor.timestamp_source.is_none()
+                    {
+                        return command_error(format!(
+                            "paced domain '{}' requires ingestor '{}' to declare TIMESTAMP NOW or \
+                             TIMESTAMP AT <field>",
+                            domain.as_str(),
+                            ingestor.name.as_str()
+                        ));
+                    }
+                    if let Model::Vhost(vhost) = model.as_ref()
+                        && let Some(tls) = vhost.tls.as_ref()
+                        && let Err(error) = self.validate_vhost_tls_binding(tls).await
+                    {
+                        return command_error(format!(
+                            "invalid TLS resource for VHOST '{}': {error}",
+                            vhost.name.as_str()
+                        ));
+                    }
+                    if let Model::Lookup(lookup) = model.as_ref()
+                        && let Err(error) = self.validate_lookup_binding(lookup).await
+                    {
+                        return command_error(format!(
+                            "invalid HASH MAP '{}': {error}",
+                            lookup.name.as_str()
+                        ));
+                    }
+                    if let Model::Inferencer(processor) = model.as_ref()
+                        && let Err(error) = self.validate_inferencer_binding(processor).await
+                    {
+                        return command_error(format!(
+                            "invalid INFERENCER '{}': {error}",
+                            processor.name.as_str()
+                        ));
+                    }
+                    if let Model::Udf(udf) = model.as_ref() {
+                        created_udfs.push(udf.clone());
+                    }
+                    refresh_http_tls |= model_kind == ModelKind::Vhost;
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "stored model '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::Create(model));
+                }
+                Statement::AlterSchema(alter) => {
+                    let model_id = alter.schema.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered schema '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterSchema(alter));
+                }
+                Statement::AlterWireSchema(alter) => {
+                    let model_id = alter.schema().clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered wire schema '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterWireSchema(alter));
+                }
+                Statement::AlterRelay(alter) => {
+                    let model_id = alter.relay.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered relay '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterRelay(alter));
+                }
+                Statement::Drop(drop) => {
+                    let model_id = drop.name.clone();
+                    refresh_http_tls |= drop.kind == ModelKind::Vhost;
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "dropped model '{}' from domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::Drop(drop));
+                }
+                _ => unreachable!("model mutation batch contains a non-mutation statement"),
             }
-            if let Model::Vhost(vhost) = model.as_ref()
-                && let Some(tls) = vhost.tls.as_ref()
-                && let Err(error) = self.validate_vhost_tls_binding(tls).await
-            {
-                return command_error(format!(
-                    "invalid TLS resource for VHOST '{}': {error}",
-                    vhost.name.as_str()
-                ));
-            }
-            if let Model::Lookup(lookup) = model.as_ref()
-                && let Err(error) = self.validate_lookup_binding(lookup).await
-            {
-                return command_error(format!(
-                    "invalid HASH MAP '{}': {error}",
-                    lookup.name.as_str()
-                ));
-            }
-            if let Model::Inferencer(processor) = model.as_ref()
-                && let Err(error) = self.validate_inferencer_binding(processor).await
-            {
-                return command_error(format!(
-                    "invalid INFERENCER '{}': {error}",
-                    processor.name.as_str()
-                ));
-            }
-            if let Model::Udf(udf) = model.as_ref() {
-                created_udfs.push(udf.clone());
-            }
-
-            created.push((index, model_id, model_kind));
-            models.push(*model);
         }
 
-        if !models.is_empty() {
+        if !mutations.is_empty() {
             let prepared_udfs = match self.prepare_created_udfs(&domain, &created_udfs).await {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -6188,18 +6529,52 @@ impl SessionServiceImpl {
                     return command_error(format!("invalid UDF '{names}': {error}"));
                 }
             };
-            let error_target = created
+            let error_target = applied
                 .first()
                 .map(|(_, id, _)| id.clone())
-                .expect("non-empty model batch must have a first created model");
-            let runtime_changes = match self.registry.apply_batch(&domain, models) {
-                Ok(changes) => changes,
+                .expect("non-empty mutation batch must have a first model");
+            let requires_quiesce = if let DomainStatus::Running = domain_state.status {
+                mutations
+                    .iter()
+                    .any(RegistryMutation::requires_domain_quiesce)
+            } else {
+                false
+            };
+            let planned = match self.registry.plan_mutations(&domain, &mutations) {
+                Ok(planned) => planned,
                 Err(err) => {
                     warn!(
                         domain = domain.as_str(),
                         error = %err,
-                        "failed to apply create statement batch"
+                        "failed to plan model mutation batch"
                     );
+                    return create_registry_error_response(query, &domain, &error_target, &err);
+                }
+            };
+            if requires_quiesce
+                && let Err(error) = self.pause_and_drain_domain_for_schema_change(&domain).await
+            {
+                return command_error(error);
+            }
+            let mut rollback_plan = requires_quiesce.then(|| planned.clone());
+            let runtime_changes = match self.registry.commit_planned(planned) {
+                Ok(changes) => changes,
+                Err(err) => {
+                    let resume_error = if requires_quiesce {
+                        self.resume_domain_after_schema_change(&domain).await.err()
+                    } else {
+                        None
+                    };
+                    warn!(
+                        domain = domain.as_str(),
+                        error = %err,
+                        "failed to apply model mutation batch"
+                    );
+                    if let Some(resume_error) = resume_error {
+                        return command_error(format!(
+                            "failed to apply schema mutation batch: {err}; {resume_error}"
+                        ));
+                    }
                     return create_registry_error_response(query, &domain, &error_target, &err);
                 }
             };
@@ -6212,6 +6587,17 @@ impl SessionServiceImpl {
                 .publish_domain_schedule(&domain, runtime_changes.graph.clone())
                 .await
             {
+                if let Some(rollback_plan) = rollback_plan.take()
+                    && let Err(rollback_error) = self
+                        .rollback_schema_change_and_resume(&domain, rollback_plan)
+                        .await
+                {
+                    return command_error(format!(
+                        "failed to publish schema migration schedule for domain '{}': {err}; \
+                         {rollback_error}",
+                        domain.as_str()
+                    ));
+                }
                 self.broadcast_error(format!(
                     "schedule publish failed in domain '{}': {}",
                     domain.as_str(),
@@ -6220,7 +6606,7 @@ impl SessionServiceImpl {
                 warn!(
                     domain = domain.as_str(),
                     error = %err,
-                    "failed to publish schedule for create statement batch"
+                    "failed to publish schedule for model mutation batch"
                 );
                 return CommandResult {
                     success: false,
@@ -6238,19 +6624,36 @@ impl SessionServiceImpl {
                 };
             }
 
-            for (index, model_id, model_kind) in created {
-                if model_kind == ModelKind::Vhost
-                    && let Err(error) = self.refresh_http_tls_server_config().await
-                {
-                    self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
+            if requires_quiesce {
+                if let Err(error) = self.wait_for_paused_domain_drain(&domain).await {
+                    if let Some(rollback_plan) = rollback_plan.take()
+                        && let Err(rollback_error) = self
+                            .rollback_schema_change_and_resume(&domain, rollback_plan)
+                            .await
+                    {
+                        return command_error(format!("{error}; {rollback_error}"));
+                    }
+                    return command_error(error);
                 }
+                if let Err(error) = self.resume_domain_after_schema_change(&domain).await {
+                    if let Some(rollback_plan) = rollback_plan.take()
+                        && let Err(rollback_error) = self
+                            .rollback_schema_change_and_resume(&domain, rollback_plan)
+                            .await
+                    {
+                        return command_error(format!("{error}; {rollback_error}"));
+                    }
+                    return command_error(error);
+                }
+            }
+
+            if refresh_http_tls && let Err(error) = self.refresh_http_tls_server_config().await {
+                self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
+            }
+            for (index, _, message) in applied {
                 results[index] = Some(CommandResult {
                     success: true,
-                    message: format!(
-                        "stored model '{}' in domain '{}'",
-                        model_id.as_str(),
-                        domain.as_str()
-                    ),
+                    message,
                     diagnostics: Vec::new(),
                     kind: CommandResultKind::Ok as i32,
                     ..Default::default()
@@ -6260,7 +6663,7 @@ impl SessionServiceImpl {
 
         let results = results
             .into_iter()
-            .map(|result| result.expect("every create statement must produce a command result"))
+            .map(|result| result.expect("every mutation statement must produce a command result"))
             .collect::<Vec<_>>();
         CommandResult {
             success: true,
@@ -6328,6 +6731,11 @@ impl SessionServiceImpl {
             }
             ClientStatement::Server(statement) => statement,
         };
+        if statement.is_model_mutation() {
+            return self
+                .process_model_mutation_batch(vec![statement], query, request_domain)
+                .await;
+        }
 
         let domain = if requires_request_domain(&statement) {
             match parse_request_domain(request_domain) {
@@ -6539,6 +6947,66 @@ impl SessionServiceImpl {
                     success: true,
                     message: format!(
                         "stored model '{}' in domain '{}'",
+                        model_id.as_str(),
+                        domain.as_str()
+                    ),
+                    diagnostics: Vec::new(),
+                    kind: CommandResultKind::Ok as i32,
+                    ..Default::default()
+                }
+            }
+            Statement::AlterSchema(alter) => {
+                let domain = domain.as_ref().expect("domain required");
+                let model_id = alter.schema.clone();
+                let runtime_changes = match self.registry.alter_schema(domain, alter) {
+                    Ok(changes) => changes,
+                    Err(error) => {
+                        return create_registry_error_response(query, domain, &model_id, &error);
+                    }
+                };
+                if let Err(error) = self
+                    .publish_domain_schedule(domain, runtime_changes.graph)
+                    .await
+                {
+                    return command_error(format!(
+                        "failed to publish schedule for domain '{}': {error}",
+                        domain.as_str()
+                    ));
+                }
+                CommandResult {
+                    success: true,
+                    message: format!(
+                        "altered schema '{}' in domain '{}'",
+                        model_id.as_str(),
+                        domain.as_str()
+                    ),
+                    diagnostics: Vec::new(),
+                    kind: CommandResultKind::Ok as i32,
+                    ..Default::default()
+                }
+            }
+            Statement::AlterWireSchema(alter) => {
+                let domain = domain.as_ref().expect("domain required");
+                let model_id = alter.schema().clone();
+                let runtime_changes = match self.registry.alter_wire_schema(domain, alter) {
+                    Ok(changes) => changes,
+                    Err(error) => {
+                        return create_registry_error_response(query, domain, &model_id, &error);
+                    }
+                };
+                if let Err(error) = self
+                    .publish_domain_schedule(domain, runtime_changes.graph)
+                    .await
+                {
+                    return command_error(format!(
+                        "failed to publish schedule for domain '{}': {error}",
+                        domain.as_str()
+                    ));
+                }
+                CommandResult {
+                    success: true,
+                    message: format!(
+                        "altered wire schema '{}' in domain '{}'",
                         model_id.as_str(),
                         domain.as_str()
                     ),
@@ -7331,6 +7799,12 @@ impl SessionServiceImpl {
         if let DomainStatus::Running = domain.status {
             return command_error(format!(
                 "domain '{}' is already running",
+                domain_id.as_str()
+            ));
+        }
+        if let DomainStatus::Paused = domain.status {
+            return command_error(format!(
+                "domain '{}' is paused for a schema migration",
                 domain_id.as_str()
             ));
         }
@@ -9215,7 +9689,7 @@ impl SessionServiceImpl {
         tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        if subscriptions.subscriptions.contains_key(&subscription.name) {
+        if subscriptions.contains_name(&subscription.name) {
             return CommandResult {
                 success: false,
                 message: format!(
@@ -12478,6 +12952,7 @@ impl Application {
         let cluster_for_reconcile = cluster.clone();
         let consensus_for_reconcile = consensus.clone();
         let registry_for_reconcile = registry.clone();
+        let runtime_for_reconcile = runtime.clone();
         let reconcile_shutdown = shutdown.clone();
         let mut background_tasks = Vec::new();
         if let Some(controller) = memory_pressure_controller {
@@ -12553,6 +13028,28 @@ impl Application {
                 if consensus_for_reconcile.current_leader().await.as_deref()
                     == Some(consensus_for_reconcile.local_node_id())
                 {
+                    for (domain, state) in consensus_for_reconcile.current_domains().await {
+                        if let DomainStatus::Paused = state.status
+                            && !runtime_for_reconcile.schema_change_is_active(&domain)
+                        {
+                            match consensus_for_reconcile.resume_domain(domain.clone()).await {
+                                Ok(()) => {
+                                    info!(
+                                        domain = domain.as_str(),
+                                        "resumed orphaned schema-change pause after leadership \
+                                         acquisition"
+                                    );
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        domain = domain.as_str(),
+                                        error = %error,
+                                        "failed to resume orphaned schema-change pause"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     if !default_user_resolved {
                         match Identifier::parse(&default_user) {
                             Ok(default_user_id)
@@ -13029,6 +13526,7 @@ impl Application {
                                             result: result.map(|snapshot| {
                                                 snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
                                                     lsm: snapshot.lsm,
+                                                    schema_fingerprint: snapshot.schema_fingerprint,
                                                     payload: snapshot.payload,
                                                 })
                                             }),
@@ -13044,6 +13542,7 @@ impl Application {
                                     response.result.map(|snapshot| {
                                         snapshot.map(|snapshot| crate::runtime::PersistedRuntimeStateEntry {
                                             lsm: snapshot.lsm,
+                                            schema_fingerprint: snapshot.schema_fingerprint,
                                             payload: snapshot.payload,
                                         })
                                     }),
@@ -13120,6 +13619,41 @@ impl Application {
                             }
                             Envelope::Control(ControlEnvelope::DataflowNodeStatusResponse(response)) => {
                                 service_for_interconnect.handle_dataflow_node_status_response(response);
+                            }
+                            Envelope::Control(ControlEnvelope::DomainDrainStatusRequest(request)) => {
+                                let domains =
+                                    service_for_interconnect.consensus.current_domains().await;
+                                service_for_interconnect.runtime.sync_domains(&domains);
+                                let schedule =
+                                    service_for_interconnect.consensus.current_schedule().await;
+                                let result = service_for_interconnect
+                                    .runtime
+                                    .apply_cluster_schedule(
+                                        service_for_interconnect.consensus.local_node_id(),
+                                        &schedule,
+                                    )
+                                    .await
+                                    .map_err(|error| error.to_string())
+                                    .map(|()| {
+                                        service_for_interconnect
+                                            .runtime
+                                            .force_flush_domain(&request.domain);
+                                        service_for_interconnect
+                                            .local_domain_drain_status(&request.domain)
+                                    });
+                                if let Err(error) = message.reply.send(Envelope::Control(
+                                    ControlEnvelope::DomainDrainStatusResponse(
+                                        RemoteDomainDrainStatusResponse {
+                                            correlation_id: request.correlation_id,
+                                            result,
+                                        },
+                                    ),
+                                )).await {
+                                    warn!(error = %error, "failed to send domain drain status response");
+                                }
+                            }
+                            Envelope::Control(ControlEnvelope::DomainDrainStatusResponse(response)) => {
+                                service_for_interconnect.handle_domain_drain_status_response(response);
                             }
                             Envelope::Control(ControlEnvelope::DescribeMetricsRequest(request)) => {
                                 let result = service_for_interconnect
@@ -13702,6 +14236,7 @@ mod tests {
             config: Box::new(Model::Schema(schema_with_fields(Vec::new()))),
             effective_branching: None,
             effective_branching_schema: None,
+            schema_fingerprint: [0; 32],
             kafka_partition_schedule: None,
             primary_node: Some("node-1".to_string()),
             assigned_nodes: vec!["node-1".to_string()],
@@ -14634,6 +15169,54 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn rebuilt_relay_drops_subscription_with_clear_session_error() {
+        let mut subscriptions = SessionSubscriptions::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let events = crate::runtime::RelayBroadcast::with_capacity(
+            std::num::NonZeroUsize::new(4).expect("test relay capacity must be nonzero"),
+        );
+        subscriptions.insert(
+            identifier("live_events"),
+            Domain::parse("default").expect("valid domain"),
+            identifier("events"),
+            SessionSubscriptionTaskConfig {
+                filter_map: None,
+                sensitivity: nervix_vm::SchemaSensitivity::default(),
+                delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
+                batch_sample_rate: None,
+                runtime: Arc::new(Runtime::default()),
+                materialized_stream_owner_nodes: HashMap::default(),
+                receiver: events.new_receiver(),
+                tx,
+            },
+        );
+
+        drop(events);
+        let response = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("subscription close error should arrive")
+            .expect("session channel should remain open")
+            .expect("session response should succeed");
+        let Some(proto::session_response::Event::Server(event)) = response.event else {
+            panic!("expected server error event");
+        };
+        assert_eq!(event.level, ServerEventLevel::Error as i32);
+        assert!(
+            event
+                .message
+                .contains("subscription 'live_events' was dropped")
+        );
+        assert!(event.message.contains("recreate the subscription"));
+        tokio::task::yield_now().await;
+        assert!(!subscriptions.contains_name(&identifier("live_events")));
+
+        let _ = subscriptions
+            .remove(&identifier("live_events"))
+            .await
+            .expect("closed subscription metadata should remain removable");
     }
 
     #[tokio::test]
