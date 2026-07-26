@@ -130,6 +130,7 @@ mod inferencer;
 mod ingestors;
 mod kafka_offset_state;
 mod materialized_state;
+mod message_error_delivery;
 mod planning;
 mod processors;
 mod relay_batch;
@@ -160,6 +161,10 @@ use kafka_offset_state::ReplicatedKafkaOffsetState;
 use materialized_state::{
     ReplicatedMaterializedRelayState, decode_materialized_stream_snapshot,
     encode_materialized_stream_snapshot_entries,
+};
+use message_error_delivery::{
+    MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
+    matching_message_error_output,
 };
 #[cfg(test)]
 use planning::resolve_concrete_branch;
@@ -848,8 +853,27 @@ struct MessageErrorHandling<'a> {
 }
 
 struct MessageErrorFailure {
+    source_route: Option<Identifier>,
     reason: String,
     operation: MessageErrorOperation,
+}
+
+impl MessageErrorFailure {
+    fn publish(source_route: Option<&Identifier>, reason: String) -> Self {
+        Self::new(source_route, reason, MessageErrorOperation::Publish)
+    }
+
+    fn new(
+        source_route: Option<&Identifier>,
+        reason: String,
+        operation: MessageErrorOperation,
+    ) -> Self {
+        Self {
+            source_route: source_route.cloned(),
+            reason,
+            operation,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1952,6 +1976,8 @@ pub struct Runtime {
     emitter_transient_errors: Arc<DashMap<RuntimeKey, String, RandomState>>,
     emitter_reconnect_backoffs: Arc<DashMap<RuntimeKey, RuntimeReconnectStatus, RandomState>>,
     executions: Arc<DashMap<Domain, DomainExecution, RandomState>>,
+    message_error_routes:
+        Arc<DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>>,
     compiled_domain_udfs: Arc<DashMap<Domain, CompiledDomainUdfs, RandomState>>,
     schedule_apply_lock: Arc<Mutex<()>>,
     domain_instantiation_errors: Arc<DashMap<Domain, String, RandomState>>,
@@ -3146,10 +3172,13 @@ impl RelayProcessorNode {
                                     &self.processor,
                                     &self.error_policies,
                                     message,
-                                    format!(
-                                        "window processor '{}' aggregate input failed: {}",
-                                        self.processor.as_str(),
-                                        error
+                                    MessageErrorFailure::publish(
+                                        None,
+                                        format!(
+                                            "window processor '{}' aggregate input failed: {}",
+                                            self.processor.as_str(),
+                                            error
+                                        ),
                                     ),
                                 )
                                 .await;
@@ -5133,7 +5162,10 @@ impl IngestorRouteTask {
                         record: row_error.record,
                         acks: row_error.acks,
                     },
-                    row_error.reason,
+                    MessageErrorFailure::publish(
+                        Some(&self.template.branch.root_relay),
+                        row_error.reason,
+                    ),
                 )
                 .await;
         }
@@ -8519,10 +8551,11 @@ async fn flush_branch_reorderer_output(
                         processor,
                         &message_error_policy,
                         message,
-                        MessageErrorFailure {
-                            reason: error.to_string(),
-                            operation: MessageErrorOperation::Finalize,
-                        },
+                        MessageErrorFailure::new(
+                            Some(&output_routes.routes[output_index].relay),
+                            error.to_string(),
+                            MessageErrorOperation::Finalize,
+                        ),
                     )
                     .await;
             }
@@ -8991,10 +9024,11 @@ async fn enqueue_correlator_output(
                             processor,
                             &policy,
                             message,
-                            MessageErrorFailure {
-                                reason: error.to_string(),
-                                operation: MessageErrorOperation::Finalize,
-                            },
+                            MessageErrorFailure::new(
+                                Some(&output_relay),
+                                error.to_string(),
+                                MessageErrorOperation::Finalize,
+                            ),
                         )
                         .await;
                 }
@@ -9109,7 +9143,7 @@ async fn handle_correlator_timeout_action(
                                 processor,
                                 error_policies,
                                 message,
-                                error.to_string(),
+                                MessageErrorFailure::publish(None, error.to_string()),
                             )
                             .await;
                         return;
@@ -10152,10 +10186,11 @@ async fn dispatch_selected_processor_outputs(
                                 context.processor,
                                 &message_error_policy,
                                 message,
-                                MessageErrorFailure {
-                                    reason: error.to_string(),
-                                    operation: MessageErrorOperation::Finalize,
-                                },
+                                MessageErrorFailure::new(
+                                    Some(relay),
+                                    error.to_string(),
+                                    MessageErrorOperation::Finalize,
+                                ),
                             )
                             .await;
                     }
@@ -15486,15 +15521,18 @@ async fn dispatch_wasm_output_envelopes(
     };
     let mut token_use_counts = wasm_output_token_use_counts(&validated_outputs);
     for output in validated_outputs {
-        let message_error_policy = output_routes.routes[output.output_route_index]
-            .message_error_policy
-            .clone();
+        let output_route = &output_routes.routes[output.output_route_index];
+        let message_error_relay = output_route.relay.clone();
+        let message_error_policy = output_route.message_error_policy.clone();
         apply_wasm_sidecar_terminal_decisions(
-            branch,
-            node_kind,
-            processor,
-            error_policies,
-            &message_error_policy,
+            WasmSidecarTerminalContext {
+                branch,
+                node_kind,
+                processor,
+                error_policies,
+                message_error_relay: &message_error_relay,
+                message_error_policy: &message_error_policy,
+            },
             ack_map,
             &output.acks,
         )
@@ -16137,15 +16175,28 @@ fn insert_wasm_filter_map_fields(
     }
 }
 
+struct WasmSidecarTerminalContext<'a> {
+    branch: &'a BranchRuntime,
+    node_kind: &'a str,
+    processor: &'a Identifier,
+    error_policies: &'a ErrorPolicies,
+    message_error_relay: &'a Identifier,
+    message_error_policy: &'a MessageErrorPolicy,
+}
+
 async fn apply_wasm_sidecar_terminal_decisions(
-    branch: &BranchRuntime,
-    node_kind: &str,
-    processor: &Identifier,
-    error_policies: &ErrorPolicies,
-    message_error_policy: &MessageErrorPolicy,
+    context: WasmSidecarTerminalContext<'_>,
     ack_map: &mut WasmAckMap,
     sidecar: &WasmAckSidecar,
 ) {
+    let WasmSidecarTerminalContext {
+        branch,
+        node_kind,
+        processor,
+        error_policies,
+        message_error_relay,
+        message_error_policy,
+    } = context;
     for message_error in &sidecar.message_errors {
         for token in &message_error.tokens {
             let context = ack_map
@@ -16184,10 +16235,11 @@ async fn apply_wasm_sidecar_terminal_decisions(
                         record,
                         acks: context.acks,
                     },
-                    MessageErrorFailure {
-                        reason: message_error.reason.clone(),
-                        operation: MessageErrorOperation::Wasm,
-                    },
+                    MessageErrorFailure::new(
+                        Some(message_error_relay),
+                        message_error.reason.clone(),
+                        MessageErrorOperation::Wasm,
+                    ),
                 )
                 .await;
         }

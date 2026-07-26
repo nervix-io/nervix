@@ -74,6 +74,9 @@ request can mix those phases.
   route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
   one-message batch guarantee. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by
   the guest.
+- On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
+  governed by that route's same interval and maximum batch-size boundaries. General/global errors
+  are node-wide and do not inherit route-local `FLUSH`.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
 - Preserve connector configuration as the documented string key/value surface. Do not translate

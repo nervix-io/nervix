@@ -41,8 +41,9 @@ Every ingestor defines:
 <relay>`. The [NSPL Overview](nspl-overview.md) defines the system-owned 100 µs minimum batching
 window for `FLUSH IMMEDIATE`. It has no size boundary. Every route also requires its own
 `ON MESSAGE ERROR <policy>`. Each route buffers and handles message-specific construction failures
-independently. `ON GENERAL ERROR` remains node-level because it handles source or transport
-failures that are not tied to one message or output route.
+independently. `ON MESSAGE ERROR SEND TO` uses that same route's interval and maximum batch-size
+boundaries for error-record delivery. `ON GENERAL ERROR` remains node-level because it handles
+source or transport failures that are not tied to one message or output route.
 
 At runtime, the ingestor:
 
