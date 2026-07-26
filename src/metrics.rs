@@ -5,13 +5,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use hdrhistogram::Histogram as HdrHistogram;
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{Domain, Identifier, ModelKind, Timestamp};
 use parking_lot::Mutex;
 use prometheus::{
-    Encoder, Gauge, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder,
+    Encoder, Gauge, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry,
+    TextEncoder,
     core::{Collector, Desc},
     proto::MetricFamily,
 };
@@ -25,6 +26,8 @@ const BYTES_TOTAL: &str = "bytes_total";
 const MESSAGES_PER_BATCH: &str = "messages_per_batch";
 const DELIVERY_LATENCY_SECONDS: &str = "delivery_latency_seconds";
 const RELAY_BUFFER_LEN: &str = "relay_buffer_len";
+const BRANCH_INSTANCES: &str = "branch_instances";
+const BRANCH_EVICTIONS_TOTAL: &str = "branch_evictions_total";
 const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
 const DOMAIN_TARGET_KIND: &str = "DOMAIN";
 const DOMAIN_INPUT_OUTPUT_TARGET: &str = "input_output";
@@ -51,6 +54,9 @@ const PROMETHEUS_LABELS: &[&str] = &[
     "peer_kind",
     "peer",
 ];
+const BRANCH_PROMETHEUS_LABELS: &[&str] = &["domain", "branch", "physical_node_id"];
+const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
+    &["domain", "branch", "physical_node_id", "reason"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
 const ONE_MINUTE_SECONDS: f64 = 60.0;
@@ -1128,7 +1134,37 @@ pub struct RuntimeMetrics {
     histograms: Arc<DashMap<MetricKey, Arc<HistogramSeries>>>,
     branch_counters: Arc<DashMap<BranchMetricKey, Arc<CounterSeries>>>,
     branch_histograms: Arc<DashMap<BranchMetricKey, Arc<HistogramSeries>>>,
+    branch_instance_references: Arc<DashMap<BranchInstanceMetricKey, BranchInstanceReferences>>,
     prometheus: Arc<PrometheusMetrics>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchEvictionReason {
+    Lru,
+    Ttl,
+}
+
+impl AsRef<str> for BranchEvictionReason {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Lru => "lru",
+            Self::Ttl => "ttl",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BranchInstanceMetricKey {
+    domain: String,
+    branch: String,
+    physical_node_id: String,
+    concrete_key: String,
+}
+
+#[derive(Debug)]
+struct BranchInstanceReferences {
+    count: usize,
+    eviction_reason: Option<BranchEvictionReason>,
 }
 
 #[derive(Debug, Clone)]
@@ -1140,6 +1176,8 @@ struct PrometheusMetrics {
     messages_per_batch: HistogramVec,
     delivery_latency_seconds: HistogramVec,
     relay_buffer_len: HistogramVec,
+    branch_instances: IntGaugeVec,
+    branch_evictions_total: IntCounterVec,
 }
 
 struct JemallocMetricsCollector {
@@ -1166,6 +1204,7 @@ impl Default for RuntimeMetrics {
             histograms: Arc::new(DashMap::new()),
             branch_counters: Arc::new(DashMap::new()),
             branch_histograms: Arc::new(DashMap::new()),
+            branch_instance_references: Arc::new(DashMap::new()),
             prometheus: Arc::new(PrometheusMetrics::new()),
         }
     }
@@ -1231,6 +1270,24 @@ impl PrometheusMetrics {
             PROMETHEUS_LABELS,
         )
         .expect("valid relay_buffer_len prometheus histogram");
+        let branch_instances = IntGaugeVec::new(
+            Opts::new(
+                BRANCH_INSTANCES,
+                "Current concrete branch keys with runtime instances on this Nervix node.",
+            )
+            .namespace("nervix"),
+            BRANCH_PROMETHEUS_LABELS,
+        )
+        .expect("valid branch_instances prometheus gauge");
+        let branch_evictions_total = IntCounterVec::new(
+            Opts::new(
+                BRANCH_EVICTIONS_TOTAL,
+                "Total concrete branch keys evicted by Nervix.",
+            )
+            .namespace("nervix"),
+            BRANCH_EVICTION_PROMETHEUS_LABELS,
+        )
+        .expect("valid branch_evictions_total prometheus counter");
 
         registry
             .register(Box::new(messages_total.clone()))
@@ -1251,6 +1308,12 @@ impl PrometheusMetrics {
             .register(Box::new(relay_buffer_len.clone()))
             .expect("relay_buffer_len registered once");
         registry
+            .register(Box::new(branch_instances.clone()))
+            .expect("branch_instances registered once");
+        registry
+            .register(Box::new(branch_evictions_total.clone()))
+            .expect("branch_evictions_total registered once");
+        registry
             .register(Box::new(JemallocMetricsCollector::new()))
             .expect("jemalloc metrics registered once");
 
@@ -1262,6 +1325,8 @@ impl PrometheusMetrics {
             messages_per_batch,
             delivery_latency_seconds,
             relay_buffer_len,
+            branch_instances,
+            branch_evictions_total,
         }
     }
 
@@ -1539,6 +1604,145 @@ pub struct NodeLatencyObservation<'a> {
 }
 
 impl RuntimeMetrics {
+    pub(crate) fn register_branch(
+        &self,
+        domain: &Domain,
+        branch: &Identifier,
+        physical_node_id: Option<&str>,
+    ) {
+        let physical_node_id = physical_node_id.unwrap_or("-");
+        self.prometheus.branch_instances.with_label_values(&[
+            domain.as_str(),
+            branch.as_str(),
+            physical_node_id,
+        ]);
+        for reason in [BranchEvictionReason::Lru, BranchEvictionReason::Ttl] {
+            self.prometheus.branch_evictions_total.with_label_values(&[
+                domain.as_str(),
+                branch.as_str(),
+                physical_node_id,
+                reason.as_ref(),
+            ]);
+        }
+    }
+
+    pub(crate) fn observe_branch_instance_created(
+        &self,
+        domain: &Domain,
+        branch: &Identifier,
+        physical_node_id: Option<&str>,
+        concrete_key: &str,
+    ) {
+        let physical_node_id = physical_node_id.unwrap_or("-");
+        let metric_key = BranchInstanceMetricKey {
+            domain: domain.as_str().to_string(),
+            branch: branch.as_str().to_string(),
+            physical_node_id: physical_node_id.to_string(),
+            concrete_key: concrete_key.to_string(),
+        };
+        match self.branch_instance_references.entry(metric_key) {
+            Entry::Occupied(mut entry) => {
+                let references = entry.get_mut();
+                references.count = references.count.saturating_add(1);
+                references.eviction_reason = None;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(BranchInstanceReferences {
+                    count: 1,
+                    eviction_reason: None,
+                });
+                self.prometheus
+                    .branch_instances
+                    .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                    .inc();
+            }
+        }
+    }
+
+    pub(crate) fn observe_branch_instance_removed(
+        &self,
+        domain: &Domain,
+        branch: &Identifier,
+        physical_node_id: Option<&str>,
+        concrete_key: &str,
+        reason: BranchEvictionReason,
+    ) {
+        let physical_node_id = physical_node_id.unwrap_or("-");
+        let metric_key = BranchInstanceMetricKey {
+            domain: domain.as_str().to_string(),
+            branch: branch.as_str().to_string(),
+            physical_node_id: physical_node_id.to_string(),
+            concrete_key: concrete_key.to_string(),
+        };
+        let (removed_key, record_eviction) = match self.branch_instance_references.entry(metric_key)
+        {
+            Entry::Occupied(mut entry) if entry.get().count > 1 => {
+                let references = entry.get_mut();
+                references.count -= 1;
+                let record_eviction = references.eviction_reason.is_none();
+                if record_eviction {
+                    references.eviction_reason = Some(reason);
+                }
+                (false, record_eviction)
+            }
+            Entry::Occupied(entry) => {
+                let references = entry.remove();
+                (true, references.eviction_reason.is_none())
+            }
+            Entry::Vacant(_) => return,
+        };
+        if removed_key {
+            self.prometheus
+                .branch_instances
+                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                .dec();
+        }
+        if record_eviction {
+            self.prometheus
+                .branch_evictions_total
+                .with_label_values(&[
+                    domain.as_str(),
+                    branch.as_str(),
+                    physical_node_id,
+                    reason.as_ref(),
+                ])
+                .inc();
+        }
+    }
+
+    pub(crate) fn observe_branch_instance_detached(
+        &self,
+        domain: &Domain,
+        branch: &Identifier,
+        physical_node_id: Option<&str>,
+        concrete_key: &str,
+    ) {
+        let physical_node_id = physical_node_id.unwrap_or("-");
+        let metric_key = BranchInstanceMetricKey {
+            domain: domain.as_str().to_string(),
+            branch: branch.as_str().to_string(),
+            physical_node_id: physical_node_id.to_string(),
+            concrete_key: concrete_key.to_string(),
+        };
+        let removed_key = match self.branch_instance_references.entry(metric_key) {
+            Entry::Occupied(mut entry) if entry.get().count > 1 => {
+                entry.get_mut().count -= 1;
+                false
+            }
+            Entry::Occupied(entry) => {
+                entry.remove();
+                true
+            }
+            Entry::Vacant(_) => return,
+        };
+        if removed_key {
+            self.prometheus
+                .branch_instances
+                .with_label_values(&[domain.as_str(), branch.as_str(), physical_node_id])
+                .dec();
+        }
+    }
+
     pub fn register_global_node(
         &self,
         domain: &Domain,
@@ -3690,6 +3894,113 @@ mod tests {
         assert!(rendered.contains("relay=\"events\""));
         assert!(rendered.contains("physical_node_id=\"node-1\""));
         assert!(rendered.contains(" 2"));
+    }
+
+    #[test]
+    fn branch_lifecycle_metrics_count_concrete_keys_once_per_node() {
+        let metrics = RuntimeMetrics::default();
+        let domain = Domain::parse("main").expect("valid domain");
+        let branch = Identifier::parse("by_tenant").expect("valid identifier");
+        let concrete_key = r#"{"tenant":"acme"}"#;
+        let has_sample = |rendered: &str, metric: &str, label_fragments: &[&str], value: u64| {
+            let expected_suffix = format!(" {value}");
+            rendered.lines().any(|line| {
+                line.starts_with(metric)
+                    && label_fragments
+                        .iter()
+                        .all(|fragment| line.contains(fragment))
+                    && line.ends_with(&expected_suffix)
+            })
+        };
+
+        metrics.register_branch(&domain, &branch, Some("node-1"));
+        metrics.observe_branch_instance_created(&domain, &branch, Some("node-1"), concrete_key);
+        metrics.observe_branch_instance_created(&domain, &branch, Some("node-1"), concrete_key);
+
+        let rendered = metrics.prometheus_text();
+        assert!(has_sample(
+            &rendered,
+            "nervix_branch_instances",
+            &[
+                "branch=\"by_tenant\"",
+                "domain=\"main\"",
+                "physical_node_id=\"node-1\"",
+            ],
+            1,
+        ));
+        assert!(!rendered.contains(concrete_key));
+
+        metrics.observe_branch_instance_removed(
+            &domain,
+            &branch,
+            Some("node-1"),
+            concrete_key,
+            BranchEvictionReason::Lru,
+        );
+        let rendered = metrics.prometheus_text();
+        assert!(has_sample(
+            &rendered,
+            "nervix_branch_instances",
+            &[
+                "branch=\"by_tenant\"",
+                "domain=\"main\"",
+                "physical_node_id=\"node-1\"",
+            ],
+            1,
+        ));
+        assert!(has_sample(
+            &rendered,
+            "nervix_branch_evictions_total",
+            &[
+                "branch=\"by_tenant\"",
+                "domain=\"main\"",
+                "physical_node_id=\"node-1\"",
+                "reason=\"lru\"",
+            ],
+            1,
+        ));
+
+        metrics.observe_branch_instance_removed(
+            &domain,
+            &branch,
+            Some("node-1"),
+            concrete_key,
+            BranchEvictionReason::Ttl,
+        );
+
+        let rendered = metrics.prometheus_text();
+        assert!(has_sample(
+            &rendered,
+            "nervix_branch_instances",
+            &[
+                "branch=\"by_tenant\"",
+                "domain=\"main\"",
+                "physical_node_id=\"node-1\"",
+            ],
+            0,
+        ));
+        assert!(has_sample(
+            &rendered,
+            "nervix_branch_evictions_total",
+            &[
+                "branch=\"by_tenant\"",
+                "domain=\"main\"",
+                "physical_node_id=\"node-1\"",
+                "reason=\"lru\"",
+            ],
+            1,
+        ));
+        assert!(has_sample(
+            &rendered,
+            "nervix_branch_evictions_total",
+            &[
+                "branch=\"by_tenant\"",
+                "domain=\"main\"",
+                "physical_node_id=\"node-1\"",
+                "reason=\"ttl\"",
+            ],
+            0,
+        ));
     }
 
     #[test]

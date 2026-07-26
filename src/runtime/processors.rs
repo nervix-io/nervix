@@ -50,6 +50,7 @@ pub(super) struct BranchedIngestorSpec {
     pub(super) kind: ModelKind,
     pub(super) identifier: Identifier,
     pub(super) root_relay: Identifier,
+    pub(super) branch: Option<Identifier>,
     pub(super) branch_ttl: Option<String>,
     pub(super) branch_max_instances: Option<u64>,
     pub(super) output_branch_assignments: Vec<Assignment>,
@@ -62,6 +63,7 @@ pub(super) struct BranchedIngestorSpec {
 #[derive(Debug, Clone)]
 pub(super) struct BranchedProcessorNodeSpec {
     pub(super) spec: BranchedProcessorSpec,
+    pub(super) branch: Option<Identifier>,
     pub(super) branch_ttl: Option<String>,
     pub(super) branch_max_instances: Option<u64>,
 }
@@ -197,6 +199,7 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) source_kind: ModelKind,
     pub(super) source: Identifier,
     pub(super) root_relay: Identifier,
+    pub(super) branch: Option<Identifier>,
     pub(super) branch_ttl: Option<Duration>,
     pub(super) branch_max_instances: Option<usize>,
     pub(super) error_policies: ErrorPolicies,
