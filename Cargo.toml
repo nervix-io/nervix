@@ -337,8 +337,7 @@ parking_lot = "0.12"
 # Match Iceberg's Arrow 58 major so RecordBatch and writer types are identical.
 parquet = { version = "58", features = ["async"] }
 petgraph = "0.8"
-# Use git version to support aws-lc
-playwright-rs = { git = "https://github.com/nervix-io/playwright-rust.git", rev = "fff094b400127536eb75872b86aaab3ad3202ce2", default-features = false, features = [
+playwright-rs = { version = "0.15", default-features = false, features = [
   "rustls-tls-webpki-roots",
   "aws-lc",
 ] }
