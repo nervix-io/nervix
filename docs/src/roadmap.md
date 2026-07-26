@@ -14,8 +14,7 @@ The current roadmap items are:
 - decide whether any relay-qualified field form beyond `relay_state.<relay>.<field>` belongs in expressions
 - explore batched direct external-database access from processing nodes as a possible supported
   pattern for cross-key enrichment; this is a direction, not a committed interface
-- add branch-lifecycle metric families: live branch instances per branch declaration, branch
-  creations total, and evictions total labeled by `reason=lru|ttl`
+- add branch-creation counters per branch declaration
 - add measurable per-node state-size signals, including deduplication entry counts and open-window
   counts
 - keep capacity-planning Prometheus signals branch-aggregated under the existing cardinality

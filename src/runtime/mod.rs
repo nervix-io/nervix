@@ -104,8 +104,8 @@ use upon::Engine as TemplateEngine;
 use crate::{
     cluster,
     metrics::{
-        NodeBatchObservation, NodeLatencyObservation, NodeWithoutRelayObservation,
-        RelayBatchObservation, RelayBufferObservation, RuntimeMetrics,
+        BranchEvictionReason, NodeBatchObservation, NodeLatencyObservation,
+        NodeWithoutRelayObservation, RelayBatchObservation, RelayBufferObservation, RuntimeMetrics,
     },
     registry::{ActiveGraph, RuntimeChange, RuntimeChanges},
     resource::ResourceStore,
@@ -5518,6 +5518,60 @@ impl IngestorRouteRuntime {
     }
 }
 
+impl Runtime {
+    fn register_branch_lifecycle_metrics(&self, domain: &Domain, branch: Option<&Identifier>) {
+        if let Some(branch) = branch {
+            self.metrics
+                .register_branch(domain, branch, self.local_node_id.read().as_deref());
+        }
+    }
+
+    fn observe_branch_instance_created(
+        &self,
+        domain: &Domain,
+        branch: Option<&Identifier>,
+        key: &Option<BranchKey>,
+    ) {
+        if let Some(branch) = branch {
+            self.metrics.observe_branch_instance_created(
+                domain,
+                branch,
+                self.local_node_id.read().as_deref(),
+                branch_key_display(key),
+            );
+        }
+    }
+
+    fn observe_branch_instance_removed(
+        &self,
+        domain: &Domain,
+        branch: Option<&Identifier>,
+        key: &Option<BranchKey>,
+        reason: Option<BranchEvictionReason>,
+    ) {
+        let Some(branch) = branch else {
+            return;
+        };
+        let physical_node_id = self.local_node_id.read();
+        if let Some(reason) = reason {
+            self.metrics.observe_branch_instance_removed(
+                domain,
+                branch,
+                physical_node_id.as_deref(),
+                branch_key_display(key),
+                reason,
+            );
+        } else {
+            self.metrics.observe_branch_instance_detached(
+                domain,
+                branch,
+                physical_node_id.as_deref(),
+                branch_key_display(key),
+            );
+        }
+    }
+}
+
 impl BranchExecutionRuntime {
     async fn dispatch_prepared_inputs(
         context: BranchExecutionDispatchContext<'_>,
@@ -5574,6 +5628,11 @@ impl BranchExecutionRuntime {
                 }
             };
             if instance.created {
+                runtime_handle.observe_branch_instance_created(
+                    domain,
+                    template.branch.as_ref(),
+                    &key,
+                );
                 debug!(
                     domain = domain.as_str(),
                     ingestor = ingestor.as_str(),
@@ -5583,8 +5642,10 @@ impl BranchExecutionRuntime {
             }
             if let Some(max_instances) = template.branch_max_instances {
                 evict_branch_instance_instances_to_capacity(
+                    runtime_handle,
                     domain,
                     ingestor,
+                    template.branch.as_ref(),
                     max_instances,
                     instances,
                 )
@@ -5646,6 +5707,7 @@ impl BranchExecutionRuntime {
             shutdown,
             task: parking_lot::Mutex::new(None),
         });
+        runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
 
         let task = tokio::spawn(async move {
             let mut instances =
@@ -5669,8 +5731,10 @@ impl BranchExecutionRuntime {
             };
             if let Some(max_instances) = template.branch_max_instances {
                 evict_branch_instance_instances_to_capacity(
+                    &runtime_handle,
                     &domain,
                     &ingestor,
+                    template.branch.as_ref(),
                     max_instances,
                     &mut instances,
                 )
@@ -5697,8 +5761,10 @@ impl BranchExecutionRuntime {
                 if Instant::now() >= next_expiration_scan {
                     if let Some(branch_ttl) = template.branch_ttl {
                         expire_branch_instance_instances(
+                            &runtime_handle,
                             &domain,
                             &ingestor,
+                            template.branch.as_ref(),
                             now,
                             branch_ttl,
                             &mut instances,
@@ -5822,7 +5888,14 @@ impl BranchExecutionRuntime {
                     "failed to persist final branch lru snapshot"
                 );
             }
-            shutdown_all_branch_instance_instances(&domain, &ingestor, &mut instances).await;
+            shutdown_all_branch_instance_instances(
+                &runtime_handle,
+                &domain,
+                &ingestor,
+                template.branch.as_ref(),
+                &mut instances,
+            )
+            .await;
         });
         *runtime.task.lock() = Some(task);
         runtime
@@ -5882,13 +5955,21 @@ impl BranchExecutionRuntime {
 }
 
 async fn expire_branch_instance_instances(
+    runtime: &Runtime,
     domain: &Domain,
     ingestor: &Identifier,
+    branch: Option<&Identifier>,
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
     for (key, state) in instances.expire(now, expiration_after) {
+        runtime.observe_branch_instance_removed(
+            domain,
+            branch,
+            &key,
+            Some(BranchEvictionReason::Ttl),
+        );
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
@@ -5901,12 +5982,20 @@ async fn expire_branch_instance_instances(
 }
 
 async fn evict_branch_instance_instances_to_capacity(
+    runtime: &Runtime,
     domain: &Domain,
     ingestor: &Identifier,
+    branch: Option<&Identifier>,
     max_instances: usize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
     for (key, state) in instances.evict_lru_to_capacity(max_instances) {
+        runtime.observe_branch_instance_removed(
+            domain,
+            branch,
+            &key,
+            Some(BranchEvictionReason::Lru),
+        );
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
@@ -5920,11 +6009,14 @@ async fn evict_branch_instance_instances_to_capacity(
 }
 
 async fn shutdown_all_branch_instance_instances(
+    runtime: &Runtime,
     domain: &Domain,
     ingestor: &Identifier,
+    branch: Option<&Identifier>,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) {
     for (key, state) in instances.drain() {
+        runtime.observe_branch_instance_removed(domain, branch, &key, None);
         let branch = state.lock().await;
         branch.detach();
         debug!(
@@ -5969,6 +6061,7 @@ fn restore_branch_instance_lru_snapshot(
     for (key, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)? {
         let mut state = template.instantiate(runtime, domain, key.clone())?;
         state.get_mut().restore_presence(last_ingestion);
+        runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
         instances.insert_restored(key, last_ingestion, state);
     }
     instances.set_version(snapshot.lsm);
@@ -6094,6 +6187,7 @@ async fn run_processor_node_runtime(
     expiration_scan_interval: Duration,
 ) {
     let processor = template.source.clone();
+    runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
     let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
     let mut last_persisted_lru_lsm = match restore_processor_branch_lru_snapshot(
         &runtime_handle,
@@ -6115,8 +6209,10 @@ async fn run_processor_node_runtime(
     };
     if let Some(max_instances) = template.branch_max_instances {
         evict_processor_branch_instances_to_capacity(
+            &runtime_handle,
             &domain,
             &processor,
+            template.branch.as_ref(),
             max_instances,
             &mut instances,
         )
@@ -6151,8 +6247,10 @@ async fn run_processor_node_runtime(
         if Instant::now() >= next_expiration_scan {
             if let Some(branch_ttl) = template.branch_ttl {
                 expire_processor_branch_instances(
+                    &runtime_handle,
                     &domain,
                     &processor,
+                    template.branch.as_ref(),
                     now,
                     branch_ttl,
                     &mut instances,
@@ -6235,7 +6333,14 @@ async fn run_processor_node_runtime(
             "failed to persist final processor branch lru snapshot"
         );
     }
-    shutdown_all_processor_branch_instances(&domain, &processor, &mut instances).await;
+    shutdown_all_processor_branch_instances(
+        &runtime_handle,
+        &domain,
+        &processor,
+        template.branch.as_ref(),
+        &mut instances,
+    )
+    .await;
 }
 
 struct ProcessorNodeDispatchContext<'a> {
@@ -6288,6 +6393,7 @@ async fn dispatch_processor_node_input(
         }
     };
     if instance.created {
+        runtime_handle.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
         debug!(
             domain = domain.as_str(),
             processor = template.source.as_str(),
@@ -6296,8 +6402,10 @@ async fn dispatch_processor_node_input(
         );
         if let Some(max_instances) = template.branch_max_instances {
             evict_processor_branch_instances_to_capacity(
+                runtime_handle,
                 domain,
                 &template.source,
+                template.branch.as_ref(),
                 max_instances,
                 instances,
             )
@@ -6318,6 +6426,12 @@ async fn dispatch_processor_node_input(
             ),
         );
         if let Some(entry) = instances.remove(&key) {
+            runtime_handle.observe_branch_instance_removed(
+                domain,
+                template.branch.as_ref(),
+                &key,
+                None,
+            );
             stop_processor_branch_task(
                 domain,
                 &template.source,
@@ -6493,13 +6607,21 @@ async fn stop_processor_branch_task(
 }
 
 async fn expire_processor_branch_instances(
+    runtime: &Runtime,
     domain: &Domain,
     processor: &Identifier,
+    branch: Option<&Identifier>,
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
     for (key, entry) in instances.expire(now, expiration_after) {
+        runtime.observe_branch_instance_removed(
+            domain,
+            branch,
+            &key,
+            Some(BranchEvictionReason::Ttl),
+        );
         stop_processor_branch_task(
             domain,
             processor,
@@ -6518,12 +6640,20 @@ async fn expire_processor_branch_instances(
 }
 
 async fn evict_processor_branch_instances_to_capacity(
+    runtime: &Runtime,
     domain: &Domain,
     processor: &Identifier,
+    branch: Option<&Identifier>,
     max_instances: usize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
     for (key, entry) in instances.evict_lru_to_capacity(max_instances) {
+        runtime.observe_branch_instance_removed(
+            domain,
+            branch,
+            &key,
+            Some(BranchEvictionReason::Lru),
+        );
         stop_processor_branch_task(
             domain,
             processor,
@@ -6543,11 +6673,14 @@ async fn evict_processor_branch_instances_to_capacity(
 }
 
 async fn shutdown_all_processor_branch_instances(
+    runtime: &Runtime,
     domain: &Domain,
     processor: &Identifier,
+    branch: Option<&Identifier>,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
     for (key, entry) in instances.drain() {
+        runtime.observe_branch_instance_removed(domain, branch, &key, None);
         stop_processor_branch_task(
             domain,
             processor,
@@ -6591,6 +6724,7 @@ fn restore_processor_branch_lru_snapshot(
             key.clone(),
             Some(last_ingestion),
         )?;
+        runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
         instances.insert_restored(key, last_ingestion, entry);
     }
     instances.set_version(snapshot.lsm);

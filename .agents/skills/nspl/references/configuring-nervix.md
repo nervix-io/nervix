@@ -152,6 +152,9 @@ Choose checks relevant to the configured graph:
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
 - `DESCRIBE INGESTOR`, processor-specific `DESCRIBE`, and `DESCRIBE EMITTER` inspect runtime state
   and edge metrics.
+- The observability server's `/metrics` endpoint reports `nervix_branch_instances` per domain,
+  branch declaration, and physical node, plus `nervix_branch_evictions_total` split by
+  `reason="lru"` or `reason="ttl"`.
 - `DESCRIBE RESOURCE` confirms uploads and versions.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
