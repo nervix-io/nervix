@@ -8353,6 +8353,12 @@ impl Runtime {
         from_relay: Identifier,
         receiver: RelayRuntimeFanIn,
     ) -> Result<JoinHandle<()>, RuntimeError> {
+        let input_collect_policy = Self::parse_runtime_node_input_collect_policy(
+            domain,
+            "reingestor",
+            &reingestor.name,
+            reingestor.from.collect_policy.as_ref(),
+        )?;
         let mut task_output_routes = RelayProcessorOutputsNode {
             routes: reingestor
                 .output_routes
@@ -8415,17 +8421,20 @@ impl Runtime {
 
         Ok(tokio::spawn(async move {
             let mut input = receiver;
+            let mut input_collection = RuntimeTaskInputCollection::new(input_collect_policy);
             let mut compiled_from_where = None;
             loop {
                 tokio::task::consume_budget().await;
-                match Self::recv_runtime_consumer_batch(
+                match Self::recv_runtime_collected_input(
                     &mut input,
                     &mut shutdown_rx,
-                    RuntimeFlushPolicy::Immediate,
+                    &mut input_collection,
+                    None,
                 )
                 .await
                 {
                     BatchedInput::Shutdown | BatchedInput::Closed => break,
+                    BatchedInput::Wake => continue,
                     BatchedInput::Batch(batch) => {
                         runtime
                             .metrics
@@ -8990,51 +8999,66 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) async fn recv_runtime_consumer_batch(
+    pub(in crate::runtime) async fn recv_runtime_collected_input(
         receiver: &mut RelayRuntimeFanIn,
         shutdown_rx: &mut watch::Receiver<bool>,
-        flush_each: RuntimeFlushPolicy,
+        collection: &mut RuntimeTaskInputCollection,
+        wake_at: Option<Instant>,
     ) -> BatchedInput {
-        let received = tokio::select! {
-            biased;
-            message = receiver.recv() => message,
-            changed = shutdown_rx.changed() => {
-                if changed.is_err() || *shutdown_rx.borrow() {
-                    return BatchedInput::Shutdown;
-                }
-                return BatchedInput::Shutdown;
-            }
-        };
-        let Some(first) = received else {
-            return BatchedInput::Closed;
-        };
-
-        let deadline = Instant::now() + flush_each.interval();
-        let mut batch = vec![first];
-        let mut batch_size = relay_batches_estimated_bytes(&batch);
-        if flush_each.size_boundary_reached(batch_size) {
-            return relay_batches_into_batched_input(batch);
-        }
         loop {
             tokio::task::consume_budget().await;
+            if *shutdown_rx.borrow() {
+                return collection
+                    .take_any()
+                    .expect("same-relay input batches must concatenate")
+                    .map(BatchedInput::Batch)
+                    .unwrap_or(BatchedInput::Shutdown);
+            }
+            if let Some(batch) = collection
+                .take_due()
+                .expect("same-relay input batches must concatenate")
+            {
+                return BatchedInput::Batch(batch);
+            }
+            let collect_at = collection.next_deadline();
             tokio::select! {
+                biased;
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
-                        return relay_batches_into_batched_input(batch);
+                        return collection
+                            .take_any()
+                            .expect("same-relay input batches must concatenate")
+                            .map(BatchedInput::Batch)
+                            .unwrap_or(BatchedInput::Shutdown);
                     }
-                    return relay_batches_into_batched_input(batch);
                 }
-                _ = sleep_until(deadline) => return relay_batches_into_batched_input(batch),
+                _ = async {
+                    if let Some(deadline) = wake_at {
+                        sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => return BatchedInput::Wake,
+                _ = async {
+                    if let Some(deadline) = collect_at {
+                        sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
                 message = receiver.recv() => {
-                    match message {
-                        Some(message) => {
-                            batch_size = batch_size.saturating_add(message.estimated_bytes());
-                            batch.push(message);
-                            if flush_each.size_boundary_reached(batch_size) {
-                                return relay_batches_into_batched_input(batch);
-                            }
-                        }
-                        None => return relay_batches_into_batched_input(batch),
+                    let Some(batch) = message else {
+                        return collection
+                            .take_any()
+                            .expect("same-relay input batches must concatenate")
+                            .map(BatchedInput::Batch)
+                            .unwrap_or(BatchedInput::Closed);
+                    };
+                    if let Some(batch) = collection
+                        .push(batch)
+                        .expect("same-relay input batches must concatenate")
+                    {
+                        return BatchedInput::Batch(batch);
                     }
                 }
             }
@@ -9125,6 +9149,48 @@ impl Runtime {
                 max_batch_size: max_batch_size.as_u64(),
             })
         }
+    }
+
+    pub(in crate::runtime) fn parse_runtime_node_input_collect_policy(
+        domain: &Domain,
+        kind: &str,
+        identifier: &Identifier,
+        policy: Option<&nervix_models::InputCollectPolicy>,
+    ) -> Result<Option<RuntimeInputCollectPolicy>, RuntimeError> {
+        policy
+            .map(|policy| {
+                let interval = Self::parse_runtime_node_duration_setting(
+                    domain,
+                    kind,
+                    identifier,
+                    "collect_for",
+                    &policy.collect_for,
+                )?;
+                let max_batch_size = policy
+                    .max_batch_size
+                    .as_deref()
+                    .map(|max_batch_size| {
+                        max_batch_size
+                            .parse::<ubyte::ByteUnit>()
+                            .map(|size| size.as_u64())
+                            .map_err(|source| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "invalid input collection max_batch_size '{}' for {} '{}': {}",
+                                    max_batch_size,
+                                    kind,
+                                    identifier.as_str(),
+                                    source
+                                ),
+                            })
+                    })
+                    .transpose()?;
+                Ok(RuntimeInputCollectPolicy {
+                    interval,
+                    max_batch_size,
+                })
+            })
+            .transpose()
     }
 
     pub(in crate::runtime) fn parse_retry_policy(

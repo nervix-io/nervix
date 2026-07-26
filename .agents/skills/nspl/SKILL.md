@@ -78,6 +78,10 @@ command.
   and initialize every required output field on set-only routes.
 - Add a route-local message error policy. Add the required general/global policy for the chosen
   node.
+- Add `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` after a relay input list only when the node
+  should assemble input batches before execution. Omission means no additional input collection.
+  The policy is per source relay and concrete branch; correlators configure each side
+  independently. Never add it to an ingestor.
 - Add `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` to every flush-based
   route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
   one-message batch guarantee. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by

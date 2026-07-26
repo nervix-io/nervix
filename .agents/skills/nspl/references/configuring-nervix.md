@@ -55,7 +55,7 @@ Capture these decisions before choosing syntax:
 | Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
 | Output | Which connector/sink, payload shape, codec or direct mapping, headers, and sensitivity leaks are required? |
-| Operations | What flush size/cadence, error behavior, TLS resources, metrics, and subscriptions are required? |
+| Operations | What input collection and output flush size/cadence, error behavior, TLS resources, metrics, and subscriptions are required? |
 
 If the user supplied a real payload, derive wire and internal schemas field by field and call out
 ambiguous types. Do not silently choose numeric width, datetime parsing, optionality, or branch
@@ -116,6 +116,9 @@ relay. Do not use them to scan across branches.
 - Every codec explicitly handles any wire/internal datetime or shape difference.
 - Every relay declares a schema and explicit branch selection.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
+- Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
+  duration, and is absent when immediate input execution is intended. Correlator sides are checked
+  independently; ingestors never declare input collection.
 - Every route constructs all required output fields. `INHERIT` appears only on a transforming
   route; set-only routes use explicit `SET` assignments.
 - Every field scope is valid for its node: use documented `input`, `message`, `output`, `branch`,
@@ -166,4 +169,4 @@ For a parse error, follow the reported expected token and compare clause order w
 public example. For a validation error, trace exact types, declaration order, domain ownership,
 branch compatibility, construction completeness, and connector capabilities. For missing data,
 check domain lifecycle, source offsets, timestamps, filters, branch keys, route filters, flush
-boundaries, and external entity provisioning in that order.
+boundaries, input collection boundaries, and external entity provisioning in that order.

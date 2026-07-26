@@ -1,5 +1,3 @@
-use std::future;
-
 use error_stack::{AttachmentKind, FrameKind, Report};
 use thiserror::Error;
 
@@ -1503,12 +1501,19 @@ impl EmitterTask {
             &emitter.sink,
             catalog_client.as_deref(),
         )?;
+        let input_collect_policy = Runtime::parse_runtime_node_input_collect_policy(
+            domain,
+            "emitter",
+            &emitter.name,
+            emitter.collect_policy.as_ref(),
+        )?;
 
         Ok(tokio::spawn(async move {
             let _client_mounts = resolved_client
                 .as_ref()
                 .and_then(|config| config.mounts.clone());
             let mut input = receiver;
+            let mut input_collection = RuntimeTaskInputCollection::new(input_collect_policy);
             let context = EmitterSinkContext {
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
@@ -1557,31 +1562,41 @@ impl EmitterTask {
 
             loop {
                 tokio::task::consume_budget().await;
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            let mut control = EmitterPublishControl {
-                                runtime: &runtime,
-                                fault_injector: &fault_injector,
-                                shutdown_rx: &mut shutdown_rx,
-                                backoff: &mut publish_backoff,
-                            };
-                            let _ = sink
-                                .flush_all(
-                                    &task_sink,
-                                    &context,
-                                    &mut control,
-                                    codec.clone(),
-                                    &mut emitter_buffer,
-                                )
-                                .await;
-                            break;
-                        }
-                    }
+                let input_event = tokio::select! {
+                    biased;
+                    event = Runtime::recv_runtime_collected_input(
+                        &mut input,
+                        &mut shutdown_rx,
+                        &mut input_collection,
+                        sink.flush_deadline(&emitter_buffer),
+                    ) => Some(event),
                     changed = force_flush_rx.changed() => {
                         if changed.is_err() {
                             break;
                         }
+                        None
+                    }
+                };
+                let Some(input_event) = input_event else {
+                    let mut control = EmitterPublishControl {
+                        runtime: &runtime,
+                        fault_injector: &fault_injector,
+                        shutdown_rx: &mut shutdown_rx,
+                        backoff: &mut publish_backoff,
+                    };
+                    let _ = sink
+                        .flush_all(
+                            &task_sink,
+                            &context,
+                            &mut control,
+                            codec.clone(),
+                            &mut emitter_buffer,
+                        )
+                        .await;
+                    continue;
+                };
+                match input_event {
+                    BatchedInput::Shutdown | BatchedInput::Closed => {
                         let mut control = EmitterPublishControl {
                             runtime: &runtime,
                             fault_injector: &fault_injector,
@@ -1597,14 +1612,9 @@ impl EmitterTask {
                                 &mut emitter_buffer,
                             )
                             .await;
+                        break;
                     }
-                    _ = async {
-                        if let Some(deadline) = sink.flush_deadline(&emitter_buffer) {
-                            sleep_until(deadline).await;
-                        } else {
-                            future::pending::<()>().await;
-                        }
-                    } => {
+                    BatchedInput::Wake => {
                         let mut control = EmitterPublishControl {
                             runtime: &runtime,
                             fault_injector: &fault_injector,
@@ -1619,23 +1629,23 @@ impl EmitterTask {
                                 codec.clone(),
                                 &mut emitter_buffer,
                             )
-                            .await {
+                            .await
+                        {
                             Ok(Some(report)) => {
                                 publish_backoff.reset();
-                                runtime.clear_emitter_transient_error(
-                                    &task_domain,
-                                    &task_emitter,
-                                );
-                                runtime.metrics.observe_global_node_sent(NodeBatchObservation {
-                                    domain: &task_domain,
-                                    kind: ModelKind::Emitter,
-                                    node: &task_emitter,
-                                    relay: &task_from_relay,
-                                    physical_node_id: runtime.local_node_id.read().as_deref(),
-                                    messages: report.messages,
-                                    bytes: report.bytes,
-                                    domain_timestamp: Some(report.domain_timestamp),
-                                });
+                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
+                                runtime
+                                    .metrics
+                                    .observe_global_node_sent(NodeBatchObservation {
+                                        domain: &task_domain,
+                                        kind: ModelKind::Emitter,
+                                        node: &task_emitter,
+                                        relay: &task_from_relay,
+                                        physical_node_id: runtime.local_node_id.read().as_deref(),
+                                        messages: report.messages,
+                                        bytes: report.bytes,
+                                        domain_timestamp: Some(report.domain_timestamp),
+                                    });
                                 runtime.mark_branch_aggregated_metrics_updated(
                                     &task_domain,
                                     ModelKind::Emitter,
@@ -1672,69 +1682,51 @@ impl EmitterTask {
                             }
                         }
                     }
-                    message = input.recv() => {
-                        let batch = match message {
-                            Some(batch) => batch,
-                            None => {
-                                let mut control = EmitterPublishControl {
-                                    runtime: &runtime,
-                                    fault_injector: &fault_injector,
-                                    shutdown_rx: &mut shutdown_rx,
-                                    backoff: &mut publish_backoff,
-                                };
-                                let _ = sink
-                                    .flush_all(
-                                        &task_sink,
-                                        &context,
-                                        &mut control,
-                                        codec.clone(),
-                                        &mut emitter_buffer,
-                                    )
-                                    .await;
-                                break;
-                            }
-                        };
-                        runtime.metrics.observe_global_node_received(NodeBatchObservation {
-                            domain: &task_domain,
-                            kind: ModelKind::Emitter,
-                            node: &task_emitter,
-                            relay: &task_from_relay,
-                            physical_node_id: runtime.local_node_id.read().as_deref(),
-                            messages: batch.message_count(),
-                            bytes: batch.estimated_bytes(),
-                            domain_timestamp: batch.domain_timestamp(),
-                        });
+                    BatchedInput::Batch(batch) => {
+                        runtime
+                            .metrics
+                            .observe_global_node_received(NodeBatchObservation {
+                                domain: &task_domain,
+                                kind: ModelKind::Emitter,
+                                node: &task_emitter,
+                                relay: &task_from_relay,
+                                physical_node_id: runtime.local_node_id.read().as_deref(),
+                                messages: batch.message_count(),
+                                bytes: batch.estimated_bytes(),
+                                domain_timestamp: batch.domain_timestamp(),
+                            });
                         runtime.mark_branch_aggregated_metrics_updated(
                             &task_domain,
                             ModelKind::Emitter,
                             &task_emitter,
                         );
-                        let delivery_latencies = batch.delivery_latency_seconds(current_timestamp());
+                        let delivery_latencies =
+                            batch.delivery_latency_seconds(current_timestamp());
                         for seconds in delivery_latencies {
-                            runtime.metrics.observe_global_delivery_latency_at_domain_time(
-                                NodeLatencyObservation {
-                                    domain: &task_domain,
-                                    kind: ModelKind::Emitter,
-                                    node: &task_emitter,
-                                    relay: &task_from_relay,
-                                    physical_node_id: runtime.local_node_id.read().as_deref(),
-                                    seconds,
-                                    domain_timestamp: batch.domain_timestamp(),
-                                },
-                            );
+                            runtime
+                                .metrics
+                                .observe_global_delivery_latency_at_domain_time(
+                                    NodeLatencyObservation {
+                                        domain: &task_domain,
+                                        kind: ModelKind::Emitter,
+                                        node: &task_emitter,
+                                        relay: &task_from_relay,
+                                        physical_node_id: runtime.local_node_id.read().as_deref(),
+                                        seconds,
+                                        domain_timestamp: batch.domain_timestamp(),
+                                    },
+                                );
                             runtime.mark_branch_aggregated_metrics_updated(
                                 &task_domain,
                                 ModelKind::Emitter,
                                 &task_emitter,
                             );
                         }
-                        let publish_batch = match batch_context
-                            .process(batch, &mut shutdown_rx)
-                            .await
-                        {
-                            Some(batch) => batch,
-                            None => continue,
-                        };
+                        let publish_batch =
+                            match batch_context.process(batch, &mut shutdown_rx).await {
+                                Some(batch) => batch,
+                                None => continue,
+                            };
 
                         {
                             let mut pending_batch = Some(publish_batch);
@@ -1745,9 +1737,7 @@ impl EmitterTask {
                                     .or_else(|| emitter_buffer.pending.first())
                                     .expect("pending emitter batch must exist");
                                 let batch_acks = batch.merged_acks();
-                                while let Some(reason) =
-                                    sink.missing_reason().map(str::to_owned)
-                                {
+                                while let Some(reason) = sink.missing_reason().map(str::to_owned) {
                                     tokio::task::consume_budget().await;
                                     let wait = publish_backoff.next_delay();
                                     runtime.record_emitter_transient_error_with_backoff(
@@ -1915,9 +1905,7 @@ impl EmitterTask {
                                             );
                                             batch_context
                                                 .handle_publish_error_batch(
-                                                    batch,
-                                                    reason,
-                                                    operation,
+                                                    batch, reason, operation,
                                                 )
                                                 .await;
                                         } else {
@@ -1928,9 +1916,7 @@ impl EmitterTask {
                                             );
                                             batch_context
                                                 .handle_publish_error_batches(
-                                                    pending,
-                                                    reason,
-                                                    operation,
+                                                    pending, reason, operation,
                                                 )
                                                 .await;
                                         }

@@ -11,9 +11,9 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, boxed_choice, byte_size_lit, channel_ref,
-        client_ref, codec_ref, current_word_prefix, duration_lit, emitter_name, flush_each,
-        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
+        client_ref, codec_ref, collect_for, current_word_prefix, duration_lit, emitter_name,
+        flush_each, general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2,
+        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
         render_vm_program_tokens, route_construction, string_lit, suggestions_from_errors,
         table_ref, tok, topic_ref,
     },
@@ -529,6 +529,7 @@ pub fn create_emitter_parser<'src>()
         .then(emitter_name())
         .then_ignore(kw(Identifier::From))
         .then(relay_ref())
+        .then(collect_for().or_not())
         .boxed()
         .then(
             kw_phrase2(Identifier::Encode, Identifier::Using)
@@ -555,7 +556,10 @@ pub fn create_emitter_parser<'src>()
                                 (
                                     (
                                         (
-                                            (((if_not_exists, mode), name), from_relay),
+                                            (
+                                                (((if_not_exists, mode), name), from_relay),
+                                                collect_policy,
+                                            ),
                                             encode_using_codec,
                                         ),
                                         materialized_state,
@@ -717,6 +721,7 @@ pub fn create_emitter_parser<'src>()
                     CreateEmitter {
                         name,
                         from_relay,
+                        collect_policy,
                         encode_using_codec,
                         sink,
                         flush_each,
@@ -825,6 +830,29 @@ mod tests {
             }
         );
         assert_eq!(parsed.mode, AckMode::Attached);
+    }
+
+    #[test]
+    fn parses_emitter_input_collection() {
+        let parsed = parse_create_emitter(
+            "CREATE EMITTER emit FROM p99 COLLECT FOR 1s MAX BATCH SIZE 10MiB ENCODE USING \
+             my_codec TO KAFKA broker1 TOPIC topic FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+             GENERAL ERROR LOG;",
+        )
+        .expect("emitter input collection must parse");
+        let policy = parsed
+            .collect_policy
+            .as_ref()
+            .expect("emitter collection policy must be structured");
+        assert_eq!(policy.collect_for, "1s");
+        assert_eq!(policy.max_batch_size.as_deref(), Some("10MiB"));
+    }
+
+    #[test]
+    fn suggests_input_collection_after_emitter_source() {
+        let input = "CREATE EMITTER emit FROM p99 COL";
+        let suggestions = suggest_create_emitter(input, input.len());
+        assert!(suggestions.contains(&"COLLECT FOR".to_string()));
     }
 
     #[test]

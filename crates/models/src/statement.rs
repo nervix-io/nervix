@@ -769,6 +769,8 @@ pub struct CreateEmitter {
     pub name: Identifier,
     pub from_relay: Identifier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_policy: Option<InputCollectPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encode_using_codec: Option<Identifier>,
     pub sink: EmitSink,
     pub flush_each: String,
@@ -1383,6 +1385,13 @@ pub struct OutputFlushPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputCollectPolicy {
+    pub collect_for: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch_size: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessorInputWhere {
     pub relay: Identifier,
     pub where_clause: crate::Expression,
@@ -1394,18 +1403,37 @@ pub struct ProcessorInputs {
     pub from: Vec<Identifier>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub r#where: Vec<ProcessorInputWhere>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_policy: Option<InputCollectPolicy>,
 }
 
 impl ProcessorInputs {
     pub fn new(from: Vec<Identifier>, r#where: Vec<ProcessorInputWhere>) -> Self {
-        Self { from, r#where }
+        Self {
+            from,
+            r#where,
+            collect_policy: None,
+        }
     }
 
     pub fn single(relay: Identifier) -> Self {
         Self {
             from: vec![relay],
             r#where: Vec::new(),
+            collect_policy: None,
         }
+    }
+
+    pub fn with_collect_policy(
+        mut self,
+        collect_for: String,
+        max_batch_size: Option<String>,
+    ) -> Self {
+        self.collect_policy = Some(InputCollectPolicy {
+            collect_for,
+            max_batch_size,
+        });
+        self
     }
 
     pub fn first(&self) -> Option<&Identifier> {

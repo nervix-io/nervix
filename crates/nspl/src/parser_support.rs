@@ -6,9 +6,9 @@ use chumsky::{
 };
 use nervix_models::{
     AckMode, AssignmentTargetScope, BranchSelection, Domain, Expression, GeneralErrorPolicy,
-    Identifier as ModelIdentifier, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, OutputBranch, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, RouteConstruction,
+    Identifier as ModelIdentifier, InputCollectPolicy, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, OutputBranch, OutputFlushPolicy,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RouteConstruction,
 };
 use sorted_vec::SortedSet;
 
@@ -620,6 +620,18 @@ pub fn max_batch_size_clause<'src>()
         .boxed()
 }
 
+pub fn collect_for<'src>()
+-> impl Parser<'src, &'src [Token], InputCollectPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Collect, Identifier::For)
+        .ignore_then(duration_lit())
+        .then(max_batch_size_clause().or_not())
+        .map(|(collect_for, max_batch_size)| InputCollectPolicy {
+            collect_for,
+            max_batch_size,
+        })
+        .boxed()
+}
+
 pub fn flush_each<'src>()
 -> impl Parser<'src, &'src [Token], (String, Option<String>), extra::Err<ParseError<'src>>> + Clone
 {
@@ -698,6 +710,7 @@ fn processor_output_boundary_token(token: &Token) -> bool {
                 iden: Identifier::To
                     | Identifier::Branched
                     | Identifier::Unbranched
+                    | Identifier::Collect
                     | Identifier::Flush
                     | Identifier::On
                     | Identifier::Using
@@ -854,14 +867,17 @@ pub fn from_relay_clauses<'src>()
         .separated_by(tok(Token::Comma))
         .at_least(1)
         .collect::<Vec<_>>()
-        .map(|inputs| {
+        .then(collect_for().or_not())
+        .map(|(inputs, collect_policy)| {
             let mut from_relays = Vec::with_capacity(inputs.len());
             let mut from_where = Vec::new();
             for (relay, mut relay_where) in inputs {
                 from_relays.push(relay);
                 from_where.append(&mut relay_where);
             }
-            ProcessorInputs::new(from_relays, from_where)
+            let mut inputs = ProcessorInputs::new(from_relays, from_where);
+            inputs.collect_policy = collect_policy;
+            inputs
         })
         .boxed()
 }

@@ -9,6 +9,24 @@ Ordinary multi-source processors require every `FROM` relay to reference the sam
 Model. Merely having structurally equal schemas is not enough. The relays must also use the same
 exact named branch, or all be unbranched.
 
+Relay inputs may optionally collect incoming Arrow batches before node execution:
+
+```nspl
+FROM <relay> [WHERE <expr>], ...
+COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]
+```
+
+Without `COLLECT FOR`, each relay batch is executed immediately and Nervix creates no additional
+input buffer. With it, the duration starts when data enters an empty input collector. The node
+executes the accumulated batch when that timer expires or the optional maximum size is reached.
+Collection is independent for each source relay and concrete branch, and occurs before
+source-specific `WHERE`, node-wide `FILTER WHERE`, and node-specific execution.
+
+This clause is available on junctions, deduplicators, reorderers, window processors, inferencers,
+WASM processors, and reingestors. Correlators configure it independently after each complete
+`LEFT FROM` or `RIGHT FROM` relay list. Ingestors cannot use it because they do not consume relays;
+generators are scheduled from materialized state and have no `FROM` relay list.
+
 Branch-preserving processors declare one node-wide contract:
 
 ```nspl
@@ -234,7 +252,9 @@ Correlators use explicit sides and have no default input scope:
 ```nspl
 CREATE CORRELATOR correlate_orders
   LEFT FROM orders WHERE left.active
+  COLLECT FOR 10ms
   RIGHT FROM payments WHERE right.approved
+  COLLECT FOR 10ms MAX BATCH SIZE 1MiB
   CORRELATE WHERE left.order_id = right.order_id
   MATCH EARLIEST
   MAX TIME 5m

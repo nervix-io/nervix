@@ -724,6 +724,7 @@ mod tests {
                     Model::Emitter(CreateEmitter {
                         name: g.ident(),
                         from_relay: g.ident(),
+                        collect_policy: None,
                         encode_using_codec: Some(g.ident()),
                         sink,
                         flush_each: "100ms".to_string(),
@@ -785,6 +786,7 @@ mod tests {
             18 => Model::Emitter(CreateEmitter {
                 name: g.ident(),
                 from_relay: g.ident(),
+                collect_policy: None,
                 encode_using_codec: Some(g.ident()),
                 sink: EmitSink::ZeroMq { client: g.ident() },
                 flush_each: "100ms".to_string(),
@@ -813,6 +815,7 @@ mod tests {
             20 => Model::Emitter(CreateEmitter {
                 name: g.ident(),
                 from_relay: g.ident(),
+                collect_policy: None,
                 encode_using_codec: Some(g.ident()),
                 sink: EmitSink::Nats {
                     client: g.ident(),
@@ -2145,9 +2148,38 @@ mod tests {
         let input = r#"
             CREATE JUNCTION join_streams
                 FROM ss1, ss2, ss3
+                COLLECT FOR 25ms MAX BATCH SIZE 2MiB
                 BRANCHED BY tenant
                 TO ss10 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG;
+        "#;
+
+        let parsed = parse_statement(input).expect("parse should succeed");
+        let Statement::Create(parsed) = parsed else {
+            panic!("expected create statement");
+        };
+        let canonical = parsed.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_correlator_input_collection() {
+        let input = r#"
+            CREATE CORRELATOR correlate
+                LEFT FROM left_current, left_archive
+                COLLECT FOR 10ms
+                RIGHT FROM right_current
+                COLLECT FOR 20ms MAX BATCH SIZE 1MiB
+                CORRELATE WHERE left.id = right.id
+                MATCH EARLIEST
+                MAX TIME 5s
+                ON CORRELATION TIMEOUT DROP, DROP
+                UNBRANCHED
+                TO matched
+                    SET id = left.id
+                    FLUSH IMMEDIATE
+                    ON MESSAGE ERROR LOG;
         "#;
 
         let parsed = parse_statement(input).expect("parse should succeed");
@@ -2218,6 +2250,7 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
+                COLLECT FOR 50ms
                 ENCODE USING my_codec
                 TO KAFKA broker1 TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

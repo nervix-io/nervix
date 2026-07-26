@@ -2100,6 +2100,12 @@ impl DomainState {
                     )?;
                 }
                 Model::Emitter(emitter) => {
+                    ensure_input_collect_policy(
+                        domain,
+                        identifier,
+                        emitter.collect_policy.as_ref(),
+                        "emitter input",
+                    )?;
                     let input = expect_kind(
                         domain,
                         identifier,
@@ -3133,6 +3139,7 @@ fn processor_input_schemas<'inputs, 'models>(
         identifier,
         models,
     } = context;
+    ensure_input_collect_policy(domain, identifier, inputs.collect_policy.as_ref(), relation)?;
     if inputs.from.is_empty() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -3181,6 +3188,53 @@ fn processor_input_schemas<'inputs, 'models>(
         input_schemas.push((from_relay, input_schema));
     }
     Ok(input_schemas)
+}
+
+fn ensure_input_collect_policy(
+    domain: &Domain,
+    identifier: &Identifier,
+    policy: Option<&nervix_models::InputCollectPolicy>,
+    relation: &str,
+) -> Result<(), Report<RegistryError>> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    let duration = humantime::parse_duration(&policy.collect_for).map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "invalid {relation} COLLECT FOR duration '{}': {error}",
+                policy.collect_for
+            ),
+        })
+    })?;
+    if duration.is_zero() {
+        return Err(Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("{relation} COLLECT FOR duration must be greater than zero"),
+        }));
+    }
+    if let Some(max_batch_size) = policy.max_batch_size.as_deref() {
+        let parsed = max_batch_size.parse::<ubyte::ByteUnit>().map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!(
+                    "invalid {relation} COLLECT MAX BATCH SIZE '{max_batch_size}': {error}"
+                ),
+            })
+        })?;
+        if parsed.as_u64() == 0 {
+            return Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("{relation} COLLECT MAX BATCH SIZE must be greater than zero"),
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn validate_correlator_input_sides_do_not_overlap(
@@ -8950,11 +9004,11 @@ mod tests {
         CreateReingestor, CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor,
         CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule,
         DropModel, EmitSink, ErrorPolicies, Expression, FieldReference, FieldScope,
-        GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource, Inheritance, JsonType,
-        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
-        MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch,
-        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-        ScheduledNode, SchemaField, WindowBound, WireSchemaField,
+        GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource, Inheritance,
+        InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+        MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
+        MqttSession, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        RelayBranching, ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
     use super::{ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange};
@@ -9564,6 +9618,7 @@ mod tests {
         Model::Emitter(CreateEmitter {
             name: Identifier::parse(name).expect("valid identifier"),
             from_relay: Identifier::parse(from_relay).expect("valid identifier"),
+            collect_policy: None,
             encode_using_codec: Some(Identifier::parse(codec).expect("valid identifier")),
             sink: EmitSink::Kafka {
                 client: Identifier::parse(client).expect("valid identifier"),
@@ -9597,6 +9652,7 @@ mod tests {
         let mut emitter = CreateEmitter {
             name: identifier("emit"),
             from_relay: identifier("events"),
+            collect_policy: None,
             encode_using_codec: Some(identifier("events_codec")),
             sink: EmitSink::ZeroMq {
                 client: identifier("zeromq_main"),
@@ -10550,6 +10606,62 @@ mod tests {
             .expect("unconditional output route should be accepted");
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn apply_batch_rejects_zero_input_collection_boundaries() {
+        let cases = [
+            (
+                InputCollectPolicy {
+                    collect_for: "0s".to_string(),
+                    max_batch_size: None,
+                },
+                "COLLECT FOR duration must be greater than zero",
+            ),
+            (
+                InputCollectPolicy {
+                    collect_for: "1s".to_string(),
+                    max_batch_size: Some("0B".to_string()),
+                },
+                "COLLECT MAX BATCH SIZE must be greater than zero",
+            ),
+        ];
+
+        for (index, (collect_policy, expected)) in cases.into_iter().enumerate() {
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry should open");
+            let domain = Domain::parse(&format!("invalid_input_collection_{index}"))
+                .expect("domain should parse");
+            let mut inputs = ProcessorInputs::single(identifier("raw_events"));
+            inputs.collect_policy = Some(collect_policy);
+            let junction = Model::Junction(CreateJunction {
+                name: identifier("collect_events"),
+                from: inputs,
+                output_routes: unbranched_transforming_outputs("collected_events"),
+                branched_by: BranchSelection::unbranched(),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            });
+
+            let error = registry
+                .apply_batch(
+                    &domain,
+                    vec![
+                        schema("event_schema"),
+                        explicitly_unbranched_relay("raw_events", "event_schema"),
+                        explicitly_unbranched_relay("collected_events", "event_schema"),
+                        junction,
+                    ],
+                )
+                .expect_err("zero input collection boundaries must be rejected");
+            assert!(
+                format!("{error:#}").contains(expected),
+                "unexpected validation error: {error:#}"
+            );
+
+            let _ = fs::remove_dir_all(path);
+        }
     }
 
     #[test]

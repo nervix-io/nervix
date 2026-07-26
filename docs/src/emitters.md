@@ -7,6 +7,7 @@ A typical emitter:
 ```nspl
 CREATE [IF NOT EXISTS] EMITTER kafka_notifications
   FROM notifications
+  COLLECT FOR 10ms MAX BATCH SIZE 1MiB
   ENCODE USING notification_codec
   TO KAFKA kafka_main TOPIC notifications_out
   INHERIT ALL
@@ -18,6 +19,7 @@ CREATE [IF NOT EXISTS] EMITTER kafka_notifications
 An emitter defines:
 
 - the source relay
+- an optional input collection policy
 - the codec used for encoding
 - the transport-specific sink
 - the flush policy used to collect a batch before publishing
@@ -45,6 +47,13 @@ additionally supports `COMMIT EACH <duration> MAX SIZE <bytes>`: flush writes lo
 staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary.
+
+An emitter may place `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` immediately after `FROM
+<relay>`. This input policy runs before emitter filtering, construction, encoding, and the required
+output `FLUSH` policy. Omission means no additional input collection: each incoming relay batch
+enters emitter execution directly. When configured, collection is independent for each concrete
+source branch and releases on the timer or optional size boundary. Branch identity still collapses
+only after successful publication.
 
 ## Codec-emitter construction
 
