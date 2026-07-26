@@ -29,6 +29,26 @@ class FakeBucket {
   }
 }
 
+function assertTemporaryUncachedRedirect(response, location) {
+  assert.equal(response.status, 307);
+  assert.equal(response.headers.get("location"), location);
+  assert.equal(response.headers.get("cache-control"), null);
+}
+
+test("root redirects temporarily without cache headers", async () => {
+  const bucket = new FakeBucket(new Map());
+
+  const response = await worker.fetch(
+    new Request("https://docs.nervix.io/"),
+    { DOCS_BUCKET: bucket },
+  );
+
+  assertTemporaryUncachedRedirect(
+    response,
+    "https://docs.nervix.io/snapshot/",
+  );
+});
+
 test("root llms.txt redirects through the published snapshot alias", async () => {
   const bucket = new FakeBucket(
     new Map([["meta/snapshot.txt", new FakeObject("v1.2.3\n")]]),
@@ -39,12 +59,65 @@ test("root llms.txt redirects through the published snapshot alias", async () =>
     { DOCS_BUCKET: bucket },
   );
 
-  assert.equal(response.status, 307);
-  assert.equal(
-    response.headers.get("location"),
+  assertTemporaryUncachedRedirect(
+    response,
     "https://docs.nervix.io/v1.2.3/llms.txt",
   );
-  assert.equal(response.headers.get("cache-control"), "public, max-age=300");
+});
+
+test("root nervix.pdf redirects through the published snapshot alias", async () => {
+  const bucket = new FakeBucket(
+    new Map([["meta/snapshot.txt", new FakeObject("v1.2.3\n")]]),
+  );
+
+  const response = await worker.fetch(
+    new Request("https://docs.nervix.io/nervix.pdf"),
+    { DOCS_BUCKET: bucket },
+  );
+
+  assertTemporaryUncachedRedirect(
+    response,
+    "https://docs.nervix.io/v1.2.3/nervix.pdf",
+  );
+});
+
+test("snapshot nervix.pdf redirects to the immutable published PDF", async () => {
+  const bucket = new FakeBucket(
+    new Map([["meta/snapshot.txt", new FakeObject("v1.2.3\n")]]),
+  );
+
+  const response = await worker.fetch(
+    new Request("https://docs.nervix.io/snapshot/nervix.pdf"),
+    { DOCS_BUCKET: bucket },
+  );
+
+  assertTemporaryUncachedRedirect(
+    response,
+    "https://docs.nervix.io/v1.2.3/nervix.pdf",
+  );
+});
+
+test("versioned nervix.pdf is served as an immutable PDF", async () => {
+  const bucket = new FakeBucket(
+    new Map([
+      [
+        "v1.2.3/nervix.pdf",
+        new FakeObject("%PDF-1.7", "application/pdf"),
+      ],
+    ]),
+  );
+
+  const response = await worker.fetch(
+    new Request("https://docs.nervix.io/v1.2.3/nervix.pdf"),
+    { DOCS_BUCKET: bucket },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "application/pdf");
+  assert.equal(
+    response.headers.get("cache-control"),
+    "public, max-age=31536000, immutable",
+  );
 });
 
 test("versioned Markdown is served without HTML fallback", async () => {

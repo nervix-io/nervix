@@ -123,10 +123,8 @@ book-pdf version="" output="":
     fi
     if [[ -n "{{ output }}" ]]; then
         output_path="{{ output }}"
-    elif [[ -n "{{ version }}" ]]; then
-        output_path="docs/book/nervix-book-{{ version }}.pdf"
     else
-        output_path="docs/book/nervix-book.pdf"
+        output_path="docs/book/nervix.pdf"
     fi
     tmp_html="$(mktemp --suffix=.html)"
     trap 'rm -f "${tmp_html}"' EXIT
@@ -170,7 +168,7 @@ worker-deploy zone_id="":
     fi
 
 publish-book target zone_id alias="snapshot" bucket="nervix-docs":
-    just book {{ target }}
+    just book-pdf {{ target }} docs/book/nervix.pdf
     just publish-dir docs/book {{ target }} {{ zone_id }} {{ alias }} {{ bucket }}
     just worker-deploy {{ zone_id }}
 

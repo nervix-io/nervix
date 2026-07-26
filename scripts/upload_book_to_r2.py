@@ -70,6 +70,7 @@ def content_type_for(path: Path) -> str:
         ".webp": "image/webp",
         ".ico": "image/x-icon",
         ".md": "text/markdown; charset=utf-8",
+        ".pdf": "application/pdf",
         ".txt": "text/plain; charset=utf-8",
         ".html": "text/html; charset=utf-8",
         ".xml": "application/xml",
