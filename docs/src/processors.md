@@ -64,7 +64,9 @@ visible independently to every route. They never initialize route outputs automa
 
 Every flush-based processor route declares `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or
 `FLUSH IMMEDIATE`. The [NSPL Overview](nspl-overview.md) defines the system-owned 100 µs minimum
-batching window and its forced-flush exceptions.
+batching window and its forced-flush exceptions. A route using `ON MESSAGE ERROR SEND TO` buffers
+its error records independently and emits them on that route's same interval or maximum batch-size
+boundary.
 
 ## Materialized relay state
 

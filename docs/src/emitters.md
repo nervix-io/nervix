@@ -42,7 +42,9 @@ means Nervix collects an in-memory Arrow batch before handing it to the external
 [NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally supports `COMMIT EACH <duration> MAX SIZE <bytes>`: flush writes local Arrow IPC
-staging files, and commit appends the staged data to object storage.
+staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
+buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
+interval or maximum batch-size boundary.
 
 ## Codec-emitter construction
 
