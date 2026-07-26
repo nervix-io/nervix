@@ -16,15 +16,15 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterRelay, AlterRelayOperation, Assignment, AssignmentTarget, AvroType, BranchSelection,
-    CodecEncoding, CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateCodec, CreateCorrelator, CreateDeduplicator, CreateGenerator, CreateInferencer,
-    CreateIngestor, CreateLookup, CreateMaterializer, CreateSchema, CreateSignalingProtocol,
-    CreateWindowProcessor, CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink,
-    EndpointType, Expression, Identifier, IngestSource, IngestTimestampSource, JsonType,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model, ModelKind,
-    OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RouteConstruction, ScheduledNode,
-    SchemaField,
+    AlterRelay, AlterRelayOperation, AlterSchema, AlterWireSchemaStmt, Assignment,
+    AssignmentTarget, AvroType, BranchSelection, CodecEncoding, CodecEncodingRule, CodecWireFormat,
+    CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator,
+    CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateMaterializer,
+    CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchemaStmt, Domain,
+    DomainSchedule, DropModel, EmitSink, EndpointType, Expression, Identifier, IngestSource,
+    IngestTimestampSource, JsonType, MaterializedStateDependency, MaterializedStatePolicy,
+    MessageErrorPolicy, Model, ModelKind, OutputBranch, ParseAsType, ProcessorOutput,
+    ProcessorOutputs, RouteConstruction, ScheduledNode, SchemaField,
 };
 use nervix_nspl::{
     vm_program::{
@@ -41,7 +41,7 @@ use nervix_vm::{
     compile_program_with_options_for_bindings_with_sensitivity,
     infer_set_expr_types_for_bindings_with_udfs,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,
 };
@@ -96,8 +96,8 @@ pub enum RegistryError {
     PersistBatch,
     #[error("model '{identifier}' already exists in domain '{domain}'")]
     AlreadyExists { domain: String, identifier: String },
-    #[error("batch contains duplicate model '{identifier}' in domain '{domain}'")]
-    DuplicateInBatch { domain: String, identifier: String },
+    #[error("domain '{domain}' changed after the mutation batch was planned")]
+    ConcurrentMutation { domain: String },
     #[error("model '{identifier}' does not exist in domain '{domain}'")]
     NotFound { domain: String, identifier: String },
     #[error(
@@ -182,6 +182,7 @@ impl RegistryKey {
 pub struct Registry {
     storage: ModelStorage,
     state: RwLock<Arc<RegistryState>>,
+    commit_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,9 +190,10 @@ pub struct RuntimeChanges {
     pub domain: Domain,
     pub graph: Option<ActiveGraph>,
     pub changes: Vec<RuntimeChange>,
+    pub state_invalidations: Vec<RegistryEntity>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RegistryEntity {
     pub kind: ModelKind,
     pub identifier: Identifier,
@@ -286,6 +288,7 @@ impl Registry {
         Ok(Self {
             storage,
             state: RwLock::new(Arc::new(state)),
+            commit_lock: Mutex::new(()),
         })
     }
 
@@ -294,13 +297,12 @@ impl Registry {
         domain: &Domain,
         models: Vec<Model>,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
-        self.apply_mutations(
+        self.apply_mutation_batch(
             domain,
             models
                 .into_iter()
                 .map(|model| RegistryMutation::Create(Box::new(model)))
                 .collect(),
-            "model batch",
         )
     }
 
@@ -328,6 +330,38 @@ impl Registry {
         )
     }
 
+    pub fn alter_schema(
+        &self,
+        domain: &Domain,
+        alter: AlterSchema,
+    ) -> Result<RuntimeChanges, Report<RegistryError>> {
+        self.apply_mutations(
+            domain,
+            vec![RegistryMutation::AlterSchema(alter)],
+            "schema alter",
+        )
+    }
+
+    pub fn alter_wire_schema(
+        &self,
+        domain: &Domain,
+        alter: AlterWireSchemaStmt,
+    ) -> Result<RuntimeChanges, Report<RegistryError>> {
+        self.apply_mutations(
+            domain,
+            vec![RegistryMutation::AlterWireSchema(alter)],
+            "wire schema alter",
+        )
+    }
+
+    pub fn apply_mutation_batch(
+        &self,
+        domain: &Domain,
+        mutations: Vec<RegistryMutation>,
+    ) -> Result<RuntimeChanges, Report<RegistryError>> {
+        self.apply_mutations(domain, mutations, "mixed mutation batch")
+    }
+
     pub fn startup_runtime_changes(&self) -> Result<Vec<RuntimeChanges>, Report<RegistryError>> {
         let state = self.state.read();
         let domains = SortedSet::from_unsorted(state.domains.keys().cloned().collect()).into_vec();
@@ -339,6 +373,7 @@ impl Registry {
                 let changes = runtime_changes_for_domain(
                     &domain,
                     Some(domain_state.graph.clone()),
+                    None,
                     &HashMap::new(),
                     &domain_state.models,
                 );
@@ -353,12 +388,30 @@ impl Registry {
         mutations: Vec<RegistryMutation>,
         operation_name: &str,
     ) -> Result<RuntimeChanges, Report<RegistryError>> {
+        let planned = self.plan_mutations_named(domain, &mutations, operation_name)?;
+        self.commit_planned(planned)
+    }
+
+    pub fn plan_mutations(
+        &self,
+        domain: &Domain,
+        mutations: &[RegistryMutation],
+    ) -> Result<PlannedMutations, Report<RegistryError>> {
+        self.plan_mutations_named(domain, mutations, "mixed mutation batch")
+    }
+
+    fn plan_mutations_named(
+        &self,
+        domain: &Domain,
+        mutations: &[RegistryMutation],
+        operation_name: &str,
+    ) -> Result<PlannedMutations, Report<RegistryError>> {
         let batch_size = mutations.len();
         info!(
             domain = domain.as_str(),
             batch_size,
             operation = operation_name,
-            "applying mutation batch"
+            "planning mutation batch"
         );
 
         let existing = self
@@ -371,13 +424,8 @@ impl Registry {
             .map(|record| (record.key.clone(), record.model.clone()))
             .collect::<HashMap<_, _>>();
         let current_state = self.build_domain_state(domain, &current_models)?;
-        let mut candidate = existing
-            .iter()
-            .map(|record| (record.key.clone(), record.model.clone()))
-            .collect::<HashMap<_, _>>();
+        let mut candidate = current_models.clone();
 
-        let mut models_to_persist = HashMap::<RegistryKey, RegistryPersistMutation>::new();
-        let mut drops_in_batch = HashSet::<RegistryKey>::new();
         let mut targeted_runtime_changes = Vec::new();
         let mut targeted_runtime_changes_only = true;
         for mutation in mutations {
@@ -407,26 +455,72 @@ impl Registry {
                         }));
                     }
 
-                    if models_to_persist
-                        .insert(
-                            key.clone(),
-                            RegistryPersistMutation::Create((*model).clone()),
-                        )
-                        .is_some()
-                    {
-                        warn!(
-                            domain = domain.as_str(),
-                            model = identifier.as_str(),
-                            kind = model.kind().as_str(),
-                            "rejecting batch because model is duplicated in batch"
-                        );
-                        return Err(Report::new(RegistryError::DuplicateInBatch {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                        }));
-                    }
+                    candidate.insert(key, model.as_ref().clone());
+                }
+                RegistryMutation::AlterSchema(alter) => {
+                    targeted_runtime_changes_only = false;
+                    let key = RegistryKey::new(ModelKind::Schema, alter.schema.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.schema.as_str(),
+                        kind = ModelKind::Schema.as_str(),
+                        "staging schema alter from batch"
+                    );
 
-                    candidate.insert(key, *model);
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Schema(schema) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                            expected_kind: ModelKind::Schema.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    schema.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
+                RegistryMutation::AlterWireSchema(alter) => {
+                    targeted_runtime_changes_only = false;
+                    let schema_name = alter.schema();
+                    let key = RegistryKey::new(ModelKind::WireSchema, schema_name.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = schema_name.as_str(),
+                        kind = ModelKind::WireSchema.as_str(),
+                        "staging wire schema alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: schema_name.as_str().to_string(),
+                        }));
+                    };
+                    let Model::WireSchema(schema) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: schema_name.as_str().to_string(),
+                            expected_kind: ModelKind::WireSchema.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    schema.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: schema_name.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
                 }
                 RegistryMutation::AlterRelay(alter) => {
                     let key = RegistryKey::new(ModelKind::Relay, alter.relay.clone());
@@ -468,16 +562,6 @@ impl Registry {
                         }
                     }
                     relay.apply_alter(&alter.operation);
-
-                    if models_to_persist
-                        .insert(key.clone(), RegistryPersistMutation::Replace(model.clone()))
-                        .is_some()
-                    {
-                        return Err(Report::new(RegistryError::DuplicateInBatch {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.relay.as_str().to_string(),
-                        }));
-                    }
                 }
                 RegistryMutation::Drop(drop) => {
                     targeted_runtime_changes_only = false;
@@ -489,28 +573,22 @@ impl Registry {
                         "staging model drop from batch"
                     );
 
-                    let Some(_existing_model) = candidate.get(&key) else {
+                    let Some(_existing_model) = candidate.remove(&key) else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
                             identifier: drop.name.as_str().to_string(),
                         }));
                     };
-
-                    if !drops_in_batch.insert(key) {
-                        return Err(Report::new(RegistryError::DuplicateInBatch {
-                            domain: domain.as_str().to_string(),
-                            identifier: drop.name.as_str().to_string(),
-                        }));
-                    }
                 }
             }
         }
 
+        let drops_in_batch = current_models
+            .keys()
+            .filter(|key| !candidate.contains_key(*key))
+            .cloned()
+            .collect::<HashSet<_>>();
         ensure_drop_targets_are_not_in_use(domain, &current_state.graph, &drops_in_batch)?;
-
-        for key in &drops_in_batch {
-            candidate.remove(key);
-        }
 
         let domain_state = match self.build_domain_state(domain, &candidate) {
             Ok(state) => state,
@@ -528,47 +606,77 @@ impl Registry {
                 return Err(err);
             }
         };
+        let models_to_persist = candidate
+            .iter()
+            .filter_map(|(key, model)| match current_models.get(key) {
+                None => Some((key.clone(), RegistryPersistMutation::Create(model.clone()))),
+                Some(current) if current != model => {
+                    Some((key.clone(), RegistryPersistMutation::Replace(model.clone())))
+                }
+                Some(_) => None,
+            })
+            .collect::<HashMap<_, _>>();
         let runtime_changes = if targeted_runtime_changes_only {
             RuntimeChanges {
                 domain: domain.clone(),
                 graph: (domain_state.graph.node_count() > 0).then_some(domain_state.graph.clone()),
                 changes: targeted_runtime_changes,
+                state_invalidations: Vec::new(),
             }
         } else {
             runtime_changes_for_domain(
                 domain,
                 (domain_state.graph.node_count() > 0).then_some(domain_state.graph.clone()),
+                Some(&current_state.graph),
                 &current_state.models,
                 &domain_state.models,
             )
         };
 
-        for (key, mutation) in &models_to_persist {
-            match mutation {
-                RegistryPersistMutation::Create(model) => {
-                    self.storage
-                        .put(domain, key.kind, &key.identifier, model)
-                        .change_context(RegistryError::PersistBatch)?;
-                }
-                RegistryPersistMutation::Replace(model) => {
-                    self.storage
-                        .replace(domain, key.kind, &key.identifier, model)
-                        .change_context(RegistryError::PersistBatch)?;
-                }
-            }
+        Ok(PlannedMutations {
+            domain: domain.clone(),
+            batch_size,
+            operation_name: operation_name.to_string(),
+            base_models: current_models,
+            domain_state,
+            models_to_persist,
+            drops_in_batch,
+            runtime_changes,
+        })
+    }
+
+    pub fn commit_planned(
+        &self,
+        planned: PlannedMutations,
+    ) -> Result<RuntimeChanges, Report<RegistryError>> {
+        let _commit_guard = self.commit_lock.lock();
+        let current_models = self
+            .storage
+            .list_models(&planned.domain)
+            .change_context(RegistryError::LoadStoredModels)?
+            .into_iter()
+            .map(|record| (record.key, record.model))
+            .collect::<HashMap<_, _>>();
+        if current_models != planned.base_models {
+            return Err(Report::new(RegistryError::ConcurrentMutation {
+                domain: planned.domain.as_str().to_string(),
+            }));
         }
-        for key in &drops_in_batch {
-            self.storage
-                .delete(domain, key.kind, &key.identifier)
-                .change_context(RegistryError::PersistBatch)?;
-        }
+
+        self.storage
+            .commit_batch(
+                &planned.domain,
+                &planned.models_to_persist,
+                &planned.drops_in_batch,
+            )
+            .change_context(RegistryError::PersistBatch)?;
 
         let current = self.state.read();
         let mut domains = current.domains.clone();
-        if domain_state.graph.node_count() == 0 {
-            domains.remove(domain);
+        if planned.domain_state.graph.node_count() == 0 {
+            domains.remove(&planned.domain);
         } else {
-            domains.insert(domain.clone(), domain_state);
+            domains.insert(planned.domain.clone(), planned.domain_state);
         }
         drop(current);
 
@@ -577,28 +685,87 @@ impl Registry {
 
         let graph_snapshot = writer
             .domains
-            .get(domain)
+            .get(&planned.domain)
             .map(|state| state.graph.describe())
             .unwrap_or_default();
 
         info!(
-            domain = domain.as_str(),
-            batch_size,
-            operation = operation_name,
+            domain = planned.domain.as_str(),
+            batch_size = planned.batch_size,
+            operation = planned.operation_name,
             result = "ok",
             node_count = writer
                 .domains
-                .get(domain)
+                .get(&planned.domain)
                 .map(|state| state.graph.node_count())
                 .unwrap_or(0),
             edge_count = writer
                 .domains
-                .get(domain)
+                .get(&planned.domain)
                 .map(|state| state.graph.edge_count())
                 .unwrap_or(0),
             "applied mutation batch\n{}",
             graph_snapshot
         );
+
+        Ok(planned.runtime_changes)
+    }
+
+    pub fn rollback_committed(
+        &self,
+        planned: PlannedMutations,
+    ) -> Result<RuntimeChanges, Report<RegistryError>> {
+        let _commit_guard = self.commit_lock.lock();
+        let current_models = self
+            .storage
+            .list_models(&planned.domain)
+            .change_context(RegistryError::LoadStoredModels)?
+            .into_iter()
+            .map(|record| (record.key, record.model))
+            .collect::<HashMap<_, _>>();
+        if current_models != planned.domain_state.models {
+            return Err(Report::new(RegistryError::ConcurrentMutation {
+                domain: planned.domain.as_str().to_string(),
+            }));
+        }
+
+        let models_to_persist = planned
+            .base_models
+            .iter()
+            .filter_map(|(key, model)| match current_models.get(key) {
+                None => Some((key.clone(), RegistryPersistMutation::Create(model.clone()))),
+                Some(current) if current != model => {
+                    Some((key.clone(), RegistryPersistMutation::Replace(model.clone())))
+                }
+                Some(_) => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let drops = current_models
+            .keys()
+            .filter(|key| !planned.base_models.contains_key(*key))
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.storage
+            .commit_batch(&planned.domain, &models_to_persist, &drops)
+            .change_context(RegistryError::PersistBatch)?;
+
+        let base_state = self.build_domain_state(&planned.domain, &planned.base_models)?;
+        let runtime_changes = runtime_changes_for_domain(
+            &planned.domain,
+            (base_state.graph.node_count() > 0).then_some(base_state.graph.clone()),
+            Some(&planned.domain_state.graph),
+            &planned.domain_state.models,
+            &base_state.models,
+        );
+        let current = self.state.read();
+        let mut domains = current.domains.clone();
+        if base_state.graph.node_count() == 0 {
+            domains.remove(&planned.domain);
+        } else {
+            domains.insert(planned.domain.clone(), base_state);
+        }
+        drop(current);
+        *self.state.write() = Arc::new(RegistryState { domains });
 
         Ok(runtime_changes)
     }
@@ -681,16 +848,40 @@ impl Registry {
 }
 
 #[derive(Debug, Clone)]
-enum RegistryMutation {
+pub enum RegistryMutation {
     Create(Box<Model>),
+    AlterSchema(AlterSchema),
+    AlterWireSchema(AlterWireSchemaStmt),
     AlterRelay(AlterRelay),
     Drop(DropModel),
+}
+
+impl RegistryMutation {
+    pub fn requires_domain_quiesce(&self) -> bool {
+        if let Self::AlterSchema(_) | Self::AlterWireSchema(_) = self {
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 enum RegistryPersistMutation {
     Create(Model),
     Replace(Model),
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannedMutations {
+    domain: Domain,
+    batch_size: usize,
+    operation_name: String,
+    base_models: HashMap<RegistryKey, Model>,
+    domain_state: DomainState,
+    models_to_persist: HashMap<RegistryKey, RegistryPersistMutation>,
+    drops_in_batch: HashSet<RegistryKey>,
+    runtime_changes: RuntimeChanges,
 }
 
 #[derive(Debug, Clone)]
@@ -2103,6 +2294,94 @@ impl ActiveGraph {
         self.graph.node_weights().cloned().collect()
     }
 
+    fn dependent_dataflow_entities(&self, seeds: &HashSet<RegistryKey>) -> HashSet<RegistryEntity> {
+        let mut pending = seeds
+            .iter()
+            .filter_map(|key| self.indices.get(key).copied())
+            .collect::<Vec<_>>();
+        let mut visited = HashSet::default();
+        let mut affected = HashSet::default();
+
+        while let Some(index) = pending.pop() {
+            if !visited.insert(index) {
+                continue;
+            }
+            let node = self
+                .graph
+                .node_weight(index)
+                .expect("visited graph node must exist");
+            if node.is_dataflow_node() {
+                affected.insert(RegistryEntity {
+                    kind: node.kind,
+                    identifier: node.identifier.clone(),
+                });
+            }
+            pending.extend(
+                self.graph
+                    .edges_directed(index, Direction::Outgoing)
+                    .filter_map(|edge| {
+                        (*edge.weight() == EdgeKind::RequiredBy).then_some(edge.target())
+                    }),
+            );
+        }
+
+        affected
+    }
+
+    fn schema_fingerprint_for_index(&self, index: NodeIndex) -> [u8; 32] {
+        let mut pending = vec![index];
+        let mut visited = HashSet::default();
+        let mut schemas = Vec::new();
+
+        while let Some(index) = pending.pop() {
+            if !visited.insert(index) {
+                continue;
+            }
+            let node = self
+                .graph
+                .node_weight(index)
+                .expect("visited graph node must exist");
+            if let Model::Schema(_) | Model::WireSchema(_) = node.config.as_ref() {
+                schemas.push((
+                    node.kind,
+                    node.identifier.clone(),
+                    serde_json::to_vec(node.config.as_ref())
+                        .expect("validated schema models must serialize"),
+                ));
+            }
+            pending.extend(
+                self.graph
+                    .edges_directed(index, Direction::Incoming)
+                    .filter_map(|edge| {
+                        (*edge.weight() == EdgeKind::RequiredBy).then_some(edge.source())
+                    }),
+            );
+        }
+        schemas.sort_by(|left, right| {
+            left.0
+                .as_str()
+                .cmp(right.0.as_str())
+                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+        });
+
+        let mut hasher = blake3::Hasher::new();
+        for (kind, identifier, encoded) in schemas {
+            hasher.update(kind.as_str().as_bytes());
+            hasher.update(&[0]);
+            hasher.update(identifier.as_str().as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&encoded);
+            hasher.update(&[0]);
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    pub fn schema_fingerprint(&self, kind: ModelKind, identifier: &Identifier) -> Option<[u8; 32]> {
+        self.indices
+            .get(&RegistryKey::new(kind, identifier.clone()))
+            .map(|index| self.schema_fingerprint_for_index(*index))
+    }
+
     pub fn schedule_for_domain(
         &self,
         domain: &Domain,
@@ -2170,6 +2449,7 @@ impl ActiveGraph {
                         config: Box::new((*node.config).clone()),
                         effective_branching: node.effective_branching,
                         effective_branching_schema: node.effective_branching_schema,
+                        schema_fingerprint: self.schema_fingerprint_for_index(index),
                         kafka_partition_schedule: None,
                         primary_node,
                         assigned_nodes,
@@ -3413,7 +3693,7 @@ fn log_registry_state(message: &str, state: &RegistryState) {
 }
 
 struct ModelStorage {
-    _db: Database,
+    db: Database,
     index: Keyspace,
 }
 
@@ -3423,9 +3703,10 @@ impl ModelStorage {
             .keyspace("models", KeyspaceCreateOptions::default)
             .change_context(RegistryError::OpenKeyspace)?;
 
-        Ok(Self { _db: db, index })
+        Ok(Self { db, index })
     }
 
+    #[cfg(test)]
     fn put(
         &self,
         domain: &Domain,
@@ -3454,45 +3735,38 @@ impl ModelStorage {
             .change_context(RegistryError::WriteValue)
     }
 
-    fn replace(
+    fn commit_batch(
         &self,
         domain: &Domain,
-        kind: ModelKind,
-        identifier: &Identifier,
-        model: &Model,
+        models_to_persist: &HashMap<RegistryKey, RegistryPersistMutation>,
+        drops_in_batch: &HashSet<RegistryKey>,
     ) -> Result<(), Report<RegistryError>> {
-        let key = encode_key(domain, kind, identifier)?;
+        let encoded_models = models_to_persist
+            .iter()
+            .map(|(key, mutation)| {
+                let model = match mutation {
+                    RegistryPersistMutation::Create(model)
+                    | RegistryPersistMutation::Replace(model) => model,
+                };
+                Ok((
+                    encode_key(domain, key.kind, &key.identifier)?,
+                    serialize_value(model)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
+        let encoded_drops = drops_in_batch
+            .iter()
+            .map(|key| encode_key(domain, key.kind, &key.identifier))
+            .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
 
-        if self
-            .index
-            .get(key.clone())
-            .change_context(RegistryError::ReadValue)?
-            .is_none()
-        {
-            return Err(Report::new(RegistryError::NotFound {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-            }));
+        let mut batch = self.db.batch();
+        for (key, value) in encoded_models {
+            batch.insert(&self.index, key, value);
         }
-
-        let value = serialize_value(model)?;
-
-        self.index
-            .insert(key, value)
-            .change_context(RegistryError::WriteValue)
-    }
-
-    fn delete(
-        &self,
-        domain: &Domain,
-        kind: ModelKind,
-        identifier: &Identifier,
-    ) -> Result<(), Report<RegistryError>> {
-        let key = encode_key(domain, kind, identifier)?;
-        self.index
-            .remove(key)
-            .change_context(RegistryError::WriteValue)?;
-        Ok(())
+        for key in encoded_drops {
+            batch.remove(&self.index, key);
+        }
+        batch.commit().change_context(RegistryError::WriteValue)
     }
 
     fn get(
@@ -8437,6 +8711,7 @@ fn parse_as_is_integer(ty: &ParseAsType) -> bool {
 fn runtime_changes_for_domain(
     domain: &Domain,
     graph: Option<ActiveGraph>,
+    current_graph: Option<&ActiveGraph>,
     current_models: &HashMap<RegistryKey, Model>,
     candidate_models: &HashMap<RegistryKey, Model>,
 ) -> RuntimeChanges {
@@ -8512,10 +8787,80 @@ fn runtime_changes_for_domain(
         });
     }
 
+    let changed_schemas = current_models
+        .iter()
+        .filter_map(|(key, current)| {
+            matches!(key.kind, ModelKind::Schema | ModelKind::WireSchema)
+                .then(|| {
+                    candidate_models
+                        .get(key)
+                        .filter(|candidate| *candidate != current)
+                })
+                .flatten()
+                .map(|_| key.clone())
+        })
+        .chain(candidate_models.iter().filter_map(|(key, candidate)| {
+            matches!(key.kind, ModelKind::Schema | ModelKind::WireSchema)
+                .then(|| {
+                    current_models
+                        .get(key)
+                        .filter(|current| *current != candidate)
+                })
+                .flatten()
+                .map(|_| key.clone())
+        }))
+        .collect::<HashSet<_>>();
+    let directly_replaced_or_dropped = current_models
+        .iter()
+        .filter_map(|(key, current)| {
+            candidate_models
+                .get(key)
+                .is_none_or(|candidate| candidate != current)
+                .then_some(key.clone())
+        })
+        .collect::<HashSet<_>>();
+    let mut state_invalidations = HashSet::default();
+    if let Some(current_graph) = current_graph {
+        state_invalidations.extend(current_graph.dependent_dataflow_entities(&changed_schemas));
+        state_invalidations.extend(
+            directly_replaced_or_dropped
+                .iter()
+                .filter_map(|key| current_graph.indices.get(key))
+                .filter_map(|index| current_graph.graph.node_weight(*index))
+                .filter(|node| node.is_dataflow_node())
+                .map(|node| RegistryEntity {
+                    kind: node.kind,
+                    identifier: node.identifier.clone(),
+                }),
+        );
+    }
+    if let Some(candidate_graph) = graph.as_ref() {
+        state_invalidations.extend(candidate_graph.dependent_dataflow_entities(&changed_schemas));
+        state_invalidations.extend(
+            directly_replaced_or_dropped
+                .iter()
+                .filter_map(|key| candidate_graph.indices.get(key))
+                .filter_map(|index| candidate_graph.graph.node_weight(*index))
+                .filter(|node| node.is_dataflow_node())
+                .map(|node| RegistryEntity {
+                    kind: node.kind,
+                    identifier: node.identifier.clone(),
+                }),
+        );
+    }
+    let mut state_invalidations = state_invalidations.into_iter().collect::<Vec<_>>();
+    state_invalidations.sort_by(|left, right| {
+        left.kind
+            .as_str()
+            .cmp(right.kind.as_str())
+            .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
+    });
+
     RuntimeChanges {
         domain: domain.clone(),
         graph,
         changes,
+        state_invalidations,
     }
 }
 
@@ -8595,8 +8940,9 @@ mod tests {
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, Assignment, AssignmentTarget,
-        AssignmentTargetScope, BranchSelection, ClientConfigEntry, CodecEncoding,
+        AckMode, AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation,
+        AlterWireSchema, AlterWireSchemaOperation, AlterWireSchemaStmt, Assignment,
+        AssignmentTarget, AssignmentTargetScope, BranchSelection, ClientConfigEntry, CodecEncoding,
         CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
         CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
         CreateBranch, CreateClientHttp, CreateClientKafka, CreateCodec, CreateCorrelator,
@@ -8611,7 +8957,7 @@ mod tests {
         ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
-    use super::{ModelStorage, Registry, RegistryError, RuntimeChange};
+    use super::{ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange};
 
     fn temp_db_path() -> PathBuf {
         let nanos = SystemTime::now()
@@ -13501,6 +13847,267 @@ mod tests {
                 .expect("read should succeed")
                 .is_none()
         );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn planned_schema_alters_do_not_mutate_until_committed() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                ],
+            )
+            .expect("create should succeed");
+        let planned = registry
+            .plan_mutations(
+                &domain,
+                &[
+                    RegistryMutation::AlterSchema(AlterSchema {
+                        schema: identifier("event_schema"),
+                        operations: vec![AlterSchemaOperation::AddField {
+                            field: SchemaField {
+                                name: identifier("note"),
+                                ty: ParseAsType::String,
+                                optional: true,
+                                sensitive: false,
+                            },
+                        }],
+                    }),
+                    RegistryMutation::AlterWireSchema(AlterWireSchemaStmt::Json(AlterWireSchema {
+                        schema: identifier("event_wire"),
+                        operations: vec![AlterWireSchemaOperation::AddField {
+                            field: WireSchemaField {
+                                name: identifier("note"),
+                                ty: JsonType::String,
+                                optional: true,
+                            },
+                        }],
+                    })),
+                ],
+            )
+            .expect("planning should succeed");
+
+        let Model::Schema(before) = registry
+            .get(&domain, ModelKind::Schema, &identifier("event_schema"))
+            .expect("read should succeed")
+            .expect("schema should exist")
+        else {
+            panic!("expected schema");
+        };
+        assert_eq!(before.fields.len(), 1, "planning must not persist");
+
+        registry
+            .commit_planned(planned)
+            .expect("commit should succeed");
+
+        let Model::Schema(after) = registry
+            .get(&domain, ModelKind::Schema, &identifier("event_schema"))
+            .expect("read should succeed")
+            .expect("schema should exist")
+        else {
+            panic!("expected schema");
+        };
+        assert_eq!(after.fields.len(), 2);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn planned_schema_alter_targets_only_schema_dependent_runtime_state() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let mut unrelated = relay("unrelated", "other_schema");
+        let Model::Relay(unrelated_relay) = &mut unrelated else {
+            unreachable!("relay helper must build a relay model")
+        };
+        unrelated_relay.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+        registry
+            .apply_batch(
+                &domain,
+                full_graph_batch()
+                    .into_iter()
+                    .chain([schema("other_schema"), unrelated])
+                    .collect(),
+            )
+            .expect("create should succeed");
+        let before_schedule = registry
+            .active_graph(&domain)
+            .expect("graph should exist")
+            .schedule_for_domain(&domain, &["node-1".to_string()], 0);
+
+        let planned = registry
+            .plan_mutations(
+                &domain,
+                &[
+                    RegistryMutation::AlterSchema(AlterSchema {
+                        schema: identifier("event_schema"),
+                        operations: vec![AlterSchemaOperation::AddField {
+                            field: SchemaField {
+                                name: identifier("note"),
+                                ty: ParseAsType::String,
+                                optional: true,
+                                sensitive: false,
+                            },
+                        }],
+                    }),
+                    RegistryMutation::AlterWireSchema(AlterWireSchemaStmt::Json(AlterWireSchema {
+                        schema: identifier("event_wire"),
+                        operations: vec![AlterWireSchemaOperation::AddField {
+                            field: WireSchemaField {
+                                name: identifier("note"),
+                                ty: JsonType::String,
+                                optional: true,
+                            },
+                        }],
+                    })),
+                ],
+            )
+            .expect("planning should succeed");
+
+        let invalidated = planned
+            .runtime_changes
+            .state_invalidations
+            .iter()
+            .map(|entity| (entity.kind, entity.identifier.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            invalidated.contains(&(ModelKind::Deduplicator, "p99_proc")),
+            "stateful processors derived from the altered schema must be invalidated"
+        );
+        assert!(
+            invalidated.contains(&(ModelKind::Relay, "notifications")),
+            "branch-LRU state for dependent relays must be invalidated"
+        );
+        assert!(
+            !invalidated.contains(&(ModelKind::Relay, "unrelated")),
+            "independent materialized state must survive the rebuild"
+        );
+        let after_schedule =
+            planned
+                .domain_state
+                .graph
+                .schedule_for_domain(&domain, &["node-1".to_string()], 0);
+        assert_ne!(
+            scheduled_node(&before_schedule, ModelKind::Deduplicator, "p99_proc")
+                .schema_fingerprint,
+            scheduled_node(&after_schedule, ModelKind::Deduplicator, "p99_proc").schema_fingerprint,
+            "dependent state placements must receive a new schema fingerprint"
+        );
+        assert_eq!(
+            scheduled_node(&before_schedule, ModelKind::Relay, "unrelated").schema_fingerprint,
+            scheduled_node(&after_schedule, ModelKind::Relay, "unrelated").schema_fingerprint,
+            "independent state placements must retain their schema fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn failed_mixed_schema_alter_batch_applies_nothing() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(&domain, vec![schema("event_schema")])
+            .expect("create should succeed");
+
+        let error = registry
+            .apply_mutation_batch(
+                &domain,
+                vec![
+                    RegistryMutation::Create(Box::new(schema("new_schema"))),
+                    RegistryMutation::AlterSchema(AlterSchema {
+                        schema: identifier("event_schema"),
+                        operations: vec![
+                            AlterSchemaOperation::AddField {
+                                field: SchemaField {
+                                    name: identifier("note"),
+                                    ty: ParseAsType::String,
+                                    optional: true,
+                                    sensitive: false,
+                                },
+                            },
+                            AlterSchemaOperation::DropField {
+                                field: identifier("missing"),
+                            },
+                        ],
+                    }),
+                ],
+            )
+            .expect_err("invalid ALTER should reject the whole batch");
+
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidModel { .. }
+        ));
+        assert!(
+            registry
+                .get(&domain, ModelKind::Schema, &identifier("new_schema"))
+                .expect("read should succeed")
+                .is_none()
+        );
+        let Model::Schema(schema) = registry
+            .get(&domain, ModelKind::Schema, &identifier("event_schema"))
+            .expect("read should succeed")
+            .expect("schema should exist")
+        else {
+            panic!("expected schema");
+        };
+        assert_eq!(schema.fields.len(), 1);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn schema_alter_revalidates_dependent_codec() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                ],
+            )
+            .expect("create should succeed");
+
+        let error = registry
+            .apply_mutation_batch(
+                &domain,
+                vec![RegistryMutation::AlterSchema(AlterSchema {
+                    schema: identifier("event_schema"),
+                    operations: vec![AlterSchemaOperation::SetFieldType {
+                        field: identifier("value"),
+                        ty: ParseAsType::F64,
+                    }],
+                })],
+            )
+            .expect_err("codec incompatibility should reject ALTER");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::IncompatibleSchema { .. }
+        ));
+
+        let Model::Schema(schema) = registry
+            .get(&domain, ModelKind::Schema, &identifier("event_schema"))
+            .expect("read should succeed")
+            .expect("schema should exist")
+        else {
+            panic!("expected schema");
+        };
+        assert_eq!(schema.fields[0].ty, ParseAsType::String);
 
         let _ = fs::remove_dir_all(path);
     }

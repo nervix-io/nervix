@@ -159,6 +159,7 @@ impl ReplicatedDeduplicatorState {
         let recent_keys = self.recent_keys.lock();
         Ok(PersistedRuntimeStateEntry {
             lsm: self.current_lsm.load(Ordering::SeqCst),
+            schema_fingerprint: self.placement.schema_fingerprint,
             payload: encode_deduplicator_snapshot(&recent_keys)?,
         })
     }

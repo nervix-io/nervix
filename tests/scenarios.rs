@@ -1721,6 +1721,19 @@ async fn given_drain_timeout_is_configured(world: &mut ScenarioWorld, timeout: S
         humantime::parse_duration(&timeout).expect("shutdown drain timeout must be valid");
 }
 
+#[given(expr = "schema change drain timeout is configured as {string}")]
+async fn given_schema_change_drain_timeout_is_configured(
+    world: &mut ScenarioWorld,
+    timeout: String,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "schema change drain timeout must be configured before cluster startup"
+    );
+    world.runtime_test_hooks.domain_drain_timeout =
+        Some(humantime::parse_duration(&timeout).expect("schema drain timeout must be valid"));
+}
+
 #[given("graceful shutdown drain is enabled")]
 async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
     assert!(

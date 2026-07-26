@@ -36,4 +36,16 @@ drops them with `REVERT`. `BEGIN` inside an active transaction is rejected, and
 contains multiple statements outside an explicit transaction is rejected instead
 of being treated as an implicit batch.
 
+Within a transaction, each consecutive run of model mutations for one domain can mix `CREATE`,
+`ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, and `DROP`. Nervix applies that run as one
+registry mutation: all operations are evaluated in written order against one candidate model map,
+the complete domain graph is revalidated, and one atomic storage batch persists the result. A
+failure writes nothing and does not swap the active registry state. This supports coordinated
+wire-schema, internal-schema, codec, and dependent-node migrations without exposing an invalid
+intermediate graph.
+
+Transaction control also queues lifecycle and other server statements, but those statements are
+not folded into the registry mutation batch. Data-plane records are likewise outside this
+control-plane atomicity.
+
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.

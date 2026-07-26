@@ -618,7 +618,7 @@ impl MqttIngestor {
         };
         loop {
             tokio::task::consume_budget().await;
-            let (acks, completion) = AckSet::root();
+            let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
             let dispatched = Self::dispatch_entry(
                 context,
                 entry.record.clone(),
@@ -704,7 +704,7 @@ impl MqttIngestor {
 
             for entry in batch {
                 tokio::task::consume_budget().await;
-                let (acks, completion) = AckSet::root();
+                let (acks, completion) = context.runtime.tracked_ack_root(&context.domain);
                 let dispatched = Self::dispatch_entry(
                     context,
                     entry.record.clone(),

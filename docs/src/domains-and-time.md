@@ -51,6 +51,26 @@ Important runtime consequences:
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
 
+## Automatic Schema-Change Quiescing
+
+`ALTER SCHEMA` and `ALTER WIRE ... SCHEMA` use an internal paused lifecycle state when their domain
+is running. There is no NSPL `PAUSE` or `RESUME` statement.
+
+Before changing the live graph, the leader validates the complete candidate graph without writing
+it. Nervix then stops domain ingestion and generators on every node, keeps the processing graph and
+domain clock alive, force-flushes processor and emitter output, and waits for ingestors, generators,
+ACK roots, and emitter buffers to drain. The wait is condition-based and bounded to 60 seconds by
+default.
+
+After a successful drain, Nervix atomically installs the model batch, replaces the schedule while
+ingestion is still withheld, and resumes the domain on the new graph. A timeout or cutover failure
+leaves the mutation unapplied, restores the old graph, and automatically resumes it with a clear
+outstanding-work error. A schema ALTER on a stopped domain only validates and persists the new
+schedule. Pure `CREATE` and `DROP` batches keep the immediate schedule-rebuild behavior.
+
+Pause is not a restart: domain clock state, start version, and broker offsets are preserved across
+the quiesce cycle.
+
 ## Ingestion Timestamps
 
 Every ingested record receives internal ingestion metadata, including mandatory low and high watermarks with nanosecond precision.
