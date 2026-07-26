@@ -180,8 +180,8 @@ SET route = read_header(lower(input.route_header))
 WHERE read_header("tenant") = output.tenant
 ```
 
-Kinesis, MQTT, Redis Pub/Sub, Prometheus, ZeroMQ, and WebSockets client ingestors do not support
-header reads. Leader-side validation rejects these functions for a source without header support.
+MQTT, Redis Pub/Sub, Prometheus, ZeroMQ, and WebSockets client ingestors do not support header
+reads. Leader-side validation rejects these functions for a source without header support.
 
 ## TLS Client Configuration
 
@@ -208,7 +208,6 @@ Transport-specific schemes and keys:
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
-- `KINESIS`: use an `https://...` optional `endpoint` for AWS-compatible targets. Nervix honors `tls_ca_file`; local/test targets can also set `region`, `access_key_id`, `secret_access_key`, and `start_position`.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file`.
 - `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`. This is primarily useful for SQS-compatible local/test endpoints.
@@ -296,24 +295,6 @@ Client config currently supports:
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
-
-### Kinesis
-
-```nspl
-FROM KINESIS <client>
-RELAY <relay>
-INSTANCES <count>
-MODE ACK SEQUENTIAL
-```
-
-- Kinesis maps cleanly to the emitter-side "publish bytes to a named relay" model
-- `UNBRANCHED` always means the single root branch
-- transport keys such as the Kinesis partition key do not implicitly choose Nervix relay branches
-- if branching depends on transport-derived data, first copy that data into a route output field and
-  reference the finalized output from `BRANCHED BY ... SET ...`
-- `INSTANCES` spreads open shards across local worker tasks on the assigned execution node
-- unlike Kafka, there is no broker-managed `CONSUMER GROUP` clause here
-- this first cut does not provide Kafka-style replicated durable checkpoints or rebalance scheduling; startup position is controlled on the `CLIENT` with `start_position = 'latest'|'trim_horizon'`
 
 ### RabbitMQ
 
@@ -444,7 +425,6 @@ ingested in their original order before live frames continue.
 `INSTANCES <count>` is currently supported on source types that can safely scale through competing consumers or parallel pollers on one node:
 
 - Kafka
-- Kinesis
 - MQTT
 - RabbitMQ
 - SQS

@@ -37,15 +37,6 @@ fn pulsar_emit_sink_parser<'src>()
         .map(|(client, topic)| EmitSink::Pulsar { client, topic })
 }
 
-fn kinesis_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Kinesis)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Relay))
-        .then(relay_ref())
-        .map(|(client, relay)| EmitSink::Kinesis { client, relay })
-}
-
 fn mqtt_emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Mqtt)
@@ -516,7 +507,6 @@ fn emit_sink_parser<'src>()
         mysql_emit_sink_parser(),
         mongodb_emit_sink_parser(),
         iceberg_emit_sink_parser(),
-        kinesis_emit_sink_parser(),
         kafka_emit_sink_parser(),
         pulsar_emit_sink_parser(),
         rabbitmq_emit_sink_parser(),
@@ -1949,29 +1939,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_create_emitter_kinesis() {
-        let input = r#"
-            CREATE EMITTER emit
-                FROM p99
-                ENCODE USING my_codec
-                TO KINESIS kinesis_main RELAY events FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#;
-
-        let tokens = to_tokens(input);
-        let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
-
-        assert_eq!(
-            parsed.sink,
-            EmitSink::Kinesis {
-                client: nervix_models::Identifier::try_from("kinesis_main")
-                    .expect("valid client identifier"),
-                relay: nervix_models::Identifier::try_from("events")
-                    .expect("valid relay identifier"),
-            }
-        );
-    }
-
-    #[test]
     fn parses_create_emitter_detached() {
         let input = r#"
             CREATE DETACHED EMITTER emit
@@ -2040,7 +2007,6 @@ mod tests {
     fn suggests_sink_after_to() {
         let input = "CREATE ATTACHED EMITTER emit FROM p99 ENCODE USING my_codec TO ";
         let suggestions = suggest_create_emitter(input, input.len());
-        assert!(suggestions.contains(&"KINESIS".to_string()));
         assert!(suggestions.contains(&"KAFKA".to_string()));
         assert!(suggestions.contains(&"PULSAR".to_string()));
         assert!(suggestions.contains(&"RABBITMQ".to_string()));

@@ -9647,7 +9647,6 @@ fn format_millis_duration(millis: u64) -> String {
 fn format_ingestor_source(source: &IngestSource) -> &'static str {
     match source {
         IngestSource::Http { .. } => "HTTP",
-        IngestSource::Kinesis { .. } => "KINESIS",
         IngestSource::Kafka { .. } => "KAFKA",
         IngestSource::Pulsar { .. } => "PULSAR",
         IngestSource::Mqtt { .. } => "MQTT",
@@ -10188,13 +10187,6 @@ fn format_emit_sink(sink: &EmitSink) -> String {
         }
         EmitSink::Pulsar { client, topic } => {
             format!("PULSAR client={} topic={}", client.as_str(), topic.as_str())
-        }
-        EmitSink::Kinesis { client, relay } => {
-            format!(
-                "KINESIS client={} relay={}",
-                client.as_str(),
-                relay.as_str()
-            )
         }
         EmitSink::RabbitMq { client, queue } => {
             format!(

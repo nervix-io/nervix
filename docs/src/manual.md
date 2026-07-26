@@ -8,7 +8,7 @@ Use it for:
 
 - understanding product boundaries and non-goals
 - learning the NSPL surface
-- understanding the currently supported transport integrations, including Kafka, Pulsar, and Kinesis
+- understanding the currently supported transport integrations, including Kafka and Pulsar
 - defining schemas, resources, relays, ingestors, processors, and emitters
 - working with sessions and the Rust client
 - following end-to-end examples

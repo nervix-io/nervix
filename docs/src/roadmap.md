@@ -21,7 +21,6 @@ The current roadmap items are:
 - cloud interface
 - WS commands
 - Revise the struct with many Arc's
-- docs: Kinesis in Introduction;
 - revise START and cleanup of maternialized state
 - RACE between creating a subscription and START/STOP domain. also check that it is preserved while switching between nodes
 

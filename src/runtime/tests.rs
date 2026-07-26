@@ -5288,35 +5288,6 @@ fn http_and_prometheus_clients_validate_timeout_configuration() {
 }
 
 #[test]
-fn kinesis_start_position_defaults_to_latest_and_accepts_trim_horizon() {
-    assert!(matches!(
-        super::ingestors::kinesis::KinesisIngestor::start_position_from_config(&[])
-            .expect("default start position"),
-        super::ingestors::kinesis::KinesisStartPosition::Latest
-    ));
-    assert!(matches!(
-        super::ingestors::kinesis::KinesisIngestor::start_position_from_config(&[
-            ClientConfigEntry {
-                key: "start_position".to_string(),
-                value: "trim_horizon".to_string(),
-            }
-        ])
-        .expect("trim horizon start position"),
-        super::ingestors::kinesis::KinesisStartPosition::TrimHorizon
-    ));
-    assert!(
-        super::ingestors::kinesis::KinesisIngestor::start_position_from_config(&[
-            ClientConfigEntry {
-                key: "start_position".to_string(),
-                value: "consumer_group".to_string(),
-            }
-        ])
-        .expect_err("invalid kinesis start position")
-        .contains("unsupported Kinesis client start_position")
-    );
-}
-
-#[test]
 fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
     let err = super::ingestors::mqtt::MqttIngestor::client_from_client(
         &CreateClientMqtt {

@@ -133,7 +133,6 @@ Client types that currently support TLS-oriented configuration through mounted r
 - MQTT
 - NATS
 - Pulsar
-- Kinesis
 - RabbitMQ
 - Redis
 - SQS
@@ -141,5 +140,3 @@ Client types that currently support TLS-oriented configuration through mounted r
 `ZEROMQ` remains plain pass-through transport configuration and does not currently expose a Nervix-specific TLS helper surface.
 
 Pulsar currently supports mounted `tls_ca_file` server trust configuration, but not mounted client certificate authentication.
-
-Kinesis client configs can also use mounted `tls_ca_file` when targeting HTTPS-compatible local or private endpoints.
