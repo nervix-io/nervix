@@ -319,6 +319,7 @@ impl Runtime {
         temp_dir: PathBuf,
     ) -> Result<Self, RuntimePersistenceError> {
         let (events, _) = broadcast::channel(256);
+        let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
             .map(RuntimeStateStore::from_database)
             .transpose()?
@@ -337,6 +338,13 @@ impl Runtime {
             schedule_apply_lock: Arc::new(Mutex::new(())),
             domain_instantiation_errors: Arc::new(DashMap::default()),
             domains: Arc::new(DashMap::default()),
+            domain_status_changed,
+            in_flight_by_domain: Arc::new(DashMap::default()),
+            generator_activity_by_domain: Arc::new(DashMap::default()),
+            emitter_buffers: Arc::new(DashMap::default()),
+            force_flush_by_domain: Arc::new(DashMap::default()),
+            active_schema_changes: Arc::new(DashMap::default()),
+            state_schema_fingerprints: Arc::new(DashMap::default()),
             domain_graphs: Arc::new(DashMap::default()),
             endpoint_bindings: Arc::new(DashMap::default()),
             relay_boundary_fanouts: Arc::new(DashMap::default()),
@@ -370,6 +378,9 @@ impl Runtime {
             state_store,
             state_snapshot_interval,
             state_replication_poll_interval: DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
+            domain_drain_timeout: hooks
+                .domain_drain_timeout
+                .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT),
             temp_dir: Arc::new(temp_dir),
             metrics: RuntimeMetrics::default(),
         })
@@ -377,6 +388,24 @@ impl Runtime {
 
     pub fn metrics(&self) -> RuntimeMetrics {
         self.metrics.clone()
+    }
+
+    pub fn domain_drain_timeout(&self) -> Duration {
+        self.domain_drain_timeout
+    }
+
+    pub fn begin_schema_change(&self, domain: &Domain) -> bool {
+        self.active_schema_changes
+            .insert(domain.clone(), ())
+            .is_none()
+    }
+
+    pub fn finish_schema_change(&self, domain: &Domain) {
+        self.active_schema_changes.remove(domain);
+    }
+
+    pub fn schema_change_is_active(&self, domain: &Domain) -> bool {
+        self.active_schema_changes.contains_key(domain)
     }
 
     pub(in crate::runtime) fn record_ingestor_transient_error(
@@ -603,13 +632,13 @@ impl Runtime {
         kind: ModelKind,
         identifier: &Identifier,
     ) {
-        let placement = RuntimeStatePlacement {
-            domain: domain.clone(),
-            state: RuntimeStateKind::BranchAggregated,
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::BranchAggregated,
             kind,
-            identifier: identifier.clone(),
-            branch_key: None,
-        };
+            identifier,
+            None,
+        );
         if let Some(state) = self.replicated_branch_aggregated_states.get(&placement) {
             state.mark_metrics_updated();
         }
@@ -850,6 +879,7 @@ impl Runtime {
                 }
                 return Ok(Some(PersistedRuntimeStateEntry {
                     lsm: latest_lsm,
+                    schema_fingerprint: placement.schema_fingerprint,
                     payload: encode_materialized_stream_snapshot_entries(
                         &entries,
                         metrics_snapshot,
@@ -874,6 +904,7 @@ impl Runtime {
         if let Some(state) = self.replicated_materialized_stream_states.get(placement) {
             let snapshot = PersistedRuntimeStateEntry {
                 lsm: state.current_lsm.load(Ordering::SeqCst),
+                schema_fingerprint: placement.schema_fingerprint,
                 payload: encode_materialized_stream_snapshot_entries(
                     &self.visible_materialized_stream_remote_entries(placement, &state),
                     state.metrics_snapshot(&self.metrics),
@@ -1704,6 +1735,10 @@ impl Runtime {
             if !domains.contains_key(&domain) {
                 self.domains.remove(&domain);
                 self.domain_instantiation_errors.remove(&domain);
+                self.in_flight_by_domain.remove(&domain);
+                self.generator_activity_by_domain.remove(&domain);
+                self.force_flush_by_domain.remove(&domain);
+                self.active_schema_changes.remove(&domain);
             }
         }
 
@@ -1723,13 +1758,73 @@ impl Runtime {
             entry.status = state.status.clone();
             entry.start_version = state.start_version;
             entry.last_start = state.last_start.clone();
-            if let (DomainPace::Paced, nervix_models::DomainStatus::Running) =
-                (state.config.pace, &state.status)
-            {
-            } else {
+            if let nervix_models::DomainStatus::Stopped = state.status {
                 entry.clock = None;
                 entry.ticks.lock().clear();
             }
+        }
+        self.domain_status_changed
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    pub(in crate::runtime) fn tracked_ack_root(&self, domain: &Domain) -> (AckSet, AckCompletion) {
+        let tracker = self
+            .in_flight_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone();
+        AckSet::tracked_root(tracker)
+    }
+
+    pub fn domain_outstanding_work(&self, domain: &Domain) -> usize {
+        self.in_flight_by_domain
+            .get(domain)
+            .map_or(0, |tracker| tracker.outstanding())
+    }
+
+    fn generator_activity_tracker(&self, domain: &Domain) -> Arc<AtomicUsize> {
+        self.generator_activity_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone()
+    }
+
+    pub(in crate::runtime) fn force_flush_receiver(&self, domain: &Domain) -> watch::Receiver<u64> {
+        self.force_flush_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| watch::channel(0).0)
+            .subscribe()
+    }
+
+    pub fn force_flush_domain(&self, domain: &Domain) {
+        let sender = self
+            .force_flush_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| watch::channel(0).0);
+        sender.send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    pub fn domain_drain_status(&self, domain: &Domain) -> DomainDrainStatus {
+        let active_ingestors = self
+            .ingestors
+            .iter()
+            .filter(|entry| &entry.key().domain == domain)
+            .count();
+        let active_generators = self
+            .generator_activity_by_domain
+            .get(domain)
+            .map_or(0, |counter| counter.load(Ordering::Acquire));
+        let buffered_emitter_messages = self
+            .emitter_buffers
+            .iter()
+            .filter(|entry| &entry.key().domain == domain)
+            .map(|entry| entry.value().load(Ordering::Acquire))
+            .sum();
+        DomainDrainStatus {
+            active_ingestors,
+            active_generators,
+            outstanding_acks: self.domain_outstanding_work(domain),
+            buffered_emitter_messages,
         }
     }
 
@@ -1761,8 +1856,14 @@ impl Runtime {
         key: &Option<BranchKey>,
         now: Timestamp,
     ) {
-        let runtime_key = RuntimeKey::new(domain.clone(), relay.clone());
-        if let Some(state) = self.expiring_stream_states.get(&runtime_key) {
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Materializer,
+            relay,
+            None,
+        );
+        if let Some(state) = self.expiring_stream_states.get(&placement) {
             state.touch(key, now);
         }
     }
@@ -1773,8 +1874,14 @@ impl Runtime {
         relay: &Identifier,
         key: &Option<BranchKey>,
     ) {
-        let runtime_key = RuntimeKey::new(domain.clone(), relay.clone());
-        if let Some(state) = self.expiring_stream_states.get(&runtime_key) {
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Materializer,
+            relay,
+            None,
+        );
+        if let Some(state) = self.expiring_stream_states.get(&placement) {
             state.remove(key);
         }
     }
@@ -1856,13 +1963,18 @@ impl Runtime {
         domain: &Domain,
         relay: &Identifier,
     ) -> Arc<ExpiringRelayState> {
-        let runtime_key = RuntimeKey::new(domain.clone(), relay.clone());
-        if let Some(existing) = self.expiring_stream_states.get(&runtime_key) {
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Materializer,
+            relay,
+            None,
+        );
+        if let Some(existing) = self.expiring_stream_states.get(&placement) {
             return existing.clone();
         }
         let state = Arc::new(ExpiringRelayState::new());
-        self.expiring_stream_states
-            .insert(runtime_key, state.clone());
+        self.expiring_stream_states.insert(placement, state.clone());
         state
     }
 
@@ -1871,10 +1983,10 @@ impl Runtime {
             .expiring_stream_states
             .iter()
             .map(|entry| entry.key().clone())
-            .filter(|runtime_key| &runtime_key.domain == domain)
+            .filter(|placement| &placement.domain == domain)
             .collect::<Vec<_>>();
-        for runtime_key in relays {
-            self.expiring_stream_states.remove(&runtime_key);
+        for placement in relays {
+            self.expiring_stream_states.remove(&placement);
         }
     }
 
@@ -2070,7 +2182,7 @@ impl Runtime {
             .into_iter()
             .map(|ack| {
                 if let Some(ack) = ack {
-                    let (acks, completion) = AckSet::root();
+                    let (acks, completion) = self.tracked_ack_root(&remote.domain);
                     self.spawn_remote_ack_watcher(remote.domain.clone(), completion, Some(ack));
                     acks
                 } else {
@@ -3106,8 +3218,15 @@ impl Runtime {
 
     pub(in crate::runtime) async fn dispatch_ingested_record(
         &self,
-        dispatch: IngestDispatch<'_>,
+        mut dispatch: IngestDispatch<'_>,
     ) -> Result<(), String> {
+        let _unobserved_completion = if dispatch.acks.is_empty() {
+            let (acks, completion) = self.tracked_ack_root(dispatch.domain);
+            dispatch.acks = acks;
+            Some(completion)
+        } else {
+            None
+        };
         let mut record = dispatch.record.into_runtime_record(
             RuntimeRecordMetadata::from_ingested_at_watermarks(
                 dispatch.ingested_at,
@@ -3543,12 +3662,22 @@ impl Runtime {
         let Some(domain_state) = self.domains.get(domain) else {
             return Ok(());
         };
-        if let nervix_models::DomainStatus::Stopped = domain_state.status {
-            return Err(format!(
-                "domain '{}' is stopped; ingestor '{}' cannot accept events",
-                domain.as_str(),
-                ingestor.as_str()
-            ));
+        match domain_state.status {
+            nervix_models::DomainStatus::Stopped => {
+                return Err(format!(
+                    "domain '{}' is stopped; ingestor '{}' cannot accept events",
+                    domain.as_str(),
+                    ingestor.as_str()
+                ));
+            }
+            nervix_models::DomainStatus::Paused => {
+                return Err(format!(
+                    "domain '{}' is paused; ingestor '{}' cannot accept events",
+                    domain.as_str(),
+                    ingestor.as_str()
+                ));
+            }
+            nervix_models::DomainStatus::Running => {}
         }
         if let DomainPace::Unpaced = domain_state.config.pace {
             return Ok(());
@@ -3833,6 +3962,13 @@ impl Runtime {
         }
 
         for domain in &schedule.domains {
+            if self
+                .domains
+                .get(&domain.domain)
+                .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Paused))
+            {
+                self.stop_domain_ingestors(&domain.domain).await;
+            }
             let desired_passive_only = self
                 .domains
                 .get(&domain.domain)
@@ -3869,6 +4005,19 @@ impl Runtime {
                         return Err(error);
                     }
                 }
+            }
+
+            if self
+                .domains
+                .get(&domain.domain)
+                .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Running))
+            {
+                self.purge_stale_runtime_state(&domain.domain)
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?;
+                self.start_missing_domain_ingestors(&domain.domain).await?;
             }
         }
 
@@ -4005,15 +4154,18 @@ impl Runtime {
 
         let Some(schedule) = schedule else {
             self.compiled_domain_udfs.remove(domain);
+            self.clear_state_schema_fingerprints(domain);
             self.clear_domain_graph_handle(domain).await;
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
         };
+        self.install_state_schema_fingerprints(&schedule);
         if self
             .domains
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped))
         {
+            self.purge_stopped_domain_runtime_state(domain)?;
             self.clear_expiring_stream_states_for_domain(domain);
             let execution = self
                 .build_passive_execution_from_schedule(domain, &schedule)
@@ -4392,13 +4544,13 @@ impl Runtime {
                         ..
                     } = &ingestor.source
                     {
-                        let placement = RuntimeStatePlacement {
-                            domain: domain.clone(),
-                            state: RuntimeStateKind::KafkaOffset,
-                            kind: node.kind,
-                            identifier: node.identifier.clone(),
-                            branch_key: None,
-                        };
+                        let placement = self.state_placement(
+                            domain,
+                            RuntimeStateKind::KafkaOffset,
+                            node.kind,
+                            &node.identifier,
+                            None,
+                        );
                         if node.is_primary_on(local_node_id) {
                             Some(
                                 self.replicated_kafka_offset_state(
@@ -4508,13 +4660,13 @@ impl Runtime {
             .map(|(identifier, relay)| (identifier.clone(), relay.registry.clone()))
             .collect::<HashMap<_, _>>();
         for relay in relay_registries.keys() {
-            let placement = RuntimeStatePlacement {
-                domain: domain.clone(),
-                state: RuntimeStateKind::BranchAggregated,
-                kind: ModelKind::Relay,
-                identifier: relay.clone(),
-                branch_key: None,
-            };
+            let placement = self.state_placement(
+                domain,
+                RuntimeStateKind::BranchAggregated,
+                ModelKind::Relay,
+                relay,
+                None,
+            );
             let state = self
                 .replicated_branch_aggregated_state(
                     placement,
@@ -4550,13 +4702,13 @@ impl Runtime {
                 Vec::new()
             };
             let required_replica_acks = replica_nodes.len();
-            let placement = RuntimeStatePlacement {
-                domain: domain.clone(),
-                state: RuntimeStateKind::BranchAggregated,
-                kind: node.kind,
-                identifier: node.identifier.clone(),
-                branch_key: None,
-            };
+            let placement = self.state_placement(
+                domain,
+                RuntimeStateKind::BranchAggregated,
+                node.kind,
+                &node.identifier,
+                None,
+            );
             if node.executes_on(local_node_id) {
                 let state = self
                     .replicated_branch_aggregated_state(
@@ -4776,6 +4928,14 @@ impl Runtime {
             },
         );
 
+        if self
+            .domains
+            .get(domain)
+            .is_some_and(|state| !matches!(state.status, nervix_models::DomainStatus::Running))
+        {
+            return Ok(());
+        }
+
         if self.ingestors_paused_for_memory_pressure() {
             info!(
                 domain = domain.as_str(),
@@ -4806,6 +4966,201 @@ impl Runtime {
             }
         }
 
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn install_state_schema_fingerprints(&self, schedule: &DomainSchedule) {
+        self.clear_state_schema_fingerprints(&schedule.domain);
+        for node in &schedule.nodes {
+            self.state_schema_fingerprints.insert(
+                RuntimeStateSchemaKey::new(
+                    schedule.domain.clone(),
+                    node.kind,
+                    node.identifier.clone(),
+                ),
+                node.schema_fingerprint,
+            );
+        }
+    }
+
+    fn install_state_schema_fingerprints_from_graph(&self, domain: &Domain, graph: &ActiveGraph) {
+        self.clear_state_schema_fingerprints(domain);
+        for node in graph.nodes() {
+            self.state_schema_fingerprints.insert(
+                RuntimeStateSchemaKey::new(domain.clone(), node.kind, node.identifier.clone()),
+                graph
+                    .schema_fingerprint(node.kind, &node.identifier)
+                    .unwrap_or([0; 32]),
+            );
+        }
+    }
+
+    fn clear_state_schema_fingerprints(&self, domain: &Domain) {
+        let keys = self
+            .state_schema_fingerprints
+            .iter()
+            .filter_map(|entry| (&entry.key().domain == domain).then(|| entry.key().clone()))
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.state_schema_fingerprints.remove(&key);
+        }
+    }
+
+    pub(in crate::runtime) fn state_placement(
+        &self,
+        domain: &Domain,
+        state: RuntimeStateKind,
+        kind: ModelKind,
+        identifier: &Identifier,
+        branch_key: Option<BranchKey>,
+    ) -> RuntimeStatePlacement {
+        let schema_fingerprint =
+            if let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset = state {
+                [0; 32]
+            } else {
+                self.state_schema_fingerprints
+                    .get(&RuntimeStateSchemaKey::new(
+                        domain.clone(),
+                        kind,
+                        identifier.clone(),
+                    ))
+                    .map(|fingerprint| *fingerprint)
+                    .unwrap_or([0; 32])
+            };
+        RuntimeStatePlacement {
+            domain: domain.clone(),
+            state,
+            kind,
+            identifier: identifier.clone(),
+            schema_fingerprint,
+            branch_key,
+        }
+    }
+
+    fn runtime_state_placement_is_current(&self, placement: &RuntimeStatePlacement) -> bool {
+        let Some(current) = self
+            .state_schema_fingerprints
+            .get(&RuntimeStateSchemaKey::new(
+                placement.domain.clone(),
+                placement.kind,
+                placement.identifier.clone(),
+            ))
+            .map(|fingerprint| *fingerprint)
+        else {
+            return false;
+        };
+        let expected = if let RuntimeStateKind::BranchAggregated | RuntimeStateKind::KafkaOffset =
+            placement.state
+        {
+            [0; 32]
+        } else {
+            current
+        };
+        placement.schema_fingerprint == expected
+    }
+
+    pub(in crate::runtime) fn purge_stale_runtime_state(
+        &self,
+        domain: &Domain,
+    ) -> Result<(), RuntimePersistenceError> {
+        let stale_deduplicators = self
+            .replicated_deduplicator_states
+            .iter()
+            .filter_map(|entry| {
+                let placement = entry.key();
+                (&placement.domain == domain && !self.runtime_state_placement_is_current(placement))
+                    .then(|| placement.clone())
+            })
+            .collect::<Vec<_>>();
+        for placement in stale_deduplicators {
+            self.replicated_deduplicator_states.remove(&placement);
+        }
+        let stale_materialized = self
+            .replicated_materialized_stream_states
+            .iter()
+            .filter_map(|entry| {
+                let placement = entry.key();
+                (&placement.domain == domain && !self.runtime_state_placement_is_current(placement))
+                    .then(|| placement.clone())
+            })
+            .collect::<Vec<_>>();
+        for placement in stale_materialized {
+            self.replicated_materialized_stream_states
+                .remove(&placement);
+        }
+        let stale_windows = self
+            .replicated_window_processor_states
+            .iter()
+            .filter_map(|entry| {
+                let placement = entry.key();
+                (&placement.domain == domain && !self.runtime_state_placement_is_current(placement))
+                    .then(|| placement.clone())
+            })
+            .collect::<Vec<_>>();
+        for placement in stale_windows {
+            self.replicated_window_processor_states.remove(&placement);
+        }
+        let stale_wasm = self
+            .replicated_wasm_processor_states
+            .iter()
+            .filter_map(|entry| {
+                let placement = entry.key();
+                (&placement.domain == domain && !self.runtime_state_placement_is_current(placement))
+                    .then(|| placement.clone())
+            })
+            .collect::<Vec<_>>();
+        for placement in stale_wasm {
+            self.replicated_wasm_processor_states.remove(&placement);
+        }
+        let stale_offsets = self
+            .replicated_kafka_offset_states
+            .iter()
+            .filter_map(|entry| {
+                let placement = entry.key();
+                (&placement.domain == domain && !self.runtime_state_placement_is_current(placement))
+                    .then(|| placement.clone())
+            })
+            .collect::<Vec<_>>();
+        for placement in stale_offsets {
+            self.replicated_kafka_offset_states.remove(&placement);
+        }
+        let stale_aggregates = self
+            .replicated_branch_aggregated_states
+            .iter()
+            .filter_map(|entry| {
+                let placement = entry.key();
+                (&placement.domain == domain && !self.runtime_state_placement_is_current(placement))
+                    .then(|| placement.clone())
+            })
+            .collect::<Vec<_>>();
+        for placement in stale_aggregates {
+            self.replicated_branch_aggregated_states.remove(&placement);
+        }
+        let stale_expiring = self
+            .expiring_stream_states
+            .iter()
+            .filter_map(|entry| {
+                let placement = entry.key();
+                (&placement.domain == domain && !self.runtime_state_placement_is_current(placement))
+                    .then(|| placement.clone())
+            })
+            .collect::<Vec<_>>();
+        for placement in stale_expiring {
+            self.expiring_stream_states.remove(&placement);
+        }
+
+        if let Some(store) = self.state_store.as_ref() {
+            let current = self
+                .state_schema_fingerprints
+                .iter()
+                .filter_map(|entry| {
+                    let key = entry.key();
+                    (&key.domain == domain)
+                        .then(|| ((key.kind, key.identifier.clone()), *entry.value()))
+                })
+                .collect::<HashMap<_, _>>();
+            store.purge_stale_schema_fingerprints(domain, &current)?;
+        }
         Ok(())
     }
 
@@ -5205,13 +5560,13 @@ impl Runtime {
         let Ok(kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
             return Ok(());
         };
-        let placement = RuntimeStatePlacement {
-            domain: domain.clone(),
-            state: RuntimeStateKind::BranchAggregated,
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::BranchAggregated,
             kind,
-            identifier: identifier.clone(),
-            branch_key: None,
-        };
+            identifier,
+            None,
+        );
         if !self
             .metrics
             .has_global_target_measurements(domain, kind, identifier)
@@ -5349,13 +5704,13 @@ impl Runtime {
         relay: &Identifier,
         branch_key: &Option<BranchKey>,
     ) -> Result<Vec<(String, RuntimeRecord)>, String> {
-        let placement = RuntimeStatePlacement {
-            domain: domain.clone(),
-            state: RuntimeStateKind::MaterializedRelay,
-            kind: ModelKind::Materializer,
-            identifier: relay.clone(),
-            branch_key: branch_key.clone(),
-        };
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Materializer,
+            relay,
+            branch_key.clone(),
+        );
         if let Some(state) = self.replicated_materialized_stream_states.get(&placement) {
             return Ok(self
                 .visible_materialized_stream_remote_entries(&placement, &state)
@@ -5397,9 +5752,15 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         state: &ReplicatedMaterializedRelayState,
     ) -> Vec<(Option<BranchKey>, nervix_models::RemoteRuntimeRecord)> {
-        let runtime_key = RuntimeKey::new(placement.domain.clone(), placement.identifier.clone());
+        let expiring_placement = self.state_placement(
+            &placement.domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Materializer,
+            &placement.identifier,
+            None,
+        );
         let mut entries =
-            if let Some(expiring_state) = self.expiring_stream_states.get(&runtime_key) {
+            if let Some(expiring_state) = self.expiring_stream_states.get(&expiring_placement) {
                 state
                     .entries
                     .iter()
@@ -5438,13 +5799,13 @@ impl Runtime {
         relay: &Identifier,
         branch_key: &Option<BranchKey>,
     ) -> Result<Vec<(String, RuntimeRecord)>, String> {
-        let placement = RuntimeStatePlacement {
-            domain: domain.clone(),
-            state: RuntimeStateKind::MaterializedRelay,
-            kind: ModelKind::Materializer,
-            identifier: relay.clone(),
-            branch_key: branch_key.clone(),
-        };
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::MaterializedRelay,
+            ModelKind::Materializer,
+            relay,
+            branch_key.clone(),
+        );
         let Some(snapshot) = self
             .request_state_sync(target_node_id, &placement, 0)
             .await?
@@ -5901,15 +6262,19 @@ impl Runtime {
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
         };
-        if self
+        let stopped = self
             .domains
             .get(domain)
-            .is_none_or(|state| matches!(state.status, nervix_models::DomainStatus::Stopped))
-        {
+            .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
+        if stopped || !self.domains.contains_key(domain) {
+            if stopped {
+                self.purge_stopped_domain_runtime_state(domain)?;
+            }
             self.clear_domain_graph_handle(domain).await;
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
         }
+        self.install_state_schema_fingerprints_from_graph(domain, &graph);
 
         let domain_graph = self.domain_graph_handle(domain).await;
         domain_graph.store(Some(StdArc::new(graph.clone())));
@@ -6427,6 +6792,9 @@ impl Runtime {
                         .nodes()
                         .into_iter()
                         .map(|node| ScheduledNode {
+                            schema_fingerprint: graph
+                                .schema_fingerprint(node.kind, &node.identifier)
+                                .unwrap_or([0; 32]),
                             identifier: node.identifier,
                             kind: node.kind,
                             config: Box::new((*node.config).clone()),
@@ -6697,16 +7065,68 @@ impl Runtime {
         let task_domain = domain.clone();
         let task_generator = generator.name.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let mut domain_status_rx = self.domain_status_changed.subscribe();
+        let generator_activity = self.generator_activity_tracker(domain);
         let runtime = self.clone();
         let task_events = self.events.clone();
 
         Ok(tokio::spawn(async move {
+            let mut activity = DomainActivityGuard::new(generator_activity);
             let mut next_state_refresh = None::<Timestamp>;
             let mut branch_states =
                 HashMap::<Option<BranchKey>, GeneratorBranchTaskState>::default();
 
             loop {
                 tokio::task::consume_budget().await;
+                if runtime.domains.get(&task_domain).is_some_and(|state| {
+                    matches!(state.status, nervix_models::DomainStatus::Paused)
+                }) {
+                    for (route_index, (route, _)) in routes.iter().enumerate() {
+                        tokio::task::consume_budget().await;
+                        let mut pending_groups = Vec::new();
+                        for (branch_key, state) in &mut branch_states {
+                            let route_state = &mut state.routes[route_index];
+                            route_state.next_flush = None;
+                            if !route_state.pending.is_empty() {
+                                pending_groups.push((
+                                    branch_key.clone(),
+                                    std::mem::take(&mut route_state.pending),
+                                ));
+                            }
+                        }
+                        if !pending_groups.is_empty() {
+                            flush_generator_groups(
+                                GeneratorFlushContext {
+                                    runtime: &runtime,
+                                    domain: &task_domain,
+                                    generator: &task_generator,
+                                    output_relay: &route.output.relay,
+                                    output_schema: &route.output_schema,
+                                    output_registry: &route.output_registry,
+                                    output_services: &route.output_services,
+                                    task_events: &task_events,
+                                },
+                                &mut pending_groups,
+                            )
+                            .await;
+                        }
+                    }
+                    activity.set_active(false);
+                    tokio::select! {
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                        changed = domain_status_rx.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                activity.set_active(true);
                 let wall_now = current_timestamp();
                 let execution_now;
                 let paced_state = runtime.domains.get(&task_domain).map(|domain_state| {
@@ -6993,11 +7413,13 @@ impl Runtime {
                                     {
                                         Ok(SingleRecordFilterMapOutcome::Filtered) => {}
                                         Ok(SingleRecordFilterMapOutcome::Output(record)) => {
+                                            let (acks, _completion) =
+                                                runtime.tracked_ack_root(&task_domain);
                                             let route_state = &mut branch_state.routes[route_index];
                                             route_state.pending.push(RelayMessage {
                                                 key: branch_key.clone(),
                                                 record,
-                                                acks: AckSet::empty(),
+                                                acks,
                                             });
                                             if route_state.next_flush.is_none() {
                                                 route_state.next_flush =
@@ -7012,6 +7434,8 @@ impl Runtime {
                                             partial_output,
                                             materialized_state,
                                         }) => {
+                                            let (acks, _completion) =
+                                                runtime.tracked_ack_root(&task_domain);
                                             runtime
                                                 .handle_structured_message_error(
                                                     MessageErrorHandling {
@@ -7023,7 +7447,7 @@ impl Runtime {
                                                         message: RelayMessage {
                                                             key: branch_key.clone(),
                                                             record: source_record.clone(),
-                                                            acks: AckSet::empty(),
+                                                            acks,
                                                         },
                                                         error,
                                                         partial_output,
@@ -8157,7 +8581,7 @@ impl Runtime {
     }
 
     pub async fn resume_one_ingestor_after_memory_pressure(&self) -> Result<bool, RuntimeError> {
-        let Some(spec) = self.next_memory_paused_ingestor_start_spec() else {
+        let Some(spec) = self.next_scheduled_ingestor_start_spec(None) else {
             self.ingestors_paused_for_memory_pressure
                 .store(false, Ordering::SeqCst);
             return Ok(false);
@@ -8183,16 +8607,44 @@ impl Runtime {
             .load(Ordering::SeqCst)
     }
 
-    fn next_memory_paused_ingestor_start_spec(&self) -> Option<ScheduledIngestorStartSpec> {
+    async fn start_missing_domain_ingestors(&self, domain: &Domain) -> Result<(), RuntimeError> {
+        if self.ingestors_paused_for_memory_pressure() {
+            return Ok(());
+        }
+        while let Some(spec) = self.next_scheduled_ingestor_start_spec(Some(domain)) {
+            tokio::task::consume_budget().await;
+            self.start_scheduled_ingestor(
+                &spec.domain,
+                spec.source_model,
+                spec.ingestor,
+                spec.kafka_offset_state,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn next_scheduled_ingestor_start_spec(
+        &self,
+        requested_domain: Option<&Domain>,
+    ) -> Option<ScheduledIngestorStartSpec> {
         let local_node_id = self.local_node_id.read().clone();
         let mut domains = self
             .executions
             .iter()
             .map(|entry| entry.key().clone())
+            .filter(|domain| requested_domain.is_none_or(|requested| requested == domain))
             .collect::<Vec<_>>();
         domains.sort_by(|left, right| left.as_str().cmp(right.as_str()));
 
         for domain in domains {
+            if self
+                .domains
+                .get(&domain)
+                .is_some_and(|state| !matches!(state.status, nervix_models::DomainStatus::Running))
+            {
+                continue;
+            }
             let Some(execution) = self.executions.get(&domain) else {
                 continue;
             };
@@ -8302,13 +8754,13 @@ impl Runtime {
         if !node.is_primary_on(local_node_id) {
             return None;
         }
-        let placement = RuntimeStatePlacement {
-            domain: domain.clone(),
-            state: RuntimeStateKind::KafkaOffset,
-            kind: node.kind,
-            identifier: node.identifier.clone(),
-            branch_key: None,
-        };
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::KafkaOffset,
+            node.kind,
+            &node.identifier,
+            None,
+        );
         self.replicated_kafka_offset_states
             .get(&placement)
             .map(|state| state.value().clone())
@@ -8334,6 +8786,16 @@ impl Runtime {
             }
         }
         self.stop_message_error_routes_for_domain(domain).await;
+        if !self
+            .domains
+            .get(domain)
+            .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Paused))
+        {
+            self.clear_runtime_state_for_domain(domain);
+        }
+    }
+
+    fn clear_runtime_state_for_domain(&self, domain: &Domain) {
         let placements = self
             .replicated_deduplicator_states
             .iter()
@@ -8372,6 +8834,15 @@ impl Runtime {
             self.replicated_window_processor_states.remove(&placement);
         }
         let placements = self
+            .replicated_wasm_processor_states
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|placement| &placement.domain == domain)
+            .collect::<Vec<_>>();
+        for placement in placements {
+            self.replicated_wasm_processor_states.remove(&placement);
+        }
+        let placements = self
             .replicated_branch_aggregated_states
             .iter()
             .map(|entry| entry.key().clone())
@@ -8380,6 +8851,18 @@ impl Runtime {
         for placement in placements {
             self.replicated_branch_aggregated_states.remove(&placement);
         }
+    }
+
+    fn purge_stopped_domain_runtime_state(&self, domain: &Domain) -> Result<(), RuntimeError> {
+        let Some(store) = self.state_store.as_ref() else {
+            return Ok(());
+        };
+        store
+            .purge_domain(domain)
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: error.to_string(),
+            })
     }
 
     async fn abort_domain_execution_start(&self, domain: &Domain) {

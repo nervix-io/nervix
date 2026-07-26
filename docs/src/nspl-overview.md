@@ -62,10 +62,27 @@ Core alter statements:
 
 ```nspl
 ALTER RELAY <name> SET CAPACITY <n>;
+
+ALTER SCHEMA <name>
+  ADD FIELD <field> <type> [OPTIONAL] [SENSITIVE],
+  DROP FIELD <field>,
+  RENAME FIELD <field> TO <field>,
+  ALTER FIELD <field> SET TYPE <type>,
+  ALTER FIELD <field> SET|DROP OPTIONAL,
+  ALTER FIELD <field> SET|DROP SENSITIVE;
+
+ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
+  ADD FIELD <field> <wire_type> [OPTIONAL],
+  DROP FIELD <field>,
+  RENAME FIELD <field> TO <field>,
+  ALTER FIELD <field> SET TYPE <wire_type>,
+  ALTER FIELD <field> SET|DROP OPTIONAL,
+  SET STRICT|LOOSE;
 ```
 
 See [Streams And State](relay.md#capacity) for live relay capacity resize
-behavior.
+behavior and [Schemas And Codecs](schemas-and-codecs.md#altering-schemas) for
+ordered schema changes and atomic migrations.
 
 All `CREATE` statements may optionally insert `IF NOT EXISTS` immediately after `CREATE`.
 

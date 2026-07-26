@@ -187,10 +187,16 @@ struct EmitterBatchBuffer {
     pending: Vec<EmitterPublishBatch>,
     pending_bytes: u64,
     flush_at: Option<Instant>,
+    buffered_messages: Arc<AtomicUsize>,
 }
 
 impl EmitterBatchBuffer {
-    fn new(context: &EmitterSinkContext, flush_each: &str, max_batch_size: Option<&str>) -> Self {
+    fn new(
+        context: &EmitterSinkContext,
+        flush_each: &str,
+        max_batch_size: Option<&str>,
+        buffered_messages: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
             flush_policy: context.parse_flush_policy_with_max(
                 "emitter",
@@ -200,7 +206,20 @@ impl EmitterBatchBuffer {
             pending: Vec::new(),
             pending_bytes: 0,
             flush_at: None,
+            buffered_messages,
         }
+    }
+
+    fn update_buffered_messages(&self) {
+        let messages = self
+            .pending
+            .iter()
+            .map(EmitterPublishBatch::message_count)
+            .fold(0_u64, u64::saturating_add);
+        self.buffered_messages.store(
+            usize::try_from(messages).unwrap_or(usize::MAX),
+            Ordering::Release,
+        );
     }
 
     fn is_empty(&self) -> bool {
@@ -217,6 +236,7 @@ impl EmitterBatchBuffer {
         };
         self.pending_bytes = self.pending_bytes.saturating_add(batch.estimated_bytes());
         self.pending.push(batch);
+        self.update_buffered_messages();
         if self.flush_at.is_none() {
             self.flush_at = Some(Instant::now() + flush_policy.interval());
         }
@@ -248,6 +268,7 @@ impl EmitterBatchBuffer {
         let pending = std::mem::take(&mut self.pending);
         self.pending_bytes = 0;
         self.flush_at = None;
+        self.update_buffered_messages();
         pending
     }
 
@@ -255,6 +276,7 @@ impl EmitterBatchBuffer {
         self.pending.clear();
         self.pending_bytes = 0;
         self.flush_at = None;
+        self.update_buffered_messages();
     }
 
     fn report(&self) -> Option<PublishReport> {
@@ -274,6 +296,12 @@ impl EmitterBatchBuffer {
             .max()
             .unwrap_or_else(current_timestamp);
         Some(PublishReport::flushed(messages, bytes, domain_timestamp))
+    }
+}
+
+impl Drop for EmitterBatchBuffer {
+    fn drop(&mut self) {
+        self.buffered_messages.store(0, Ordering::Release);
     }
 }
 
@@ -1459,6 +1487,12 @@ impl EmitterTask {
         let fault_injector = runtime.emitter_faults.clone();
         let runtime = runtime.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let mut force_flush_rx = runtime.force_flush_receiver(domain);
+        let emitter_buffer_count = runtime
+            .emitter_buffers
+            .entry(RuntimeKey::new(domain.clone(), emitter.name.clone()))
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
         let resolved_client =
             resolve_emitter_client(&runtime, domain, &emitter.sink, client.as_deref())?;
         let resolved_catalog_client = resolve_emitter_catalog_client(
@@ -1488,8 +1522,12 @@ impl EmitterTask {
                 udfs,
             };
             let mut publish_backoff = RuntimeReconnectBackoff::default();
-            let mut emitter_buffer =
-                EmitterBatchBuffer::new(&context, &task_flush_each, task_max_batch_size.as_deref());
+            let mut emitter_buffer = EmitterBatchBuffer::new(
+                &context,
+                &task_flush_each,
+                task_max_batch_size.as_deref(),
+                emitter_buffer_count,
+            );
             let mut sink = SinkEmitter::new(
                 &task_sink,
                 client.as_deref(),
@@ -1524,14 +1562,40 @@ impl EmitterTask {
 
             loop {
                 tokio::task::consume_budget().await;
-                match Runtime::recv_runtime_collected_input(
-                    &mut input,
-                    &mut shutdown_rx,
-                    &mut input_collection,
-                    sink.flush_deadline(&emitter_buffer),
-                )
-                .await
-                {
+                let input_event = tokio::select! {
+                    biased;
+                    event = Runtime::recv_runtime_collected_input(
+                        &mut input,
+                        &mut shutdown_rx,
+                        &mut input_collection,
+                        sink.flush_deadline(&emitter_buffer),
+                    ) => Some(event),
+                    changed = force_flush_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        None
+                    }
+                };
+                let Some(input_event) = input_event else {
+                    let mut control = EmitterPublishControl {
+                        runtime: &runtime,
+                        fault_injector: &fault_injector,
+                        shutdown_rx: &mut shutdown_rx,
+                        backoff: &mut publish_backoff,
+                    };
+                    let _ = sink
+                        .flush_all(
+                            &task_sink,
+                            &context,
+                            &mut control,
+                            codec.clone(),
+                            &mut emitter_buffer,
+                        )
+                        .await;
+                    continue;
+                };
+                match input_event {
                     BatchedInput::Shutdown | BatchedInput::Closed => {
                         let mut control = EmitterPublishControl {
                             runtime: &runtime,

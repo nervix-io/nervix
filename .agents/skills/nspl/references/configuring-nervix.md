@@ -21,7 +21,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | User need | Documentation index entry |
 | --- | --- |
 | Domain timing and lifecycle | `Domains And Time` |
-| Internal/wire schemas, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` |
+| Internal/wire schemas, schema evolution, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` and `Control Plane` |
 | Expressions, casts, and built-in functions | `Filter-Map Functions` |
 | Trusted Roto user-defined expression functions | `User-Defined Functions` |
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
@@ -70,6 +70,8 @@ Use separate execution phases so transaction and active-domain rules stay clear.
 3. **Resources:** create resource declarations, then upload local directories as separate client
    actions.
 4. **Graph transaction:** wrap multiple domain-owned server statements in `BEGIN;` and `COMMIT;`.
+   A consecutive one-domain model-mutation run is one atomic candidate-graph update, including
+   mixed `CREATE`, schema or relay `ALTER`, and `DROP`.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended.
 
 Within the graph transaction, declare dependencies before consumers:
@@ -135,7 +137,12 @@ relay. Do not use them to scan across branches.
   `nervix_process_batch(ptr, size)`, and validates that exact range against its reusable buffer.
 - Paced ingestors declare their timestamp source.
 - External sensitive values use the required explicit leakage operation.
-- Multiple server statements are transactional; client-local commands are outside the transaction.
+- Transactions queue multiple server statements, while only consecutive one-domain model-mutation
+  runs receive atomic candidate-graph validation and persistence; client-local commands are outside
+  the transaction.
+- Interdependent schema evolution is one transaction, preserves ALTER operation order, and includes
+  all wire schema, internal schema, codec, and dependent-node mutations needed by the new graph.
+- Running-domain schema ALTER quiescing is automatic; do not emit `PAUSE` or `RESUME` syntax.
 - External entities and resource contents are provisioned before the graph is started.
 
 ## Verification and troubleshooting

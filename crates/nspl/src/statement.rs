@@ -140,6 +140,8 @@ pub fn statement_parser<'src>()
         }),
     );
     let administration = boxed_choice!(
+        crate::schema::alter_schema_parser().map(Statement::AlterSchema),
+        crate::schema::alter_wire_schema_parser_any().map(Statement::AlterWireSchema),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
@@ -1137,11 +1139,12 @@ mod tests {
     }
 
     #[test]
-    fn alter_context_suggestions_include_relay_without_schema_keyword_leakage() {
+    fn alter_context_suggestions_include_all_supported_model_families() {
         let input = "ALTER ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"RELAY".to_string()));
-        assert!(!suggestions.contains(&"SCHEMA".to_string()));
+        assert!(suggestions.contains(&"SCHEMA".to_string()));
+        assert!(suggestions.contains(&"WIRE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
@@ -1849,6 +1852,39 @@ mod tests {
         let canonical = parsed.to_canonical_nspl().expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::Create(parsed), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_schema() {
+        let parsed = parse_statement(
+            "ALTER SCHEMA events ADD FIELD note STRING OPTIONAL SENSITIVE, RENAME FIELD id TO \
+             event_id, ALTER FIELD event_id SET TYPE I64, ALTER FIELD event_id DROP OPTIONAL, \
+             ALTER FIELD note DROP SENSITIVE;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterSchema(alter) = parsed else {
+            panic!("expected ALTER SCHEMA");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterSchema(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_wire_schema() {
+        let parsed = parse_statement(
+            "ALTER WIRE AVRO SCHEMA payload ADD FIELD note STRING OPTIONAL, ALTER FIELD id SET \
+             TYPE LONG, ALTER FIELD note DROP OPTIONAL, SET LOOSE;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterWireSchema(alter) = parsed else {
+            panic!("expected ALTER WIRE SCHEMA");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterWireSchema(alter), reparsed);
     }
 
     #[test]

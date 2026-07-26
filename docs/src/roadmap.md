@@ -10,7 +10,6 @@ The current roadmap items are:
 - add cucumber coverage for drain race scenarios, including draining a primary while its preferred replica is also draining
 - cleanup materialized data of expired relays
 - restore all branch-grouped states from the DB, not just read it on demand - connected with proper expiration
-- ALTER
 - rebalance across cluster
 - decide whether any relay-qualified field form beyond `relay_state.<relay>.<field>` belongs in expressions
 - explore batched direct external-database access from processing nodes as a possible supported

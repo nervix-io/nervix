@@ -24,8 +24,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference, WASM,
   correlation, materialized state, lookup, generation, or repartitioning.
-- Operations: batching/flush, error routes, credentials/TLS resources, observability, and session
-  subscriptions.
+- Operations: batching/flush, error routes, credentials/TLS resources, observability, session
+  subscriptions, and whether an existing schema must be evolved atomically with its dependents.
 
 Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
 guidance to select the relevant Markdown entries from the public index.
@@ -50,6 +50,11 @@ Use `BEGIN; ... COMMIT;` when sending multiple server statements in one request.
 commands such as `USE` and resource uploads outside transactions. Do not imply that one undivided
 request can mix those phases.
 
+For schema evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the
+transaction semantics in `Control Plane`. Put every interdependent `CREATE`, schema or relay
+`ALTER`, and `DROP` for one domain in the same transaction; do not invent a user-facing pause
+command.
+
 ## Preserve NSPL semantics
 
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
@@ -59,6 +64,9 @@ request can mix those phases.
   optional destination.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
+- Preserve written operation order in schema ALTER statements. Include every dependent wire,
+  internal, codec, and node mutation required for the candidate graph to validate in the same
+  transaction.
 - Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only
   when the body needs the domain clock or randomness. Roto UDFs are trusted native code; keep
   untrusted custom processing in WASM.

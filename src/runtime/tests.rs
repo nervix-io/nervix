@@ -2200,10 +2200,88 @@ fn scheduled_model(
         config: Box::new(model),
         effective_branching: None,
         effective_branching_schema: None,
+        schema_fingerprint: [0; 32],
         kafka_partition_schedule: None,
         primary_node: Some("node-1".to_string()),
         assigned_nodes: vec!["node-1".to_string()],
     }
+}
+
+#[tokio::test]
+async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let schema = identifier("notification");
+    let relay = identifier("notifications");
+    let running = DomainState {
+        id: domain.clone(),
+        config: DomainConfig {
+            pace: DomainPace::Unpaced,
+            period: "1s".to_string(),
+            skew: "0s".to_string(),
+        },
+        status: DomainStatus::Running,
+        start_version: 1,
+        last_start: nervix_models::DomainStartPoint::Resume,
+    };
+    runtime.sync_domains(&BTreeMap::from([(domain.clone(), running.clone())]));
+    let schedule = ClusterSchedule {
+        domains: vec![DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![
+                scheduled_model(
+                    ModelKind::Schema,
+                    schema.clone(),
+                    nervix_models::Model::Schema(CreateSchema {
+                        name: schema.clone(),
+                        fields: vec![SchemaField {
+                            name: identifier("user_id"),
+                            ty: ParseAsType::I64,
+                            optional: false,
+                            sensitive: false,
+                        }],
+                    }),
+                ),
+                scheduled_model(
+                    ModelKind::Relay,
+                    relay.clone(),
+                    nervix_models::Model::Relay(CreateRelay {
+                        name: relay.clone(),
+                        schema,
+                        buffer: 2,
+                        branching: RelayBranching::unbranched(),
+                        materialized_state: None,
+                    }),
+                ),
+            ],
+        }],
+    };
+    runtime
+        .apply_cluster_schedule("node-1", &schedule)
+        .await
+        .expect("running schedule should build");
+    let graph_before_pause = runtime
+        .executions
+        .get(&domain)
+        .expect("execution should exist")
+        .graph
+        .clone();
+
+    let mut paused = running;
+    paused.status = DomainStatus::Paused;
+    runtime.sync_domains(&BTreeMap::from([(domain.clone(), paused)]));
+    runtime
+        .apply_cluster_schedule("node-1", &schedule)
+        .await
+        .expect("paused schedule should remain active");
+
+    let execution = runtime
+        .executions
+        .get(&domain)
+        .expect("paused execution should remain");
+    assert!(!execution.passive_only);
+    assert!(StdArc::ptr_eq(&graph_before_pause, &execution.graph));
+    assert!(execution.relay_registries.contains_key(&relay));
 }
 
 #[tokio::test]
@@ -2746,6 +2824,7 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: identifier("dedup_orders"),
+        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
 
@@ -2771,6 +2850,104 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
 }
 
 #[test]
+fn runtime_state_store_purges_only_stale_schema_fingerprints() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let base = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: identifier("dedup_orders"),
+        schema_fingerprint: [1; 32],
+        branch_key: None,
+    };
+    let current = RuntimeStatePlacement {
+        schema_fingerprint: [2; 32],
+        ..base.clone()
+    };
+    store
+        .persist_latest_snapshot(&base, 1, b"old")
+        .expect("old snapshot should persist");
+    store
+        .persist_latest_snapshot(&current, 2, b"current")
+        .expect("current snapshot should persist");
+
+    store
+        .purge_stale_schema_fingerprints(
+            &base.domain,
+            &HashMap::from_iter([(
+                (base.kind, base.identifier.clone()),
+                current.schema_fingerprint,
+            )]),
+        )
+        .expect("stale snapshots should purge");
+
+    assert!(
+        store
+            .latest_snapshot(&base)
+            .expect("old snapshot lookup should succeed")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .latest_snapshot(&current)
+            .expect("current snapshot lookup should succeed")
+            .expect("current snapshot should remain")
+            .payload,
+        b"current".to_vec()
+    );
+}
+
+#[test]
+fn runtime_state_store_purges_only_the_requested_domain() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let stopped = RuntimeStatePlacement {
+        domain: domain("stopped"),
+        state: RuntimeStateKind::Deduplicator,
+        kind: ModelKind::Deduplicator,
+        identifier: identifier("dedup_orders"),
+        schema_fingerprint: [1; 32],
+        branch_key: None,
+    };
+    let running = RuntimeStatePlacement {
+        domain: domain("running"),
+        ..stopped.clone()
+    };
+    store
+        .persist_latest_snapshot(&stopped, 1, b"stopped")
+        .expect("stopped-domain snapshot should persist");
+    store
+        .persist_latest_snapshot(&running, 2, b"running")
+        .expect("running-domain snapshot should persist");
+
+    store
+        .purge_domain(&stopped.domain)
+        .expect("stopped-domain snapshots should purge");
+
+    assert!(
+        store
+            .latest_snapshot(&stopped)
+            .expect("stopped-domain snapshot lookup should succeed")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .latest_snapshot(&running)
+            .expect("running-domain snapshot lookup should succeed")
+            .expect("running-domain snapshot should remain")
+            .payload,
+        b"running".to_vec()
+    );
+}
+
+#[test]
 fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -2782,6 +2959,7 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         state: RuntimeStateKind::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: identifier("kafka_notifications"),
+        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let state =
@@ -2836,6 +3014,7 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Ingestor,
         identifier: identifier("redis_notifications"),
+        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let relay = identifier("notifications");
@@ -2901,6 +3080,7 @@ fn describe_restores_branch_aggregated_metrics_from_store_without_materialized_s
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Ingestor,
         identifier: ingestor.clone(),
+        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     {
@@ -2963,6 +3143,7 @@ fn describe_restores_branch_aggregated_metrics_when_state_lsm_is_current_but_met
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Ingestor,
         identifier: ingestor.clone(),
+        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let db = Database::builder(dir.path())
@@ -3038,6 +3219,7 @@ fn describe_does_not_reapply_equal_lsm_snapshot_over_active_metrics() {
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Ingestor,
         identifier: ingestor.clone(),
+        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     let db = Database::builder(dir.path())
@@ -3119,6 +3301,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: identifier("dedup_orders"),
+        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -3154,6 +3337,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: identifier("dedup_orders"),
+        schema_fingerprint: [1; 32],
         branch_key: string_branch_key("tenant", "beta"),
     };
     let tenant = RuntimeStatePlacement {
@@ -3161,6 +3345,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: identifier("dedup_orders"),
+        schema_fingerprint: [1; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
 
@@ -3170,6 +3355,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         state: RuntimeStateKind::BranchAggregated,
         kind: ModelKind::Deduplicator,
         identifier: identifier("dedup_orders"),
+        schema_fingerprint: [0; 32],
         branch_key: None,
     };
     assert_ne!(
@@ -3181,11 +3367,88 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: identifier("dedup_orders"),
+        schema_fingerprint: [1; 32],
         branch_key: None,
     };
     assert_ne!(
         deduplicator_global.as_storage_key(),
         branch_aggregated.as_storage_key()
+    );
+}
+
+#[test]
+fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let identifier = identifier("dedup_orders");
+    let schedule = |fingerprint| DomainSchedule {
+        domain: domain.clone(),
+        nodes: vec![ScheduledNode {
+            identifier: identifier.clone(),
+            kind: ModelKind::Deduplicator,
+            config: Box::new(nervix_models::Model::Schema(CreateSchema {
+                name: identifier.clone(),
+                fields: Vec::new(),
+            })),
+            effective_branching: None,
+            effective_branching_schema: None,
+            schema_fingerprint: fingerprint,
+            kafka_partition_schedule: None,
+            primary_node: Some("node-1".to_string()),
+            assigned_nodes: vec!["node-1".to_string()],
+        }],
+    };
+
+    runtime.install_state_schema_fingerprints(&schedule([1; 32]));
+    let original_placement = runtime.state_placement(
+        &domain,
+        RuntimeStateKind::Deduplicator,
+        ModelKind::Deduplicator,
+        &identifier,
+        None,
+    );
+    let original = runtime
+        .replicated_deduplicator_state(original_placement.clone(), Vec::new(), 0)
+        .expect("state should initialize");
+
+    runtime.install_state_schema_fingerprints(&schedule([1; 32]));
+    let unchanged = runtime
+        .replicated_deduplicator_state(
+            runtime.state_placement(
+                &domain,
+                RuntimeStateKind::Deduplicator,
+                ModelKind::Deduplicator,
+                &identifier,
+                None,
+            ),
+            Vec::new(),
+            0,
+        )
+        .expect("unchanged state should initialize");
+    assert!(Arc::ptr_eq(&original, &unchanged));
+
+    runtime.install_state_schema_fingerprints(&schedule([2; 32]));
+    let changed = runtime
+        .replicated_deduplicator_state(
+            runtime.state_placement(
+                &domain,
+                RuntimeStateKind::Deduplicator,
+                ModelKind::Deduplicator,
+                &identifier,
+                None,
+            ),
+            Vec::new(),
+            0,
+        )
+        .expect("changed state should initialize");
+    assert!(!Arc::ptr_eq(&original, &changed));
+    runtime
+        .purge_stale_runtime_state(&domain)
+        .expect("stale state should purge");
+    assert!(
+        !runtime
+            .replicated_deduplicator_states
+            .contains_key(&original_placement)
     );
 }
 
@@ -3197,6 +3460,7 @@ async fn replica_quorum_waits_for_replication_ack() {
         state: RuntimeStateKind::Deduplicator,
         kind: ModelKind::Deduplicator,
         identifier: identifier("dedup_orders"),
+        schema_fingerprint: [0; 32],
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = Arc::new(
@@ -4325,6 +4589,47 @@ fn sync_domains_clears_ticks_when_paced_domain_stops() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn sync_domains_preserves_clock_state_but_rejects_ingestion_while_paused() {
+    let runtime = super::Runtime::new();
+    let mut domains = BTreeMap::new();
+    domains.insert(domain("paced"), paced_domain_state("paced"));
+    runtime.sync_domains(&domains);
+    runtime.handle_domain_tick(
+        &domain("paced"),
+        &DomainTick {
+            tick_id: 1,
+            logical_timestamp: Timestamp::from_unix_nanos(0),
+            wall_clock: Timestamp::from_unix_nanos(10_000_000_000),
+            duration_ms: 1_000,
+        },
+    );
+
+    let mut paused = paced_domain_state("paced");
+    paused.status = DomainStatus::Paused;
+    domains.insert(domain("paced"), paused);
+    runtime.sync_domains(&domains);
+
+    assert_eq!(
+        runtime
+            .domains
+            .get(&domain("paced"))
+            .expect("domain should remain")
+            .ticks
+            .lock()
+            .len(),
+        1
+    );
+    let error = runtime
+        .ensure_domain_allows_ingestion(
+            &domain("paced"),
+            &identifier("ing"),
+            Timestamp::from_unix_nanos(10_000_000_000),
+        )
+        .expect_err("paused domain must reject ingestion");
+    assert!(error.contains("paused"));
 }
 
 #[test]
@@ -6851,6 +7156,7 @@ fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_st
                 state: RuntimeStateKind::MaterializedRelay,
                 kind: ModelKind::Materializer,
                 identifier: relay.clone(),
+                schema_fingerprint: [0; 32],
                 branch_key: branch_key.clone(),
             },
             None,

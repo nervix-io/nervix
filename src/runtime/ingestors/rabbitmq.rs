@@ -222,7 +222,8 @@ impl RabbitMqIngestor {
                                                     RabbitMqIngestMode::AckSequential { .. } => {
                                                         let mut output_routes =
                                                             task_output_routes.clone();
-                                                        let (acks, completion) = AckSet::root();
+                                                        let (acks, completion) =
+                                                            task_runtime.tracked_ack_root(&task_domain);
                                                         let dispatched = task_runtime
                                                             .dispatch_ingested_record(IngestDispatch {
                                                                 domain: &task_domain,

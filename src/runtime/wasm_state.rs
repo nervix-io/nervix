@@ -72,6 +72,7 @@ impl ReplicatedWasmProcessorState {
         let snapshot = self.snapshot.lock().clone();
         Ok(PersistedRuntimeStateEntry {
             lsm: self.current_lsm.load(Ordering::SeqCst),
+            schema_fingerprint: self.placement.schema_fingerprint,
             payload: snapshot,
         })
     }
@@ -110,6 +111,7 @@ mod tests {
             state: RuntimeStateKind::WasmProcessor,
             kind: ModelKind::WasmProcessor,
             identifier: Identifier::parse("filter").expect("valid identifier"),
+            schema_fingerprint: [0; 32],
             branch_key: BranchKey::from_fields([(
                 Identifier::parse("tenant").expect("valid identifier"),
                 RuntimeValue::String("acme".to_string()),
@@ -144,6 +146,7 @@ mod tests {
     fn wasm_processor_state_restores_raw_guest_bytes() {
         let initial = PersistedRuntimeStateEntry {
             lsm: 7,
+            schema_fingerprint: placement().schema_fingerprint,
             payload: vec![9, 8, 7],
         };
         let state = ReplicatedWasmProcessorState::new(placement(), Vec::new(), 0, Some(initial))

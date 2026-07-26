@@ -587,7 +587,8 @@ impl KafkaIngestor {
 
                                             loop {
                                                 tokio::task::consume_budget().await;
-                                                let (acks, completion) = AckSet::root();
+                                                let (acks, completion) =
+                                                    task_runtime.tracked_ack_root(&task_domain);
                                                 let mut output_routes =
                                                     task_output_routes.clone();
                                                 let dispatched = task_runtime
@@ -859,7 +860,8 @@ impl KafkaIngestor {
 
                                                 for (row, entry) in batch.iter().enumerate() {
                                                     tokio::task::consume_budget().await;
-                                                    let (acks, completion) = AckSet::root();
+                                                    let (acks, completion) =
+                                                        task_runtime.tracked_ack_root(&task_domain);
                                                     if !selected_rows.contains(&row) {
                                                         acks.ack_success();
                                                         completions.push(completion);

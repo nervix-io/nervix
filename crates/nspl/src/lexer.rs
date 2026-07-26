@@ -52,8 +52,10 @@ pub enum Word {
 pub enum Identifier {
     Create,
     Delete,
+    Add,
     Alter,
     Drop,
+    Rename,
     Cordon,
     Uncordon,
     Drain,
@@ -136,6 +138,7 @@ pub enum Identifier {
     Protobuf,
     Wire,
     Schema,
+    Field,
     Codec,
     Ingestor,
     Into,
