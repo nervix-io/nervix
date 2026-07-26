@@ -2609,9 +2609,6 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         root_relay: identifier("orders"),
         branch_ttl: None,
         branch_max_instances: None,
-        entrypoint_branch_assignments: Vec::new(),
-        entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Preserve,
-        entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
             identifier("projected_orders"),
@@ -3826,6 +3823,48 @@ fn relay_record_batches_can_be_concatenated_without_losing_metadata() {
         messages[1].record.metadata().ingested_at_low_watermark(),
         Timestamp::from_unix_nanos(200)
     );
+}
+
+#[test]
+fn relay_fanout_shares_arrow_columns_and_materializes_rows_only_on_demand() {
+    let schema = test_schema(&[("user_id", ParseAsType::U32)]);
+    let batch = super::RelayRecordBatch::from_messages(
+        schema,
+        vec![
+            RelayMessage {
+                key: u32_branch_key("user_id", 42),
+                record: RuntimeRecord::from_fields([(
+                    "user_id".to_string(),
+                    RuntimeValue::U32(42),
+                )]),
+                acks: AckSet::empty(),
+            },
+            RelayMessage {
+                key: u32_branch_key("user_id", 42),
+                record: RuntimeRecord::from_fields([(
+                    "user_id".to_string(),
+                    RuntimeValue::U32(43),
+                )]),
+                acks: AckSet::empty(),
+            },
+        ],
+    )
+    .expect("relay batch should build");
+    let source_column = batch.batch.batch().column(0).clone();
+
+    let fanout = batch.into_attached_fanout(3);
+
+    assert_eq!(fanout.len(), 3);
+    for output in &fanout {
+        assert!(StdArc::ptr_eq(
+            &source_column,
+            output.batch.batch().column(0)
+        ));
+    }
+    let records = fanout[0]
+        .runtime_records()
+        .expect("a node may explicitly materialize local rows");
+    assert_eq!(records[1].value("user_id"), Some(&RuntimeValue::U32(43)));
 }
 
 #[tokio::test]
@@ -6349,9 +6388,6 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
-        entrypoint_branch_assignments: branch_mappings(&["tenant"]),
-        entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
-        entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
             root_relay.clone(),
@@ -6404,23 +6440,24 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
         ],
     )
     .expect("batch should build");
-    let graph = StdArc::new(ArcSwapOption::from(None));
-    let mut instances =
-        BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
-
-    super::BranchedIngestorRuntime::dispatch_entrypoint_inputs(
-        super::BranchedBranchDispatchContext {
-            runtime_handle: &runtime,
-            domain: &domain,
-            ingestor: &identifier("tenant_partition"),
-            graph: &graph,
-            template: &template,
-            now: Timestamp::from_unix_nanos(1_000_000_000),
+    let route_runtime = super::IngestorRouteRuntime::new(
+        runtime,
+        domain,
+        identifier("tenant_partition"),
+        StdArc::new(ArcSwapOption::from(None)),
+        super::IngestorRouteTemplate {
+            branch: template,
+            branch_assignments: branch_mappings(&["tenant"]),
+            ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
+            flush_policy: super::RuntimeFlushPolicy::Immediate,
         },
-        &mut instances,
-        vec![input],
-    )
-    .await;
+        Duration::from_secs(30),
+    );
+    route_runtime
+        .sender()
+        .send(input)
+        .await
+        .expect("reingestor route should accept input");
 
     let mut outputs = [
         timeout(Duration::from_secs(1), fan_in.recv())
@@ -6438,6 +6475,7 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
     assert_eq!(outputs[0].message_count(), 2);
     assert_eq!(key_label(&outputs[1].key), r#"{"tenant":"beta"}"#);
     assert_eq!(outputs[1].message_count(), 1);
+    route_runtime.shutdown().await;
 }
 
 #[tokio::test]
@@ -6459,9 +6497,6 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
-        entrypoint_branch_assignments: branch_mappings(&["tenant"]),
-        entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Detached),
-        entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
             root_relay.clone(),
@@ -6478,6 +6513,20 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
     let graph = StdArc::new(ArcSwapOption::from(None));
     let mut instances =
         BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
+    let (branch_sender, _) = mpsc::channel(1);
+    let route_task = super::IngestorRouteTask {
+        runtime_handle: runtime.clone(),
+        domain: domain.clone(),
+        ingestor: identifier("tenant_partition"),
+        template: super::IngestorRouteTemplate {
+            branch: template.clone(),
+            branch_assignments: branch_mappings(&["tenant"]),
+            ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Detached),
+            flush_policy: super::RuntimeFlushPolicy::Immediate,
+        },
+        branch_sender,
+        pending: HashMap::default(),
+    };
 
     for round in 0..3 {
         let messages = (0..64)
@@ -6496,8 +6545,9 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         let input = super::RelayRecordBatch::from_messages(schema.clone(), messages)
             .expect("batch should build");
 
-        super::BranchedIngestorRuntime::dispatch_entrypoint_inputs(
-            super::BranchedBranchDispatchContext {
+        let prepared = route_task.prepare_input(input).await;
+        super::BranchExecutionRuntime::dispatch_prepared_inputs(
+            super::BranchExecutionDispatchContext {
                 runtime_handle: &runtime,
                 domain: &domain,
                 ingestor: &identifier("tenant_partition"),
@@ -6506,7 +6556,7 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
                 now: Timestamp::from_unix_nanos(1_000_000_000 + i64::from(round)),
             },
             &mut instances,
-            vec![input],
+            prepared,
         )
         .await;
 
@@ -6559,34 +6609,34 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             tasks: Vec::new(),
         },
     );
-    let branched_runtime = super::BranchedIngestorRuntime::new(
+    let branched_runtime = super::IngestorRouteRuntime::new(
         runtime.clone(),
         domain.clone(),
         identifier("tenant_partition"),
         StdArc::new(ArcSwapOption::from(None)),
-        super::BranchInstanceTemplate {
-            source_kind: ModelKind::Reingestor,
-            source: identifier("tenant_partition"),
-            root_relay: relay.clone(),
-            branch_ttl: Some(Duration::from_secs(30)),
-            branch_max_instances: None,
-            entrypoint_branch_assignments: branch_mappings(&["tenant"]),
-            entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Reingestor(
-                AckMode::Attached,
-            ),
-            entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
-            error_policies: ErrorPolicies::handled_by_log(),
-            relays: [(
-                relay.clone(),
-                super::RelayProcessorRelayTemplate {
-                    registry: output_registry,
-                    services: output_services,
-                },
-            )]
-            .into_iter()
-            .collect(),
-            materialized_streams: HashSet::default(),
-            processors: HashMap::default(),
+        super::IngestorRouteTemplate {
+            branch: super::BranchInstanceTemplate {
+                source_kind: ModelKind::Reingestor,
+                source: identifier("tenant_partition"),
+                root_relay: relay.clone(),
+                branch_ttl: Some(Duration::from_secs(30)),
+                branch_max_instances: None,
+                error_policies: ErrorPolicies::handled_by_log(),
+                relays: [(
+                    relay.clone(),
+                    super::RelayProcessorRelayTemplate {
+                        registry: output_registry,
+                        services: output_services,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                materialized_streams: HashSet::default(),
+                processors: HashMap::default(),
+            },
+            branch_assignments: branch_mappings(&["tenant"]),
+            ack_boundary: super::BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
+            flush_policy: super::RuntimeFlushPolicy::Immediate,
         },
         Duration::from_secs(30),
     );
@@ -6776,7 +6826,7 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
     let root_relay = identifier("tenant_orders");
     let registry = super::RelayRegistry::new();
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
-    let branched_runtime = super::BranchedIngestorRuntime::new(
+    let branched_runtime = super::BranchExecutionRuntime::new(
         runtime,
         domain.clone(),
         identifier("tenant_ingestor"),
@@ -6787,9 +6837,6 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
             root_relay: root_relay.clone(),
             branch_ttl: Some(Duration::from_secs(30)),
             branch_max_instances: None,
-            entrypoint_branch_assignments: branch_mappings(&["tenant"]),
-            entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Preserve,
-            entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             relays: [(
                 root_relay,
@@ -6846,6 +6893,193 @@ async fn branched_runtime_shutdown_evicts_branch_relay_presence() {
 }
 
 #[tokio::test]
+async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let root_relay = identifier("notifications");
+    let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
+    let mut fan_in =
+        super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
+    let services = Arc::new(super::RelayBoundaryServices {
+        fanout,
+        attached_runtime_consumer_count: 1,
+        detached_runtime_consumer_count: 0,
+        remote_runtime_consumers: Arc::from(Vec::new()),
+        remote_dispatcher: None,
+    });
+    let schema = test_schema(&[("user_id", ParseAsType::U32)]);
+    let branched_runtime = super::BranchExecutionRuntime::new(
+        runtime,
+        domain,
+        identifier("notifications_ingestor"),
+        StdArc::new(ArcSwapOption::from(None)),
+        super::BranchInstanceTemplate {
+            source_kind: ModelKind::Ingestor,
+            source: identifier("notifications_ingestor"),
+            root_relay: root_relay.clone(),
+            branch_ttl: None,
+            branch_max_instances: None,
+            error_policies: ErrorPolicies::handled_by_log(),
+            relays: [(
+                root_relay,
+                super::RelayProcessorRelayTemplate {
+                    registry: super::RelayRegistry::new(),
+                    services,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            materialized_streams: HashSet::default(),
+            processors: HashMap::default(),
+        },
+        Duration::from_secs(30),
+    );
+
+    branched_runtime
+        .sender()
+        .send(
+            super::RelayRecordBatch::single(
+                schema,
+                None,
+                RuntimeRecord::from_fields([("user_id".to_string(), RuntimeValue::U32(42))]),
+                AckSet::empty(),
+            )
+            .expect("ingestor output batch should build"),
+        )
+        .await
+        .expect("branch entrypoint should accept an ingestor-prepared batch");
+
+    let batch = timeout(Duration::from_millis(100), fan_in.recv())
+        .await
+        .expect("branch entrypoint must not apply a second flush delay")
+        .expect("runtime consumer should remain open");
+    assert_eq!(batch.message_count(), 1);
+
+    branched_runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn ingestor_route_applies_size_boundaries_independently_per_branch() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let root_relay = identifier("notifications");
+    let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
+    let mut fan_in =
+        super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
+    let services = Arc::new(super::RelayBoundaryServices {
+        fanout,
+        attached_runtime_consumer_count: 1,
+        detached_runtime_consumer_count: 0,
+        remote_runtime_consumers: Arc::from(Vec::new()),
+        remote_dispatcher: None,
+    });
+    let schema = test_schema(&[
+        ("tenant", ParseAsType::String),
+        ("user_id", ParseAsType::U32),
+    ]);
+    let batch = |tenant: &str, user_id| {
+        super::RelayRecordBatch::single(
+            schema.clone(),
+            string_branch_key("tenant", tenant),
+            RuntimeRecord::from_fields([
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String(tenant.to_string()),
+                ),
+                ("user_id".to_string(), RuntimeValue::U32(user_id)),
+            ]),
+            AckSet::empty(),
+        )
+        .expect("ingestor output batch should build")
+    };
+    let acme_one = batch("acme", 1);
+    let max_batch_size = acme_one.estimated_bytes() + 1;
+    let route_runtime = super::IngestorRouteRuntime::new(
+        runtime,
+        domain,
+        identifier("notifications_ingestor"),
+        StdArc::new(ArcSwapOption::from(None)),
+        super::IngestorRouteTemplate {
+            branch: super::BranchInstanceTemplate {
+                source_kind: ModelKind::Ingestor,
+                source: identifier("notifications_ingestor"),
+                root_relay: root_relay.clone(),
+                branch_ttl: None,
+                branch_max_instances: None,
+                error_policies: ErrorPolicies::handled_by_log(),
+                relays: [(
+                    root_relay,
+                    super::RelayProcessorRelayTemplate {
+                        registry: super::RelayRegistry::new(),
+                        services,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                materialized_streams: HashSet::default(),
+                processors: HashMap::default(),
+            },
+            branch_assignments: Vec::new(),
+            ack_boundary: super::BranchInstanceAckBoundary::Preserve,
+            flush_policy: super::RuntimeFlushPolicy::Each {
+                interval: Duration::from_secs(10),
+                max_batch_size,
+            },
+        },
+        Duration::from_secs(30),
+    );
+
+    route_runtime
+        .sender()
+        .send(acme_one)
+        .await
+        .expect("acme batch should enter the route");
+    route_runtime
+        .sender()
+        .send(batch("beta", 1))
+        .await
+        .expect("beta batch should enter the route");
+    assert!(
+        timeout(Duration::from_millis(50), fan_in.recv())
+            .await
+            .is_err(),
+        "different branches must not share a size boundary"
+    );
+
+    route_runtime
+        .sender()
+        .send(batch("acme", 2))
+        .await
+        .expect("second acme batch should enter the route");
+    let acme = timeout(Duration::from_secs(1), fan_in.recv())
+        .await
+        .expect("acme size boundary should flush")
+        .expect("runtime consumer should remain open");
+    assert_eq!(key_label(&acme.key), r#"{"tenant":"acme"}"#);
+    assert_eq!(acme.message_count(), 2);
+    assert!(
+        timeout(Duration::from_millis(50), fan_in.recv())
+            .await
+            .is_err(),
+        "beta must remain pending until its own size boundary"
+    );
+
+    route_runtime
+        .sender()
+        .send(batch("beta", 2))
+        .await
+        .expect("second beta batch should enter the route");
+    let beta = timeout(Duration::from_secs(1), fan_in.recv())
+        .await
+        .expect("beta size boundary should flush")
+        .expect("runtime consumer should remain open");
+    assert_eq!(key_label(&beta.key), r#"{"tenant":"beta"}"#);
+    assert_eq!(beta.message_count(), 2);
+
+    route_runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
@@ -6867,9 +7101,6 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
         root_relay: root_relay.clone(),
         branch_ttl: None,
         branch_max_instances: None,
-        entrypoint_branch_assignments: branch_mappings(&["tenant"]),
-        entrypoint_ack_boundary: super::BranchInstanceAckBoundary::Preserve,
-        entrypoint_flush_each: super::RuntimeFlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
             root_relay.clone(),
@@ -6904,8 +7135,8 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
         async move {
             let mut instances =
                 BranchInstanceRegistry::<Option<BranchKey>, Mutex<super::BranchRuntime>>::new();
-            super::BranchedIngestorRuntime::dispatch_entrypoint_inputs(
-                super::BranchedBranchDispatchContext {
+            super::BranchExecutionRuntime::dispatch_prepared_inputs(
+                super::BranchExecutionDispatchContext {
                     runtime_handle: &runtime,
                     domain: &domain,
                     ingestor: &ingestor,
@@ -7376,10 +7607,11 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
     .expect("array inheritance should execute");
 
     assert!(plan.message_errors.is_empty());
-    assert_eq!(
-        plan.batch.expect("array output batch should exist").records[0].value("vector"),
-        Some(&expected)
-    );
+    let output = plan.batch.expect("array output batch should exist");
+    let record = output
+        .runtime_record(0)
+        .expect("array output row should materialize at the test boundary");
+    assert_eq!(record.value("vector"), Some(&expected));
 }
 
 #[tokio::test]
@@ -7455,8 +7687,11 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
         .as_ref()
         .expect("the successful row should remain in the output batch");
     assert_eq!(successful.message_count(), 1);
+    let successful_record = successful
+        .runtime_record(0)
+        .expect("successful output row should materialize at the test boundary");
     assert_eq!(
-        successful.records[0].value("amount"),
+        successful_record.value("amount"),
         Some(&RuntimeValue::I64(5))
     );
     let [error] = plan.message_errors.as_slice() else {
