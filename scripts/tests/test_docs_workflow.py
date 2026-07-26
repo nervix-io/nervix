@@ -46,6 +46,7 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertIn("fonts-noto-cjk", build_book)
         self.assertIn("fonts-noto-core", build_book)
         self.assertIn("lmodern", build_book)
+        self.assertIn("texlive-fonts-recommended", build_book)
         self.assertIn("texlive-lang-chinese", build_book)
         self.assertIn("texlive-lang-cjk", build_book)
         self.assertIn("texlive-xetex", build_book)

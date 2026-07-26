@@ -170,6 +170,7 @@ jobs:
             fonts-noto-core \
             lmodern \
             pandoc \
+            texlive-fonts-recommended \
             texlive-lang-chinese \
             texlive-lang-cjk \
             texlive-xetex
