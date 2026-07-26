@@ -139,6 +139,7 @@ book-pdf version="" output="":
         --from=html \
         --to=pdf \
         --pdf-engine=xelatex \
+        --include-in-header=docs/theme/nervix-pdf-header.tex \
         --include-before-body=docs/theme/nervix-pdf-title.tex \
         --variable=graphics \
         --toc \
