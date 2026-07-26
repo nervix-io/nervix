@@ -1,23 +1,22 @@
-use error_stack::Report;
+use error_stack::{Report, ResultExt};
 use nervix_models::{
     AckMode, AvroType, BranchEviction, BranchSelection, ClickHouseValueMapping, CodecEncoding,
     CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
     CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
-    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
-    CreateLookup, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
-    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType,
-    ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend,
-    Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, IngestSource, IngestTimestampSource, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MaterializedRelayState,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
+    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
+    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
+    EndpointIngestMode, EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy,
+    IcebergCatalog, IcebergStorageBackend, Identifier, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
+    InferencerTensorRepresentation, InferencerTensorSchema, IngestSource, IngestTimestampSource,
+    JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
     MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType,
     PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
@@ -35,7 +34,7 @@ pub enum StoredModelVersioned {
     Codec(StoredCreateCodec),
     TransportKafka(StoredCreateClientKafka),
     TransportPulsar(StoredCreateClientPulsar),
-    TransportKinesis(StoredCreateClientKinesis),
+    RemovedTransport(StoredRemovedClient),
     TransportHttp(StoredCreateClientHttp),
     TransportSentry(StoredCreateClientSentry),
     TransportPrometheus(StoredCreateClientPrometheus),
@@ -72,6 +71,14 @@ pub enum StoredModelVersioned {
     WindowProcessor(StoredCreateWindowProcessor),
     Emitter(StoredCreateEmitter),
     Udf(StoredCreateUdf),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoredModelConversionError {
+    #[error("stored model contains an invalid name")]
+    InvalidName,
+    #[error("stored model uses the removed Kinesis integration")]
+    RemovedIntegration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -230,7 +237,7 @@ pub struct StoredCreateClientPulsar {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct StoredCreateClientKinesis {
+pub struct StoredRemovedClient {
     pub name: String,
     pub mount: Option<String>,
     pub config: Vec<StoredClientConfigEntry>,
@@ -613,11 +620,11 @@ pub enum StoredIngestSource {
         client: String,
         every: String,
     },
-    Kinesis {
+    RemovedIntegration {
         client: String,
         relay: String,
         instances: u64,
-        mode: StoredKinesisIngestMode,
+        mode: StoredRemovedIngestMode,
     },
     Kafka {
         client: String,
@@ -682,6 +689,16 @@ pub enum StoredIngestSource {
     },
 }
 
+impl StoredIngestSource {
+    fn is_removed_integration(&self) -> bool {
+        if let Self::RemovedIntegration { .. } = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredKafkaOffsetMode {
     ConsumerGroup(String),
@@ -708,7 +725,7 @@ pub enum StoredKafkaIngestMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredKinesisIngestMode {
+pub enum StoredRemovedIngestMode {
     AckSequential {
         timeout: String,
         retry_backoff: String,
@@ -977,7 +994,7 @@ pub enum StoredEmitSink {
         client: String,
         topic: String,
     },
-    Kinesis {
+    RemovedIntegration {
         client: String,
         relay: String,
     },
@@ -1051,6 +1068,16 @@ pub enum StoredEmitSink {
     },
 }
 
+impl StoredEmitSink {
+    fn is_removed_integration(&self) -> bool {
+        if let Self::RemovedIntegration { .. } = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredIcebergCatalog {
     Rest { client: String },
@@ -1104,7 +1131,6 @@ impl From<Model> for StoredModelVersioned {
             Model::Codec(v) => Self::Codec(v.into()),
             Model::ClientKafka(v) => Self::TransportKafka(v.into()),
             Model::ClientPulsar(v) => Self::TransportPulsar(v.into()),
-            Model::ClientKinesis(v) => Self::TransportKinesis(v.into()),
             Model::ClientHttp(v) => Self::TransportHttp(v.into()),
             Model::ClientSentry(v) => Self::TransportSentry(v.into()),
             Model::ClientPrometheus(v) => Self::TransportPrometheus(v.into()),
@@ -1148,65 +1174,88 @@ impl From<Model> for StoredModelVersioned {
     }
 }
 
+fn convert_stored<T, U>(value: T) -> Result<U, Report<StoredModelConversionError>>
+where
+    U: TryFrom<T, Error = Report<NameError>>,
+{
+    U::try_from(value).change_context(StoredModelConversionError::InvalidName)
+}
+
 impl TryFrom<StoredModelVersioned> for Model {
-    type Error = Report<NameError>;
+    type Error = Report<StoredModelConversionError>;
 
     fn try_from(value: StoredModelVersioned) -> Result<Self, Self::Error> {
         match value {
-            StoredModelVersioned::Schema(v) => Ok(Model::Schema(v.try_into()?)),
-            StoredModelVersioned::WireSchema(v) => Ok(Model::WireSchema(v.try_into()?)),
-            StoredModelVersioned::Codec(v) => Ok(Model::Codec(v.try_into()?)),
-            StoredModelVersioned::TransportKafka(v) => Ok(Model::ClientKafka(v.try_into()?)),
-            StoredModelVersioned::TransportPulsar(v) => Ok(Model::ClientPulsar(v.try_into()?)),
-            StoredModelVersioned::TransportKinesis(v) => Ok(Model::ClientKinesis(v.try_into()?)),
-            StoredModelVersioned::TransportHttp(v) => Ok(Model::ClientHttp(v.try_into()?)),
-            StoredModelVersioned::TransportSentry(v) => Ok(Model::ClientSentry(v.try_into()?)),
-            StoredModelVersioned::TransportPrometheus(v) => {
-                Ok(Model::ClientPrometheus(v.try_into()?))
+            StoredModelVersioned::Schema(v) => Ok(Model::Schema(convert_stored(v)?)),
+            StoredModelVersioned::WireSchema(v) => Ok(Model::WireSchema(convert_stored(v)?)),
+            StoredModelVersioned::Codec(v) => Ok(Model::Codec(convert_stored(v)?)),
+            StoredModelVersioned::TransportKafka(v) => Ok(Model::ClientKafka(convert_stored(v)?)),
+            StoredModelVersioned::TransportPulsar(v) => Ok(Model::ClientPulsar(convert_stored(v)?)),
+            StoredModelVersioned::RemovedTransport(_) => {
+                Err(Report::new(StoredModelConversionError::RemovedIntegration))
             }
-            StoredModelVersioned::TransportRabbitMq(v) => Ok(Model::ClientRabbitMq(v.try_into()?)),
-            StoredModelVersioned::TransportRedis(v) => Ok(Model::ClientRedis(v.try_into()?)),
-            StoredModelVersioned::TransportMqtt(v) => Ok(Model::ClientMqtt(v.try_into()?)),
-            StoredModelVersioned::TransportNats(v) => Ok(Model::ClientNats(v.try_into()?)),
-            StoredModelVersioned::TransportZeroMq(v) => Ok(Model::ClientZeroMq(v.try_into()?)),
-            StoredModelVersioned::TransportSqs(v) => Ok(Model::ClientSqs(v.try_into()?)),
+            StoredModelVersioned::TransportHttp(v) => Ok(Model::ClientHttp(convert_stored(v)?)),
+            StoredModelVersioned::TransportSentry(v) => Ok(Model::ClientSentry(convert_stored(v)?)),
+            StoredModelVersioned::TransportPrometheus(v) => {
+                Ok(Model::ClientPrometheus(convert_stored(v)?))
+            }
+            StoredModelVersioned::TransportRabbitMq(v) => {
+                Ok(Model::ClientRabbitMq(convert_stored(v)?))
+            }
+            StoredModelVersioned::TransportRedis(v) => Ok(Model::ClientRedis(convert_stored(v)?)),
+            StoredModelVersioned::TransportMqtt(v) => Ok(Model::ClientMqtt(convert_stored(v)?)),
+            StoredModelVersioned::TransportNats(v) => Ok(Model::ClientNats(convert_stored(v)?)),
+            StoredModelVersioned::TransportZeroMq(v) => Ok(Model::ClientZeroMq(convert_stored(v)?)),
+            StoredModelVersioned::TransportSqs(v) => Ok(Model::ClientSqs(convert_stored(v)?)),
             StoredModelVersioned::TransportWebsockets(v) => {
-                Ok(Model::ClientWebsockets(v.try_into()?))
+                Ok(Model::ClientWebsockets(convert_stored(v)?))
             }
             StoredModelVersioned::TransportClickHouse(v) => {
-                Ok(Model::ClientClickHouse(v.try_into()?))
+                Ok(Model::ClientClickHouse(convert_stored(v)?))
             }
-            StoredModelVersioned::TransportPostgres(v) => Ok(Model::ClientPostgres(v.try_into()?)),
-            StoredModelVersioned::TransportMySql(v) => Ok(Model::ClientMySql(v.try_into()?)),
-            StoredModelVersioned::TransportMongoDb(v) => Ok(Model::ClientMongoDb(v.try_into()?)),
-            StoredModelVersioned::TransportS3(v) => Ok(Model::ClientS3(v.try_into()?)),
-            StoredModelVersioned::TransportGcs(v) => Ok(Model::ClientGcs(v.try_into()?)),
+            StoredModelVersioned::TransportPostgres(v) => {
+                Ok(Model::ClientPostgres(convert_stored(v)?))
+            }
+            StoredModelVersioned::TransportMySql(v) => Ok(Model::ClientMySql(convert_stored(v)?)),
+            StoredModelVersioned::TransportMongoDb(v) => {
+                Ok(Model::ClientMongoDb(convert_stored(v)?))
+            }
+            StoredModelVersioned::TransportS3(v) => Ok(Model::ClientS3(convert_stored(v)?)),
+            StoredModelVersioned::TransportGcs(v) => Ok(Model::ClientGcs(convert_stored(v)?)),
             StoredModelVersioned::TransportAzureBlob(v) => {
-                Ok(Model::ClientAzureBlob(v.try_into()?))
+                Ok(Model::ClientAzureBlob(convert_stored(v)?))
             }
             StoredModelVersioned::TransportIcebergRest(v) => {
-                Ok(Model::ClientIcebergRest(v.try_into()?))
+                Ok(Model::ClientIcebergRest(convert_stored(v)?))
             }
-            StoredModelVersioned::Vhost(v) => Ok(Model::Vhost(v.try_into()?)),
-            StoredModelVersioned::Branch(v) => Ok(Model::Branch(v.try_into()?)),
-            StoredModelVersioned::Endpoint(v) => Ok(Model::Endpoint(v.try_into()?)),
+            StoredModelVersioned::Vhost(v) => Ok(Model::Vhost(convert_stored(v)?)),
+            StoredModelVersioned::Branch(v) => Ok(Model::Branch(convert_stored(v)?)),
+            StoredModelVersioned::Endpoint(v) => Ok(Model::Endpoint(convert_stored(v)?)),
             StoredModelVersioned::SignalingProtocol(v) => {
-                Ok(Model::SignalingProtocol(v.try_into()?))
+                Ok(Model::SignalingProtocol(convert_stored(v)?))
             }
-            StoredModelVersioned::Generator(v) => Ok(Model::Generator(v.try_into()?)),
-            StoredModelVersioned::Inferencer(v) => Ok(Model::Inferencer(v.try_into()?)),
-            StoredModelVersioned::WasmProcessor(v) => Ok(Model::WasmProcessor(v.try_into()?)),
-            StoredModelVersioned::Ingestor(v) => Ok(Model::Ingestor(v.try_into()?)),
-            StoredModelVersioned::Reingestor(v) => Ok(Model::Reingestor(v.try_into()?)),
-            StoredModelVersioned::Relay(v) => Ok(Model::Relay(v.try_into()?)),
-            StoredModelVersioned::Lookup(v) => Ok(Model::Lookup(v.try_into()?)),
-            StoredModelVersioned::Deduplicator(v) => Ok(Model::Deduplicator(v.try_into()?)),
-            StoredModelVersioned::Correlator(v) => Ok(Model::Correlator(v.try_into()?)),
-            StoredModelVersioned::Reorderer(v) => Ok(Model::Reorderer(v.try_into()?)),
-            StoredModelVersioned::Junction(v) => Ok(Model::Junction(v.try_into()?)),
-            StoredModelVersioned::WindowProcessor(v) => Ok(Model::WindowProcessor(v.try_into()?)),
-            StoredModelVersioned::Emitter(v) => Ok(Model::Emitter(v.try_into()?)),
-            StoredModelVersioned::Udf(v) => Ok(Model::Udf(v.try_into()?)),
+            StoredModelVersioned::Generator(v) => Ok(Model::Generator(convert_stored(v)?)),
+            StoredModelVersioned::Inferencer(v) => Ok(Model::Inferencer(convert_stored(v)?)),
+            StoredModelVersioned::WasmProcessor(v) => Ok(Model::WasmProcessor(convert_stored(v)?)),
+            StoredModelVersioned::Ingestor(v) if v.source.is_removed_integration() => {
+                Err(Report::new(StoredModelConversionError::RemovedIntegration))
+            }
+            StoredModelVersioned::Ingestor(v) => Ok(Model::Ingestor(convert_stored(v)?)),
+            StoredModelVersioned::Reingestor(v) => Ok(Model::Reingestor(convert_stored(v)?)),
+            StoredModelVersioned::Relay(v) => Ok(Model::Relay(convert_stored(v)?)),
+            StoredModelVersioned::Lookup(v) => Ok(Model::Lookup(convert_stored(v)?)),
+            StoredModelVersioned::Deduplicator(v) => Ok(Model::Deduplicator(convert_stored(v)?)),
+            StoredModelVersioned::Correlator(v) => Ok(Model::Correlator(convert_stored(v)?)),
+            StoredModelVersioned::Reorderer(v) => Ok(Model::Reorderer(convert_stored(v)?)),
+            StoredModelVersioned::Junction(v) => Ok(Model::Junction(convert_stored(v)?)),
+            StoredModelVersioned::WindowProcessor(v) => {
+                Ok(Model::WindowProcessor(convert_stored(v)?))
+            }
+            StoredModelVersioned::Emitter(v) if v.sink.is_removed_integration() => {
+                Err(Report::new(StoredModelConversionError::RemovedIntegration))
+            }
+            StoredModelVersioned::Emitter(v) => Ok(Model::Emitter(convert_stored(v)?)),
+            StoredModelVersioned::Udf(v) => Ok(Model::Udf(convert_stored(v)?)),
         }
     }
 }
@@ -1664,35 +1713,10 @@ impl From<CreateClientPulsar> for StoredCreateClientPulsar {
     }
 }
 
-impl From<CreateClientKinesis> for StoredCreateClientKinesis {
-    fn from(value: CreateClientKinesis) -> Self {
-        Self {
-            name: value.name.to_string(),
-            mount: value.mount.map(|mount| mount.to_string()),
-            config: value.config.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
 impl TryFrom<StoredCreateClientPulsar> for CreateClientPulsar {
     type Error = Report<NameError>;
 
     fn try_from(value: StoredCreateClientPulsar) -> Result<Self, Self::Error> {
-        Ok(Self {
-            name: Identifier::parse(&value.name)?,
-            mount: value
-                .mount
-                .map(|mount| Identifier::parse(&mount))
-                .transpose()?,
-            config: value.config.into_iter().map(Into::into).collect(),
-        })
-    }
-}
-
-impl TryFrom<StoredCreateClientKinesis> for CreateClientKinesis {
-    type Error = Report<NameError>;
-
-    fn try_from(value: StoredCreateClientKinesis) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
             mount: value
@@ -3007,17 +3031,6 @@ impl From<IngestSource> for StoredIngestSource {
                 client: client.to_string(),
                 every,
             },
-            IngestSource::Kinesis {
-                client,
-                relay,
-                instances,
-                mode,
-            } => Self::Kinesis {
-                client: client.to_string(),
-                relay: relay.to_string(),
-                instances,
-                mode: mode.into(),
-            },
             IngestSource::Kafka {
                 client,
                 topic,
@@ -3133,17 +3146,8 @@ impl TryFrom<StoredIngestSource> for IngestSource {
                 client: Identifier::parse(&client)?,
                 every,
             }),
-            StoredIngestSource::Kinesis {
-                client,
-                relay,
-                instances,
-                mode,
-            } => Ok(Self::Kinesis {
-                client: Identifier::parse(&client)?,
-                relay: Identifier::parse(&relay)?,
-                instances,
-                mode: mode.into(),
-            }),
+            StoredIngestSource::RemovedIntegration { .. } => Err(Report::new(NameError::Empty)
+                .attach_printable("stored model uses the removed Kinesis integration")),
             StoredIngestSource::Kafka {
                 client,
                 topic,
@@ -3314,39 +3318,6 @@ impl From<KafkaIngestMode> for StoredKafkaIngestMode {
                 retry_max_backoff: retry_policy.max_backoff,
             },
             KafkaIngestMode::NoAckParallel { max } => Self::NoAckParallel { max },
-        }
-    }
-}
-
-impl From<KinesisIngestMode> for StoredKinesisIngestMode {
-    fn from(value: KinesisIngestMode) -> Self {
-        match value {
-            KinesisIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            } => Self::AckSequential {
-                timeout,
-                retry_backoff: retry_policy.backoff,
-                retry_max_backoff: retry_policy.max_backoff,
-            },
-        }
-    }
-}
-
-impl From<StoredKinesisIngestMode> for KinesisIngestMode {
-    fn from(value: StoredKinesisIngestMode) -> Self {
-        match value {
-            StoredKinesisIngestMode::AckSequential {
-                timeout,
-                retry_backoff,
-                retry_max_backoff,
-            } => Self::AckSequential {
-                timeout,
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: retry_backoff,
-                    max_backoff: retry_max_backoff,
-                },
-            },
         }
     }
 }
@@ -4087,10 +4058,6 @@ impl From<EmitSink> for StoredEmitSink {
                 client: client.to_string(),
                 topic: topic.to_string(),
             },
-            EmitSink::Kinesis { client, relay } => Self::Kinesis {
-                client: client.to_string(),
-                relay: relay.to_string(),
-            },
             EmitSink::RabbitMq { client, queue } => Self::RabbitMq {
                 client: client.to_string(),
                 queue: queue.to_string(),
@@ -4213,10 +4180,8 @@ impl TryFrom<StoredEmitSink> for EmitSink {
                 client: Identifier::parse(&client)?,
                 topic: Identifier::parse(&topic)?,
             }),
-            StoredEmitSink::Kinesis { client, relay } => Ok(Self::Kinesis {
-                client: Identifier::parse(&client)?,
-                relay: Identifier::parse(&relay)?,
-            }),
+            StoredEmitSink::RemovedIntegration { .. } => Err(Report::new(NameError::Empty)
+                .attach_printable("stored model uses the removed Kinesis integration")),
             StoredEmitSink::RabbitMq { client, queue } => Ok(Self::RabbitMq {
                 client: Identifier::parse(&client)?,
                 queue: Identifier::parse(&queue)?,
@@ -4645,8 +4610,9 @@ mod tests {
 
         assert!(matches!(
             err.current_context(),
-            NameError::InvalidChar { ch: ' ' }
+            StoredModelConversionError::InvalidName
         ));
+        assert!(format!("{err:?}").contains("invalid character ' ' in name"));
     }
 
     #[test]

@@ -155,21 +155,6 @@ The current Iceberg OpenDAL adapter honors custom GCS service endpoints, so `fak
 
 Iceberg emitters stage local batch files under `/tmp` by default before committing them to blob storage. Use `--temp-dir` or `NERVIX_TEMP_DIR` to place runtime temporary files elsewhere.
 
-Kinesis is not part of `just deps` today. For local Kinesis-compatible testing, run a separate LocalStack container and point a `CLIENT ... TYPE KINESIS` at its `endpoint`.
-
-Minimal LocalStack example:
-
-```yaml
-services:
-  localstack:
-    image: localstack/localstack
-    ports:
-      - "4566:4566"
-    environment:
-      SERVICES: kinesis
-      AWS_DEFAULT_REGION: us-east-1
-```
-
 ## Prometheus Local Check
 
 ```bash

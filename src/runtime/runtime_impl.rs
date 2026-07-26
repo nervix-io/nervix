@@ -8252,7 +8252,6 @@ impl Runtime {
     ) -> Option<Model> {
         let source_ref = match &ingestor.source {
             IngestSource::Http { client, .. } => client,
-            IngestSource::Kinesis { client, .. } => client,
             IngestSource::Kafka { client, .. } => client,
             IngestSource::Pulsar { client, .. } => client,
             IngestSource::Prometheus { client, .. } => client,

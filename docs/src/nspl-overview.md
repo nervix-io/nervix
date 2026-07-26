@@ -370,7 +370,6 @@ Current built-in client transport kinds include:
 - `ZEROMQ`
 - `SQS`
 - `WEBSOCKETS`
-- `KINESIS`
 - `S3`
 - `GCS`
 - `AZURE_BLOB`

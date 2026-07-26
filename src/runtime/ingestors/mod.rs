@@ -3,7 +3,6 @@ use super::*;
 pub(in crate::runtime) mod endpoint;
 pub(in crate::runtime) mod http;
 pub(in crate::runtime) mod kafka;
-pub(in crate::runtime) mod kinesis;
 pub(in crate::runtime) mod mqtt;
 pub(in crate::runtime) mod nats;
 pub(in crate::runtime) mod prometheus;
@@ -17,7 +16,6 @@ pub(in crate::runtime) mod zeromq;
 use endpoint::EndpointIngestor;
 use http::HttpIngestor;
 use kafka::KafkaIngestor;
-use kinesis::KinesisIngestor;
 use mqtt::MqttIngestor;
 use nats::NatsIngestor;
 use prometheus::PrometheusIngestor;
@@ -41,9 +39,6 @@ impl IngestorStarter {
         match (&source_model, &ingestor.source) {
             (Model::ClientHttp(client), IngestSource::Http { .. }) => {
                 HttpIngestor::start(runtime, domain, client.clone(), ingestor).await
-            }
-            (Model::ClientKinesis(client), IngestSource::Kinesis { .. }) => {
-                KinesisIngestor::start(runtime, domain, client.clone(), ingestor).await
             }
             (Model::ClientKafka(client), IngestSource::Kafka { .. }) => {
                 KafkaIngestor::start(

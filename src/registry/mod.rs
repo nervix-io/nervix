@@ -861,7 +861,6 @@ impl DomainState {
                 }
                 Model::ClientKafka(_)
                 | Model::ClientPulsar(_)
-                | Model::ClientKinesis(_)
                 | Model::ClientHttp(_)
                 | Model::ClientSentry(_)
                 | Model::ClientPrometheus(_)
@@ -1195,7 +1194,6 @@ impl DomainState {
 
                     match &ingestor.source {
                         IngestSource::Http { client, .. }
-                        | IngestSource::Kinesis { client, .. }
                         | IngestSource::Kafka { client, .. }
                         | IngestSource::Pulsar { client, .. }
                         | IngestSource::Prometheus { client, .. }
@@ -8477,7 +8475,6 @@ fn runtime_changes_for_domain(
         };
         let source_ref = match &ingestor_model.source {
             IngestSource::Http { client, .. } => client,
-            IngestSource::Kinesis { client, .. } => client,
             IngestSource::Kafka { client, .. } => client,
             IngestSource::Pulsar { client, .. } => client,
             IngestSource::Prometheus { client, .. } => client,
@@ -8492,7 +8489,6 @@ fn runtime_changes_for_domain(
         };
         let source_kind = match &ingestor_model.source {
             IngestSource::Http { .. }
-            | IngestSource::Kinesis { .. }
             | IngestSource::Kafka { .. }
             | IngestSource::Pulsar { .. }
             | IngestSource::Prometheus { .. }

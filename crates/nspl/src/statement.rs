@@ -90,9 +90,6 @@ pub fn statement_parser<'src>()
         crate::client::create_client_pulsar_parser().map(|create| {
             Statement::Create(create.map_body(Model::ClientPulsar).map_body(Box::new))
         }),
-        crate::client::create_client_kinesis_parser().map(|create| {
-            Statement::Create(create.map_body(Model::ClientKinesis).map_body(Box::new))
-        }),
         crate::client::create_client_http_parser()
             .map(|create| Statement::Create(create.map_body(Model::ClientHttp).map_body(Box::new))),
         crate::client::create_client_sentry_parser().map(|create| {
@@ -967,8 +964,6 @@ mod tests {
         let input = "CREATE CLIENT kafka_main TYPE ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"KAFKA".to_string()));
-        assert!(suggestions.contains(&"PULSAR".to_string()));
-        assert!(suggestions.contains(&"KINESIS".to_string()));
         assert!(suggestions.contains(&"PULSAR".to_string()));
         assert!(suggestions.contains(&"HTTP".to_string()));
         assert!(suggestions.contains(&"SENTRY".to_string()));

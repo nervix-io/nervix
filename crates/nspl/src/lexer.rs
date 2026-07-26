@@ -161,7 +161,6 @@ pub enum Identifier {
     Key,
     Kafka,
     Pulsar,
-    Kinesis,
     Clickhouse,
     Postgres,
     Mysql,
