@@ -4,8 +4,8 @@ Nervix bounds work; the operator sizes it. The runtime provides backpressure for
 processing through bounded [relay capacity](relay.md#capacity), and it bounds branch population
 through branch `TTL` and optional `MAX INSTANCES <n> EVICT LRU`. The capacity-planning contract
 also requires observable eviction and resource consumption. Current signals cover process memory,
-traffic, latency, relay-buffer occupancy, and branch-local relay inspection, but not branch
-population, eviction counts, or per-node state size. Those missing signals are stated in
+traffic, latency, relay-buffer occupancy, branch population, eviction counts, and branch-local
+relay inspection, but not per-node state size. Remaining signals are stated in
 [Branch Lifecycle Signals](metrics-and-observability.md#branch-lifecycle-signals) and the
 [Roadmap](roadmap.md).
 
@@ -68,6 +68,9 @@ defaults.
 
 - `nervix_jemalloc_allocated_bytes`, `nervix_jemalloc_active_bytes`, and
   `nervix_jemalloc_resident_bytes` show process-memory pressure from all workloads on the node.
+- `nervix_branch_instances` shows the current concrete branch-key population per domain, branch
+  declaration, and physical node.
+- `nervix_branch_evictions_total` shows LRU pressure and TTL churn through its `reason` label.
 - Sustained high `nervix_relay_buffer_len` percentiles show downstream backpressure at relay
   fan-out buffers.
 - High `nervix_delivery_latency_seconds` percentiles show downstream lag between graph nodes.
@@ -75,10 +78,9 @@ defaults.
   reports its buffer metrics when available.
 - `DESCRIBE INGESTOR <name>` reports `memory-backpressure: active|inactive`.
 
-Prometheus does not currently expose live branch-instance counts, branch creation or eviction
-counters, deduplication entry counts, or open-window counts. `DESCRIBE` also does not provide a
-branch-population inventory or eviction history. Do not infer those values from traffic series.
-Future signal work is listed only in the [Roadmap](roadmap.md).
+Prometheus does not currently expose branch-creation counters, deduplication entry counts, or
+open-window counts. `DESCRIBE` also does not provide a branch-population inventory or eviction
+history. Future signal work is listed only in the [Roadmap](roadmap.md).
 
 For runtime ownership and snapshot boundaries, see [Data Plane](data-plane.md). For the current
 metric families and cardinality policy, see

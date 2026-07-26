@@ -62,6 +62,7 @@ fn processor_input_collect_policies(
 }
 
 struct BranchEntrypoint {
+    branch: Option<Identifier>,
     ttl: Option<String>,
     max_instances: Option<u64>,
     assignments: Vec<Assignment>,
@@ -70,14 +71,15 @@ struct BranchEntrypoint {
 fn branch_policy(
     branch_ref: Option<&Identifier>,
     branches: &HashMap<Identifier, CreateBranch>,
-) -> (Option<String>, Option<u64>) {
+) -> (Option<Identifier>, Option<String>, Option<u64>) {
     let Some(branch_ref) = branch_ref else {
-        return (None, None);
+        return (None, None, None);
     };
     let branch = branches
         .get(branch_ref)
         .expect("branch references must be validated before runtime planning");
     (
+        Some(branch_ref.clone()),
         Some(branch.ttl.clone()),
         branch
             .eviction
@@ -90,8 +92,9 @@ fn branch_entrypoint(
     branch_action: &OutputBranch,
     branches: &HashMap<Identifier, CreateBranch>,
 ) -> BranchEntrypoint {
-    let (ttl, max_instances) = branch_policy(branch_action.branch(), branches);
+    let (branch, ttl, max_instances) = branch_policy(branch_action.branch(), branches);
     BranchEntrypoint {
+        branch,
         ttl,
         max_instances,
         assignments: branch_action.assignments().to_vec(),
@@ -103,9 +106,10 @@ fn processor_node_spec(
     branched_by: &nervix_models::BranchSelection,
     branches: &HashMap<Identifier, CreateBranch>,
 ) -> BranchedProcessorNodeSpec {
-    let (branch_ttl, branch_max_instances) = branch_policy(branched_by.branch(), branches);
+    let (branch, branch_ttl, branch_max_instances) = branch_policy(branched_by.branch(), branches);
     BranchedProcessorNodeSpec {
         spec,
+        branch,
         branch_ttl,
         branch_max_instances,
     }
@@ -348,6 +352,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         kind,
                         identifier.clone(),
                         output.relay.clone(),
+                        entrypoint.branch,
                         entrypoint.ttl,
                         entrypoint.max_instances,
                         Vec::new(),
@@ -380,6 +385,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         kind,
                         identifier.clone(),
                         output.relay.clone(),
+                        entrypoint.branch,
                         entrypoint.ttl,
                         entrypoint.max_instances,
                         entrypoint.assignments,
@@ -415,6 +421,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                     kind,
                     identifier,
                     root_relay,
+                    branch,
                     branch_ttl,
                     branch_max_instances,
                     output_branch_assignments,
@@ -427,6 +434,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_models(
                         kind,
                         identifier,
                         root_relay,
+                        branch,
                         branch_ttl,
                         branch_max_instances,
                         output_branch_assignments,
@@ -877,6 +885,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
             source_kind: spec.kind,
             source: spec.identifier.clone(),
             root_relay: spec.root_relay.clone(),
+            branch: spec.branch.clone(),
             branch_ttl: parse_branch_ttl_setting(
                 spec.branch_ttl.as_deref(),
                 spec.kind,
@@ -934,6 +943,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         source_kind: spec.kind,
         source: spec.processor.clone(),
         root_relay,
+        branch: node.branch.clone(),
         branch_ttl: parse_branch_ttl_setting(
             node.branch_ttl.as_deref(),
             spec.kind,

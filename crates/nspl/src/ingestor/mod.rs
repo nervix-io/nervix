@@ -1,9 +1,9 @@
 use chumsky::prelude::*;
 use nervix_models::{
     CreateIngestor, CreateStatement, EndpointIngestMode, IngestSource, IngestTimestampSource,
-    KafkaIngestMode, KafkaOffsetMode, KinesisIngestMode, MqttIngestMode, MqttQos, MqttSession,
-    NatsIngestMode, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
-    SqsIngestMode, WebsocketsIngestMode, ZeroMqIngestMode,
+    KafkaIngestMode, KafkaOffsetMode, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
+    PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SqsIngestMode,
+    WebsocketsIngestMode, ZeroMqIngestMode,
 };
 
 use crate::{
@@ -13,8 +13,7 @@ use crate::{
         consumer_group_ref, current_word_prefix, duration_lit, endpoint_ref, filter_where_clause,
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
         into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
-        queue_ref, relay_ref, string_lit, subscription_ref, suggestions_from_errors, tok,
-        topic_ref, word_raw,
+        queue_ref, string_lit, subscription_ref, suggestions_from_errors, tok, topic_ref, word_raw,
     },
 };
 
@@ -135,30 +134,6 @@ fn rabbitmq_mode_parser<'src>()
         .then(duration_lit())
         .map(
             |((timeout, backoff), max_backoff)| RabbitMqIngestMode::AckSequential {
-                timeout,
-                retry_policy: RetryPolicy {
-                    backoff,
-                    max_backoff,
-                },
-            },
-        )
-}
-
-fn kinesis_mode_parser<'src>()
--> impl Parser<'src, &'src [Token], KinesisIngestMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Ack)
-        .ignore_then(kw(Identifier::Sequential))
-        .ignore_then(kw(Identifier::Ack))
-        .ignore_then(kw(Identifier::Timeout))
-        .ignore_then(duration_lit())
-        .then_ignore(kw(Identifier::Retry))
-        .then_ignore(kw(Identifier::Policy))
-        .then_ignore(kw(Identifier::Backoff))
-        .then(duration_lit())
-        .then_ignore(kw(Identifier::Max))
-        .then(duration_lit())
-        .map(
-            |((timeout, backoff), max_backoff)| KinesisIngestMode::AckSequential {
                 timeout,
                 retry_policy: RetryPolicy {
                     backoff,
@@ -451,30 +426,6 @@ fn rabbitmq_ingest_source_parser<'src>()
         )
 }
 
-fn kinesis_ingest_source_parser<'src>()
--> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Kinesis)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Relay))
-        .then(relay_ref())
-        .then(
-            kw(Identifier::Instances)
-                .ignore_then(positive_u64_word())
-                .or_not()
-                .map(|instances| instances.unwrap_or(1)),
-        )
-        .then_ignore(kw(Identifier::Mode))
-        .then(kinesis_mode_parser())
-        .map(
-            |(((client, relay), instances), mode)| IngestSource::Kinesis {
-                client,
-                relay,
-                instances,
-                mode,
-            },
-        )
-}
-
 fn redis_pubsub_ingest_source_parser<'src>()
 -> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Redis)
@@ -620,7 +571,6 @@ fn ingest_source_parser<'src>()
 -> impl Parser<'src, &'src [Token], IngestSource, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
         http_ingest_source_parser(),
-        kinesis_ingest_source_parser(),
         kafka_ingest_source_parser(),
         pulsar_ingest_source_parser(),
         rabbitmq_ingest_source_parser(),
@@ -952,39 +902,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_create_ingestor_kinesis_ack_sequential() {
-        let input = r#"
-            CREATE INGESTOR kinesis_notifications
-              FROM KINESIS kinesis_main RELAY notifications INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
-              DECODE USING notification_codec
-              TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
-              FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
-              ON GENERAL ERROR LOG;
-        "#;
-
-        let tokens = to_tokens(input);
-        let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-
-        assert_eq!(
-            parsed.source,
-            IngestSource::Kinesis {
-                client: nervix_models::Identifier::try_from("kinesis_main")
-                    .expect("valid client identifier"),
-                relay: nervix_models::Identifier::try_from("notifications")
-                    .expect("valid relay identifier"),
-                instances: 2,
-                mode: KinesisIngestMode::AckSequential {
-                    timeout: "15s".to_string(),
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "8s".to_string(),
-                    },
-                },
-            }
-        );
-    }
-
-    #[test]
     fn parses_create_ingestor_no_ack_parallel() {
         let input = r#"
             CREATE INGESTOR i
@@ -1161,7 +1078,6 @@ mod tests {
         let input = "CREATE INGESTOR i FROM ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"HTTP".to_string()));
-        assert!(suggestions.contains(&"KINESIS".to_string()));
         assert!(suggestions.contains(&"KAFKA".to_string()));
         assert!(suggestions.contains(&"PULSAR".to_string()));
         assert!(suggestions.contains(&"PROMETHEUS".to_string()));
@@ -1695,15 +1611,6 @@ mod tests {
                 every: "1s".to_string(),
             }
         );
-    }
-
-    #[test]
-    fn kinesis_mode_context_does_not_offer_no_ack_or_parallel() {
-        let input = "CREATE INGESTOR i FROM KINESIS c RELAY events MODE ";
-        let suggestions = suggest_create_ingestor(input, input.len());
-        assert!(suggestions.contains(&"ACK".to_string()));
-        assert!(!suggestions.contains(&"NO_ACK".to_string()));
-        assert!(!suggestions.contains(&"PARALLEL".to_string()));
     }
 
     #[test]

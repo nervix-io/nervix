@@ -442,7 +442,6 @@ pub enum Model {
     Codec(CreateCodec),
     ClientKafka(CreateClientKafka),
     ClientPulsar(CreateClientPulsar),
-    ClientKinesis(CreateClientKinesis),
     ClientHttp(CreateClientHttp),
     ClientSentry(CreateClientSentry),
     ClientPrometheus(CreateClientPrometheus),
@@ -490,7 +489,6 @@ impl Model {
             Self::Codec(_) => ModelKind::Codec,
             Self::ClientKafka(_)
             | Self::ClientPulsar(_)
-            | Self::ClientKinesis(_)
             | Self::ClientHttp(_)
             | Self::ClientSentry(_)
             | Self::ClientPrometheus(_)
@@ -542,7 +540,6 @@ impl Model {
             Self::Codec(v) => &v.name,
             Self::ClientKafka(v) => &v.name,
             Self::ClientPulsar(v) => &v.name,
-            Self::ClientKinesis(v) => &v.name,
             Self::ClientHttp(v) => &v.name,
             Self::ClientSentry(v) => &v.name,
             Self::ClientPrometheus(v) => &v.name,
@@ -587,7 +584,6 @@ impl Model {
         match self {
             Self::ClientKafka(_) => Some("KAFKA"),
             Self::ClientPulsar(_) => Some("PULSAR"),
-            Self::ClientKinesis(_) => Some("KINESIS"),
             Self::ClientHttp(_) => Some("HTTP"),
             Self::ClientSentry(_) => Some("SENTRY"),
             Self::ClientPrometheus(_) => Some("PROMETHEUS"),
@@ -800,10 +796,6 @@ pub enum EmitSink {
         client: Identifier,
         topic: Identifier,
     },
-    Kinesis {
-        client: Identifier,
-        relay: Identifier,
-    },
     #[strum(serialize = "RABBITMQ")]
     RabbitMq {
         client: Identifier,
@@ -885,7 +877,6 @@ impl EmitSink {
         match self {
             Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
-            | Self::Kinesis { client, .. }
             | Self::RabbitMq { client, .. }
             | Self::Redis { client, .. }
             | Self::Mqtt { client, .. }
@@ -917,7 +908,6 @@ impl EmitSink {
         match self {
             Self::Kafka { .. } => "KAFKA",
             Self::Pulsar { .. } => "PULSAR",
-            Self::Kinesis { .. } => "KINESIS",
             Self::RabbitMq { .. } => "RABBITMQ",
             Self::Redis { .. } => "REDIS",
             Self::Mqtt { .. } => "MQTT",
@@ -949,7 +939,6 @@ impl EmitSink {
             (self, client),
             (Self::Kafka { .. }, Model::ClientKafka(_))
                 | (Self::Pulsar { .. }, Model::ClientPulsar(_))
-                | (Self::Kinesis { .. }, Model::ClientKinesis(_))
                 | (Self::RabbitMq { .. }, Model::ClientRabbitMq(_))
                 | (Self::Redis { .. }, Model::ClientRedis(_))
                 | (Self::Mqtt { .. }, Model::ClientMqtt(_))
@@ -989,7 +978,6 @@ impl EmitSink {
         match self {
             Self::Kafka { .. }
             | Self::Pulsar { .. }
-            | Self::Kinesis { .. }
             | Self::RabbitMq { .. }
             | Self::Redis { .. }
             | Self::Mqtt { .. }
@@ -1018,7 +1006,6 @@ impl EmitSink {
             } => Some((flush_each.as_str(), max_batch_size.as_deref())),
             Self::Kafka { .. }
             | Self::Pulsar { .. }
-            | Self::Kinesis { .. }
             | Self::RabbitMq { .. }
             | Self::Redis { .. }
             | Self::Mqtt { .. }
@@ -1038,7 +1025,6 @@ impl EmitSink {
             } => Some((commit_each.as_str(), max_commit_size.as_str())),
             Self::Kafka { .. }
             | Self::Pulsar { .. }
-            | Self::Kinesis { .. }
             | Self::RabbitMq { .. }
             | Self::Redis { .. }
             | Self::Mqtt { .. }
@@ -1112,13 +1098,6 @@ pub struct CreateClientKafka {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateClientPulsar {
-    pub name: Identifier,
-    pub mount: Option<Identifier>,
-    pub config: Vec<ClientConfigEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateClientKinesis {
     pub name: Identifier,
     pub mount: Option<Identifier>,
     pub config: Vec<ClientConfigEntry>,
@@ -1259,7 +1238,6 @@ pub struct ClientConfigEntry {
 
 pub type KafkaConfigEntry = ClientConfigEntry;
 pub type PulsarConfigEntry = ClientConfigEntry;
-pub type KinesisConfigEntry = ClientConfigEntry;
 pub type HttpConfigEntry = ClientConfigEntry;
 pub type SentryConfigEntry = ClientConfigEntry;
 pub type RabbitMqConfigEntry = ClientConfigEntry;
@@ -1781,12 +1759,6 @@ pub enum IngestSource {
         client: Identifier,
         every: String,
     },
-    Kinesis {
-        client: Identifier,
-        relay: Identifier,
-        instances: u64,
-        mode: KinesisIngestMode,
-    },
     Kafka {
         client: Identifier,
         topic: Identifier,
@@ -1861,7 +1833,6 @@ impl IngestSource {
     pub fn source_ref(&self) -> &Identifier {
         match self {
             Self::Http { client, .. }
-            | Self::Kinesis { client, .. }
             | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
             | Self::Mqtt { client, .. }
@@ -1914,14 +1885,6 @@ pub enum KafkaIngestMode {
 }
 
 pub type PulsarIngestMode = KafkaIngestMode;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum KinesisIngestMode {
-    AckSequential {
-        timeout: String,
-        retry_policy: RetryPolicy,
-    },
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]

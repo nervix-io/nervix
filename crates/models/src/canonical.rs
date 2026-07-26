@@ -5,29 +5,28 @@ use crate::{
     BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
     CodecEncodingRule, CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction,
     CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
-    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
-    CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
-    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression,
-    FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
+    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
+    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
+    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
+    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
+    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, KinesisConfigEntry, KinesisIngestMode, Literal,
-    MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry,
-    NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry,
-    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
-    RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry,
-    SchemaField, SentryConfigEntry, SqsConfigEntry, SqsIngestMode, UnaryOperator,
-    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqConfigEntry,
-    ZeroMqIngestMode,
+    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
+    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
+    NatsConfigEntry, NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
+    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
+    RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry, SqsConfigEntry,
+    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
+    WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
 pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
@@ -330,7 +329,6 @@ impl Model {
             Self::Codec(codec) => codec.to_canonical_nspl(),
             Self::ClientKafka(client) => client.to_canonical_nspl(),
             Self::ClientPulsar(client) => client.to_canonical_nspl(),
-            Self::ClientKinesis(client) => client.to_canonical_nspl(),
             Self::ClientHttp(client) => client.to_canonical_nspl(),
             Self::ClientSentry(client) => client.to_canonical_nspl(),
             Self::ClientPrometheus(client) => client.to_canonical_nspl(),
@@ -452,24 +450,6 @@ impl CreateClientKafka {
 
         Ok(format!(
             "CREATE CLIENT {} TYPE KAFKA{} CONFIG {{{}}};",
-            self.name.as_str(),
-            client_mount_clause(self.mount.as_ref()),
-            config
-        ))
-    }
-}
-
-impl CreateClientKinesis {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(kinesis_entry_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
-        Ok(format!(
-            "CREATE CLIENT {} TYPE KINESIS{} CONFIG {{{}}};",
             self.name.as_str(),
             client_mount_clause(self.mount.as_ref()),
             config
@@ -1647,29 +1627,9 @@ fn pulsar_entry_to_nspl(entry: &PulsarConfigEntry) -> Result<String, CanonicalNs
     kafka_entry_to_nspl(entry)
 }
 
-fn kinesis_entry_to_nspl(entry: &KinesisConfigEntry) -> Result<String, CanonicalNsplError> {
-    kafka_entry_to_nspl(entry)
-}
-
 fn ingest_source_to_nspl(source: &IngestSource) -> String {
     match source {
         IngestSource::Http { client, every } => format!("HTTP {} EVERY {}", client.as_str(), every),
-        IngestSource::Kinesis {
-            client,
-            relay,
-            instances,
-            mode,
-        } => format!(
-            "KINESIS {} RELAY {}{} MODE {}",
-            client.as_str(),
-            relay.as_str(),
-            if *instances > 1 {
-                format!(" INSTANCES {}", instances)
-            } else {
-                String::new()
-            },
-            kinesis_mode_to_nspl(mode)
-        ),
         IngestSource::Kafka {
             client,
             topic,
@@ -1844,18 +1804,6 @@ fn kafka_mode_to_nspl(mode: &KafkaIngestMode) -> String {
             retry_policy_to_nspl(retry_policy)
         ),
         KafkaIngestMode::NoAckParallel { max } => format!("NO_ACK PARALLEL MAX {max}"),
-    }
-}
-
-fn kinesis_mode_to_nspl(mode: &KinesisIngestMode) -> String {
-    match mode {
-        KinesisIngestMode::AckSequential {
-            timeout,
-            retry_policy,
-        } => format!(
-            "ACK SEQUENTIAL ACK TIMEOUT {timeout} RETRY POLICY {}",
-            retry_policy_to_nspl(retry_policy)
-        ),
     }
 }
 
@@ -2049,11 +1997,6 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             "PULSAR {} TOPIC {}",
             client.as_str(),
             topic.as_str()
-        )),
-        EmitSink::Kinesis { client, relay } => Ok(format!(
-            "KINESIS {} RELAY {}",
-            client.as_str(),
-            relay.as_str()
         )),
         EmitSink::RabbitMq { client, queue } => Ok(format!(
             "RABBITMQ {} QUEUE {}",
@@ -2333,23 +2276,22 @@ mod tests {
         AckMode, AvroType, BinaryOperator, BranchSelection, CodecEncoding, CodecEncodingRule,
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-        CreateClientHttp, CreateClientKafka, CreateClientKinesis, CreateClientMqtt,
-        CreateClientNats, CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis,
-        CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq,
-        CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
-        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema,
-        CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
-        Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource,
-        InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-        KinesisIngestMode, Literal, MessageErrorPolicy, Model, MongoDbConflictAction,
-        MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-        MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType, PostgresConflictAction,
-        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
-        RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry, SqsIngestMode, UdfArgument,
-        UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound, WireSchemaField,
-        ZeroMqIngestMode,
+        CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
+        CreateClientPrometheus, CreateClientRabbitMq, CreateClientRedis, CreateClientSentry,
+        CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+        CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
+        CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf,
+        CreateVhost, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
+        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope,
+        GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, InputCollectPolicy,
+        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy,
+        Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
+        PostgresConflictAction, PostgresValueMapping, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode,
+        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
+        SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound,
+        WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -3128,13 +3070,6 @@ mod tests {
                 "PULSAR pulsar_main TOPIC orders",
             ),
             (
-                EmitSink::Kinesis {
-                    client: identifier("kinesis_main"),
-                    relay: identifier("orders_stream_out"),
-                },
-                "KINESIS kinesis_main RELAY orders_stream_out",
-            ),
-            (
                 EmitSink::RabbitMq {
                     client: identifier("rmq_main"),
                     queue: identifier("orders_q"),
@@ -3370,32 +3305,6 @@ mod tests {
                 "CREATE INGESTOR http_ingestor FROM HTTP http_main EVERY 30s DECODE USING \
                  orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
                  MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
-            ),
-            (
-                CreateIngestor {
-                    name: identifier("kinesis_ingestor"),
-                    output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: identifier("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Kinesis {
-                        client: identifier("kinesis_main"),
-                        relay: identifier("orders_stream"),
-                        instances: 2,
-                        mode: KinesisIngestMode::AckSequential {
-                            timeout: "12s".to_string(),
-                            retry_policy: retry.clone(),
-                        },
-                    },
-                    general_error_policy: GeneralErrorPolicy::Log,
-
-                    filter_where: None,
-                }
-                .to_canonical_nspl()
-                .expect("must render"),
-                "CREATE INGESTOR kinesis_ingestor FROM KINESIS kinesis_main RELAY orders_stream \
-                 INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 12s RETRY POLICY BACKOFF 1s MAX 30s \
-                 DECODE USING orders_codec TO orders UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE \
-                 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
             ),
             (
                 CreateIngestor {
@@ -3650,16 +3559,6 @@ mod tests {
         assert_eq!(
             model.to_canonical_nspl().expect("must render"),
             "CREATE CLIENT kafka_main TYPE KAFKA CONFIG {'bootstrap.servers' = 'localhost:9092'};"
-        );
-
-        let kinesis = Model::ClientKinesis(CreateClientKinesis {
-            name: identifier("kinesis_main"),
-            mount: None,
-            config: vec![config_entry("region", "us-east-1")],
-        });
-        assert_eq!(
-            kinesis.to_canonical_nspl().expect("must render"),
-            "CREATE CLIENT kinesis_main TYPE KINESIS CONFIG {'region' = 'us-east-1'};"
         );
     }
 

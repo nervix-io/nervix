@@ -21,7 +21,10 @@ Use the node's observability address, not the data-plane HTTP listener:
 curl http://127.0.0.1:<observability-port>/metrics
 ```
 
-Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a relay is branched by high-cardinality values such as tenant, user, account, or device id.
+Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay
+branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a
+relay is branched by high-cardinality values such as tenant, user, account, or device id. Branch
+lifecycle metrics identify the declared branch, not the concrete key.
 
 ## Metric Labels
 
@@ -34,6 +37,8 @@ Graph metric series use these labels:
 - `direction`: `received` or `sent`
 - `stream`: logical relay associated with the observation, or `-` when no relay applies
 - `peer_kind` and `peer`: relay peer labels for node-to-relay observations, or `-` when no peer applies
+- `branch`: named branch declaration on branch lifecycle metrics
+- `reason`: branch eviction reason, either `lru` or `ttl`
 - `le`: Prometheus histogram bucket boundary
 
 `DESCRIBE` output uses the same concepts but renders `physical_node_id` as `physical_node` for readability.
@@ -62,6 +67,10 @@ Nervix records these raw metric families:
 - `nervix_messages_per_batch`: histogram of message count per batch
 - `nervix_delivery_latency_seconds`: histogram of delivery latency between graph nodes
 - `nervix_relay_buffer_len`: histogram of runtime relay buffer occupancy in queued batches
+- `nervix_branch_instances`: current concrete branch keys with at least one runtime instance on the
+  physical node
+- `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
+  `reason="lru"` or `reason="ttl"`
 - `nervix_jemalloc_active_bytes`: bytes in active allocator pages
 - `nervix_jemalloc_allocated_bytes`: bytes allocated by the process
 - `nervix_jemalloc_mapped_bytes`: bytes mapped by active allocator extents
@@ -127,22 +136,25 @@ A `-` value means the derived value is not available. This is common for domain-
 
 ## Branch Lifecycle Signals
 
-Current Prometheus metrics are branch-aggregated traffic, latency, and buffer observations. They do
-not include live branch-instance counts, branch-creation counters, eviction counters, or
-branch-local state-size gauges.
+Prometheus exposes branch lifecycle state without a concrete branch-key label:
 
-Current branch-local visibility is limited to inspection:
+- `nervix_branch_instances{domain,branch,physical_node_id}` is a gauge of live concrete branch
+  keys on that physical node. A key is counted once even when multiple local graph nodes hold
+  runtime state for it.
+- `nervix_branch_evictions_total{domain,branch,physical_node_id,reason}` counts each concrete key
+  once when branch eviction begins on that physical node, even if multiple local graph nodes hold
+  the key. `reason="lru"` is a `MAX INSTANCES ... EVICT LRU` capacity eviction; `reason="ttl"` is
+  idle expiration.
 
-- `DESCRIBE RELAY <relay> WHERE (...)` reports whether the matching concrete branch-local relay
-  exists and includes its relay-buffer metrics when available.
-- `DESCRIBE RELAY <relay>` reports logical configuration and aggregated buffer observations. It
-  does not count live branch instances.
-- Processor and ingestor `DESCRIBE` output reports the runtime state implemented by that node, but
-  it does not provide a common branch inventory or eviction history.
+Normal shutdown, schedule replacement, and runtime detachment reduce the live gauge but do not
+increment the eviction counter. Lifecycle metrics are live process-local Prometheus state and are
+not persisted or replicated.
 
-Prometheus deliberately has no branch-key label. Any future lifecycle metrics must preserve this
-cardinality policy. See [Capacity Planning For Branched Graphs](capacity-planning.md) for the cost
-model and [Roadmap](roadmap.md) for signals that do not exist yet.
+Concrete branch-local inspection remains available through `DESCRIBE RELAY <relay> WHERE (...)`.
+`DESCRIBE` does not provide a common branch inventory or eviction history. Prometheus deliberately
+has no branch-key label. See
+[Capacity Planning For Branched Graphs](capacity-planning.md) for the cost model and
+[Roadmap](roadmap.md) for remaining signals.
 
 ## Wall Clock And Domain Clock
 
@@ -164,4 +176,6 @@ Nervix maintains two internal metric sets for `DESCRIBE`, edge statistics, and r
 
 Branch-aggregated metrics are replicated as branch-aggregated runtime state. Concrete branch metrics travel with the concrete branch state they describe. This is why `DESCRIBE` and graph edge metrics survive node drain and restart paths in the same way as other replicated runtime state.
 
-Prometheus export is a separate, live process-local registry. It intentionally ignores branch identity and reports aggregated raw values to avoid cardinality growth. Prometheus registry values are not snapshotted into Nervix internal metric state.
+Prometheus export is a separate, live process-local registry. Traffic metrics ignore branch
+identity, while lifecycle metrics retain only the bounded declared branch name. Prometheus
+registry values are not snapshotted into Nervix internal metric state.

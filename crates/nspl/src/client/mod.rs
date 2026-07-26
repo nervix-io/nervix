@@ -1,11 +1,11 @@
 use chumsky::prelude::*;
 use nervix_models::{
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientKinesis, CreateClientMongoDb,
-    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateStatement, KafkaConfigEntry,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
+    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq,
+    CreateStatement, KafkaConfigEntry,
 };
 
 use crate::{
@@ -114,18 +114,6 @@ pub fn create_client_sentry_parser<'src>()
 + Clone {
     create_client_parser(Identifier::Sentry, |name, mount, config| {
         CreateClientSentry {
-            name,
-            mount,
-            config,
-        }
-    })
-}
-
-pub fn create_client_kinesis_parser<'src>()
--> impl Parser<'src, &'src [Token], CreateStatement<CreateClientKinesis>, extra::Err<ParseError<'src>>>
-+ Clone {
-    create_client_parser(Identifier::Kinesis, |name, mount, config| {
-        CreateClientKinesis {
             name,
             mount,
             config,
@@ -656,33 +644,6 @@ mod tests {
             "https://public@sentry.example.com/42"
         );
         assert_eq!(parsed.config[1].key, "timeout_ms");
-    }
-
-    #[test]
-    fn parses_client_kinesis_config() {
-        let input = r#"
-            CREATE CLIENT kinesis_main
-              TYPE KINESIS
-              CONFIG {
-                'endpoint' = 'http://127.0.0.1:4566',
-                'region' = 'us-east-1',
-                'start_position' = 'trim_horizon'
-              };
-        "#;
-
-        let tokens = to_tokens(input);
-        let parsed = create_client_kinesis_parser()
-            .then_ignore(end())
-            .parse(tokens.as_slice())
-            .into_result()
-            .expect("parse should succeed");
-
-        assert_eq!(parsed.name.as_str(), "kinesis_main");
-        assert_eq!(parsed.config.len(), 3);
-        assert_eq!(parsed.config[0].key, "endpoint");
-        assert_eq!(parsed.config[0].value, "http://127.0.0.1:4566");
-        assert_eq!(parsed.config[2].key, "start_position");
-        assert_eq!(parsed.config[2].value, "trim_horizon");
     }
 
     #[test]

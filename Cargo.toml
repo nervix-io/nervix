@@ -31,7 +31,6 @@ async-tar = { workspace = true, features = ["runtime-tokio"] }
 async-trait = { workspace = true }
 aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
-aws-sdk-kinesis = { workspace = true }
 aws-sdk-sqs = { workspace = true }
 # The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
@@ -240,10 +239,6 @@ async-trait = "0.1"
 aws-config = "1.8"
 aws-credential-types = "1.2"
 # Disable the AWS SDK TLS defaults so the root's Smithy client owns AWS-LC selection.
-aws-sdk-kinesis = { version = "1.77", default-features = false, features = [
-  "default-https-client",
-  "rt-tokio",
-] }
 aws-sdk-sqs = { version = "1.76", default-features = false, features = [
   "default-https-client",
   "rt-tokio",

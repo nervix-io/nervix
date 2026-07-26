@@ -44,7 +44,9 @@ means Nervix collects an in-memory Arrow batch before handing it to the external
 [NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally supports `COMMIT EACH <duration> MAX SIZE <bytes>`: flush writes local Arrow IPC
-staging files, and commit appends the staged data to object storage.
+staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
+buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
+interval or maximum batch-size boundary.
 
 An emitter may place `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` immediately after `FROM
 <relay>`. This input policy runs before emitter filtering, construction, encoding, and the required
@@ -109,8 +111,7 @@ partial-envelope publication.
 
 Header output is supported only on codec emitters for Kafka, NATS, Pulsar, RabbitMQ, and SQS.
 Kafka and NATS preserve ordered repeated values. Pulsar, RabbitMQ, and SQS use last-write-wins
-behavior. Kinesis, Redis, MQTT, ZeroMQ, Sentry, direct database sinks, and Iceberg reject header
-writes.
+behavior. Redis, MQTT, ZeroMQ, Sentry, direct database sinks, and Iceberg reject header writes.
 
 Emitter expressions use the same typed surface as other runtime nodes:
 
@@ -156,7 +157,6 @@ Transport-specific expectations:
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
-- `KINESIS`: use an `https://...` optional `endpoint` for AWS-compatible targets. Nervix honors `tls_ca_file`; local/test targets can also set `region`, `access_key_id`, and `secret_access_key`.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`.
 - `SENTRY`: the referenced `TYPE SENTRY` client carries an `https://...` `dsn`; Nervix honors the
   client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
@@ -203,12 +203,6 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
 
 Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
-
-### Kinesis
-
-```nspl
-TO KINESIS <client> RELAY <relay>
-```
 
 ### RabbitMQ
 

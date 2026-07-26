@@ -78,10 +78,15 @@ request can mix those phases.
   route. Treat `FLUSH IMMEDIATE` as the system-owned 100 µs minimum batching window, not a
   one-message batch guarantee. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by
   the guest.
+- On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
+  governed by that route's same interval and maximum batch-size boundaries. General/global errors
+  are node-wide and do not inherit route-local `FLUSH`.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
 - Preserve connector configuration as the documented string key/value surface. Do not translate
   options between different client libraries.
+- Use only connector kinds listed in the current Ingestors and Emitters documentation. Treat
+  connector syntax retained in older examples or configurations as invalid.
 - For a Sentry sink, reference a `TYPE SENTRY` client containing the project DSN and use a codec
   that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other

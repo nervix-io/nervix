@@ -6,7 +6,6 @@ use super::*;
 pub(in crate::runtime) mod clickhouse;
 mod iceberg;
 mod kafka;
-mod kinesis;
 mod mongodb;
 mod mqtt;
 mod mysql;
@@ -25,7 +24,6 @@ use iceberg::{
     IcebergEmitterResult,
 };
 use kafka::KafkaEmitter;
-use kinesis::KinesisEmitter;
 use mongodb::MongoDbEmitter;
 use mqtt::MqttEmitter;
 use mysql::MySqlEmitter;
@@ -704,7 +702,6 @@ impl EmitterSinkContext {
 enum SinkEmitter {
     Kafka(KafkaEmitter),
     Pulsar(PulsarEmitter),
-    Kinesis(KinesisEmitter),
     RabbitMq(RabbitMqEmitter),
     Redis(RedisEmitter),
     Mqtt(MqttEmitter),
@@ -739,14 +736,6 @@ impl SinkEmitter {
                 match PulsarEmitter::new(client, resolved, topic).await {
                     Ok(emitter) => Self::Pulsar(emitter),
                     Err(error) => Self::missing_after_emitter_init_error("pulsar", context, &error),
-                }
-            }
-            (EmitSink::Kinesis { .. }, Some(Model::ClientKinesis(client)), _) => {
-                match KinesisEmitter::new(client, resolved).await {
-                    Ok(emitter) => Self::Kinesis(emitter),
-                    Err(error) => {
-                        Self::missing_after_emitter_init_error("kinesis", context, &error)
-                    }
                 }
             }
             (EmitSink::RabbitMq { .. }, Some(Model::ClientRabbitMq(client)), _) => {
@@ -1241,14 +1230,6 @@ impl SinkEmitter {
                 };
                 emitter.publish(&message, payload, headers).await
             }
-            (Self::Kinesis(emitter), EmitSink::Kinesis { relay, .. }) => {
-                let message = RelayMessage {
-                    key: key.clone(),
-                    record: record.clone(),
-                    acks: AckSet::empty(),
-                };
-                emitter.publish(relay, &message, payload).await
-            }
             (Self::RabbitMq(emitter), EmitSink::RabbitMq { queue, .. }) => {
                 emitter.publish(queue, payload, headers).await
             }
@@ -1391,7 +1372,6 @@ impl EmitSinkLabel for EmitSink {
         match self {
             EmitSink::Kafka { .. } => "kafka",
             EmitSink::Pulsar { .. } => "pulsar",
-            EmitSink::Kinesis { .. } => "kinesis",
             EmitSink::RabbitMq { .. } => "rabbitmq",
             EmitSink::Redis { .. } => "redis",
             EmitSink::Mqtt { .. } => "mqtt",
@@ -1899,9 +1879,6 @@ fn resolve_emitter_client(
             Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
         }
         (EmitSink::Pulsar { .. }, Some(Model::ClientPulsar(client))) => {
-            Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
-        }
-        (EmitSink::Kinesis { .. }, Some(Model::ClientKinesis(client))) => {
             Some(runtime.resolve_client_config(client.mount.as_ref(), &client.config))
         }
         (EmitSink::RabbitMq { .. }, Some(Model::ClientRabbitMq(client))) => {

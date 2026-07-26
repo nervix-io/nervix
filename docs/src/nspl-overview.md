@@ -337,8 +337,11 @@ tied to a message.
 affected field paths, timestamp, and a non-sensitive message. Error construction can read the
 eligible original input, the exact materialized-state snapshot, an all-optional `partial_output`,
 and the structured `error` scope. The error route preserves the branch in which the failure
-occurred. Error-record construction failures are logged and no-acked without recursively invoking
-the same policy.
+occurred. On flush-based nodes, `SEND TO` records are buffered independently for the owning `TO`
+route and concrete branch, then emitted when that route's `FLUSH` interval or maximum batch size
+fires. They are not dispatched immediately. Error-record construction failures are logged and
+no-acked without recursively invoking the same policy. General and global errors remain node-wide
+and do not inherit a route-local `FLUSH` policy.
 
 Client definitions are key-value based and may optionally mount a resource for file-backed settings such as TLS material:
 
@@ -380,7 +383,6 @@ Current built-in client transport kinds include:
 - `ZEROMQ`
 - `SQS`
 - `WEBSOCKETS`
-- `KINESIS`
 - `S3`
 - `GCS`
 - `AZURE_BLOB`
