@@ -53,6 +53,8 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertIn("just book-pdf", justfile)
         self.assertIn('output_path="docs/book/nervix.pdf"', justfile)
         self.assertIn("--pdf-engine=xelatex", justfile)
+        self.assertIn("--variable=geometry:margin=0.8in", justfile)
+        self.assertIn("--variable=linestretch:1.08", justfile)
 
     def test_docs_publisher_does_not_shell_out_for_storage_operations(self) -> None:
         publisher = Path("scripts/publish_docs_alias.py").read_text()
