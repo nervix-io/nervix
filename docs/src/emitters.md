@@ -55,6 +55,40 @@ enters emitter execution directly. When configured, collection is independent fo
 source branch and releases on the timer or optional size boundary. Branch identity still collapses
 only after successful publication.
 
+## Altering emitters
+
+`ALTER EMITTER` applies one or more comma-separated operations in written order:
+
+```nspl
+ALTER EMITTER <emitter>
+    SET TO <full sink clause>
+  | SET CLIENT <client>
+  | SET ENCODE USING <codec>
+  | DROP ENCODE
+  | SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]
+  | DROP COLLECT
+  | SET ATTACHED
+  | SET DETACHED
+  | SET FLUSH EACH <duration> MAX BATCH SIZE <bytes>
+  | SET FLUSH IMMEDIATE
+  | SET COMMIT EACH <duration> MAX SIZE <bytes>
+  [, ...];
+```
+
+`SET TO` accepts the same transport-specific sink body that follows `TO` in `CREATE EMITTER`; the
+existing construction and flush policy remain in place. `SET CLIENT` changes only the client of the
+current sink kind. `SET COMMIT` is valid only for Iceberg. Changing to Iceberg from another sink
+therefore requires a later `SET COMMIT` operation in the same statement or transaction. `DROP
+ENCODE` fails if the emitter has no codec configured.
+
+Changing only `FLUSH` is a `DYNAMIC` update. The live emitter keeps its pending Arrow batches,
+installs the new cadence, and receives a force-flush kick, so buffered output is neither discarded
+nor re-encoded. Sink, client, codec, collection, and attachment changes use `ENTITY_PAUSE`: Nervix
+gates the emitter's source relay, drains collected input and pending sink output, replaces that
+emitter task, and releases the gate. Other relays continue flowing; sibling consumers of the gated
+source may see bounded backpressure until the gate is released. The complete candidate graph is
+validated before any change is committed.
+
 ## Codec-emitter construction
 
 Codec emitters are transforming routes. They begin with an empty codec-schema payload and use

@@ -37,12 +37,12 @@ contains multiple statements outside an explicit transaction is rejected instead
 of being treated as an implicit batch.
 
 Within a transaction, each consecutive run of model mutations for one domain can mix `CREATE`,
-`ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, and `DROP`. Nervix applies
-that run as one registry mutation: all operations are evaluated in written order against one
-candidate model map, the complete domain graph is revalidated, and one atomic storage batch
-persists the result. A failure writes nothing and does not swap the active registry state. This
-supports coordinated wire-schema, internal-schema, codec, relay, junction, and dependent-node
-migrations without exposing an invalid intermediate graph.
+`ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER EMITTER`, and
+`DROP`. Nervix applies that run as one registry mutation: all operations are evaluated in written
+order against one candidate model map, the complete domain graph is revalidated, and one atomic
+storage batch persists the result. A failure writes nothing and does not swap the active registry
+state. This supports coordinated wire-schema, internal-schema, codec, relay, junction, emitter, and
+dependent-node migrations without exposing an invalid intermediate graph.
 
 Transaction control also queues lifecycle and other server statements, but those statements are
 not folded into the registry mutation batch. Data-plane records are likewise outside this
@@ -59,14 +59,16 @@ base-model comparison remains a final consistency check.
 Nervix classifies the validated base-to-candidate model diff, not the spelling of the statements
 that produced it. The batch uses the highest level contributed by any changed entity:
 
-- `DYNAMIC` changes do not pause ingestion. Relay capacity and dynamic junction configuration are
-  hot-applied from the published schedule while retaining buffered and branch-local state.
+- `DYNAMIC` changes do not pause ingestion. Relay capacity, dynamic junction configuration, and
+  emitter flush policy are hot-applied from the published schedule while retaining buffered and
+  branch-local state.
   `CREATE` and `DROP` retain their existing pause-free schedule-rebuild behavior.
 - `ENTITY_PAUSE` changes gate only the affected relays on every live node, force-flush affected
   work, and wait for the gated relay rings and target-node work counters to drain before commit.
   Other domain traffic continues. A processor topology change then swaps only the affected node
   tasks and hands pending materialized-state work to their replacements. Relay materialized-state
-  changes update membership in place.
+  changes update membership in place. Emitter sink, client, codec, input-collection, and attachment
+  changes drain and replace only the affected emitter task.
 - `DOMAIN_PAUSE` changes stop ingestion and generators across the domain and fully drain attached
   work before commit. Relay schema or branching changes and schema or wire-schema definition
   changes use this level.

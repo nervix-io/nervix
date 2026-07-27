@@ -1,4 +1,4 @@
-use nervix_models::{DomainSchedule, DynamicModelUpdate, QuiesceLevel, ScheduledNode};
+use nervix_models::{DomainSchedule, DynamicModelUpdate, ModelKind, QuiesceLevel, ScheduledNode};
 
 use crate::registry::RegistryEntity;
 
@@ -31,16 +31,23 @@ impl ScheduleDelta {
             }) else {
                 return Self::Rebuild;
             };
-            if !Self::same_schedule_residue(existing_node, desired_node) {
-                return Self::Rebuild;
-            }
             let aspects = existing_node
                 .config
                 .change_aspects_against(&desired_node.config);
+            let level = aspects.quiesce_level();
+            let emitter_schema_fingerprint_may_change =
+                desired_node.kind == ModelKind::Emitter && level == QuiesceLevel::EntityPause;
+            if !Self::same_schedule_residue(
+                existing_node,
+                desired_node,
+                emitter_schema_fingerprint_may_change,
+            ) {
+                return Self::Rebuild;
+            }
             if aspects.is_empty() {
                 continue;
             }
-            match aspects.quiesce_level() {
+            match level {
                 QuiesceLevel::Dynamic => {
                     if aspects.dynamic_updates().is_empty() {
                         return Self::Rebuild;
@@ -76,7 +83,11 @@ impl ScheduleDelta {
         }
     }
 
-    fn same_schedule_residue(existing: &ScheduledNode, desired: &ScheduledNode) -> bool {
+    fn same_schedule_residue(
+        existing: &ScheduledNode,
+        desired: &ScheduledNode,
+        allow_schema_fingerprint_change: bool,
+    ) -> bool {
         let ScheduledNode {
             identifier: existing_identifier,
             kind: existing_kind,
@@ -104,7 +115,8 @@ impl ScheduleDelta {
             && existing_kind == desired_kind
             && existing_effective_branching == desired_effective_branching
             && existing_effective_branching_schema == desired_effective_branching_schema
-            && existing_schema_fingerprint == desired_schema_fingerprint
+            && (allow_schema_fingerprint_change
+                || existing_schema_fingerprint == desired_schema_fingerprint)
             && existing_kafka_partition_schedule == desired_kafka_partition_schedule
             && existing_primary_node == desired_primary_node
             && existing_assigned_nodes == desired_assigned_nodes
@@ -114,9 +126,10 @@ impl ScheduleDelta {
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        AckMode, BranchSelection, CreateJunction, CreateRelay, Domain, DomainSchedule,
-        DynamicModelUpdate, Expression, Identifier, Literal, Model, ModelKind, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, RelayBranching, ScheduledNode,
+        AckMode, BranchSelection, CreateEmitter, CreateJunction, CreateRelay, Domain,
+        DomainSchedule, DynamicModelUpdate, EmitSink, ErrorPolicies, Expression, Identifier,
+        Literal, Model, ModelKind, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        RelayBranching, RouteConstruction, ScheduledNode,
     };
 
     use super::ScheduleDelta;
@@ -243,6 +256,70 @@ mod tests {
                 entities: vec![crate::registry::RegistryEntity {
                     kind: ModelKind::Junction,
                     identifier: identifier("route_events"),
+                }],
+                dynamic_updates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn emitter_flush_is_dynamic_and_client_changes_swap_despite_fingerprint_changes() {
+        let emitter = CreateEmitter {
+            name: identifier("event_sink"),
+            from_relay: identifier("events"),
+            collect_policy: None,
+            encode_using_codec: Some(identifier("event_codec")),
+            sink: EmitSink::ZeroMq {
+                client: identifier("sink_a"),
+            },
+            flush_each: "30s".to_string(),
+            max_batch_size: Some("1MiB".to_string()),
+            error_policies: ErrorPolicies::handled_by_log(),
+            mode: AckMode::Attached,
+            construction: RouteConstruction::default(),
+            materialized_state: Vec::new(),
+        };
+        let existing = DomainSchedule {
+            domain: Domain::parse("testing").expect("valid domain"),
+            nodes: vec![ScheduledNode {
+                identifier: emitter.name.clone(),
+                kind: ModelKind::Emitter,
+                config: Box::new(Model::Emitter(emitter.clone())),
+                effective_branching: Some(Vec::new()),
+                effective_branching_schema: None,
+                schema_fingerprint: [1; 32],
+                kafka_partition_schedule: None,
+                primary_node: Some("node-1".to_string()),
+                assigned_nodes: vec!["node-1".to_string()],
+            }],
+        };
+
+        let mut dynamic_emitter = emitter.clone();
+        dynamic_emitter.flush_each = "IMMEDIATE".to_string();
+        dynamic_emitter.max_batch_size = None;
+        let mut dynamic = existing.clone();
+        dynamic.nodes[0].config = Box::new(Model::Emitter(dynamic_emitter.clone()));
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &dynamic),
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Emitter {
+                emitter: identifier("event_sink"),
+                config: dynamic_emitter,
+            }])
+        );
+
+        let mut swapped_emitter = emitter;
+        swapped_emitter.sink = EmitSink::ZeroMq {
+            client: identifier("sink_b"),
+        };
+        let mut swapped = existing.clone();
+        swapped.nodes[0].config = Box::new(Model::Emitter(swapped_emitter));
+        swapped.nodes[0].schema_fingerprint = [2; 32];
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &swapped),
+            ScheduleDelta::EntitySwap {
+                entities: vec![crate::registry::RegistryEntity {
+                    kind: ModelKind::Emitter,
+                    identifier: identifier("event_sink"),
                 }],
                 dynamic_updates: Vec::new(),
             }

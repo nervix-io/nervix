@@ -222,6 +222,20 @@ impl EmitterBatchBuffer {
         );
     }
 
+    fn reconfigure(
+        &mut self,
+        context: &EmitterSinkContext,
+        flush_each: &str,
+        max_batch_size: Option<&str>,
+    ) {
+        self.flush_policy =
+            context.parse_flush_policy_with_max("emitter", flush_each, max_batch_size);
+        self.flush_at = self
+            .flush_policy
+            .filter(|_| !self.pending.is_empty())
+            .map(|policy| Instant::now() + policy.interval());
+    }
+
     fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
@@ -1014,6 +1028,20 @@ impl SinkEmitter {
         }
     }
 
+    fn reconfigure_flush_policy(
+        &mut self,
+        context: &EmitterSinkContext,
+        flush_each: &str,
+        max_batch_size: Option<&str>,
+    ) {
+        if let Self::Iceberg(emitter) = self
+            && let Some(policy) =
+                context.parse_flush_policy_with_max("iceberg emitter", flush_each, max_batch_size)
+        {
+            emitter.reconfigure_flush_policy(policy);
+        }
+    }
+
     async fn flush_due(
         &mut self,
         sink: &EmitSink,
@@ -1422,7 +1450,7 @@ impl EmitterTask {
         build: EmitterTaskBuildDeps<'_>,
         emitter: CreateEmitter,
         receiver: RelayRuntimeFanIn,
-    ) -> Result<JoinHandle<()>, RuntimeError> {
+    ) -> Result<ScheduledEmitterTask, RuntimeError> {
         let EmitterTaskBuildDeps {
             domain,
             shutdown_tx,
@@ -1507,13 +1535,18 @@ impl EmitterTask {
             &emitter.name,
             emitter.collect_policy.as_ref(),
         )?;
+        let quiesce_counters = runtime.node_quiesce_counters(domain, &emitter.name);
+        let (commands, mut command_rx) = mpsc::channel(4);
 
-        Ok(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let _client_mounts = resolved_client
                 .as_ref()
                 .and_then(|config| config.mounts.clone());
             let mut input = receiver;
-            let mut input_collection = RuntimeTaskInputCollection::new(input_collect_policy);
+            let mut input_collection = RuntimeTaskInputCollection::with_quiesce_counters(
+                input_collect_policy,
+                quiesce_counters.clone(),
+            );
             let context = EmitterSinkContext {
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
@@ -1559,25 +1592,80 @@ impl EmitterTask {
                 materialized_stream_owner_nodes: &materialized_stream_owner_nodes,
                 schema: output_compiled_schema.clone(),
             };
+            let mut force_flush_pending = false;
 
             loop {
                 tokio::task::consume_budget().await;
-                let input_event = tokio::select! {
-                    biased;
-                    event = Runtime::recv_runtime_collected_input(
-                        &mut input,
-                        &mut shutdown_rx,
-                        &mut input_collection,
-                        sink.flush_deadline(&emitter_buffer),
-                    ) => Some(event),
-                    changed = force_flush_rx.changed() => {
-                        if changed.is_err() {
+                let input_event = if force_flush_pending {
+                    match input_collection.take_any() {
+                        Ok(Some(batch)) => Some(BatchedInput::Batch(batch)),
+                        Ok(None) => {
+                            force_flush_pending = false;
+                            None
+                        }
+                        Err(reason) => {
+                            context.report_flush_error(task_sink.label(), &reason);
                             break;
                         }
-                        None
+                    }
+                } else {
+                    tokio::select! {
+                        biased;
+                        command = command_rx.recv() => {
+                            match command {
+                                Some(EmitterTaskCommand::Reconfigure { config, response }) => {
+                                    emitter_buffer.reconfigure(
+                                        &context,
+                                        &config.flush_each,
+                                        config.max_batch_size.as_deref(),
+                                    );
+                                    sink.reconfigure_flush_policy(
+                                        &context,
+                                        &config.flush_each,
+                                        config.max_batch_size.as_deref(),
+                                    );
+                                    let _ = response.send(());
+                                    continue;
+                                }
+                                Some(EmitterTaskCommand::Stop { response }) => {
+                                    let mut control = EmitterPublishControl {
+                                        runtime: &runtime,
+                                        fault_injector: &fault_injector,
+                                        shutdown_rx: &mut shutdown_rx,
+                                        backoff: &mut publish_backoff,
+                                    };
+                                    let _ = sink
+                                        .flush_all(
+                                            &task_sink,
+                                            &context,
+                                            &mut control,
+                                            codec.clone(),
+                                            &mut emitter_buffer,
+                                        )
+                                        .await;
+                                    let _ = response.send(());
+                                    break;
+                                }
+                                None => break,
+                            }
+                        }
+                        event = Runtime::recv_runtime_collected_input(
+                            &mut input,
+                            &mut shutdown_rx,
+                            &mut input_collection,
+                            sink.flush_deadline(&emitter_buffer),
+                        ) => Some(event),
+                        changed = force_flush_rx.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                            force_flush_pending = true;
+                            continue;
+                        }
                     }
                 };
                 let Some(input_event) = input_event else {
+                    let _work = NodeQuiesceWorkGuard::begin(quiesce_counters.clone());
                     let mut control = EmitterPublishControl {
                         runtime: &runtime,
                         fault_injector: &fault_injector,
@@ -1595,6 +1683,7 @@ impl EmitterTask {
                         .await;
                     continue;
                 };
+                let _work = NodeQuiesceWorkGuard::begin(quiesce_counters.clone());
                 match input_event {
                     BatchedInput::Shutdown | BatchedInput::Closed => {
                         let mut control = EmitterPublishControl {
@@ -1928,7 +2017,8 @@ impl EmitterTask {
                     }
                 }
             }
-        }))
+        });
+        Ok(ScheduledEmitterTask { commands, task })
     }
 }
 

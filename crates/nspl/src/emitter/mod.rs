@@ -2,18 +2,19 @@ use std::borrow::Cow;
 
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use nervix_models::{
-    AckMode, ClickHouseValueMapping, CreateEmitter, CreateStatement, EmitSink, IcebergCatalog,
-    IcebergStorageBackend, IcebergValueMapping, MongoDbConflictAction, MySqlConflictAction,
-    PostgresConflictAction,
+    AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CreateEmitter,
+    CreateStatement, EmitSink, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    MongoDbConflictAction, MySqlConflictAction, PostgresConflictAction,
 };
 
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, boxed_choice, byte_size_lit, channel_ref,
-        client_ref, codec_ref, collect_for, current_word_prefix, duration_lit, emitter_name,
-        flush_each, general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2,
-        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
+        ParseError, ParseFromSourceError, ack_mode, alter_op_separator, boxed_choice,
+        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, current_word_prefix,
+        duration_lit, emitter_name, emitter_ref, flush_each, general_error_policy,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
+        materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
         render_vm_program_tokens, route_construction, string_lit, suggestions_from_errors,
         table_ref, tok, topic_ref,
     },
@@ -519,6 +520,77 @@ fn emit_sink_parser<'src>()
     )
 }
 
+pub fn alter_emitter_parser<'src>()
+-> impl Parser<'src, &'src [Token], AlterEmitter, extra::Err<ParseError<'src>>> + Clone {
+    let set_sink = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(emit_sink_parser())
+        .map(|sink| AlterEmitterOperation::SetSink { sink });
+    let set_client = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Client))
+        .ignore_then(client_ref())
+        .map(|client| AlterEmitterOperation::SetClient { client });
+    let set_encode = kw(Identifier::Set)
+        .ignore_then(kw_phrase2(Identifier::Encode, Identifier::Using))
+        .ignore_then(codec_ref())
+        .map(|codec| AlterEmitterOperation::SetEncodeUsing { codec });
+    let drop_encode = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Encode))
+        .to(AlterEmitterOperation::DropEncode);
+    let set_collect = kw(Identifier::Set)
+        .ignore_then(collect_for())
+        .map(|policy| AlterEmitterOperation::SetCollect { policy });
+    let drop_collect = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Collect))
+        .to(AlterEmitterOperation::DropCollect);
+    let set_mode = kw(Identifier::Set)
+        .ignore_then(ack_mode())
+        .map(|mode| AlterEmitterOperation::SetMode { mode });
+    let set_flush =
+        kw(Identifier::Set)
+            .ignore_then(flush_each())
+            .map(
+                |(flush_each, max_batch_size)| AlterEmitterOperation::SetFlush {
+                    flush_each,
+                    max_batch_size,
+                },
+            );
+    let set_commit = kw(Identifier::Set).ignore_then(iceberg_commit_each()).map(
+        |(commit_each, max_commit_size)| AlterEmitterOperation::SetCommit {
+            commit_each,
+            max_commit_size,
+        },
+    );
+    let operation = choice((
+        set_sink,
+        set_client,
+        set_encode,
+        drop_encode,
+        set_collect,
+        drop_collect,
+        set_mode,
+        set_flush,
+        set_commit,
+    ))
+    .boxed();
+
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Emitter))
+        .ignore_then(emitter_ref())
+        .then(
+            operation
+                .separated_by(alter_op_separator())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .map(|(emitter, operations)| AlterEmitter {
+            emitter,
+            operations,
+        })
+        .boxed()
+}
+
 pub fn create_emitter_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateEmitter>, extra::Err<ParseError<'src>>> + Clone
 {
@@ -754,11 +826,28 @@ pub fn parse_create_emitter_tokens(
     }
 }
 
+pub fn parse_alter_emitter_tokens(tokens: &[Token]) -> Result<AlterEmitter, Vec<ParseError<'_>>> {
+    let out = alter_emitter_parser().then_ignore(end()).parse(tokens);
+    if out.has_errors() {
+        Err(out.into_errors())
+    } else {
+        Ok(out
+            .into_output()
+            .expect("successful parse must have output"))
+    }
+}
+
 pub fn parse_create_emitter(
     input: &str,
 ) -> Result<CreateStatement<CreateEmitter>, ParseFromSourceError> {
     let (source, spanned_tokens, tokens) = lex_input(input)?;
     parse_create_emitter_tokens(&tokens)
+        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+}
+
+pub fn parse_alter_emitter(input: &str) -> Result<AlterEmitter, ParseFromSourceError> {
+    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    parse_alter_emitter_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
@@ -782,6 +871,26 @@ pub fn suggest_create_emitter(input: &str, cursor: usize) -> Vec<String> {
     suggestions_from_errors(out.into_errors(), &prefix)
 }
 
+pub fn suggest_alter_emitter(input: &str, cursor: usize) -> Vec<String> {
+    let safe_cursor = cursor.min(input.len());
+    let prefix_src = &input[..safe_cursor];
+    let prefix = current_word_prefix(prefix_src);
+
+    let (_, _, tokens) = match lex_input(prefix_src) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let out = alter_emitter_parser()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if !out.has_errors() {
+        return Vec::new();
+    }
+
+    suggestions_from_errors(out.into_errors(), &prefix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,6 +902,91 @@ mod tests {
             .into_iter()
             .map(|t| t.token)
             .collect()
+    }
+
+    #[test]
+    fn parses_alter_emitter_operations_in_written_order() {
+        let parsed = parse_alter_emitter(
+            "ALTER EMITTER event_sink SET TO ZEROMQ sink_b, SET CLIENT sink_c, SET ENCODE USING \
+             event_codec, DROP ENCODE, SET COLLECT FOR 10ms MAX BATCH SIZE 1MiB, DROP COLLECT, \
+             SET DETACHED, SET FLUSH IMMEDIATE;",
+        )
+        .expect("ALTER EMITTER should parse");
+
+        assert_eq!(parsed.operations.len(), 8);
+        assert!(matches!(
+            parsed.operations[0],
+            AlterEmitterOperation::SetSink {
+                sink: EmitSink::ZeroMq { .. }
+            }
+        ));
+        assert!(matches!(
+            parsed.operations[1],
+            AlterEmitterOperation::SetClient { .. }
+        ));
+        assert!(matches!(
+            parsed.operations[2],
+            AlterEmitterOperation::SetEncodeUsing { .. }
+        ));
+        assert_eq!(parsed.operations[3], AlterEmitterOperation::DropEncode);
+        assert!(matches!(
+            parsed.operations[4],
+            AlterEmitterOperation::SetCollect { .. }
+        ));
+        assert_eq!(parsed.operations[5], AlterEmitterOperation::DropCollect);
+        assert_eq!(
+            parsed.operations[6],
+            AlterEmitterOperation::SetMode {
+                mode: AckMode::Detached
+            }
+        );
+        assert_eq!(
+            parsed.operations[7],
+            AlterEmitterOperation::SetFlush {
+                flush_each: "IMMEDIATE".to_string(),
+                max_batch_size: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
+        let direct = parse_alter_emitter(
+            "ALTER EMITTER event_sink SET TO POSTGRES postgres_main INSERT TO TABLE events VALUES \
+             { 'seq' = concat(input.kind, ','), 'value' = input.value } WITH MAX BATCH 100, SET \
+             FLUSH EACH 1s MAX BATCH SIZE 1MiB;",
+        )
+        .expect("direct sink expressions should preserve internal commas");
+        assert_eq!(direct.operations.len(), 2);
+
+        let iceberg =
+            parse_alter_emitter("ALTER EMITTER event_sink SET COMMIT EACH 30s MAX SIZE 64MiB;")
+                .expect("Iceberg commit policy should parse");
+        assert_eq!(
+            iceberg.operations,
+            vec![AlterEmitterOperation::SetCommit {
+                commit_each: "30s".to_string(),
+                max_commit_size: "64MiB".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_alter_emitter_without_operations_or_complete_flush_policy() {
+        assert!(parse_alter_emitter("ALTER EMITTER event_sink;").is_err());
+        assert!(parse_alter_emitter("ALTER EMITTER event_sink SET FLUSH EACH 1s;").is_err());
+    }
+
+    #[test]
+    fn alter_emitter_completion_comes_from_its_operation_grammar() {
+        let suggestions = suggest_alter_emitter("ALTER EMITTER event_sink ", usize::MAX);
+        for expected in ["SET", "DROP"] {
+            assert!(
+                suggestions.contains(&expected.to_string()),
+                "missing {expected}: {suggestions:?}"
+            );
+        }
+        assert!(!suggestions.contains(&"SCHEMA".to_string()));
     }
 
     fn expression(source: &str) -> nervix_models::Expression {

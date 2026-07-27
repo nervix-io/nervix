@@ -4313,6 +4313,8 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
+            emitter_tasks: HashMap::default(),
+            clients: HashMap::default(),
             tasks: Vec::new(),
         },
     );
@@ -4387,6 +4389,8 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 udfs: nervix_roto::UdfExecutor::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
+                emitter_tasks: HashMap::default(),
+                clients: HashMap::default(),
                 tasks: Vec::new(),
             },
         )
@@ -4446,6 +4450,8 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
+            emitter_tasks: HashMap::default(),
+            clients: HashMap::default(),
             tasks: Vec::new(),
         },
     );
@@ -7048,6 +7054,8 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
+            emitter_tasks: HashMap::default(),
+            clients: HashMap::default(),
             tasks: Vec::new(),
         },
     );
@@ -9234,6 +9242,8 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
+            emitter_tasks: HashMap::default(),
+            clients: HashMap::default(),
             tasks: Vec::new(),
         },
     );

@@ -25,6 +25,7 @@ pub enum Statement {
     AlterWireSchema(AlterWireSchemaStmt),
     AlterRelay(AlterRelay),
     AlterJunction(AlterJunction),
+    AlterEmitter(AlterEmitter),
     Drop(DropModel),
     DropNode(DropNode),
     CordonNode(CordonNode),
@@ -59,6 +60,7 @@ impl Statement {
             | Self::AlterWireSchema(_)
             | Self::AlterRelay(_)
             | Self::AlterJunction(_)
+            | Self::AlterEmitter(_)
             | Self::Drop(_) => true,
             Self::CreateDomain(_)
             | Self::CreateUser(_)
@@ -790,6 +792,145 @@ impl CreateEmitter {
     pub fn flush_policy(&self) -> (&str, Option<&str>) {
         (self.flush_each.as_str(), self.max_batch_size.as_deref())
     }
+
+    pub fn apply_alter(&mut self, alter: &AlterEmitter) -> Result<(), AlterEmitterError> {
+        if self.name != alter.emitter {
+            return Err(AlterEmitterError::EmitterNameMismatch {
+                stored: self.name.clone(),
+                requested: alter.emitter.clone(),
+            });
+        }
+
+        let mut candidate = self.clone();
+        for operation in &alter.operations {
+            candidate.apply_alter_operation(operation)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn apply_alter_operation(
+        &mut self,
+        operation: &AlterEmitterOperation,
+    ) -> Result<(), AlterEmitterError> {
+        match operation {
+            AlterEmitterOperation::SetSink { sink } => {
+                let mut sink = sink.clone();
+                sink.copy_flush_policy_from(self);
+                if let (
+                    EmitSink::Iceberg {
+                        commit_each,
+                        max_commit_size,
+                        ..
+                    },
+                    EmitSink::Iceberg {
+                        commit_each: existing_commit_each,
+                        max_commit_size: existing_max_commit_size,
+                        ..
+                    },
+                ) = (&mut sink, &self.sink)
+                {
+                    *commit_each = existing_commit_each.clone();
+                    *max_commit_size = existing_max_commit_size.clone();
+                }
+                self.sink = sink;
+            }
+            AlterEmitterOperation::SetClient { client } => {
+                *self.sink.client_mut() = client.clone();
+            }
+            AlterEmitterOperation::SetEncodeUsing { codec } => {
+                self.encode_using_codec = Some(codec.clone());
+            }
+            AlterEmitterOperation::DropEncode => {
+                if self.encode_using_codec.take().is_none() {
+                    return Err(AlterEmitterError::EncodeNotConfigured);
+                }
+            }
+            AlterEmitterOperation::SetCollect { policy } => {
+                self.collect_policy = Some(policy.clone());
+            }
+            AlterEmitterOperation::DropCollect => {
+                self.collect_policy = None;
+            }
+            AlterEmitterOperation::SetMode { mode } => {
+                self.mode = *mode;
+            }
+            AlterEmitterOperation::SetFlush {
+                flush_each,
+                max_batch_size,
+            } => {
+                self.flush_each = flush_each.clone();
+                self.max_batch_size = max_batch_size.clone();
+                let mut sink = self.sink.clone();
+                sink.copy_flush_policy_from(self);
+                self.sink = sink;
+            }
+            AlterEmitterOperation::SetCommit {
+                commit_each,
+                max_commit_size,
+            } => {
+                let EmitSink::Iceberg {
+                    commit_each: current_commit_each,
+                    max_commit_size: current_max_commit_size,
+                    ..
+                } = &mut self.sink
+                else {
+                    return Err(AlterEmitterError::CommitPolicyUnsupported);
+                };
+                *current_commit_each = commit_each.clone();
+                *current_max_commit_size = max_commit_size.clone();
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterEmitter {
+    pub emitter: Identifier,
+    pub operations: Vec<AlterEmitterOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlterEmitterOperation {
+    SetSink {
+        sink: EmitSink,
+    },
+    SetClient {
+        client: Identifier,
+    },
+    SetEncodeUsing {
+        codec: Identifier,
+    },
+    DropEncode,
+    SetCollect {
+        policy: InputCollectPolicy,
+    },
+    DropCollect,
+    SetMode {
+        mode: AckMode,
+    },
+    SetFlush {
+        flush_each: String,
+        max_batch_size: Option<String>,
+    },
+    SetCommit {
+        commit_each: String,
+        max_commit_size: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterEmitterError {
+    #[error("ALTER targets emitter `{requested}`, but the stored emitter is `{stored}`")]
+    EmitterNameMismatch {
+        stored: Identifier,
+        requested: Identifier,
+    },
+    #[error("emitter encoding is not configured")]
+    EncodeNotConfigured,
+    #[error("COMMIT policy is only supported by Iceberg emitters")]
+    CommitPolicyUnsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -936,6 +1077,53 @@ impl EmitSink {
             | Self::MySql { client, .. }
             | Self::MongoDb { client, .. }
             | Self::Iceberg { client, .. } => client,
+        }
+    }
+
+    fn client_mut(&mut self) -> &mut Identifier {
+        match self {
+            Self::Kafka { client, .. }
+            | Self::Pulsar { client, .. }
+            | Self::RabbitMq { client, .. }
+            | Self::Redis { client, .. }
+            | Self::Mqtt { client, .. }
+            | Self::Nats { client, .. }
+            | Self::ZeroMq { client }
+            | Self::Sqs { client, .. }
+            | Self::Sentry { client }
+            | Self::ClickHouse { client, .. }
+            | Self::Postgres { client, .. }
+            | Self::MySql { client, .. }
+            | Self::MongoDb { client, .. }
+            | Self::Iceberg { client, .. } => client,
+        }
+    }
+
+    fn copy_flush_policy_from(&mut self, emitter: &CreateEmitter) {
+        match self {
+            Self::ClickHouse { flush_each, .. }
+            | Self::Postgres { flush_each, .. }
+            | Self::MySql { flush_each, .. }
+            | Self::MongoDb { flush_each, .. } => {
+                *flush_each = emitter.flush_each.clone();
+            }
+            Self::Iceberg {
+                flush_each,
+                max_batch_size,
+                ..
+            } => {
+                *flush_each = emitter.flush_each.clone();
+                *max_batch_size = emitter.max_batch_size.clone();
+            }
+            Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Redis { .. }
+            | Self::Mqtt { .. }
+            | Self::Nats { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sqs { .. }
+            | Self::Sentry { .. } => {}
         }
     }
 
@@ -2728,12 +2916,13 @@ pub enum AckMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        AckMode, AlterJunction, AlterJunctionError, AlterJunctionOperation, AlterRelay,
-        AlterRelayError, AlterRelayOperation, BranchSelection, ClusterSchedule, CreateRelay,
-        CreateSchema, DomainSchedule, GeneralErrorPolicy, InferencerTensorDimension,
-        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
-        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, RelayBranching,
-        ScheduledNode,
+        AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterJunction,
+        AlterJunctionError, AlterJunctionOperation, AlterRelay, AlterRelayError,
+        AlterRelayOperation, BranchSelection, ClusterSchedule, CreateEmitter, CreateRelay,
+        CreateSchema, DomainSchedule, EmitSink, ErrorPolicies, GeneralErrorPolicy,
+        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
+        InferencerTensorSchema, KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind,
+        RelayBranching, ScheduledNode,
     };
     use crate::{
         CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Expression, Identifier,
@@ -3384,5 +3573,110 @@ mod tests {
                 }],
             })
             .expect("set WHERE should succeed");
+    }
+
+    #[test]
+    fn emitter_alter_applies_operations_in_order_and_is_atomic() {
+        let mut emitter = CreateEmitter {
+            name: identifier("event_sink"),
+            from_relay: identifier("events"),
+            collect_policy: None,
+            encode_using_codec: Some(identifier("event_codec")),
+            sink: EmitSink::ZeroMq {
+                client: identifier("sink_a"),
+            },
+            flush_each: "1s".to_string(),
+            max_batch_size: Some("1MiB".to_string()),
+            error_policies: ErrorPolicies::handled_by_log(),
+            mode: AckMode::Attached,
+            construction: crate::RouteConstruction::default(),
+            materialized_state: Vec::new(),
+        };
+        emitter
+            .apply_alter(&AlterEmitter {
+                emitter: identifier("event_sink"),
+                operations: vec![
+                    AlterEmitterOperation::SetClient {
+                        client: identifier("sink_b"),
+                    },
+                    AlterEmitterOperation::SetFlush {
+                        flush_each: "2s".to_string(),
+                        max_batch_size: Some("2MiB".to_string()),
+                    },
+                    AlterEmitterOperation::SetFlush {
+                        flush_each: "IMMEDIATE".to_string(),
+                        max_batch_size: None,
+                    },
+                    AlterEmitterOperation::SetMode {
+                        mode: AckMode::Detached,
+                    },
+                ],
+            })
+            .expect("emitter alter should apply");
+        assert_eq!(emitter.sink.client(), &identifier("sink_b"));
+        assert_eq!(emitter.flush_policy(), ("IMMEDIATE", None));
+        assert_eq!(emitter.mode, AckMode::Detached);
+
+        let before = emitter.clone();
+        let error = emitter
+            .apply_alter(&AlterEmitter {
+                emitter: identifier("event_sink"),
+                operations: vec![
+                    AlterEmitterOperation::SetClient {
+                        client: identifier("sink_c"),
+                    },
+                    AlterEmitterOperation::DropEncode,
+                    AlterEmitterOperation::DropEncode,
+                ],
+            })
+            .expect_err("the second codec drop must fail");
+        assert_eq!(error, AlterEmitterError::EncodeNotConfigured);
+        assert_eq!(emitter, before, "failed ALTER must not partially apply");
+    }
+
+    #[test]
+    fn emitter_alter_reports_name_and_commit_policy_errors() {
+        let emitter = CreateEmitter {
+            name: identifier("event_sink"),
+            from_relay: identifier("events"),
+            collect_policy: None,
+            encode_using_codec: Some(identifier("event_codec")),
+            sink: EmitSink::ZeroMq {
+                client: identifier("sink"),
+            },
+            flush_each: "IMMEDIATE".to_string(),
+            max_batch_size: None,
+            error_policies: ErrorPolicies::handled_by_log(),
+            mode: AckMode::Attached,
+            construction: crate::RouteConstruction::default(),
+            materialized_state: Vec::new(),
+        };
+        let cases = [
+            (
+                AlterEmitter {
+                    emitter: identifier("other"),
+                    operations: Vec::new(),
+                },
+                AlterEmitterError::EmitterNameMismatch {
+                    stored: identifier("event_sink"),
+                    requested: identifier("other"),
+                },
+            ),
+            (
+                AlterEmitter {
+                    emitter: identifier("event_sink"),
+                    operations: vec![AlterEmitterOperation::SetCommit {
+                        commit_each: "1m".to_string(),
+                        max_commit_size: "1GiB".to_string(),
+                    }],
+                },
+                AlterEmitterError::CommitPolicyUnsupported,
+            ),
+        ];
+        for (alter, expected) in cases {
+            let mut candidate = emitter.clone();
+            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(candidate, emitter);
+        }
     }
 }
