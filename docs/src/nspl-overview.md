@@ -85,6 +85,16 @@ ALTER JUNCTION <name>
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
 
+ALTER EMITTER <name>
+  SET TO <sink> |
+  SET CLIENT <client> |
+  SET ENCODE USING <codec> | DROP ENCODE |
+  SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>] | DROP COLLECT |
+  SET ATTACHED | SET DETACHED |
+  SET FLUSH EACH <duration> MAX BATCH SIZE <bytes> | SET FLUSH IMMEDIATE |
+  SET COMMIT EACH <duration> MAX SIZE <bytes>
+  [, ...];
+
 ALTER SCHEMA <name>
   ADD FIELD <field> <type> [OPTIONAL] [SENSITIVE],
   DROP FIELD <field>,
@@ -102,9 +112,10 @@ ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
   SET STRICT|LOOSE;
 ```
 
-Operations in one `ALTER RELAY` or `ALTER JUNCTION` execute in written order. See
+Operations in one `ALTER RELAY`, `ALTER JUNCTION`, or `ALTER EMITTER` execute in written order. See
 [Streams And State](relay.md#altering-relays) for relay operations,
 [Processors](processors.md#altering-junctions) for the full junction operation shapes, and
+[Emitters](emitters.md#altering-emitters) for emitter operations. See
 [Schemas And Codecs](schemas-and-codecs.md#altering-schemas) for ordered schema changes and atomic
 migrations.
 

@@ -492,6 +492,12 @@ impl IcebergEmitter {
         }
     }
 
+    pub(in crate::runtime) fn reconfigure_flush_policy(&mut self, policy: RuntimeFlushPolicy) {
+        self.flush_policy = policy;
+        self.flush_at = (!self.pending_batches.is_empty())
+            .then(|| Instant::now() + self.flush_policy.interval());
+    }
+
     pub(in crate::runtime) async fn publish_batch(
         &mut self,
         batch: RelayRecordBatch,

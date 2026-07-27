@@ -14,8 +14,8 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterJunction, AlterRelay, AlterSchema, AlterWireSchemaStmt, Assignment, AssignmentTarget,
-    AvroType, BranchSelection, CodecEncoding, CodecEncodingRule, CodecWireFormat,
+    AlterEmitter, AlterJunction, AlterRelay, AlterSchema, AlterWireSchemaStmt, Assignment,
+    AssignmentTarget, AvroType, BranchSelection, CodecEncoding, CodecEncodingRule, CodecWireFormat,
     CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateMaterializer,
     CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchemaStmt, Domain,
@@ -571,6 +571,37 @@ impl Registry {
                         })
                     })?;
                 }
+                RegistryMutation::AlterEmitter(alter) => {
+                    let key = RegistryKey::new(ModelKind::Emitter, alter.emitter.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.emitter.as_str(),
+                        kind = ModelKind::Emitter.as_str(),
+                        "staging emitter alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.emitter.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Emitter(emitter) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.emitter.as_str().to_string(),
+                            expected_kind: ModelKind::Emitter.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    emitter.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.emitter.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
                 RegistryMutation::Drop(drop) => {
                     let key = RegistryKey::new(drop.kind, drop.name.clone());
                     info!(
@@ -910,6 +941,7 @@ pub enum RegistryMutation {
     AlterWireSchema(AlterWireSchemaStmt),
     AlterRelay(AlterRelay),
     AlterJunction(AlterJunction),
+    AlterEmitter(AlterEmitter),
     Drop(DropModel),
 }
 
@@ -9066,22 +9098,22 @@ mod tests {
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
-        AckMode, AlterJunction, AlterJunctionOperation, AlterRelay, AlterRelayOperation,
-        AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
-        AlterWireSchemaStmt, Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection,
-        ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
-        CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction,
-        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientHttp,
-        CreateClientKafka, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-        CreateGenerator, CreateIngestor, CreateJunction, CreateReingestor, CreateRelay,
-        CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
-        CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink, ErrorPolicies,
-        Expression, FieldReference, FieldScope, GeneralErrorPolicy, Identifier, IngestSource,
-        IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
-        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model,
-        ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
-        ScheduledNode, SchemaField, WindowBound, WireSchemaField,
+        AckMode, AlterEmitter, AlterJunction, AlterJunctionOperation, AlterRelay,
+        AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+        AlterWireSchemaOperation, AlterWireSchemaStmt, Assignment, AssignmentTarget,
+        AssignmentTargetScope, BranchSelection, ClientConfigEntry, CodecEncoding,
+        CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+        CreateBranch, CreateClientHttp, CreateClientKafka, CreateCodec, CreateCorrelator,
+        CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
+        CreateReingestor, CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor,
+        CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule,
+        DropModel, EmitSink, ErrorPolicies, Expression, FieldReference, FieldScope,
+        GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource, Inheritance,
+        InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+        MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
+        MqttSession, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        QuiesceLevel, RelayBranching, ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
     use super::{ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange};
@@ -10201,6 +10233,63 @@ mod tests {
             )
             .expect("mode alter should plan");
         assert_eq!(entity_pause.quiesce().level(), QuiesceLevel::EntityPause);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn emitter_alter_is_applied_before_diff_based_quiesce_classification() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                    client_model("sink_a"),
+                    client_model("sink_b"),
+                    relay("outgoing", "event_schema"),
+                    emitter("event_sink", "outgoing", "event_codec", "sink_a"),
+                ],
+            )
+            .expect("initial graph should succeed");
+
+        let dynamic = registry
+            .plan_mutations(
+                &domain,
+                &[RegistryMutation::AlterEmitter(AlterEmitter {
+                    emitter: identifier("event_sink"),
+                    operations: vec![nervix_models::AlterEmitterOperation::SetFlush {
+                        flush_each: "IMMEDIATE".to_string(),
+                        max_batch_size: None,
+                    }],
+                })],
+            )
+            .expect("flush alter should plan");
+        assert_eq!(dynamic.quiesce().level(), QuiesceLevel::Dynamic);
+
+        let entity_pause = registry
+            .plan_mutations(
+                &domain,
+                &[RegistryMutation::AlterEmitter(AlterEmitter {
+                    emitter: identifier("event_sink"),
+                    operations: vec![nervix_models::AlterEmitterOperation::SetClient {
+                        client: identifier("sink_b"),
+                    }],
+                })],
+            )
+            .expect("client alter should plan");
+        assert_eq!(entity_pause.quiesce().level(), QuiesceLevel::EntityPause);
+        assert_eq!(
+            entity_pause.quiesce().affected_entities(),
+            &[super::RegistryEntity {
+                kind: ModelKind::Emitter,
+                identifier: identifier("event_sink"),
+            }]
+        );
 
         let _ = fs::remove_dir_all(path);
     }

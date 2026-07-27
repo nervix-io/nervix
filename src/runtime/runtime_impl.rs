@@ -423,12 +423,10 @@ impl Runtime {
                     .nodes
                     .iter()
                     .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
-                    .and_then(|node| {
-                        if let Model::Junction(junction) = node.config.as_ref() {
-                            Some(junction.from.relays().to_vec())
-                        } else {
-                            None
-                        }
+                    .and_then(|node| match node.config.as_ref() {
+                        Model::Junction(junction) => Some(junction.from.relays().to_vec()),
+                        Model::Emitter(emitter) => Some(vec![emitter.from_relay.clone()]),
+                        _ => None,
                     })
                     .unwrap_or_default()
             })
@@ -492,10 +490,21 @@ impl Runtime {
             .sum();
         let node_work_items = affected_entities
             .iter()
-            .filter_map(|entity| {
-                self.node_quiesce_counters
+            .map(|entity| {
+                let quiesce_work = self
+                    .node_quiesce_counters
                     .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
                     .map(|counters| counters.outstanding_work())
+                    .unwrap_or(0);
+                let emitter_work = if entity.kind == ModelKind::Emitter {
+                    self.emitter_buffers
+                        .get(&RuntimeKey::new(domain.clone(), entity.identifier.clone()))
+                        .map(|buffered| buffered.load(Ordering::Acquire))
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                quiesce_work.saturating_add(emitter_work)
             })
             .sum();
         EntityDrainStatus {
@@ -4163,7 +4172,8 @@ impl Runtime {
             if existing_schedules.get(&domain.domain) != Some(domain)
                 || existing_passive_only.get(&domain.domain) != Some(&desired_passive_only)
             {
-                if existing_passive_only.get(&domain.domain) == Some(&desired_passive_only)
+                if !desired_passive_only
+                    && existing_passive_only.get(&domain.domain) == Some(&desired_passive_only)
                     && let Some(existing_schedule) = existing_schedules.get(&domain.domain)
                 {
                     match ScheduleDelta::classify(existing_schedule, domain) {
@@ -4349,6 +4359,145 @@ impl Runtime {
                 }
                 continue;
             }
+            if entity.kind == ModelKind::Emitter {
+                let desired_node = schedule
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.kind == ModelKind::Emitter && node.identifier == entity.identifier
+                    })
+                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!("missing desired emitter '{}'", entity.identifier.as_str()),
+                    })?;
+                let Model::Emitter(desired_emitter) = desired_node.config.as_ref() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "desired emitter '{}' has the wrong model kind",
+                            entity.identifier.as_str()
+                        ),
+                    });
+                };
+                let desired_emitter = desired_emitter.clone();
+                let (old_emitter, old_task) = {
+                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution is unavailable for emitter swap".to_string(),
+                        }
+                    })?;
+                    let old_emitter = execution
+                        .schedule
+                        .nodes
+                        .iter()
+                        .find(|node| {
+                            node.kind == ModelKind::Emitter && node.identifier == entity.identifier
+                        })
+                        .and_then(|node| {
+                            if let Model::Emitter(emitter) = node.config.as_ref() {
+                                Some(emitter.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing existing emitter '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                    let old_task = execution.emitter_tasks.remove(entity);
+                    (old_emitter, old_task)
+                };
+                let had_old_task = old_task.is_some();
+                if let Some(old_task) = old_task {
+                    old_task
+                        .stop()
+                        .await
+                        .map_err(|reason| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason,
+                        })?;
+                }
+
+                graph_handle.store(Some(desired_graph.clone()));
+                let executes_locally = local_node_id
+                    .as_deref()
+                    .is_some_and(|node_id| desired_node.executes_on(node_id));
+                let spawn = {
+                    let execution = self.executions.get_mut(domain).ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution disappeared during emitter swap".to_string(),
+                        }
+                    })?;
+                    if had_old_task
+                        && let Some(services) =
+                            execution.relay_services.get(&old_emitter.from_relay)
+                    {
+                        services.remove_local_runtime_consumer(old_emitter.mode);
+                    }
+                    if !executes_locally {
+                        None
+                    } else {
+                        let receiver = execution
+                            .relay_services
+                            .get(&desired_emitter.from_relay)
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing relay services for swapped emitter input '{}'",
+                                    desired_emitter.from_relay.as_str()
+                                ),
+                            })?
+                            .add_local_runtime_consumer(desired_emitter.mode);
+                        let deps = self.emitter_task_deps(
+                            ExecutionBuildDeps {
+                                domain,
+                                relay_schemas: &execution.relay_schemas,
+                                relay_branchings: &execution.relay_branchings,
+                                relay_branching_schemas: &execution.relay_branching_schemas,
+                                materialized_relay_specs: &execution.materialized_stream_specs,
+                                materialized_relay_owner_nodes: &execution
+                                    .materialized_stream_owner_nodes,
+                                lookups: &execution.lookups,
+                            },
+                            &desired_emitter,
+                        )?;
+                        Some((
+                            execution.shutdown.clone(),
+                            execution.codecs.clone(),
+                            execution.clients.clone(),
+                            deps,
+                            receiver,
+                        ))
+                    }
+                };
+                if let Some((shutdown, codecs, clients, deps, receiver)) = spawn {
+                    let task = self.spawn_emitter_task(
+                        EmitterTaskBuildDeps {
+                            domain,
+                            shutdown_tx: &shutdown,
+                            codecs: &codecs,
+                            clients: &clients,
+                            deps,
+                        },
+                        desired_emitter,
+                        receiver,
+                    )?;
+                    self.executions
+                        .get_mut(domain)
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution disappeared after emitter spawn".to_string(),
+                        })?
+                        .emitter_tasks
+                        .insert(entity.clone(), task);
+                }
+                continue;
+            }
             if entity.kind != ModelKind::Junction {
                 return Err(RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -4494,13 +4643,8 @@ impl Runtime {
         }
 
         graph_handle.store(Some(desired_graph));
-        for update in dynamic_updates {
-            if let nervix_models::DynamicModelUpdate::RelayCapacity { relay, capacity } = update
-                && let Some(capacity) = NonZeroUsize::new(*capacity)
-            {
-                self.set_relay_capacity(domain, relay, capacity);
-            }
-        }
+        self.apply_dynamic_model_updates(domain, dynamic_updates)
+            .await?;
         if let Some(mut execution) = self.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id.as_deref() {
                 let remote_consumers =
@@ -4590,7 +4734,23 @@ impl Runtime {
                 reason: format!("failed to build dynamic schedule graph: {error}"),
             }
         })?;
+        self.apply_dynamic_model_updates(domain, updates).await?;
+        let graph_handle = self.domain_graph_handle(domain).await;
+        graph_handle.store(Some(StdArc::new(graph)));
+        if let Some(mut execution) = self.executions.get_mut(domain) {
+            execution.schedule = schedule;
+        }
+        self.force_flush_domain(domain);
+        Ok(())
+    }
+
+    async fn apply_dynamic_model_updates(
+        &self,
+        domain: &Domain,
+        updates: &[nervix_models::DynamicModelUpdate],
+    ) -> Result<(), RuntimeError> {
         for update in updates {
+            tokio::task::consume_budget().await;
             match update {
                 nervix_models::DynamicModelUpdate::RelayCapacity { relay, capacity } => {
                     let Some(capacity) = NonZeroUsize::new(*capacity) else {
@@ -4604,14 +4764,27 @@ impl Runtime {
                     self.set_relay_capacity(domain, relay, capacity);
                 }
                 nervix_models::DynamicModelUpdate::Junction { .. } => {}
+                nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
+                    let commands = self.executions.get(domain).and_then(|execution| {
+                        execution
+                            .emitter_tasks
+                            .get(&RegistryEntity {
+                                kind: ModelKind::Emitter,
+                                identifier: emitter.clone(),
+                            })
+                            .map(|task| task.commands.clone())
+                    });
+                    if let Some(commands) = commands {
+                        ScheduledEmitterTask::reconfigure_via(&commands, config.clone())
+                            .await
+                            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason,
+                            })?;
+                    }
+                }
             }
         }
-        let graph_handle = self.domain_graph_handle(domain).await;
-        graph_handle.store(Some(StdArc::new(graph)));
-        if let Some(mut execution) = self.executions.get_mut(domain) {
-            execution.schedule = schedule;
-        }
-        self.force_flush_domain(domain);
         Ok(())
     }
 
@@ -4743,6 +4916,7 @@ impl Runtime {
         let mut ingestor_specs = Vec::new();
         let mut tasks = Vec::new();
         let mut node_tasks = HashMap::new();
+        let mut emitter_tasks = HashMap::new();
         let remote_dispatcher = self.remote_dispatcher.read().clone();
         let model_index = schedule
             .nodes
@@ -5431,17 +5605,24 @@ impl Runtime {
         }
 
         for (emitter, receiver) in emitter_specs {
-            tasks.push(self.spawn_emitter_task(
-                EmitterTaskBuildDeps {
-                    domain,
-                    shutdown_tx: &shutdown_tx,
-                    codecs: &codecs,
-                    clients: &transports,
-                    deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
-                },
-                emitter,
-                receiver,
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Emitter,
+                identifier: emitter.name.clone(),
+            };
+            emitter_tasks.insert(
+                entity,
+                self.spawn_emitter_task(
+                    EmitterTaskBuildDeps {
+                        domain,
+                        shutdown_tx: &shutdown_tx,
+                        codecs: &codecs,
+                        clients: &transports,
+                        deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
+                    },
+                    emitter,
+                    receiver,
+                )?,
+            );
         }
 
         for (reingestor, from_relay, receiver) in reingestor_specs {
@@ -5477,6 +5658,8 @@ impl Runtime {
                 signaling_protocols,
                 endpoint_routes,
                 node_tasks,
+                emitter_tasks,
+                clients: transports,
                 tasks,
             },
         );
@@ -6841,6 +7024,7 @@ impl Runtime {
         let mut reingestor_specs = Vec::new();
         let mut tasks = Vec::new();
         let mut node_tasks = HashMap::new();
+        let mut emitter_tasks = HashMap::new();
         let branched_specs = branched_ingestor_specs_from_active_graph(&graph);
         let branch_relays = branch_relays_from_branched_specs(&branched_specs);
         let model_index = graph
@@ -7309,17 +7493,24 @@ impl Runtime {
         }
 
         for (emitter, receiver) in emitter_specs {
-            tasks.push(self.spawn_emitter_task(
-                EmitterTaskBuildDeps {
-                    domain,
-                    shutdown_tx: &shutdown_tx,
-                    codecs: &codecs,
-                    clients: &transports,
-                    deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
-                },
-                emitter,
-                receiver,
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Emitter,
+                identifier: emitter.name.clone(),
+            };
+            emitter_tasks.insert(
+                entity,
+                self.spawn_emitter_task(
+                    EmitterTaskBuildDeps {
+                        domain,
+                        shutdown_tx: &shutdown_tx,
+                        codecs: &codecs,
+                        clients: &transports,
+                        deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
+                    },
+                    emitter,
+                    receiver,
+                )?,
+            );
         }
 
         for (reingestor, from_relay, receiver) in reingestor_specs {
@@ -7374,6 +7565,8 @@ impl Runtime {
                 signaling_protocols,
                 endpoint_routes,
                 node_tasks,
+                emitter_tasks,
+                clients: transports,
                 tasks,
             },
         );
@@ -7569,6 +7762,8 @@ impl Runtime {
             signaling_protocols: HashMap::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
+            emitter_tasks: HashMap::default(),
+            clients: HashMap::default(),
             tasks: Vec::new(),
         })
     }
@@ -9083,7 +9278,7 @@ impl Runtime {
         build: EmitterTaskBuildDeps<'_>,
         emitter: CreateEmitter,
         receiver: RelayRuntimeFanIn,
-    ) -> Result<JoinHandle<()>, RuntimeError> {
+    ) -> Result<ScheduledEmitterTask, RuntimeError> {
         emitters::EmitterTask::spawn(self, build, emitter, receiver)
     }
 
@@ -9330,6 +9525,15 @@ impl Runtime {
                 domain,
                 Some(&entity.identifier),
                 "scheduled node",
+            )
+            .await;
+        }
+        for (entity, emitter_task) in execution.emitter_tasks {
+            Self::await_shutdown_task(
+                emitter_task.task,
+                domain,
+                Some(&entity.identifier),
+                "scheduled emitter",
             )
             .await;
         }

@@ -469,6 +469,8 @@ struct DomainExecution {
     signaling_protocols: HashMap<Identifier, Arc<CreateSignalingProtocol>>,
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
     node_tasks: HashMap<RegistryEntity, ScheduledNodeTask>,
+    emitter_tasks: HashMap<RegistryEntity, ScheduledEmitterTask>,
+    clients: HashMap<Identifier, Arc<Model>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -514,6 +516,27 @@ impl NodeQuiesceCounters {
             .load(Ordering::Acquire)
             .saturating_add(self.collected_inputs.load(Ordering::Acquire))
             .saturating_add(self.output_buffers.load(Ordering::Acquire))
+    }
+}
+
+struct NodeQuiesceWorkGuard {
+    counters: Arc<NodeQuiesceCounters>,
+}
+
+impl NodeQuiesceWorkGuard {
+    fn begin(counters: Arc<NodeQuiesceCounters>) -> Self {
+        counters
+            .mailbox_and_in_flight
+            .fetch_add(1, Ordering::AcqRel);
+        Self { counters }
+    }
+}
+
+impl Drop for NodeQuiesceWorkGuard {
+    fn drop(&mut self) {
+        self.counters
+            .mailbox_and_in_flight
+            .fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -1853,6 +1876,8 @@ fn relay_batches_estimated_bytes(batches: &[RelayRecordBatch]) -> u64 {
 struct RuntimeTaskInputCollection {
     policy: Option<RuntimeInputCollectPolicy>,
     pending: HashMap<Option<BranchKey>, RuntimeTaskInputBranchCollection>,
+    quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
+    pending_batches: usize,
 }
 
 #[derive(Debug, Default)]
@@ -1867,6 +1892,20 @@ impl RuntimeTaskInputCollection {
         Self {
             policy,
             pending: HashMap::default(),
+            quiesce_counters: None,
+            pending_batches: 0,
+        }
+    }
+
+    fn with_quiesce_counters(
+        policy: Option<RuntimeInputCollectPolicy>,
+        quiesce_counters: Arc<NodeQuiesceCounters>,
+    ) -> Self {
+        Self {
+            policy,
+            pending: HashMap::default(),
+            quiesce_counters: Some(quiesce_counters),
+            pending_batches: 0,
         }
     }
 
@@ -1878,6 +1917,10 @@ impl RuntimeTaskInputCollection {
         let collection = self.pending.entry(key.clone()).or_default();
         collection.bytes = collection.bytes.saturating_add(batch.estimated_bytes());
         collection.batches.push(batch);
+        self.pending_batches = self.pending_batches.saturating_add(1);
+        if let Some(counters) = &self.quiesce_counters {
+            counters.collected_inputs.fetch_add(1, Ordering::AcqRel);
+        }
         collection
             .deadline
             .get_or_insert_with(|| Instant::now() + policy.interval);
@@ -1912,6 +1955,14 @@ impl RuntimeTaskInputCollection {
             .pending
             .remove(key)
             .expect("selected input collection must exist");
+        self.pending_batches = self
+            .pending_batches
+            .saturating_sub(collection.batches.len());
+        if let Some(counters) = &self.quiesce_counters {
+            counters
+                .collected_inputs
+                .fetch_sub(collection.batches.len(), Ordering::AcqRel);
+        }
         RelayRecordBatch::concat(collection.batches)
     }
 
@@ -1920,6 +1971,16 @@ impl RuntimeTaskInputCollection {
             return Ok(None);
         };
         self.take(&key).map(Some)
+    }
+}
+
+impl Drop for RuntimeTaskInputCollection {
+    fn drop(&mut self) {
+        if let Some(counters) = &self.quiesce_counters {
+            counters
+                .collected_inputs
+                .fetch_sub(self.pending_batches, Ordering::AcqRel);
+        }
     }
 }
 
@@ -6811,6 +6872,59 @@ enum ProcessorNodeCommand {
     Handoff {
         response: oneshot::Sender<Vec<ProcessorBranchHandoff>>,
     },
+}
+
+enum EmitterTaskCommand {
+    Reconfigure {
+        config: CreateEmitter,
+        response: oneshot::Sender<()>,
+    },
+    Stop {
+        response: oneshot::Sender<()>,
+    },
+}
+
+struct ScheduledEmitterTask {
+    commands: mpsc::Sender<EmitterTaskCommand>,
+    task: JoinHandle<()>,
+}
+
+impl ScheduledEmitterTask {
+    async fn reconfigure_via(
+        commands: &mpsc::Sender<EmitterTaskCommand>,
+        config: CreateEmitter,
+    ) -> Result<(), String> {
+        let (response, receiver) = oneshot::channel();
+        commands
+            .send(EmitterTaskCommand::Reconfigure { config, response })
+            .await
+            .map_err(|_| "scheduled emitter task is unavailable for reconfiguration".to_string())?;
+        tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
+            .await
+            .map_err(|_| "scheduled emitter task timed out reconfiguring".to_string())?
+            .map_err(|_| "scheduled emitter task dropped its reconfiguration response".to_string())
+    }
+
+    async fn stop(mut self) -> Result<(), String> {
+        let (response, receiver) = oneshot::channel();
+        self.commands
+            .send(EmitterTaskCommand::Stop { response })
+            .await
+            .map_err(|_| "scheduled emitter task is unavailable for stopping".to_string())?;
+        tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
+            .await
+            .map_err(|_| "scheduled emitter task timed out stopping".to_string())?
+            .map_err(|_| "scheduled emitter task dropped its stop response".to_string())?;
+        match tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut self.task).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("scheduled emitter task join failed: {error}")),
+            Err(_) => {
+                self.task.abort();
+                let _ = self.task.await;
+                Err("scheduled emitter task timed out terminating".to_string())
+            }
+        }
+    }
 }
 
 struct ScheduledNodeTask {
