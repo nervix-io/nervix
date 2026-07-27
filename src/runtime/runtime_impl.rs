@@ -456,22 +456,91 @@ impl Runtime {
         EntityGateHold { gates }
     }
 
-    pub fn engage_entity_gate_operation(
+    pub async fn engage_entity_gate_operation(
         &self,
         operation_id: u64,
         domain: &Domain,
         relays: &[Identifier],
+        affected_entities: &[RegistryEntity],
         deadline: Instant,
         reason: &str,
-    ) {
-        let hold = self.engage_entity_gates(domain, relays, deadline, reason);
-        self.entity_gate_holds
-            .insert((domain.clone(), operation_id), hold);
+    ) -> Result<(), String> {
+        let gates = self.engage_entity_gates(domain, relays, deadline, reason);
+        let ingestors = affected_entities
+            .iter()
+            .filter(|entity| entity.kind == ModelKind::Ingestor)
+            .map(|entity| entity.identifier.clone())
+            .collect::<Vec<_>>();
+        let mut resume_ingestors = false;
+        for ingestor in &ingestors {
+            tokio::task::consume_budget().await;
+            let key = RuntimeKey::new(domain.clone(), ingestor.clone());
+            if !self.ingestors.contains_key(&key) {
+                continue;
+            }
+            if let Err(error) = self.stop_ingestor(domain, ingestor).await {
+                gates.release();
+                if resume_ingestors
+                    && let Err(resume_error) = self.start_missing_domain_ingestors(domain).await
+                {
+                    warn!(
+                        domain = domain.as_str(),
+                        error = %resume_error,
+                        "failed to resume ingestors after entity-pause engagement failure"
+                    );
+                }
+                return Err(error.to_string());
+            }
+            resume_ingestors = true;
+        }
+        self.entity_gate_holds.insert(
+            (domain.clone(), operation_id),
+            EntityAlterHold {
+                gates,
+                resume_ingestors,
+            },
+        );
+        let runtime = self.clone();
+        let domain = domain.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            if let Err(error) = runtime
+                .release_entity_gate_operation(operation_id, &domain)
+                .await
+            {
+                warn!(
+                    domain = domain.as_str(),
+                    operation_id,
+                    error = %error,
+                    "failed to release expired entity-pause operation"
+                );
+            }
+        });
+        Ok(())
     }
 
-    pub fn release_entity_gate_operation(&self, operation_id: u64, domain: &Domain) {
-        self.entity_gate_holds
-            .remove(&(domain.clone(), operation_id));
+    pub async fn release_entity_gate_operation(
+        &self,
+        operation_id: u64,
+        domain: &Domain,
+    ) -> Result<(), String> {
+        let Some((_, hold)) = self
+            .entity_gate_holds
+            .remove(&(domain.clone(), operation_id))
+        else {
+            return Ok(());
+        };
+        let EntityAlterHold {
+            gates,
+            resume_ingestors,
+        } = hold;
+        gates.release();
+        if resume_ingestors {
+            self.start_missing_domain_ingestors(domain)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn entity_drain_status(
@@ -4356,6 +4425,62 @@ impl Runtime {
                 self.bump_materializer_epoch(domain);
                 if dropped_materialized_state {
                     self.purge_materialized_relay_state(domain, &entity.identifier)?;
+                }
+                continue;
+            }
+            if entity.kind == ModelKind::Ingestor {
+                let desired_node = schedule
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.kind == ModelKind::Ingestor && node.identifier == entity.identifier
+                    })
+                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing desired ingestor '{}'",
+                            entity.identifier.as_str()
+                        ),
+                    })?;
+                let Model::Ingestor(desired_ingestor) = desired_node.config.as_ref() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "desired ingestor '{}' has the wrong model kind",
+                            entity.identifier.as_str()
+                        ),
+                    });
+                };
+
+                let key = RuntimeKey::new(domain.clone(), entity.identifier.clone());
+                if self.ingestors.contains_key(&key) {
+                    self.stop_ingestor(domain, &entity.identifier).await?;
+                }
+                graph_handle.store(Some(desired_graph.clone()));
+
+                if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
+                    let source_model =
+                        Self::source_model_for_scheduled_ingestor(&schedule, desired_ingestor)
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing source model for swapped ingestor '{}'",
+                                    entity.identifier.as_str()
+                                ),
+                            })?;
+                    let kafka_offset_state = self.kafka_offset_state_for_memory_pressure_resume(
+                        domain,
+                        desired_node,
+                        desired_ingestor,
+                        local_node_id.as_deref(),
+                    );
+                    self.start_scheduled_ingestor(
+                        domain,
+                        source_model,
+                        desired_ingestor.clone(),
+                        kafka_offset_state,
+                    )
+                    .await?;
                 }
                 continue;
             }

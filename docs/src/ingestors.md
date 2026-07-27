@@ -57,6 +57,41 @@ At runtime, the ingestor:
 Branch execution receives these completed Arrow batches and does not buffer them behind another
 flush policy.
 
+## Altering Ingestors
+
+`ALTER INGESTOR` applies one or more comma-separated operations in written order:
+
+```nspl
+ALTER INGESTOR <ingestor>
+    SET FROM <full source clause>
+  | SET DECODE USING <codec>
+  | SET TIMESTAMP NOW
+  | SET TIMESTAMP AT <field>
+  | DROP TIMESTAMP
+  | SET FILTER WHERE <expression>
+  | DROP FILTER WHERE
+  | ADD ROUTE TO <relay> <full ingestor route body>
+  | DROP ROUTE TO <relay>
+  | REPLACE ROUTE TO <relay> <full ingestor route body>
+  | SET GENERAL ERROR IGNORE
+  | SET GENERAL ERROR LOG
+  [, ...];
+```
+
+`SET FROM` accepts the complete transport-specific source body that follows `FROM` in `CREATE
+INGESTOR`. Change a client, source address, Kafka topic or offset mode, `INSTANCES`, delivery mode,
+or source-specific subscription settings by supplying that complete body. `ADD ROUTE` appends a
+route, while `REPLACE ROUTE` preserves the matched route's position. Duplicate routes to the same
+relay remain legal, so `DROP ROUTE` and `REPLACE ROUTE` reject an ambiguous target. An ingestor must
+retain at least one route.
+
+Every ingestor alteration currently uses `ENTITY_PAUSE`. Nervix stops only the affected ingestor
+instances on all live nodes and waits for their in-flight work to drain before commit. Schedule
+application starts the new source configuration on its assigned nodes; unrelated graph paths keep
+flowing. A drain or cutover failure leaves the candidate unapplied and restarts the old source.
+The transient hold also expires automatically, so loss of the coordinating leader cannot leave an
+ingestor stopped indefinitely.
+
 ## Branch Semantics
 
 Ingestors are where external mixed flows enter branch-isolated processing. Every route independently

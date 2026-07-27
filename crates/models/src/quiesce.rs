@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, IntoStaticStr};
 
 use crate::{
-    CreateEmitter, CreateJunction, CreateRelay, CreateSchema, CreateWireSchemaStmt, EmitSink,
-    Identifier, MessageErrorPolicy, Model, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    CreateEmitter, CreateIngestor, CreateJunction, CreateRelay, CreateSchema, CreateWireSchemaStmt,
+    EmitSink, Identifier, MessageErrorPolicy, Model, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs,
 };
 
 #[derive(
@@ -80,6 +81,12 @@ pub enum ModelChangeAspect {
     EmitterConstruction,
     EmitterErrorPolicies,
     EmitterMaterializedState,
+    IngestorSource,
+    IngestorCodec,
+    IngestorTimestamp,
+    IngestorFilter,
+    IngestorRoutes,
+    IngestorGeneralError,
     SchemaDefinition,
     WireSchemaDefinition,
     EntityReplaced,
@@ -115,7 +122,13 @@ impl ModelChangeAspect {
             | Self::EmitterMode
             | Self::EmitterConstruction
             | Self::EmitterErrorPolicies
-            | Self::EmitterMaterializedState => QuiesceLevel::EntityPause,
+            | Self::EmitterMaterializedState
+            | Self::IngestorSource
+            | Self::IngestorCodec
+            | Self::IngestorTimestamp
+            | Self::IngestorFilter
+            | Self::IngestorRoutes
+            | Self::IngestorGeneralError => QuiesceLevel::EntityPause,
             Self::RelaySchema
             | Self::RelayBranching
             | Self::EmitterInput
@@ -188,6 +201,9 @@ impl Model {
             (Self::Emitter(base), Self::Emitter(candidate)) => {
                 emitter_change_aspects(base, candidate)
             }
+            (Self::Ingestor(base), Self::Ingestor(candidate)) => {
+                ingestor_change_aspects(base, candidate)
+            }
             (Self::Schema(base), Self::Schema(candidate)) => {
                 let CreateSchema {
                     name: base_name,
@@ -253,6 +269,55 @@ impl Model {
             | (Self::WireSchema(_), _) => ModelChangeAspects::replaced(),
         }
     }
+}
+
+fn ingestor_change_aspects(
+    base: &CreateIngestor,
+    candidate: &CreateIngestor,
+) -> ModelChangeAspects {
+    let CreateIngestor {
+        name: base_name,
+        output_routes: base_output_routes,
+        decode_using_codec: base_codec,
+        timestamp_source: base_timestamp,
+        source: base_source,
+        general_error_policy: base_general_error,
+        filter_where: base_filter,
+    } = base;
+    let CreateIngestor {
+        name: candidate_name,
+        output_routes: candidate_output_routes,
+        decode_using_codec: candidate_codec,
+        timestamp_source: candidate_timestamp,
+        source: candidate_source,
+        general_error_policy: candidate_general_error,
+        filter_where: candidate_filter,
+    } = candidate;
+
+    if base_name != candidate_name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    if base_source != candidate_source {
+        changes.push(ModelChangeAspect::IngestorSource);
+    }
+    if base_codec != candidate_codec {
+        changes.push(ModelChangeAspect::IngestorCodec);
+    }
+    if base_timestamp != candidate_timestamp {
+        changes.push(ModelChangeAspect::IngestorTimestamp);
+    }
+    if base_filter != candidate_filter {
+        changes.push(ModelChangeAspect::IngestorFilter);
+    }
+    if base_output_routes != candidate_output_routes {
+        changes.push(ModelChangeAspect::IngestorRoutes);
+    }
+    if base_general_error != candidate_general_error {
+        changes.push(ModelChangeAspect::IngestorGeneralError);
+    }
+    changes
 }
 
 fn relay_change_aspects(base: &CreateRelay, candidate: &CreateRelay) -> ModelChangeAspects {
@@ -799,8 +864,9 @@ fn wire_schema_change_aspects(
 #[cfg(test)]
 mod tests {
     use crate::{
-        AckMode, BranchSelection, CreateEmitter, CreateJunction, CreateRelay, EmitSink,
-        ErrorPolicies, Identifier, InputCollectPolicy, MaterializedRelayState,
+        AckMode, BranchSelection, CreateEmitter, CreateIngestor, CreateJunction, CreateRelay,
+        EmitSink, EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource,
+        IngestTimestampSource, InputCollectPolicy, MaterializedRelayState,
         MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
         ModelChangeAspect, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
         ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
@@ -851,6 +917,25 @@ mod tests {
             mode: AckMode::Attached,
             construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),
+        }
+    }
+
+    fn ingestor() -> CreateIngestor {
+        CreateIngestor {
+            name: identifier("ingest"),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                identifier("events"),
+                "1s".to_string(),
+                Some("1MiB".to_string()),
+            )]),
+            decode_using_codec: identifier("event_codec"),
+            timestamp_source: None,
+            source: IngestSource::Endpoint {
+                endpoint: identifier("ingress_a"),
+                mode: EndpointIngestMode::NoAckSequential,
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
         }
     }
 
@@ -1145,5 +1230,77 @@ mod tests {
             ModelChangeAspect::EmitterInput,
             QuiesceLevel::DomainPause,
         );
+    }
+
+    #[test]
+    fn every_ingestor_aspect_requires_entity_pause() {
+        let base = ingestor();
+        let cases = [
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.source = IngestSource::Endpoint {
+                        endpoint: identifier("ingress_b"),
+                        mode: EndpointIngestMode::NoAckSequential,
+                    };
+                    candidate
+                },
+                ModelChangeAspect::IngestorSource,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.decode_using_codec = identifier("event_codec_v2");
+                    candidate
+                },
+                ModelChangeAspect::IngestorCodec,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.timestamp_source = Some(IngestTimestampSource::Now);
+                    candidate
+                },
+                ModelChangeAspect::IngestorTimestamp,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.filter_where =
+                        Some(crate::Expression::Literal(crate::Literal::Bool(true)));
+                    candidate
+                },
+                ModelChangeAspect::IngestorFilter,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.output_routes.routes[0]
+                        .flush_policy
+                        .as_mut()
+                        .expect("test route has a flush policy")
+                        .flush_each = "2s".to_string();
+                    candidate
+                },
+                ModelChangeAspect::IngestorRoutes,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.general_error_policy = GeneralErrorPolicy::Ignore;
+                    candidate
+                },
+                ModelChangeAspect::IngestorGeneralError,
+            ),
+        ];
+
+        for (candidate, aspect) in cases {
+            assert_single_aspect(
+                Model::Ingestor(base.clone()),
+                Model::Ingestor(candidate),
+                aspect,
+                QuiesceLevel::EntityPause,
+            );
+        }
     }
 }

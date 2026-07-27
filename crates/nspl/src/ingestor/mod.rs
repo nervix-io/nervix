@@ -1,19 +1,21 @@
 use chumsky::prelude::*;
 use nervix_models::{
-    CreateIngestor, CreateStatement, EndpointIngestMode, IngestSource, IngestTimestampSource,
-    KafkaIngestMode, KafkaOffsetMode, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
-    PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SqsIngestMode,
-    WebsocketsIngestMode, ZeroMqIngestMode,
+    AlterIngestor, AlterIngestorOperation, CreateIngestor, CreateStatement, EndpointIngestMode,
+    GeneralErrorPolicy, IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode,
+    MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, PulsarIngestMode, RabbitMqIngestMode,
+    RedisPubSubIngestMode, RetryPolicy, SqsIngestMode, WebsocketsIngestMode, ZeroMqIngestMode,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, channel_ref, client_ref, codec_ref,
-        consumer_group_ref, current_word_prefix, duration_lit, endpoint_ref, filter_where_clause,
-        flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
-        into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref,
-        queue_ref, string_lit, subscription_ref, suggestions_from_errors, tok, topic_ref, word_raw,
+        ParseError, ParseFromSourceError, alter_ingestor_route_body, alter_op_separator,
+        boxed_choice, channel_ref, client_ref, codec_ref, consumer_group_ref, current_word_prefix,
+        duration_lit, endpoint_ref, filter_where_clause, flushed_ingestor_outputs,
+        general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
+        kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref, queue_ref, relay_ref,
+        string_lit, subscription_ref, suggestions_from_errors, tok, topic_ref, where_expression,
+        word_raw,
     },
 };
 
@@ -585,6 +587,83 @@ fn ingest_source_parser<'src>()
     )
 }
 
+pub fn alter_ingestor_parser<'src>()
+-> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone {
+    let set_source = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(ingest_source_parser())
+        .map(|source| AlterIngestorOperation::SetSource { source });
+    let set_decode = kw(Identifier::Set)
+        .ignore_then(kw_phrase2(Identifier::Decode, Identifier::Using))
+        .ignore_then(codec_ref())
+        .map(|codec| AlterIngestorOperation::SetDecodeUsing { codec });
+    let set_timestamp = kw(Identifier::Set)
+        .ignore_then(timestamp_source())
+        .map(|source| AlterIngestorOperation::SetTimestamp { source });
+    let drop_timestamp = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Timestamp))
+        .to(AlterIngestorOperation::DropTimestamp);
+    let set_filter = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Filter))
+        .ignore_then(where_expression(alter_op_separator()))
+        .map(|where_clause| AlterIngestorOperation::SetFilterWhere { where_clause });
+    let drop_filter = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Filter))
+        .then_ignore(kw(Identifier::Where))
+        .to(AlterIngestorOperation::DropFilterWhere);
+    let add_route = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(alter_ingestor_route_body())
+        .map(|route| AlterIngestorOperation::AddRoute { route });
+    let drop_route = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterIngestorOperation::DropRoute { relay });
+    let replace_route = kw(Identifier::Replace)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(alter_ingestor_route_body())
+        .map(|route| AlterIngestorOperation::ReplaceRoute { route });
+    let set_general_error = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::General))
+        .then_ignore(kw(Identifier::Error))
+        .ignore_then(choice((
+            kw(Identifier::Ignore).to(GeneralErrorPolicy::Ignore),
+            kw(Identifier::Log).to(GeneralErrorPolicy::Log),
+        )))
+        .map(|policy| AlterIngestorOperation::SetGeneralError { policy });
+
+    let operation = choice((
+        set_source,
+        set_decode,
+        set_timestamp,
+        drop_timestamp,
+        set_filter,
+        drop_filter,
+        add_route,
+        drop_route,
+        replace_route,
+        set_general_error,
+    ))
+    .boxed();
+
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Ingestor))
+        .ignore_then(ingestor_name())
+        .then(
+            operation
+                .separated_by(alter_op_separator())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .map(|(ingestor, operations)| AlterIngestor {
+            ingestor,
+            operations,
+        })
+        .boxed()
+}
+
 pub fn create_ingestor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateIngestor>, extra::Err<ParseError<'src>>>
 + Clone {
@@ -652,6 +731,23 @@ pub fn parse_create_ingestor(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
+pub fn parse_alter_ingestor_tokens(tokens: &[Token]) -> Result<AlterIngestor, Vec<ParseError<'_>>> {
+    let out = alter_ingestor_parser().then_ignore(end()).parse(tokens);
+    if out.has_errors() {
+        Err(out.into_errors())
+    } else {
+        Ok(out
+            .into_output()
+            .expect("successful parse must have output"))
+    }
+}
+
+pub fn parse_alter_ingestor(input: &str) -> Result<AlterIngestor, ParseFromSourceError> {
+    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    parse_alter_ingestor_tokens(&tokens)
+        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+}
+
 pub fn suggest_create_ingestor(input: &str, cursor: usize) -> Vec<String> {
     let safe_cursor = cursor.min(input.len());
     let prefix_src = &input[..safe_cursor];
@@ -672,6 +768,26 @@ pub fn suggest_create_ingestor(input: &str, cursor: usize) -> Vec<String> {
     suggestions_from_errors(out.into_errors(), &prefix)
 }
 
+pub fn suggest_alter_ingestor(input: &str, cursor: usize) -> Vec<String> {
+    let safe_cursor = cursor.min(input.len());
+    let prefix_src = &input[..safe_cursor];
+    let prefix = current_word_prefix(prefix_src);
+
+    let (_, _, tokens) = match lex_input(prefix_src) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let out = alter_ingestor_parser()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if !out.has_errors() {
+        return Vec::new();
+    }
+
+    suggestions_from_errors(out.into_errors(), &prefix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +799,58 @@ mod tests {
             .into_iter()
             .map(|t| t.token)
             .collect()
+    }
+
+    #[test]
+    fn parses_alter_ingestor_full_operations_and_expression_commas() {
+        let parsed = parse_alter_ingestor(
+            "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL, SET \
+             DECODE USING event_codec_v2, SET TIMESTAMP NOW, SET FILTER WHERE concat(input.kind, \
+             ',') != '', REPLACE ROUTE TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON \
+             MESSAGE ERROR SEND TO errors SET code = concat(error.code, ',bad'), ADD ROUTE TO \
+             audit INHERIT ALL UNBRANCHED FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
+             LOG, SET GENERAL ERROR IGNORE;",
+        )
+        .expect("ALTER INGESTOR should parse all operations");
+
+        assert_eq!(parsed.ingestor.as_str(), "event_source");
+        assert_eq!(parsed.operations.len(), 7);
+        assert!(matches!(
+            parsed.operations[0],
+            AlterIngestorOperation::SetSource {
+                source: IngestSource::Endpoint { .. }
+            }
+        ));
+        assert!(matches!(
+            parsed.operations[4],
+            AlterIngestorOperation::ReplaceRoute { .. }
+        ));
+        assert!(matches!(
+            parsed.operations[6],
+            AlterIngestorOperation::SetGeneralError {
+                policy: GeneralErrorPolicy::Ignore
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_alter_ingestor_without_operations() {
+        parse_alter_ingestor("ALTER INGESTOR event_source;")
+            .expect_err("ALTER INGESTOR requires at least one operation");
+    }
+
+    #[test]
+    fn alter_ingestor_completion_exposes_operation_heads() {
+        let suggestions = suggest_alter_ingestor(
+            "ALTER INGESTOR event_source SET ",
+            "ALTER INGESTOR event_source SET ".len(),
+        );
+        assert!(suggestions.contains(&"FROM".to_string()));
+        assert!(suggestions.contains(&"DECODE USING".to_string()));
+        assert!(suggestions.contains(&"TIMESTAMP".to_string()));
+        assert!(suggestions.contains(&"FILTER".to_string()));
+        assert!(suggestions.contains(&"GENERAL".to_string()));
+        assert!(!suggestions.contains(&"SCHEMA".to_string()));
     }
 
     #[test]

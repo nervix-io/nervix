@@ -5127,18 +5127,22 @@ impl SessionServiceImpl {
         operation_id: u64,
         domain: &Domain,
         relays: &[Identifier],
+        affected_entities: &[crate::registry::RegistryEntity],
         deadline: tokio::time::Instant,
         reason: &str,
     ) -> Result<(), String> {
         if node_id == self.consensus.local_node_id() {
-            self.runtime.engage_entity_gate_operation(
-                operation_id,
-                domain,
-                relays,
-                deadline,
-                reason,
-            );
-            return Ok(());
+            return self
+                .runtime
+                .engage_entity_gate_operation(
+                    operation_id,
+                    domain,
+                    relays,
+                    affected_entities,
+                    deadline,
+                    reason,
+                )
+                .await;
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
@@ -5154,6 +5158,13 @@ impl SessionServiceImpl {
                     operation_id,
                     domain: domain.clone(),
                     relays: relays.to_vec(),
+                    affected_entities: affected_entities
+                        .iter()
+                        .map(|entity| RemoteEntityReference {
+                            kind: entity.kind,
+                            identifier: entity.identifier.clone(),
+                        })
+                        .collect(),
                     deadline_millis,
                     reason: reason.to_string(),
                 }),
@@ -5232,9 +5243,10 @@ impl SessionServiceImpl {
         domain: &Domain,
     ) -> Result<(), String> {
         if node_id == self.consensus.local_node_id() {
-            self.runtime
-                .release_entity_gate_operation(operation_id, domain);
-            return Ok(());
+            return self
+                .runtime
+                .release_entity_gate_operation(operation_id, domain)
+                .await;
         }
         let correlation_id = self.next_cluster_command_correlation_id();
         let (tx, rx) = oneshot::channel();
@@ -5297,6 +5309,7 @@ impl SessionServiceImpl {
         &self,
         domain: &Domain,
         relays: &[Identifier],
+        affected_entities: &[crate::registry::RegistryEntity],
         deadline: tokio::time::Instant,
     ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
         let mut nodes = self.cluster.live_node_ids().await;
@@ -5318,6 +5331,7 @@ impl SessionServiceImpl {
                     operation_id,
                     domain,
                     relays,
+                    affected_entities,
                     deadline,
                     "leader-orchestrated entity alteration",
                 )
@@ -6993,6 +7007,19 @@ impl SessionServiceImpl {
                     ));
                     mutations.push(RegistryMutation::AlterEmitter(alter));
                 }
+                Statement::AlterIngestor(alter) => {
+                    let model_id = alter.ingestor.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered ingestor '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterIngestor(alter));
+                }
                 Statement::Drop(drop) => {
                     let model_id = drop.name.clone();
                     refresh_http_tls |= drop.kind == ModelKind::Vhost;
@@ -7069,7 +7096,7 @@ impl SessionServiceImpl {
                     .entity_pause_relays(&domain, &affected_entities);
                 let deadline = tokio::time::Instant::now() + self.runtime.entity_gate_deadline();
                 let gate = match self
-                    .engage_cluster_entity_gates(&domain, &relays, deadline)
+                    .engage_cluster_entity_gates(&domain, &relays, &affected_entities, deadline)
                     .await
                 {
                     Ok(gate) => gate,
@@ -7356,6 +7383,7 @@ impl SessionServiceImpl {
             | Statement::AlterRelay(_)
             | Statement::AlterJunction(_)
             | Statement::AlterEmitter(_)
+            | Statement::AlterIngestor(_)
             | Statement::Drop(_) => {
                 unreachable!("model mutations are handled before statement dispatch")
             }
@@ -13842,19 +13870,31 @@ impl Application {
                                 service_for_interconnect.handle_domain_drain_status_response(response);
                             }
                             Envelope::Control(ControlEnvelope::EntityGateRequest(request)) => {
-                                service_for_interconnect.runtime.engage_entity_gate_operation(
-                                    request.operation_id,
-                                    &request.domain,
-                                    &request.relays,
-                                    tokio::time::Instant::now()
-                                        + Duration::from_millis(request.deadline_millis),
-                                    &request.reason,
-                                );
+                                let affected_entities = request
+                                    .affected_entities
+                                    .iter()
+                                    .map(|entity| crate::registry::RegistryEntity {
+                                        kind: entity.kind,
+                                        identifier: entity.identifier.clone(),
+                                    })
+                                    .collect::<Vec<_>>();
+                                let result = service_for_interconnect
+                                    .runtime
+                                    .engage_entity_gate_operation(
+                                        request.operation_id,
+                                        &request.domain,
+                                        &request.relays,
+                                        &affected_entities,
+                                        tokio::time::Instant::now()
+                                            + Duration::from_millis(request.deadline_millis),
+                                        &request.reason,
+                                    )
+                                    .await;
                                 if let Err(error) = message.reply.send(Envelope::Control(
                                     ControlEnvelope::EntityGateResponse(
                                         RemoteEntityGateResponse {
                                             correlation_id: request.correlation_id,
-                                            result: Ok(()),
+                                            result,
                                         },
                                     ),
                                 )).await {
@@ -13897,17 +13937,18 @@ impl Application {
                                 service_for_interconnect.handle_entity_drain_status_response(response);
                             }
                             Envelope::Control(ControlEnvelope::EntityGateReleaseRequest(request)) => {
-                                service_for_interconnect
+                                let result = service_for_interconnect
                                     .runtime
                                     .release_entity_gate_operation(
                                         request.operation_id,
                                         &request.domain,
-                                    );
+                                    )
+                                    .await;
                                 if let Err(error) = message.reply.send(Envelope::Control(
                                     ControlEnvelope::EntityGateReleaseResponse(
                                         RemoteEntityGateReleaseResponse {
                                             correlation_id: request.correlation_id,
-                                            result: Ok(()),
+                                            result,
                                         },
                                     ),
                                 )).await {

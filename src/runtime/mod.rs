@@ -503,6 +503,11 @@ pub struct EntityGateHold {
     gates: Vec<(Arc<RelayDispatchGate>, RelayDispatchGateToken)>,
 }
 
+struct EntityAlterHold {
+    gates: EntityGateHold,
+    resume_ingestors: bool,
+}
+
 #[derive(Debug, Default)]
 struct NodeQuiesceCounters {
     mailbox_and_in_flight: AtomicUsize,
@@ -2395,7 +2400,7 @@ pub struct Runtime {
     emitter_buffers: Arc<DashMap<RuntimeKey, Arc<AtomicUsize>, RandomState>>,
     force_flush_by_domain: Arc<DashMap<Domain, watch::Sender<u64>, RandomState>>,
     node_quiesce_counters: Arc<DashMap<RuntimeKey, Arc<NodeQuiesceCounters>, RandomState>>,
-    entity_gate_holds: Arc<DashMap<(Domain, u64), EntityGateHold, RandomState>>,
+    entity_gate_holds: Arc<DashMap<(Domain, u64), EntityAlterHold, RandomState>>,
     active_domain_alters: Arc<DashMap<Domain, ActiveDomainAlter, RandomState>>,
     state_schema_fingerprints: Arc<DashMap<RuntimeStateSchemaKey, [u8; 32], RandomState>>,
     domain_graphs: Arc<DashMap<Domain, SharedActiveGraph, RandomState>>,
