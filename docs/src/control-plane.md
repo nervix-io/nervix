@@ -37,12 +37,13 @@ contains multiple statements outside an explicit transaction is rejected instead
 of being treated as an implicit batch.
 
 Within a transaction, each consecutive run of model mutations for one domain can mix `CREATE`,
-`ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER EMITTER`, and
-`DROP`. Nervix applies that run as one registry mutation: all operations are evaluated in written
-order against one candidate model map, the complete domain graph is revalidated, and one atomic
-storage batch persists the result. A failure writes nothing and does not swap the active registry
-state. This supports coordinated wire-schema, internal-schema, codec, relay, junction, emitter, and
-dependent-node migrations without exposing an invalid intermediate graph.
+`ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER EMITTER`, `ALTER
+INGESTOR`, and `DROP`. Nervix applies that run as one registry mutation: all operations are
+evaluated in written order against one candidate model map, the complete domain graph is
+revalidated, and one atomic storage batch persists the result. A failure writes nothing and does
+not swap the active registry state. This supports coordinated wire-schema, internal-schema, codec,
+relay, junction, emitter, ingestor, and dependent-node migrations without exposing an invalid
+intermediate graph.
 
 Transaction control also queues lifecycle and other server statements, but those statements are
 not folded into the registry mutation batch. Data-plane records are likewise outside this
@@ -68,16 +69,19 @@ that produced it. The batch uses the highest level contributed by any changed en
   Other domain traffic continues. A processor topology change then swaps only the affected node
   tasks and hands pending materialized-state work to their replacements. Relay materialized-state
   changes update membership in place. Emitter sink, client, codec, input-collection, and attachment
-  changes drain and replace only the affected emitter task.
+  changes drain and replace only the affected emitter task. Every current ingestor alteration
+  stops and drains only the affected ingestor instances, then starts their desired source
+  configuration from the published schedule.
 - `DOMAIN_PAUSE` changes stop ingestion and generators across the domain and fully drain attached
   work before commit. Relay schema or branching changes and schema or wire-schema definition
   changes use this level.
 
-Entity gates are transient and deadline-bound. A gate self-releases if the leader disappears, and
-schedule application re-engages the local gate before an affected node swaps itself. Sibling
-consumers of a gated relay can therefore see bounded backpressure for at most the gate deadline,
-but unrelated relays and nodes continue flowing. Pending `REQUIRED WAIT` materialized records are
-carried through a node handoff rather than treated as drainable work.
+Entity holds are transient and deadline-bound. A relay gate self-releases if the leader disappears;
+an ingestor hold restarts the old source when it expires. Schedule application re-engages a local
+relay gate before an affected node swaps itself. Sibling consumers of a gated relay can therefore
+see bounded backpressure for at most the gate deadline, but unrelated relays and nodes continue
+flowing. Pending `REQUIRED WAIT` materialized records are carried through a node handoff rather than
+treated as drainable work.
 
 An unchanged candidate contributes no aspect. An all-no-op batch therefore performs no storage
 write or schedule publication and reports `DYNAMIC`, even when the running domain has work that

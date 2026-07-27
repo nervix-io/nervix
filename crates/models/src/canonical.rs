@@ -1,22 +1,23 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    AlterEmitter, AlterEmitterOperation, AlterJunction, AlterJunctionOperation, AlterRelay,
-    AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
-    AlterWireSchemaOperation, AlterWireSchemaStmt, AssignmentTargetScope, AvroType,
-    AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection, ClickHouseConfigEntry,
-    ClickHouseValueMapping, CodecEncoding, CodecEncodingRule, CodecJaqTransformations,
-    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
-    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
-    CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
-    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression,
-    FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    AlterEmitter, AlterEmitterOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
+    AlterJunctionOperation, AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation,
+    AlterWireSchema, AlterWireSchemaOperation, AlterWireSchemaStmt, AssignmentTargetScope,
+    AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection,
+    ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding, CodecEncodingRule,
+    CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
+    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
+    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
+    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
+    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
+    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
     KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
@@ -501,6 +502,21 @@ impl AlterEmitter {
         Ok(format!(
             "ALTER EMITTER {} {operations};",
             self.emitter.as_str()
+        ))
+    }
+}
+
+impl AlterIngestor {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_ingestor_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER INGESTOR {} {operations};",
+            self.ingestor.as_str()
         ))
     }
 }
@@ -1757,6 +1773,48 @@ fn alter_emitter_operation_to_nspl(
         } => Ok(format!(
             "SET {}",
             commit_policy_to_nspl(commit_each, max_commit_size)
+        )),
+    }
+}
+
+fn alter_ingestor_operation_to_nspl(
+    operation: &AlterIngestorOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterIngestorOperation::SetSource { source } => {
+            Ok(format!("SET FROM {}", ingest_source_to_nspl(source)))
+        }
+        AlterIngestorOperation::SetDecodeUsing { codec } => {
+            Ok(format!("SET DECODE USING {}", codec.as_str()))
+        }
+        AlterIngestorOperation::SetTimestamp { source } => Ok(match source {
+            IngestTimestampSource::Now => "SET TIMESTAMP NOW".to_string(),
+            IngestTimestampSource::At(field) => {
+                format!("SET TIMESTAMP AT {}", field.as_str())
+            }
+        }),
+        AlterIngestorOperation::DropTimestamp => Ok("DROP TIMESTAMP".to_string()),
+        AlterIngestorOperation::SetFilterWhere { where_clause } => Ok(format!(
+            "SET FILTER WHERE {}",
+            expression_to_nspl(where_clause)?
+        )),
+        AlterIngestorOperation::DropFilterWhere => Ok("DROP FILTER WHERE".to_string()),
+        AlterIngestorOperation::AddRoute { route } => {
+            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+        }
+        AlterIngestorOperation::DropRoute { relay } => {
+            Ok(format!("DROP ROUTE TO {}", relay.as_str()))
+        }
+        AlterIngestorOperation::ReplaceRoute { route } => Ok(format!(
+            "REPLACE ROUTE {}",
+            processor_output_to_nspl(route)?
+        )),
+        AlterIngestorOperation::SetGeneralError { policy } => Ok(format!(
+            "SET GENERAL ERROR {}",
+            match policy {
+                GeneralErrorPolicy::Ignore => "IGNORE",
+                GeneralErrorPolicy::Log => "LOG",
+            }
         )),
     }
 }

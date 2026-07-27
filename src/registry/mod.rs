@@ -14,15 +14,16 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterEmitter, AlterJunction, AlterRelay, AlterSchema, AlterWireSchemaStmt, Assignment,
-    AssignmentTarget, AvroType, BranchSelection, CodecEncoding, CodecEncodingRule, CodecWireFormat,
-    CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateMaterializer,
-    CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchemaStmt, Domain,
-    DomainSchedule, DropModel, EmitSink, EndpointType, Expression, Identifier, IngestSource,
-    IngestTimestampSource, JsonType, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputBranch, ParseAsType,
-    ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
+    AlterEmitter, AlterIngestor, AlterJunction, AlterRelay, AlterSchema, AlterWireSchemaStmt,
+    Assignment, AssignmentTarget, AvroType, BranchSelection, CodecEncoding, CodecEncodingRule,
+    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
+    CreateMaterializer, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
+    CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
+    Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputBranch,
+    ParseAsType, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode,
+    SchemaField,
 };
 use nervix_nspl::{
     vm_program::{
@@ -602,6 +603,37 @@ impl Registry {
                         })
                     })?;
                 }
+                RegistryMutation::AlterIngestor(alter) => {
+                    let key = RegistryKey::new(ModelKind::Ingestor, alter.ingestor.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.ingestor.as_str(),
+                        kind = ModelKind::Ingestor.as_str(),
+                        "staging ingestor alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.ingestor.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Ingestor(ingestor) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.ingestor.as_str().to_string(),
+                            expected_kind: ModelKind::Ingestor.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    ingestor.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.ingestor.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
                 RegistryMutation::Drop(drop) => {
                     let key = RegistryKey::new(drop.kind, drop.name.clone());
                     info!(
@@ -942,6 +974,7 @@ pub enum RegistryMutation {
     AlterRelay(AlterRelay),
     AlterJunction(AlterJunction),
     AlterEmitter(AlterEmitter),
+    AlterIngestor(AlterIngestor),
     Drop(DropModel),
 }
 

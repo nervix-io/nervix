@@ -38,11 +38,12 @@ pub use schema::{
     ParseAsType, SchemaField, WireSchemaField, WireSchemaFormat, WireSchemaStrictness,
 };
 pub use statement::{
-    AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterJunction,
-    AlterJunctionError, AlterJunctionOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
-    AzureBlobConfigEntry, BranchEviction, BranchSelection, ClickHouseConfigEntry,
-    ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule,
-    CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CordonNode,
+    AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestor,
+    AlterIngestorError, AlterIngestorOperation, AlterJunction, AlterJunctionError,
+    AlterJunctionOperation, AlterRelay, AlterRelayError, AlterRelayOperation, AzureBlobConfigEntry,
+    BranchEviction, BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping,
+    ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+    CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CordonNode,
     CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
