@@ -7,13 +7,215 @@ use async_broadcast::{
     InactiveReceiver, Receiver as AsyncBroadcastReceiver, RecvError, SendError, Sender,
 };
 use parking_lot::Mutex;
-use tokio::sync::Notify;
+use tokio::{
+    sync::Notify,
+    time::{Instant, timeout_at},
+};
+use tracing::debug;
 use triomphe::Arc;
+
+#[derive(Debug)]
+pub(crate) struct RelayDispatchGate {
+    closed: AtomicBool,
+    state: Mutex<RelayDispatchGateState>,
+    changed: Notify,
+}
+
+#[derive(Debug, Default)]
+struct RelayDispatchGateState {
+    generation: u64,
+    engagement: Option<RelayDispatchGateEngagement>,
+}
+
+#[derive(Debug)]
+struct RelayDispatchGateEngagement {
+    deadline: Instant,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelayDispatchGateToken {
+    generation: u64,
+}
+
+impl RelayDispatchGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            closed: AtomicBool::new(false),
+            state: Mutex::new(RelayDispatchGateState::default()),
+            changed: Notify::new(),
+        }
+    }
+
+    pub(crate) fn engage(
+        &self,
+        deadline: Instant,
+        reason: impl Into<String>,
+    ) -> RelayDispatchGateToken {
+        let mut state = self.state.lock();
+        state.generation = state.generation.wrapping_add(1);
+        let token = RelayDispatchGateToken {
+            generation: state.generation,
+        };
+        state.engagement = Some(RelayDispatchGateEngagement {
+            deadline,
+            reason: reason.into(),
+        });
+        self.closed.store(true, Ordering::Release);
+        token
+    }
+
+    pub(crate) fn release(&self, token: RelayDispatchGateToken) {
+        let mut state = self.state.lock();
+        if state.generation != token.generation || state.engagement.is_none() {
+            return;
+        }
+        state.engagement = None;
+        self.closed.store(false, Ordering::Release);
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.clear_if_expired();
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn wait_open(&self) {
+        if !self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        loop {
+            tokio::task::consume_budget().await;
+            let changed = self.changed.notified();
+            let Some((generation, deadline)) = ({
+                let state = self.state.lock();
+                state
+                    .engagement
+                    .as_ref()
+                    .map(|engagement| (state.generation, engagement.deadline))
+            }) else {
+                self.closed.store(false, Ordering::Release);
+                return;
+            };
+            if Instant::now() >= deadline {
+                self.clear_generation_if_expired(generation);
+                return;
+            }
+            if timeout_at(deadline, changed).await.is_err() {
+                self.clear_generation_if_expired(generation);
+            }
+            if !self.closed.load(Ordering::Acquire) {
+                return;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reason(&self) -> Option<String> {
+        self.clear_if_expired();
+        self.state
+            .lock()
+            .engagement
+            .as_ref()
+            .map(|engagement| engagement.reason.clone())
+    }
+
+    #[cfg(test)]
+    fn clear_if_expired(&self) {
+        if !self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let generation = {
+            let state = self.state.lock();
+            state.engagement.as_ref().and_then(|engagement| {
+                (Instant::now() >= engagement.deadline).then_some(state.generation)
+            })
+        };
+        if let Some(generation) = generation {
+            self.clear_generation_if_expired(generation);
+        }
+    }
+
+    fn clear_generation_if_expired(&self, generation: u64) {
+        let mut state = self.state.lock();
+        let should_clear = state.generation == generation
+            && state
+                .engagement
+                .as_ref()
+                .is_some_and(|engagement| Instant::now() >= engagement.deadline);
+        if !should_clear {
+            return;
+        }
+        let reason = state
+            .engagement
+            .take()
+            .map(|engagement| engagement.reason)
+            .unwrap_or_default();
+        self.closed.store(false, Ordering::Release);
+        drop(state);
+        debug!(reason, "relay dispatch gate deadline expired; reopening");
+        self.changed.notify_waiters();
+    }
+}
+
+impl Default for RelayDispatchGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct RelayBroadcast<T> {
     sender: Sender<T>,
     inner: Arc<RelayBroadcastInner<T>>,
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+
+    use super::RelayDispatchGate;
+
+    #[tokio::test]
+    async fn relay_dispatch_gate_releases_waiters_explicitly() {
+        let gate = RelayDispatchGate::new();
+        let token = gate.engage(Instant::now() + Duration::from_secs(1), "node swap");
+        assert!(gate.is_closed());
+        assert_eq!(gate.reason().as_deref(), Some("node swap"));
+
+        gate.release(token);
+        gate.wait_open().await;
+        assert!(!gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn relay_dispatch_gate_self_clears_at_its_deadline() {
+        let gate = RelayDispatchGate::new();
+        gate.engage(
+            Instant::now() + Duration::from_millis(10),
+            "leader may fail",
+        );
+
+        gate.wait_open().await;
+        assert!(!gate.is_closed());
+    }
+
+    #[tokio::test]
+    async fn stale_gate_hold_cannot_release_a_new_engagement() {
+        let gate = RelayDispatchGate::new();
+        let stale = gate.engage(Instant::now() + Duration::from_secs(1), "first");
+        let current = gate.engage(Instant::now() + Duration::from_secs(1), "second");
+
+        gate.release(stale);
+        assert!(gate.is_closed());
+        assert_eq!(gate.reason().as_deref(), Some("second"));
+        gate.release(current);
+        assert!(!gate.is_closed());
+    }
 }
 
 #[derive(Debug)]

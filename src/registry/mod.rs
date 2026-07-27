@@ -1,8 +1,6 @@
 mod stored;
 
-use std::{
-    cmp::Reverse, num::NonZeroUsize, path::Path, str::FromStr, sync::Arc as StdArc, time::Duration,
-};
+use std::{cmp::Reverse, path::Path, str::FromStr, sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::{
@@ -16,15 +14,15 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterRelay, AlterRelayOperation, AlterSchema, AlterWireSchemaStmt, Assignment,
-    AssignmentTarget, AvroType, BranchSelection, CodecEncoding, CodecEncodingRule, CodecWireFormat,
+    AlterJunction, AlterRelay, AlterSchema, AlterWireSchemaStmt, Assignment, AssignmentTarget,
+    AvroType, BranchSelection, CodecEncoding, CodecEncodingRule, CodecWireFormat,
     CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateMaterializer,
     CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchemaStmt, Domain,
     DomainSchedule, DropModel, EmitSink, EndpointType, Expression, Identifier, IngestSource,
     IngestTimestampSource, JsonType, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, Model, ModelKind, OutputBranch, ParseAsType, ProcessorOutput,
-    ProcessorOutputs, RouteConstruction, ScheduledNode, SchemaField,
+    MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputBranch, ParseAsType,
+    ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
 };
 use nervix_nspl::{
     vm_program::{
@@ -208,10 +206,22 @@ pub enum RuntimeChange {
     StopIngestor {
         ingestor: Identifier,
     },
-    SetRelayCapacity {
-        relay: Identifier,
-        capacity: NonZeroUsize,
-    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuiescePlan {
+    level: QuiesceLevel,
+    affected_entities: Vec<RegistryEntity>,
+}
+
+impl QuiescePlan {
+    pub fn level(&self) -> QuiesceLevel {
+        self.level
+    }
+
+    pub fn affected_entities(&self) -> &[RegistryEntity] {
+        &self.affected_entities
+    }
 }
 
 impl Registry {
@@ -292,6 +302,7 @@ impl Registry {
         })
     }
 
+    #[cfg(test)]
     pub fn apply_batch(
         &self,
         domain: &Domain,
@@ -306,6 +317,7 @@ impl Registry {
         )
     }
 
+    #[cfg(test)]
     pub fn drop_batch(
         &self,
         domain: &Domain,
@@ -318,6 +330,7 @@ impl Registry {
         )
     }
 
+    #[cfg(test)]
     pub fn alter_relay(
         &self,
         domain: &Domain,
@@ -330,30 +343,7 @@ impl Registry {
         )
     }
 
-    pub fn alter_schema(
-        &self,
-        domain: &Domain,
-        alter: AlterSchema,
-    ) -> Result<RuntimeChanges, Report<RegistryError>> {
-        self.apply_mutations(
-            domain,
-            vec![RegistryMutation::AlterSchema(alter)],
-            "schema alter",
-        )
-    }
-
-    pub fn alter_wire_schema(
-        &self,
-        domain: &Domain,
-        alter: AlterWireSchemaStmt,
-    ) -> Result<RuntimeChanges, Report<RegistryError>> {
-        self.apply_mutations(
-            domain,
-            vec![RegistryMutation::AlterWireSchema(alter)],
-            "wire schema alter",
-        )
-    }
-
+    #[cfg(test)]
     pub fn apply_mutation_batch(
         &self,
         domain: &Domain,
@@ -382,6 +372,7 @@ impl Registry {
             .collect())
     }
 
+    #[cfg(test)]
     fn apply_mutations(
         &self,
         domain: &Domain,
@@ -426,12 +417,9 @@ impl Registry {
         let current_state = self.build_domain_state(domain, &current_models)?;
         let mut candidate = current_models.clone();
 
-        let mut targeted_runtime_changes = Vec::new();
-        let mut targeted_runtime_changes_only = true;
         for mutation in mutations {
             match mutation {
                 RegistryMutation::Create(model) => {
-                    targeted_runtime_changes_only = false;
                     let identifier = model.identifier().clone();
                     let key = RegistryKey::from_model(&model);
 
@@ -458,7 +446,6 @@ impl Registry {
                     candidate.insert(key, model.as_ref().clone());
                 }
                 RegistryMutation::AlterSchema(alter) => {
-                    targeted_runtime_changes_only = false;
                     let key = RegistryKey::new(ModelKind::Schema, alter.schema.clone());
                     info!(
                         domain = domain.as_str(),
@@ -490,7 +477,6 @@ impl Registry {
                     })?;
                 }
                 RegistryMutation::AlterWireSchema(alter) => {
-                    targeted_runtime_changes_only = false;
                     let schema_name = alter.schema();
                     let key = RegistryKey::new(ModelKind::WireSchema, schema_name.clone());
                     info!(
@@ -546,25 +532,46 @@ impl Registry {
                             actual_kind: model.kind().as_str(),
                         }));
                     };
-                    match &alter.operation {
-                        AlterRelayOperation::SetCapacity { capacity } => {
-                            let Some(nonzero_capacity) = NonZeroUsize::new(*capacity) else {
-                                return Err(Report::new(RegistryError::InvalidModel {
-                                    domain: domain.as_str().to_string(),
-                                    identifier: alter.relay.as_str().to_string(),
-                                    reason: "relay capacity must be greater than 0".to_string(),
-                                }));
-                            };
-                            targeted_runtime_changes.push(RuntimeChange::SetRelayCapacity {
-                                relay: alter.relay.clone(),
-                                capacity: nonzero_capacity,
-                            });
-                        }
-                    }
-                    relay.apply_alter(&alter.operation);
+                    relay.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.relay.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
+                RegistryMutation::AlterJunction(alter) => {
+                    let key = RegistryKey::new(ModelKind::Junction, alter.junction.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.junction.as_str(),
+                        kind = ModelKind::Junction.as_str(),
+                        "staging junction alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.junction.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Junction(junction) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.junction.as_str().to_string(),
+                            expected_kind: ModelKind::Junction.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    junction.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.junction.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
                 }
                 RegistryMutation::Drop(drop) => {
-                    targeted_runtime_changes_only = false;
                     let key = RegistryKey::new(drop.kind, drop.name.clone());
                     info!(
                         domain = domain.as_str(),
@@ -616,11 +623,13 @@ impl Registry {
                 Some(_) => None,
             })
             .collect::<HashMap<_, _>>();
-        let runtime_changes = if targeted_runtime_changes_only {
+        let quiesce = classify_quiesce(&current_models, &candidate);
+        let is_noop = models_to_persist.is_empty() && drops_in_batch.is_empty();
+        let runtime_changes = if is_noop {
             RuntimeChanges {
                 domain: domain.clone(),
-                graph: (domain_state.graph.node_count() > 0).then_some(domain_state.graph.clone()),
-                changes: targeted_runtime_changes,
+                graph: None,
+                changes: Vec::new(),
                 state_invalidations: Vec::new(),
             }
         } else {
@@ -642,6 +651,7 @@ impl Registry {
             models_to_persist,
             drops_in_batch,
             runtime_changes,
+            quiesce,
         })
     }
 
@@ -847,23 +857,60 @@ impl Registry {
     }
 }
 
+fn classify_quiesce(
+    base: &HashMap<RegistryKey, Model>,
+    candidate: &HashMap<RegistryKey, Model>,
+) -> QuiescePlan {
+    let mut level = QuiesceLevel::Dynamic;
+    let mut affected_entities = Vec::new();
+
+    for (key, base_model) in base {
+        let change_level = match candidate.get(key) {
+            Some(candidate_model) => {
+                let aspects = base_model.change_aspects_against(candidate_model);
+                if aspects.is_empty() {
+                    continue;
+                }
+                aspects.quiesce_level()
+            }
+            None => ModelChangeAspect::EntityDropped.quiesce_level(),
+        };
+        level = level.max(change_level);
+        affected_entities.push(RegistryEntity {
+            kind: key.kind,
+            identifier: key.identifier.clone(),
+        });
+    }
+
+    for key in candidate.keys().filter(|key| !base.contains_key(*key)) {
+        level = level.max(ModelChangeAspect::EntityCreated.quiesce_level());
+        affected_entities.push(RegistryEntity {
+            kind: key.kind,
+            identifier: key.identifier.clone(),
+        });
+    }
+
+    affected_entities.sort_by(|left, right| {
+        left.kind
+            .as_str()
+            .cmp(right.kind.as_str())
+            .then_with(|| left.identifier.as_str().cmp(right.identifier.as_str()))
+    });
+    affected_entities.dedup();
+    QuiescePlan {
+        level,
+        affected_entities,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RegistryMutation {
     Create(Box<Model>),
     AlterSchema(AlterSchema),
     AlterWireSchema(AlterWireSchemaStmt),
     AlterRelay(AlterRelay),
+    AlterJunction(AlterJunction),
     Drop(DropModel),
-}
-
-impl RegistryMutation {
-    pub fn requires_domain_quiesce(&self) -> bool {
-        if let Self::AlterSchema(_) | Self::AlterWireSchema(_) = self {
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -882,6 +929,17 @@ pub struct PlannedMutations {
     models_to_persist: HashMap<RegistryKey, RegistryPersistMutation>,
     drops_in_batch: HashSet<RegistryKey>,
     runtime_changes: RuntimeChanges,
+    quiesce: QuiescePlan,
+}
+
+impl PlannedMutations {
+    pub fn quiesce(&self) -> &QuiescePlan {
+        &self.quiesce
+    }
+
+    pub fn is_noop(&self) -> bool {
+        self.models_to_persist.is_empty() && self.drops_in_batch.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2261,6 +2319,20 @@ pub struct ActiveGraph {
 }
 
 impl ActiveGraph {
+    pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
+        let models = schedule
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    RegistryKey::new(node.kind, node.identifier.clone()),
+                    node.config.as_ref().clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        DomainState::build(&schedule.domain, &models).map(|state| state.graph)
+    }
+
     pub fn node(&self, kind: ModelKind, identifier: &Identifier) -> Option<&ActiveNode> {
         self.indices
             .get(&RegistryKey::new(kind, identifier.clone()))
@@ -8994,21 +9066,22 @@ mod tests {
     use fjall::Database;
     use nervix_dataflow_graph::DataflowEdgeKind;
     use nervix_models::{
-        AckMode, AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation,
-        AlterWireSchema, AlterWireSchemaOperation, AlterWireSchemaStmt, Assignment,
-        AssignmentTarget, AssignmentTargetScope, BranchSelection, ClientConfigEntry, CodecEncoding,
-        CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-        CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-        CreateBranch, CreateClientHttp, CreateClientKafka, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
-        CreateReingestor, CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule,
-        DropModel, EmitSink, ErrorPolicies, Expression, FieldReference, FieldScope,
-        GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource, Inheritance,
-        InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-        MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
-        MqttSession, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        RelayBranching, ScheduledNode, SchemaField, WindowBound, WireSchemaField,
+        AckMode, AlterJunction, AlterJunctionOperation, AlterRelay, AlterRelayOperation,
+        AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
+        AlterWireSchemaStmt, Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection,
+        ClientConfigEntry, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+        CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CorrelationTimeoutAction,
+        CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientHttp,
+        CreateClientKafka, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+        CreateGenerator, CreateIngestor, CreateJunction, CreateReingestor, CreateRelay,
+        CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
+        CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink, ErrorPolicies,
+        Expression, FieldReference, FieldScope, GeneralErrorPolicy, Identifier, IngestSource,
+        IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model,
+        ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
+        ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
     use super::{ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange};
@@ -9991,16 +10064,15 @@ mod tests {
                 &domain,
                 AlterRelay {
                     relay: identifier("notifications"),
-                    operation: AlterRelayOperation::SetCapacity { capacity: 5 },
+                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
                 },
             )
             .expect("alter should succeed");
-        assert_eq!(changes.changes.len(), 1);
-        let RuntimeChange::SetRelayCapacity { relay, capacity } = &changes.changes[0] else {
-            panic!("alter relay capacity should produce a targeted capacity change");
-        };
-        assert_eq!(relay, &identifier("notifications"));
-        assert_eq!(capacity.get(), 5);
+        assert!(
+            changes.changes.is_empty(),
+            "capacity updates are applied from the published schedule delta"
+        );
+        assert!(changes.graph.is_some());
 
         let stored = registry
             .get(&domain, ModelKind::Relay, &identifier("notifications"))
@@ -10026,6 +10098,155 @@ mod tests {
     }
 
     #[test]
+    fn mutation_plan_classifies_no_op_and_relay_capacity_from_the_model_diff() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    relay("notifications", "event_schema"),
+                ],
+            )
+            .expect("initial graph should succeed");
+
+        let noop = registry
+            .plan_mutations(
+                &domain,
+                &[RegistryMutation::AlterRelay(AlterRelay {
+                    relay: identifier("notifications"),
+                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 1 }],
+                })],
+            )
+            .expect("no-op alter should plan");
+        assert!(noop.is_noop());
+        assert_eq!(noop.quiesce().level(), QuiesceLevel::Dynamic);
+        assert!(noop.quiesce().affected_entities().is_empty());
+
+        let capacity = registry
+            .plan_mutations(
+                &domain,
+                &[RegistryMutation::AlterRelay(AlterRelay {
+                    relay: identifier("notifications"),
+                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
+                })],
+            )
+            .expect("capacity alter should plan");
+        assert!(!capacity.is_noop());
+        assert_eq!(capacity.quiesce().level(), QuiesceLevel::Dynamic);
+        assert_eq!(
+            capacity.quiesce().affected_entities(),
+            &[super::RegistryEntity {
+                kind: ModelKind::Relay,
+                identifier: identifier("notifications"),
+            }]
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn junction_alter_is_applied_before_diff_based_quiesce_classification() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    relay("incoming", "event_schema"),
+                    relay("outgoing", "event_schema"),
+                    Model::Junction(CreateJunction {
+                        name: identifier("route_events"),
+                        from: ProcessorInputs::single(identifier("incoming")),
+                        output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                            "outgoing",
+                        )))
+                        .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                        branched_by: BranchSelection::unbranched(),
+                        mode: AckMode::Attached,
+                        filter_where: None,
+                        materialized_state: Vec::new(),
+                    }),
+                ],
+            )
+            .expect("initial graph should succeed");
+
+        let dynamic = registry
+            .plan_mutations(
+                &domain,
+                &[RegistryMutation::AlterJunction(AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::SetFilterWhere {
+                        where_clause: nervix_nspl::parse_expression("input.value != ''")
+                            .expect("valid expression"),
+                    }],
+                })],
+            )
+            .expect("filter alter should plan");
+        assert_eq!(dynamic.quiesce().level(), QuiesceLevel::Dynamic);
+
+        let entity_pause = registry
+            .plan_mutations(
+                &domain,
+                &[RegistryMutation::AlterJunction(AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::SetMode {
+                        mode: AckMode::Detached,
+                    }],
+                })],
+            )
+            .expect("mode alter should plan");
+        assert_eq!(entity_pause.quiesce().level(), QuiesceLevel::EntityPause);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn relay_drop_create_same_key_is_classified_as_a_model_change() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    schema("event_schema_v2"),
+                    relay("notifications", "event_schema"),
+                ],
+            )
+            .expect("initial graph should succeed");
+
+        let planned = registry
+            .plan_mutations(
+                &domain,
+                &[
+                    RegistryMutation::Drop(DropModel {
+                        kind: ModelKind::Relay,
+                        name: identifier("notifications"),
+                    }),
+                    RegistryMutation::Create(Box::new(relay("notifications", "event_schema_v2"))),
+                ],
+            )
+            .expect("relay recreation should plan");
+
+        assert_eq!(planned.quiesce().level(), QuiesceLevel::DomainPause);
+        assert_eq!(
+            planned.quiesce().affected_entities(),
+            &[super::RegistryEntity {
+                kind: ModelKind::Relay,
+                identifier: identifier("notifications"),
+            }]
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn alter_relay_rejects_missing_relay_without_persisting() {
         let path = temp_db_path();
         let registry = Registry::open(&path).expect("registry should open");
@@ -10035,7 +10256,7 @@ mod tests {
             &domain,
             AlterRelay {
                 relay: identifier("notifications"),
-                operation: AlterRelayOperation::SetCapacity { capacity: 5 },
+                operations: vec![AlterRelayOperation::SetCapacity { capacity: 5 }],
             },
         );
         assert!(matches!(
@@ -11458,7 +11679,6 @@ mod tests {
             .filter_map(|change| match change {
                 RuntimeChange::StopIngestor { ingestor } => Some(ingestor.as_str().to_string()),
                 RuntimeChange::StartIngestor { .. } => None,
-                RuntimeChange::SetRelayCapacity { .. } => None,
             })
             .collect::<Vec<_>>();
         let start_names = changes
@@ -11469,7 +11689,6 @@ mod tests {
                     Some(ingestor.name.as_str().to_string())
                 }
                 RuntimeChange::StopIngestor { .. } => None,
-                RuntimeChange::SetRelayCapacity { .. } => None,
             })
             .collect::<Vec<_>>();
 

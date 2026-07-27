@@ -2,6 +2,7 @@ mod canonical;
 mod expression;
 mod message_error;
 mod names;
+mod quiesce;
 mod remote;
 mod resource;
 mod schema;
@@ -20,6 +21,7 @@ pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };
 pub use names::{Domain, Identifier, NameError};
+pub use quiesce::{DynamicModelUpdate, ModelChangeAspect, ModelChangeAspects, QuiesceLevel};
 pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteDecodedRecord,
     RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
@@ -36,13 +38,14 @@ pub use schema::{
     ParseAsType, SchemaField, WireSchemaField, WireSchemaFormat, WireSchemaStrictness,
 };
 pub use statement::{
-    AckMode, AlterRelay, AlterRelayOperation, AzureBlobConfigEntry, BranchEviction,
-    BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, ClientConfigEntry,
-    ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-    CodecProtobufConfig, CodecWireFormat, CordonNode, CorrelationTimeoutAction,
-    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob,
-    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    AckMode, AlterJunction, AlterJunctionError, AlterJunctionOperation, AlterRelay,
+    AlterRelayError, AlterRelayOperation, AzureBlobConfigEntry, BranchEviction, BranchSelection,
+    ClickHouseConfigEntry, ClickHouseValueMapping, ClientConfigEntry, ClusterSchedule,
+    CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+    CodecWireFormat, CordonNode, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+    CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
     CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
     CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
     CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateDomain,

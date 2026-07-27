@@ -24,6 +24,7 @@ pub enum Statement {
     AlterSchema(AlterSchema),
     AlterWireSchema(AlterWireSchemaStmt),
     AlterRelay(AlterRelay),
+    AlterJunction(AlterJunction),
     Drop(DropModel),
     DropNode(DropNode),
     CordonNode(CordonNode),
@@ -57,6 +58,7 @@ impl Statement {
             | Self::AlterSchema(_)
             | Self::AlterWireSchema(_)
             | Self::AlterRelay(_)
+            | Self::AlterJunction(_)
             | Self::Drop(_) => true,
             Self::CreateDomain(_)
             | Self::CreateUser(_)
@@ -2059,24 +2061,78 @@ pub struct CreateRelay {
 }
 
 impl CreateRelay {
-    pub fn apply_alter(&mut self, operation: &AlterRelayOperation) {
+    pub fn apply_alter(&mut self, alter: &AlterRelay) -> Result<(), AlterRelayError> {
+        if self.name != alter.relay {
+            return Err(AlterRelayError::RelayNameMismatch {
+                stored: self.name.clone(),
+                requested: alter.relay.clone(),
+            });
+        }
+
+        let mut candidate = self.clone();
+        for operation in &alter.operations {
+            candidate.apply_alter_operation(operation)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn apply_alter_operation(
+        &mut self,
+        operation: &AlterRelayOperation,
+    ) -> Result<(), AlterRelayError> {
         match operation {
             AlterRelayOperation::SetCapacity { capacity } => {
+                if *capacity == 0 {
+                    return Err(AlterRelayError::InvalidCapacity);
+                }
                 self.buffer = *capacity;
             }
+            AlterRelayOperation::SetSchema { schema } => {
+                self.schema = schema.clone();
+            }
+            AlterRelayOperation::SetBranching { branching } => {
+                self.branching = branching.clone();
+            }
+            AlterRelayOperation::SetMaterializedState => {
+                self.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+            }
+            AlterRelayOperation::DropMaterializedState => {
+                if self.materialized_state.take().is_none() {
+                    return Err(AlterRelayError::MaterializedStateNotConfigured);
+                }
+            }
         }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlterRelay {
     pub relay: Identifier,
-    pub operation: AlterRelayOperation,
+    pub operations: Vec<AlterRelayOperation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterRelayOperation {
     SetCapacity { capacity: usize },
+    SetSchema { schema: Identifier },
+    SetBranching { branching: RelayBranching },
+    SetMaterializedState,
+    DropMaterializedState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterRelayError {
+    #[error("ALTER targets relay `{requested}`, but the stored relay is `{stored}`")]
+    RelayNameMismatch {
+        stored: Identifier,
+        requested: Identifier,
+    },
+    #[error("relay capacity must be greater than 0")]
+    InvalidCapacity,
+    #[error("relay materialized state is not configured")]
+    MaterializedStateNotConfigured,
 }
 
 pub const fn default_relay_buffer() -> usize {
@@ -2269,6 +2325,274 @@ pub struct CreateJunction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterJunction {
+    pub junction: Identifier,
+    pub operations: Vec<AlterJunctionOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlterJunctionOperation {
+    AddFrom {
+        relay: Identifier,
+        where_clause: Option<crate::Expression>,
+    },
+    DropFrom {
+        relay: Identifier,
+    },
+    AlterFromSetWhere {
+        relay: Identifier,
+        where_clause: crate::Expression,
+    },
+    AlterFromDropWhere {
+        relay: Identifier,
+    },
+    SetCollect {
+        policy: InputCollectPolicy,
+    },
+    DropCollect,
+    SetFilterWhere {
+        where_clause: crate::Expression,
+    },
+    DropFilterWhere,
+    SetMode {
+        mode: AckMode,
+    },
+    SetBranching {
+        branching: BranchSelection,
+    },
+    AddMaterializedState {
+        dependency: crate::MaterializedStateDependency,
+    },
+    DropMaterializedState {
+        relay: Identifier,
+    },
+    AlterMaterializedState {
+        relay: Identifier,
+        policy: crate::MaterializedStatePolicy,
+    },
+    AddRoute {
+        route: ProcessorOutput,
+    },
+    DropRoute {
+        relay: Identifier,
+    },
+    ReplaceRoute {
+        route: ProcessorOutput,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterJunctionError {
+    #[error("ALTER targets junction `{requested}`, but the stored junction is `{stored}`")]
+    JunctionNameMismatch {
+        stored: Identifier,
+        requested: Identifier,
+    },
+    #[error("input relay `{relay}` is already configured")]
+    InputAlreadyExists { relay: Identifier },
+    #[error("input relay `{relay}` is not configured")]
+    InputNotFound { relay: Identifier },
+    #[error("input relay `{relay}` has no WHERE clause")]
+    InputWhereNotConfigured { relay: Identifier },
+    #[error("a junction must retain at least one input")]
+    CannotDropLastInput,
+    #[error("materialized-state dependency `{relay}` is already configured")]
+    MaterializedStateAlreadyConfigured { relay: Identifier },
+    #[error("materialized-state dependency `{relay}` is not configured")]
+    MaterializedStateNotConfigured { relay: Identifier },
+    #[error("route target `{relay}` is not configured")]
+    RouteTargetNotFound { relay: Identifier },
+    #[error("route target `{relay}` is ambiguous because it is configured more than once")]
+    RouteTargetAmbiguous { relay: Identifier },
+    #[error("a junction must retain at least one route")]
+    CannotDropLastRoute,
+}
+
+impl CreateJunction {
+    pub fn apply_alter(&mut self, alter: &AlterJunction) -> Result<(), AlterJunctionError> {
+        if self.name != alter.junction {
+            return Err(AlterJunctionError::JunctionNameMismatch {
+                stored: self.name.clone(),
+                requested: alter.junction.clone(),
+            });
+        }
+
+        let mut candidate = self.clone();
+        for operation in &alter.operations {
+            candidate.apply_alter_operation(operation)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn apply_alter_operation(
+        &mut self,
+        operation: &AlterJunctionOperation,
+    ) -> Result<(), AlterJunctionError> {
+        match operation {
+            AlterJunctionOperation::AddFrom {
+                relay,
+                where_clause,
+            } => {
+                self.ensure_input_absent(relay)?;
+                self.from.from.push(relay.clone());
+                if let Some(where_clause) = where_clause {
+                    self.from.r#where.push(ProcessorInputWhere {
+                        relay: relay.clone(),
+                        where_clause: where_clause.clone(),
+                    });
+                }
+            }
+            AlterJunctionOperation::DropFrom { relay } => {
+                let index = self.input_index(relay)?;
+                if self.from.from.len() == 1 {
+                    return Err(AlterJunctionError::CannotDropLastInput);
+                }
+                self.from.from.remove(index);
+                self.from
+                    .r#where
+                    .retain(|input_where| input_where.relay != *relay);
+            }
+            AlterJunctionOperation::AlterFromSetWhere {
+                relay,
+                where_clause,
+            } => {
+                self.input_index(relay)?;
+                if let Some(input_where) = self
+                    .from
+                    .r#where
+                    .iter_mut()
+                    .find(|input_where| input_where.relay == *relay)
+                {
+                    input_where.where_clause = where_clause.clone();
+                } else {
+                    self.from.r#where.push(ProcessorInputWhere {
+                        relay: relay.clone(),
+                        where_clause: where_clause.clone(),
+                    });
+                }
+            }
+            AlterJunctionOperation::AlterFromDropWhere { relay } => {
+                self.input_index(relay)?;
+                let Some(index) = self
+                    .from
+                    .r#where
+                    .iter()
+                    .position(|input_where| input_where.relay == *relay)
+                else {
+                    return Err(AlterJunctionError::InputWhereNotConfigured {
+                        relay: relay.clone(),
+                    });
+                };
+                self.from.r#where.remove(index);
+            }
+            AlterJunctionOperation::SetCollect { policy } => {
+                self.from.collect_policy = Some(policy.clone());
+            }
+            AlterJunctionOperation::DropCollect => {
+                self.from.collect_policy = None;
+            }
+            AlterJunctionOperation::SetFilterWhere { where_clause } => {
+                self.filter_where = Some(where_clause.clone());
+            }
+            AlterJunctionOperation::DropFilterWhere => {
+                self.filter_where = None;
+            }
+            AlterJunctionOperation::SetMode { mode } => {
+                self.mode = *mode;
+            }
+            AlterJunctionOperation::SetBranching { branching } => {
+                self.branched_by = branching.clone();
+            }
+            AlterJunctionOperation::AddMaterializedState { dependency } => {
+                if self
+                    .materialized_state
+                    .iter()
+                    .any(|existing| existing.relay == dependency.relay)
+                {
+                    return Err(AlterJunctionError::MaterializedStateAlreadyConfigured {
+                        relay: dependency.relay.clone(),
+                    });
+                }
+                self.materialized_state.push(dependency.clone());
+            }
+            AlterJunctionOperation::DropMaterializedState { relay } => {
+                let index = self.materialized_state_index(relay)?;
+                self.materialized_state.remove(index);
+            }
+            AlterJunctionOperation::AlterMaterializedState { relay, policy } => {
+                let index = self.materialized_state_index(relay)?;
+                self.materialized_state[index].policy = policy.clone();
+            }
+            AlterJunctionOperation::AddRoute { route } => {
+                self.output_routes.routes.push(route.clone());
+            }
+            AlterJunctionOperation::DropRoute { relay } => {
+                let index = self.unique_route_index(relay)?;
+                if self.output_routes.routes.len() == 1 {
+                    return Err(AlterJunctionError::CannotDropLastRoute);
+                }
+                self.output_routes.routes.remove(index);
+            }
+            AlterJunctionOperation::ReplaceRoute { route } => {
+                let index = self.unique_route_index(&route.relay)?;
+                self.output_routes.routes[index] = route.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn input_index(&self, relay: &Identifier) -> Result<usize, AlterJunctionError> {
+        self.from
+            .from
+            .iter()
+            .position(|candidate| candidate == relay)
+            .ok_or_else(|| AlterJunctionError::InputNotFound {
+                relay: relay.clone(),
+            })
+    }
+
+    fn ensure_input_absent(&self, relay: &Identifier) -> Result<(), AlterJunctionError> {
+        if self.from.from.iter().any(|candidate| candidate == relay) {
+            Err(AlterJunctionError::InputAlreadyExists {
+                relay: relay.clone(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn materialized_state_index(&self, relay: &Identifier) -> Result<usize, AlterJunctionError> {
+        self.materialized_state
+            .iter()
+            .position(|dependency| dependency.relay == *relay)
+            .ok_or_else(|| AlterJunctionError::MaterializedStateNotConfigured {
+                relay: relay.clone(),
+            })
+    }
+
+    fn unique_route_index(&self, relay: &Identifier) -> Result<usize, AlterJunctionError> {
+        let mut indexes = self
+            .output_routes
+            .routes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
+        let Some(index) = indexes.next() else {
+            return Err(AlterJunctionError::RouteTargetNotFound {
+                relay: relay.clone(),
+            });
+        };
+        if indexes.next().is_some() {
+            return Err(AlterJunctionError::RouteTargetAmbiguous {
+                relay: relay.clone(),
+            });
+        }
+        Ok(index)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateDeduplicator {
     pub name: Identifier,
     pub from: ProcessorInputs,
@@ -2404,14 +2728,17 @@ pub enum AckMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        AckMode, BranchSelection, ClusterSchedule, CreateSchema, DomainSchedule,
-        GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
-        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule, Model,
-        ModelKind, ScheduledNode,
+        AckMode, AlterJunction, AlterJunctionError, AlterJunctionOperation, AlterRelay,
+        AlterRelayError, AlterRelayOperation, BranchSelection, ClusterSchedule, CreateRelay,
+        CreateSchema, DomainSchedule, GeneralErrorPolicy, InferencerTensorDimension,
+        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
+        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, RelayBranching,
+        ScheduledNode,
     };
     use crate::{
-        CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Identifier, IngestSource,
-        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField,
+        CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Expression, Identifier,
+        IngestSource, Literal, MaterializedStateDependency, MaterializedStatePolicy, ParseAsType,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -2684,5 +3011,378 @@ mod tests {
         assert_eq!(schedule.observed_partitions, vec![0, 1, 2, 3]);
         assert_eq!(schedule.rebalance_epoch, 7);
         assert_eq!(schedule.instance_assignments, vec![vec![0, 2], vec![1, 3]]);
+    }
+
+    #[test]
+    fn relay_alter_applies_operations_in_order_and_is_atomic() {
+        let mut relay = CreateRelay {
+            name: identifier("events"),
+            schema: identifier("event_v1"),
+            buffer: 1,
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        };
+        relay
+            .apply_alter(&AlterRelay {
+                relay: identifier("events"),
+                operations: vec![
+                    AlterRelayOperation::SetCapacity { capacity: 8 },
+                    AlterRelayOperation::SetSchema {
+                        schema: identifier("event_v2"),
+                    },
+                    AlterRelayOperation::SetCapacity { capacity: 16 },
+                    AlterRelayOperation::SetMaterializedState,
+                ],
+            })
+            .expect("relay alter should apply");
+        assert_eq!(relay.buffer, 16);
+        assert_eq!(relay.schema, identifier("event_v2"));
+        assert_eq!(
+            relay.materialized_state,
+            Some(MaterializedRelayState::LastByTimestamp)
+        );
+
+        let before = relay.clone();
+        let error = relay
+            .apply_alter(&AlterRelay {
+                relay: identifier("events"),
+                operations: vec![
+                    AlterRelayOperation::SetCapacity { capacity: 32 },
+                    AlterRelayOperation::DropMaterializedState,
+                    AlterRelayOperation::DropMaterializedState,
+                ],
+            })
+            .expect_err("the second drop must fail");
+        assert_eq!(error, AlterRelayError::MaterializedStateNotConfigured);
+        assert_eq!(relay, before, "failed ALTER must not partially apply");
+    }
+
+    #[test]
+    fn junction_alter_preserves_order_and_rejects_ambiguous_routes_atomically() {
+        let mut junction = CreateJunction {
+            name: identifier("route_events"),
+            from: ProcessorInputs::new(vec![identifier("incoming")], Vec::new()),
+            output_routes: ProcessorOutputs::new(vec![
+                ProcessorOutput::with_flush_policy(
+                    identifier("accepted"),
+                    "100ms".to_string(),
+                    Some("1MiB".to_string()),
+                ),
+                ProcessorOutput::with_flush_policy(
+                    identifier("accepted"),
+                    "200ms".to_string(),
+                    Some("2MiB".to_string()),
+                ),
+            ]),
+            branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        };
+        let before = junction.clone();
+        let error = junction
+            .apply_alter(&AlterJunction {
+                junction: identifier("route_events"),
+                operations: vec![
+                    AlterJunctionOperation::SetMode {
+                        mode: AckMode::Detached,
+                    },
+                    AlterJunctionOperation::DropRoute {
+                        relay: identifier("accepted"),
+                    },
+                ],
+            })
+            .expect_err("duplicate route targets must be ambiguous");
+        assert_eq!(
+            error,
+            AlterJunctionError::RouteTargetAmbiguous {
+                relay: identifier("accepted"),
+            }
+        );
+        assert_eq!(junction, before, "failed ALTER must not partially apply");
+    }
+
+    #[test]
+    fn junction_alter_applies_ordered_collection_filter_dependency_and_route_updates() {
+        let mut junction = CreateJunction {
+            name: identifier("route_events"),
+            from: ProcessorInputs::single(identifier("incoming_a")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                identifier("accepted"),
+                "100ms".to_string(),
+                Some("1MiB".to_string()),
+            )]),
+            branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        };
+        let true_expression = Expression::Literal(Literal::Bool(true));
+        let false_expression = Expression::Literal(Literal::Bool(false));
+        let replacement = ProcessorOutput::with_flush_policy(
+            identifier("accepted"),
+            "250ms".to_string(),
+            Some("2MiB".to_string()),
+        );
+        junction
+            .apply_alter(&AlterJunction {
+                junction: identifier("route_events"),
+                operations: vec![
+                    AlterJunctionOperation::AddFrom {
+                        relay: identifier("incoming_b"),
+                        where_clause: Some(true_expression.clone()),
+                    },
+                    AlterJunctionOperation::AlterFromSetWhere {
+                        relay: identifier("incoming_b"),
+                        where_clause: false_expression.clone(),
+                    },
+                    AlterJunctionOperation::SetFilterWhere {
+                        where_clause: true_expression.clone(),
+                    },
+                    AlterJunctionOperation::SetFilterWhere {
+                        where_clause: false_expression.clone(),
+                    },
+                    AlterJunctionOperation::AddMaterializedState {
+                        dependency: MaterializedStateDependency {
+                            relay: identifier("profiles"),
+                            policy: MaterializedStatePolicy::RequiredWait,
+                        },
+                    },
+                    AlterJunctionOperation::AddMaterializedState {
+                        dependency: MaterializedStateDependency {
+                            relay: identifier("accounts"),
+                            policy: MaterializedStatePolicy::RequiredSkip,
+                        },
+                    },
+                    AlterJunctionOperation::AlterMaterializedState {
+                        relay: identifier("profiles"),
+                        policy: MaterializedStatePolicy::RequiredSkip,
+                    },
+                    AlterJunctionOperation::AddRoute {
+                        route: ProcessorOutput::with_flush_policy(
+                            identifier("audit"),
+                            "100ms".to_string(),
+                            Some("1MiB".to_string()),
+                        ),
+                    },
+                    AlterJunctionOperation::ReplaceRoute {
+                        route: replacement.clone(),
+                    },
+                    AlterJunctionOperation::SetMode {
+                        mode: AckMode::Detached,
+                    },
+                ],
+            })
+            .expect("ordered junction alter should apply");
+
+        assert_eq!(
+            junction.from.from,
+            vec![identifier("incoming_a"), identifier("incoming_b")]
+        );
+        assert_eq!(junction.from.r#where[0].where_clause, false_expression);
+        assert_eq!(
+            junction.filter_where,
+            Some(Expression::Literal(Literal::Bool(false)))
+        );
+        assert_eq!(
+            junction
+                .materialized_state
+                .iter()
+                .map(|dependency| dependency.relay.clone())
+                .collect::<Vec<_>>(),
+            vec![identifier("profiles"), identifier("accounts")]
+        );
+        assert_eq!(
+            junction.materialized_state[0].policy,
+            MaterializedStatePolicy::RequiredSkip
+        );
+        assert_eq!(
+            junction
+                .output_routes
+                .routes
+                .iter()
+                .map(|route| route.relay.clone())
+                .collect::<Vec<_>>(),
+            vec![identifier("accepted"), identifier("audit")]
+        );
+        assert_eq!(junction.output_routes.routes[0], replacement);
+        assert_eq!(junction.mode, AckMode::Detached);
+    }
+
+    #[test]
+    fn relay_alter_reports_each_typed_error() {
+        let relay = CreateRelay {
+            name: identifier("events"),
+            schema: identifier("event"),
+            buffer: 1,
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        };
+        let cases = [
+            (
+                AlterRelay {
+                    relay: identifier("other"),
+                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 2 }],
+                },
+                AlterRelayError::RelayNameMismatch {
+                    stored: identifier("events"),
+                    requested: identifier("other"),
+                },
+            ),
+            (
+                AlterRelay {
+                    relay: identifier("events"),
+                    operations: vec![AlterRelayOperation::SetCapacity { capacity: 0 }],
+                },
+                AlterRelayError::InvalidCapacity,
+            ),
+            (
+                AlterRelay {
+                    relay: identifier("events"),
+                    operations: vec![AlterRelayOperation::DropMaterializedState],
+                },
+                AlterRelayError::MaterializedStateNotConfigured,
+            ),
+        ];
+        for (alter, expected) in cases {
+            let mut candidate = relay.clone();
+            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(candidate, relay);
+        }
+    }
+
+    #[test]
+    fn junction_alter_reports_each_typed_lookup_and_last_element_error() {
+        let base = CreateJunction {
+            name: identifier("route_events"),
+            from: ProcessorInputs::single(identifier("incoming")),
+            output_routes: ProcessorOutputs::single(identifier("accepted")),
+            branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: vec![MaterializedStateDependency {
+                relay: identifier("profiles"),
+                policy: MaterializedStatePolicy::RequiredWait,
+            }],
+        };
+        let true_expression = Expression::Literal(Literal::Bool(true));
+        let cases = vec![
+            (
+                AlterJunction {
+                    junction: identifier("other"),
+                    operations: Vec::new(),
+                },
+                AlterJunctionError::JunctionNameMismatch {
+                    stored: identifier("route_events"),
+                    requested: identifier("other"),
+                },
+            ),
+            (
+                AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::AddFrom {
+                        relay: identifier("incoming"),
+                        where_clause: None,
+                    }],
+                },
+                AlterJunctionError::InputAlreadyExists {
+                    relay: identifier("incoming"),
+                },
+            ),
+            (
+                AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::DropFrom {
+                        relay: identifier("missing"),
+                    }],
+                },
+                AlterJunctionError::InputNotFound {
+                    relay: identifier("missing"),
+                },
+            ),
+            (
+                AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::AlterFromDropWhere {
+                        relay: identifier("incoming"),
+                    }],
+                },
+                AlterJunctionError::InputWhereNotConfigured {
+                    relay: identifier("incoming"),
+                },
+            ),
+            (
+                AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::DropFrom {
+                        relay: identifier("incoming"),
+                    }],
+                },
+                AlterJunctionError::CannotDropLastInput,
+            ),
+            (
+                AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::AddMaterializedState {
+                        dependency: MaterializedStateDependency {
+                            relay: identifier("profiles"),
+                            policy: MaterializedStatePolicy::RequiredSkip,
+                        },
+                    }],
+                },
+                AlterJunctionError::MaterializedStateAlreadyConfigured {
+                    relay: identifier("profiles"),
+                },
+            ),
+            (
+                AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::AlterMaterializedState {
+                        relay: identifier("missing"),
+                        policy: MaterializedStatePolicy::RequiredSkip,
+                    }],
+                },
+                AlterJunctionError::MaterializedStateNotConfigured {
+                    relay: identifier("missing"),
+                },
+            ),
+            (
+                AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::ReplaceRoute {
+                        route: ProcessorOutput::new(identifier("missing")),
+                    }],
+                },
+                AlterJunctionError::RouteTargetNotFound {
+                    relay: identifier("missing"),
+                },
+            ),
+            (
+                AlterJunction {
+                    junction: identifier("route_events"),
+                    operations: vec![AlterJunctionOperation::DropRoute {
+                        relay: identifier("accepted"),
+                    }],
+                },
+                AlterJunctionError::CannotDropLastRoute,
+            ),
+        ];
+
+        for (alter, expected) in cases {
+            let mut candidate = base.clone();
+            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(candidate, base);
+        }
+
+        let mut with_where = base.clone();
+        with_where
+            .apply_alter(&AlterJunction {
+                junction: identifier("route_events"),
+                operations: vec![AlterJunctionOperation::AlterFromSetWhere {
+                    relay: identifier("incoming"),
+                    where_clause: true_expression,
+                }],
+            })
+            .expect("set WHERE should succeed");
     }
 }

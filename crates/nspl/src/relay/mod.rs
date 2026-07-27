@@ -7,9 +7,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, branch_ref, current_word_prefix, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, relay_name, relay_ref, schema_ref,
-        suggestions_from_errors, tok, word_raw,
+        ParseError, ParseFromSourceError, alter_op_separator, branch_ref, current_word_prefix,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, relay_name, relay_ref,
+        schema_ref, suggestions_from_errors, tok, word_raw,
     },
 };
 
@@ -81,17 +81,51 @@ pub fn create_relay_parser<'src>()
 
 pub fn alter_relay_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterRelay, extra::Err<ParseError<'src>>> + Clone {
+    let operation = choice((
+        kw(Identifier::Set)
+            .ignore_then(kw(Identifier::Capacity))
+            .ignore_then(positive_usize())
+            .map(|capacity| AlterRelayOperation::SetCapacity { capacity }),
+        kw(Identifier::Set)
+            .ignore_then(kw(Identifier::Schema))
+            .ignore_then(schema_ref())
+            .map(|schema| AlterRelayOperation::SetSchema { schema }),
+        kw(Identifier::Set)
+            .ignore_then(kw_phrase2(Identifier::Branched, Identifier::By))
+            .ignore_then(branch_ref())
+            .map(|branch| AlterRelayOperation::SetBranching {
+                branching: RelayBranching::branched_by(branch),
+            }),
+        kw(Identifier::Set)
+            .ignore_then(kw(Identifier::Unbranched))
+            .to(AlterRelayOperation::SetBranching {
+                branching: RelayBranching::unbranched(),
+            }),
+        kw(Identifier::Set)
+            .ignore_then(kw(Identifier::Materialized))
+            .ignore_then(kw(Identifier::State))
+            .ignore_then(kw(Identifier::Last))
+            .ignore_then(kw(Identifier::By))
+            .ignore_then(kw(Identifier::Timestamp))
+            .to(AlterRelayOperation::SetMaterializedState),
+        kw(Identifier::Drop)
+            .ignore_then(kw(Identifier::Materialized))
+            .ignore_then(kw(Identifier::State))
+            .to(AlterRelayOperation::DropMaterializedState),
+    ))
+    .boxed();
+
     kw(Identifier::Alter)
         .ignore_then(kw(Identifier::Relay))
         .ignore_then(relay_ref())
-        .then_ignore(kw(Identifier::Set))
-        .then_ignore(kw(Identifier::Capacity))
-        .then(positive_usize())
+        .then(
+            operation
+                .separated_by(alter_op_separator())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
         .then_ignore(tok(Token::Semicolon).or_not())
-        .map(|(relay, capacity)| AlterRelay {
-            relay,
-            operation: AlterRelayOperation::SetCapacity { capacity },
-        })
+        .map(|(relay, operations)| AlterRelay { relay, operations })
 }
 
 pub fn parse_create_stream_tokens(
@@ -250,8 +284,39 @@ mod tests {
 
         assert_eq!(parsed.relay.as_str(), "notifications");
         assert_eq!(
-            parsed.operation,
-            AlterRelayOperation::SetCapacity { capacity: 32 }
+            parsed.operations,
+            vec![AlterRelayOperation::SetCapacity { capacity: 32 }]
+        );
+    }
+
+    #[test]
+    fn parses_full_alter_relay_operation_list_in_written_order() {
+        let parsed = parse_alter_relay(
+            "ALTER RELAY notifications SET CAPACITY 8, SET SCHEMA event_v2, SET BRANCHED BY \
+             by_tenant, SET UNBRANCHED, SET MATERIALIZED STATE LAST BY TIMESTAMP, DROP \
+             MATERIALIZED STATE;",
+        )
+        .expect("full relay alter should parse");
+
+        assert_eq!(
+            parsed.operations,
+            vec![
+                AlterRelayOperation::SetCapacity { capacity: 8 },
+                AlterRelayOperation::SetSchema {
+                    schema: nervix_models::Identifier::try_from("event_v2")
+                        .expect("valid identifier"),
+                },
+                AlterRelayOperation::SetBranching {
+                    branching: RelayBranching::branched_by(
+                        nervix_models::Identifier::try_from("by_tenant").expect("valid identifier"),
+                    ),
+                },
+                AlterRelayOperation::SetBranching {
+                    branching: RelayBranching::unbranched(),
+                },
+                AlterRelayOperation::SetMaterializedState,
+                AlterRelayOperation::DropMaterializedState,
+            ]
         );
     }
 

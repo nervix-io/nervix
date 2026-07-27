@@ -50,10 +50,12 @@ Use `BEGIN; ... COMMIT;` when sending multiple server statements in one request.
 commands such as `USE` and resource uploads outside transactions. Do not imply that one undivided
 request can mix those phases.
 
-For schema evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the
-transaction semantics in `Control Plane`. Put every interdependent `CREATE`, schema or relay
-`ALTER`, and `DROP` for one domain in the same transaction; do not invent a user-facing pause
-command.
+For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
+and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, schema, wire-schema,
+relay, or junction `ALTER`, and `DROP` for one domain in the same transaction; Nervix classifies
+the complete model diff and no user-facing pause command exists. Capacity and expression-only
+junction changes are dynamic; relay schema or branching changes pause the domain; structural
+junction and relay materialized-state changes gate and drain only affected entities.
 
 ## Preserve NSPL semantics
 
@@ -64,9 +66,9 @@ command.
   optional destination.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
-- Preserve written operation order in schema ALTER statements. Include every dependent wire,
-  internal, codec, and node mutation required for the candidate graph to validate in the same
-  transaction.
+- Preserve written operation order in schema, relay, and junction ALTER statements. Include every
+  dependent wire, internal, codec, and node mutation required for the candidate graph to validate
+  in the same transaction.
 - Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only
   when the body needs the domain clock or randomness. Roto UDFs are trusted native code; keep
   untrusted custom processing in WASM.

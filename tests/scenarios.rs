@@ -63,6 +63,7 @@ use rustls_pki_types::{CertificateDer, pem::PemObject};
 use tempfile::TempDir;
 use tokio_postgres::{Client as PostgresClient, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
+use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
 use crate::common::{
@@ -131,6 +132,7 @@ struct ScenarioWorld {
     playwright: Option<Playwright>,
     web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     dependencies: TestDependencies,
+    background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -1734,6 +1736,16 @@ async fn given_schema_change_drain_timeout_is_configured(
         Some(humantime::parse_duration(&timeout).expect("schema drain timeout must be valid"));
 }
 
+#[given(expr = "entity gate deadline is configured as {string}")]
+async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, timeout: String) {
+    assert!(
+        world.cluster.is_none(),
+        "entity gate deadline must be configured before cluster startup"
+    );
+    world.runtime_test_hooks.entity_gate_deadline =
+        Some(humantime::parse_duration(&timeout).expect("entity gate deadline must be valid"));
+}
+
 #[given("graceful shutdown drain is enabled")]
 async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
     assert!(
@@ -3009,6 +3021,49 @@ async fn run_nspl_commands_on_node(
             .map_err(|error| error.to_string())?;
     }
     Ok(last_output)
+}
+
+#[when("these NSPL commands begin executing in the background")]
+async fn when_these_nspl_commands_begin_executing_in_the_background(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_nspl.is_none(),
+        "a background NSPL execution is already active"
+    );
+    let commands = expand_placeholders(world, docstring(step));
+    let statements = nspl_statements(&commands);
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .expect("failed to open background NSPL session");
+    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut last_output = String::new();
+        for command in statements {
+            tokio::task::consume_budget().await;
+            last_output = session
+                .run_command(&command)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(last_output)
+    })));
+}
+
+#[then("the background NSPL execution succeeds")]
+async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) {
+    let task = world
+        .background_nspl
+        .take()
+        .expect("a background NSPL execution must be active");
+    let output = task
+        .await
+        .expect("background NSPL task must not panic")
+        .expect("background NSPL execution must succeed");
+    world.last_command_output = Some(output);
 }
 
 fn commands_are_retry_safe_session_ops(commands: &str) -> bool {

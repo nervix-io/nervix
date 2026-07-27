@@ -315,7 +315,7 @@ pub(super) struct RelayProcessorNode {
     pub(super) compiled_filter_where: HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
     pub(super) last_graph: Option<StdArc<ActiveGraph>>,
-    pub(super) generation: u64,
+    pub(super) applied_generation: u64,
 }
 
 #[derive(Debug)]

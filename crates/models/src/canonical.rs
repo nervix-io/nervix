@@ -1,9 +1,10 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
-    AlterWireSchemaStmt, AssignmentTargetScope, AvroType, AzureBlobConfigEntry, BinaryOperator,
-    BranchEviction, BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
+    AlterJunction, AlterJunctionOperation, AlterRelay, AlterRelayOperation, AlterSchema,
+    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AlterWireSchemaStmt,
+    AssignmentTargetScope, AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction,
+    BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
     CodecEncodingRule, CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction,
     CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
@@ -441,6 +442,50 @@ impl AlterSchema {
         Ok(format!(
             "ALTER SCHEMA {} {operations};",
             self.schema.as_str()
+        ))
+    }
+}
+
+impl AlterRelay {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                AlterRelayOperation::SetCapacity { capacity } => {
+                    format!("SET CAPACITY {capacity}")
+                }
+                AlterRelayOperation::SetSchema { schema } => {
+                    format!("SET SCHEMA {}", schema.as_str())
+                }
+                AlterRelayOperation::SetBranching { branching } => match branching {
+                    RelayBranching::BranchedBy { branch } => {
+                        format!("SET BRANCHED BY {}", branch.as_str())
+                    }
+                    RelayBranching::Unbranched => "SET UNBRANCHED".to_string(),
+                },
+                AlterRelayOperation::SetMaterializedState => {
+                    "SET MATERIALIZED STATE LAST BY TIMESTAMP".to_string()
+                }
+                AlterRelayOperation::DropMaterializedState => "DROP MATERIALIZED STATE".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!("ALTER RELAY {} {operations};", self.relay.as_str()))
+    }
+}
+
+impl AlterJunction {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_junction_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER JUNCTION {} {operations};",
+            self.junction.as_str()
         ))
     }
 }
@@ -1186,6 +1231,29 @@ fn message_error_policy_to_nspl(policy: &MessageErrorPolicy) -> Result<String, C
     })
 }
 
+fn materialized_state_policy_to_nspl(
+    policy: &MaterializedStatePolicy,
+) -> Result<String, CanonicalNsplError> {
+    match policy {
+        MaterializedStatePolicy::RequiredSkip => Ok("REQUIRED SKIP".to_string()),
+        MaterializedStatePolicy::RequiredWait => Ok("REQUIRED WAIT".to_string()),
+        MaterializedStatePolicy::Default(assignments) => Ok(format!(
+            "DEFAULT {{ {} }}",
+            assignments
+                .iter()
+                .map(|assignment| {
+                    Ok(format!(
+                        "{} = {}",
+                        assignment.target.field.as_str(),
+                        expression_to_nspl(&assignment.value)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                .join(", ")
+        )),
+    }
+}
+
 fn general_error_policy_to_nspl(policy: &GeneralErrorPolicy) -> &'static str {
     match policy {
         GeneralErrorPolicy::Ignore => "ON GENERAL ERROR IGNORE",
@@ -1199,24 +1267,7 @@ fn materialized_state_dependencies_suffix(
     dependencies
         .iter()
         .map(|dependency| {
-            let policy = match &dependency.policy {
-                MaterializedStatePolicy::RequiredSkip => "REQUIRED SKIP".to_string(),
-                MaterializedStatePolicy::RequiredWait => "REQUIRED WAIT".to_string(),
-                MaterializedStatePolicy::Default(assignments) => format!(
-                    "DEFAULT {{ {} }}",
-                    assignments
-                        .iter()
-                        .map(|assignment| {
-                            Ok(format!(
-                                "{} = {}",
-                                assignment.target.field.as_str(),
-                                expression_to_nspl(&assignment.value)?
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, CanonicalNsplError>>()?
-                        .join(", ")
-                ),
-            };
+            let policy = materialized_state_policy_to_nspl(&dependency.policy)?;
             Ok(format!(
                 " USING MATERIALIZED STATE {} {policy}",
                 dependency.relay.as_str()
@@ -1544,43 +1595,42 @@ fn processor_outputs_to_nspl(outputs: &ProcessorOutputs) -> Result<String, Canon
     outputs
         .routes
         .iter()
-        .map(|output| {
-            let flush = output
-                .flush_policy
-                .as_ref()
-                .map(|policy| {
-                    format!(
-                        " {}",
-                        flush_policy_to_nspl_with_max(
-                            &policy.flush_each,
-                            policy.max_batch_size.as_deref(),
-                        )
-                    )
-                })
-                .unwrap_or_default();
-            let construction = route_construction_to_nspl(&output.construction)?;
-            let construction = if construction.is_empty() {
-                String::new()
-            } else {
-                format!(" {construction}")
-            };
-            let branch = output
-                .branch
-                .as_ref()
-                .map(output_branch_to_nspl)
-                .transpose()?
-                .map(|branch| format!(" {branch}"))
-                .unwrap_or_default();
-            Ok(format!(
-                " TO {}{}{}{} {}",
-                output.relay.as_str(),
-                construction,
-                branch,
-                flush,
-                message_error_policy_to_nspl(&output.message_error_policy)?
-            ))
-        })
+        .map(|output| processor_output_to_nspl(output).map(|route| format!(" {route}")))
         .collect::<Result<String, CanonicalNsplError>>()
+}
+
+fn processor_output_to_nspl(output: &crate::ProcessorOutput) -> Result<String, CanonicalNsplError> {
+    let flush = output
+        .flush_policy
+        .as_ref()
+        .map(|policy| {
+            format!(
+                " {}",
+                flush_policy_to_nspl_with_max(&policy.flush_each, policy.max_batch_size.as_deref(),)
+            )
+        })
+        .unwrap_or_default();
+    let construction = route_construction_to_nspl(&output.construction)?;
+    let construction = if construction.is_empty() {
+        String::new()
+    } else {
+        format!(" {construction}")
+    };
+    let branch = output
+        .branch
+        .as_ref()
+        .map(output_branch_to_nspl)
+        .transpose()?
+        .map(|branch| format!(" {branch}"))
+        .unwrap_or_default();
+    Ok(format!(
+        "TO {}{}{}{} {}",
+        output.relay.as_str(),
+        construction,
+        branch,
+        flush,
+        message_error_policy_to_nspl(&output.message_error_policy)?
+    ))
 }
 
 fn schema_field_to_nspl(field: &SchemaField) -> Result<String, CanonicalNsplError> {
@@ -1591,6 +1641,73 @@ fn schema_field_to_nspl(field: &SchemaField) -> Result<String, CanonicalNsplErro
         optional_suffix(field.optional),
         sensitive_suffix(field.sensitive)
     ))
+}
+
+fn alter_junction_operation_to_nspl(
+    operation: &AlterJunctionOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterJunctionOperation::AddFrom {
+            relay,
+            where_clause,
+        } => Ok(format!(
+            "ADD FROM {}{}",
+            relay.as_str(),
+            where_clause
+                .as_ref()
+                .map(|expression| Ok(format!(" WHERE {}", expression_to_nspl(expression)?)))
+                .transpose()?
+                .unwrap_or_default()
+        )),
+        AlterJunctionOperation::DropFrom { relay } => Ok(format!("DROP FROM {}", relay.as_str())),
+        AlterJunctionOperation::AlterFromSetWhere {
+            relay,
+            where_clause,
+        } => Ok(format!(
+            "ALTER FROM {} SET WHERE {}",
+            relay.as_str(),
+            expression_to_nspl(where_clause)?
+        )),
+        AlterJunctionOperation::AlterFromDropWhere { relay } => {
+            Ok(format!("ALTER FROM {} DROP WHERE", relay.as_str()))
+        }
+        AlterJunctionOperation::SetCollect { policy } => {
+            Ok(format!("SET {}", collect_policy_to_nspl(policy)))
+        }
+        AlterJunctionOperation::DropCollect => Ok("DROP COLLECT".to_string()),
+        AlterJunctionOperation::SetFilterWhere { where_clause } => Ok(format!(
+            "SET FILTER WHERE {}",
+            expression_to_nspl(where_clause)?
+        )),
+        AlterJunctionOperation::DropFilterWhere => Ok("DROP FILTER WHERE".to_string()),
+        AlterJunctionOperation::SetMode { mode } => Ok(format!("SET {}", mode.as_ref())),
+        AlterJunctionOperation::SetBranching { branching } => {
+            Ok(format!("SET {}", branch_selection_to_nspl(branching)))
+        }
+        AlterJunctionOperation::AddMaterializedState { dependency } => Ok(format!(
+            "ADD MATERIALIZED STATE {} {}",
+            dependency.relay.as_str(),
+            materialized_state_policy_to_nspl(&dependency.policy)?
+        )),
+        AlterJunctionOperation::DropMaterializedState { relay } => {
+            Ok(format!("DROP MATERIALIZED STATE {}", relay.as_str()))
+        }
+        AlterJunctionOperation::AlterMaterializedState { relay, policy } => Ok(format!(
+            "ALTER MATERIALIZED STATE {} SET {}",
+            relay.as_str(),
+            materialized_state_policy_to_nspl(policy)?
+        )),
+        AlterJunctionOperation::AddRoute { route } => {
+            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+        }
+        AlterJunctionOperation::DropRoute { relay } => {
+            Ok(format!("DROP ROUTE TO {}", relay.as_str()))
+        }
+        AlterJunctionOperation::ReplaceRoute { route } => Ok(format!(
+            "REPLACE ROUTE {}",
+            processor_output_to_nspl(route)?
+        )),
+    }
 }
 
 fn alter_schema_operation_to_nspl(

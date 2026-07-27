@@ -220,6 +220,60 @@ impl RuntimeStateStore {
             .map_err(|_| RuntimePersistenceError::WriteValue)
     }
 
+    pub fn purge_entity(
+        &self,
+        domain: &Domain,
+        state: RuntimeStateKind,
+        kind: ModelKind,
+        identifier: &Identifier,
+    ) -> Result<(), RuntimePersistenceError> {
+        let mut prefix = domain.as_str().as_bytes().to_vec();
+        prefix.push(0);
+        prefix.push(state as u8);
+        prefix.push(0);
+        prefix.extend_from_slice(kind.as_str().as_bytes());
+        prefix.push(0);
+        prefix.extend_from_slice(identifier.as_str().as_bytes());
+        prefix.push(0);
+        let latest_keys = self
+            .latest
+            .prefix(prefix)
+            .map(|item| {
+                item.key()
+                    .map(|key| key.as_ref().to_vec())
+                    .map_err(|_| RuntimePersistenceError::ReadValue)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if latest_keys.is_empty() {
+            return Ok(());
+        }
+        let mut lsm_keys = Vec::new();
+        for latest_key in &latest_keys {
+            let mut lsm_prefix = latest_key.clone();
+            lsm_prefix.push(0);
+            lsm_keys.extend(
+                self.lsm_index
+                    .prefix(lsm_prefix)
+                    .map(|item| {
+                        item.key()
+                            .map(|key| key.as_ref().to_vec())
+                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+        let mut batch = self.db.batch();
+        for key in latest_keys {
+            batch.remove(&self.latest, key);
+        }
+        for key in lsm_keys {
+            batch.remove(&self.lsm_index, key);
+        }
+        batch
+            .commit()
+            .map_err(|_| RuntimePersistenceError::WriteValue)
+    }
+
     pub fn purge_stale_schema_fingerprints(
         &self,
         domain: &Domain,
