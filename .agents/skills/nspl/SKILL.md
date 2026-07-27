@@ -52,11 +52,12 @@ request can mix those phases.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, schema, wire-schema,
-relay, or junction `ALTER`, and `DROP` for one domain in the same transaction; Nervix classifies
-the complete model diff and no user-facing pause command exists. Capacity and expression-only
-junction changes and emitter flush changes are dynamic; relay schema or branching changes pause the
-domain; structural junction, emitter sink/client/codec/collect/mode, and relay materialized-state
-changes gate and drain only affected entities.
+relay, junction, emitter, or ingestor `ALTER`, and `DROP` for one domain in the same transaction;
+Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
+expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
+changes pause the domain; structural junction, emitter sink/client/codec/collect/mode, ingestor,
+and relay materialized-state changes gate and drain only affected entities. In `ALTER INGESTOR`,
+use a complete transport-specific source body after `SET FROM`.
 
 ## Preserve NSPL semantics
 
@@ -67,7 +68,8 @@ changes gate and drain only affected entities.
   optional destination.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
-- Preserve written operation order in schema, relay, junction, and emitter ALTER statements.
+- Preserve written operation order in schema, relay, junction, emitter, and ingestor ALTER
+  statements.
   Include every dependent wire, internal, codec, and node mutation required for the candidate graph
   to validate in the same transaction.
 - Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only

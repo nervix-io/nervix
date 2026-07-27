@@ -756,6 +756,34 @@ pub fn alter_flushed_route_body<'src>()
         .boxed()
 }
 
+pub fn alter_ingestor_route_body<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(alter_route_construction().or_not())
+        .then(output_branch())
+        .then(flush_each())
+        .then(alter_message_error_policy())
+        .map(
+            |(
+                (((relay, construction), branch), (flush_each, max_batch_size)),
+                message_error_policy,
+            )| {
+                ProcessorOutput {
+                    relay,
+                    construction: construction.unwrap_or_default(),
+                    flush_policy: Some(OutputFlushPolicy {
+                        flush_each,
+                        max_batch_size,
+                    }),
+                    message_error_policy,
+                    branch: Some(branch),
+                }
+            },
+        )
+        .boxed()
+}
+
 pub fn general_error_policy<'src>()
 -> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::On)

@@ -37,10 +37,13 @@ impl ScheduleDelta {
             let level = aspects.quiesce_level();
             let emitter_schema_fingerprint_may_change =
                 desired_node.kind == ModelKind::Emitter && level == QuiesceLevel::EntityPause;
+            let ingestor_schedule_residue_may_change =
+                desired_node.kind == ModelKind::Ingestor && level == QuiesceLevel::EntityPause;
             if !Self::same_schedule_residue(
                 existing_node,
                 desired_node,
                 emitter_schema_fingerprint_may_change,
+                ingestor_schedule_residue_may_change,
             ) {
                 return Self::Rebuild;
             }
@@ -87,6 +90,7 @@ impl ScheduleDelta {
         existing: &ScheduledNode,
         desired: &ScheduledNode,
         allow_schema_fingerprint_change: bool,
+        allow_ingestor_schedule_residue_change: bool,
     ) -> bool {
         let ScheduledNode {
             identifier: existing_identifier,
@@ -111,9 +115,14 @@ impl ScheduleDelta {
             assigned_nodes: desired_assigned_nodes,
         } = desired;
 
-        existing_identifier == desired_identifier
-            && existing_kind == desired_kind
-            && existing_effective_branching == desired_effective_branching
+        if existing_identifier != desired_identifier || existing_kind != desired_kind {
+            return false;
+        }
+        if allow_ingestor_schedule_residue_change {
+            return true;
+        }
+
+        existing_effective_branching == desired_effective_branching
             && existing_effective_branching_schema == desired_effective_branching_schema
             && (allow_schema_fingerprint_change
                 || existing_schema_fingerprint == desired_schema_fingerprint)
@@ -126,9 +135,10 @@ impl ScheduleDelta {
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        AckMode, BranchSelection, CreateEmitter, CreateJunction, CreateRelay, Domain,
-        DomainSchedule, DynamicModelUpdate, EmitSink, ErrorPolicies, Expression, Identifier,
-        Literal, Model, ModelKind, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        AckMode, BranchSelection, CreateEmitter, CreateIngestor, CreateJunction, CreateRelay,
+        Domain, DomainSchedule, DynamicModelUpdate, EmitSink, EndpointIngestMode, ErrorPolicies,
+        Expression, GeneralErrorPolicy, Identifier, IngestSource, Literal, Model, ModelKind,
+        OutputBranch, OutputFlushPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         RelayBranching, RouteConstruction, ScheduledNode,
     };
 
@@ -152,6 +162,43 @@ mod tests {
                     materialized_state: None,
                 })),
                 effective_branching: Some(Vec::new()),
+                effective_branching_schema: None,
+                schema_fingerprint: [1; 32],
+                kafka_partition_schedule: None,
+                primary_node: Some("node-1".to_string()),
+                assigned_nodes: vec!["node-1".to_string()],
+            }],
+        }
+    }
+
+    fn ingestor_schedule(endpoint: &str) -> DomainSchedule {
+        DomainSchedule {
+            domain: Domain::parse("testing").expect("valid domain"),
+            nodes: vec![ScheduledNode {
+                identifier: identifier("event_source"),
+                kind: ModelKind::Ingestor,
+                config: Box::new(Model::Ingestor(CreateIngestor {
+                    name: identifier("event_source"),
+                    output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
+                        relay: identifier("events"),
+                        construction: RouteConstruction::default(),
+                        flush_policy: Some(OutputFlushPolicy {
+                            flush_each: "IMMEDIATE".to_string(),
+                            max_batch_size: None,
+                        }),
+                        message_error_policy: nervix_models::MessageErrorPolicy::Log,
+                        branch: Some(OutputBranch::Unbranched),
+                    }]),
+                    decode_using_codec: identifier("event_codec"),
+                    timestamp_source: None,
+                    source: IngestSource::Endpoint {
+                        endpoint: identifier(endpoint),
+                        mode: EndpointIngestMode::NoAckSequential,
+                    },
+                    general_error_policy: GeneralErrorPolicy::Log,
+                    filter_where: None,
+                })),
+                effective_branching: None,
                 effective_branching_schema: None,
                 schema_fingerprint: [1; 32],
                 kafka_partition_schedule: None,
@@ -260,6 +307,27 @@ mod tests {
                 dynamic_updates: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn ingestor_changes_swap_even_when_schedule_placement_residue_changes() {
+        let existing = ingestor_schedule("ingress_a");
+        let mut desired = ingestor_schedule("ingress_b");
+        desired.nodes[0].schema_fingerprint = [2; 32];
+        desired.nodes[0].primary_node = Some("node-2".to_string());
+        desired.nodes[0].assigned_nodes = vec!["node-2".to_string()];
+
+        let ScheduleDelta::EntitySwap {
+            entities,
+            dynamic_updates,
+        } = ScheduleDelta::classify(&existing, &desired)
+        else {
+            panic!("ingestor changes should use entity swap");
+        };
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].kind, ModelKind::Ingestor);
+        assert_eq!(entities[0].identifier, identifier("event_source"));
+        assert!(dynamic_updates.is_empty());
     }
 
     #[test]

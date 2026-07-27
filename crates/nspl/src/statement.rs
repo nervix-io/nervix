@@ -145,6 +145,7 @@ pub fn statement_parser<'src>()
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
         crate::junction::alter_junction_parser().map(Statement::AlterJunction),
         crate::emitter::alter_emitter_parser().map(Statement::AlterEmitter),
+        crate::ingestor::alter_ingestor_parser().map(Statement::AlterIngestor),
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
@@ -1147,6 +1148,7 @@ mod tests {
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"RELAY".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
+        assert!(suggestions.contains(&"INGESTOR".to_string()));
         assert!(suggestions.contains(&"SCHEMA".to_string()));
         assert!(suggestions.contains(&"WIRE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1940,6 +1942,24 @@ mod tests {
         let canonical = alter.to_canonical_nspl().expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::AlterEmitter(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_ingestor() {
+        let parsed = parse_statement(
+            "ALTER INGESTOR event_source SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL, SET \
+             DECODE USING event_codec_v2, SET TIMESTAMP AT occurred_at, SET FILTER WHERE \
+             input.active, REPLACE ROUTE TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterIngestor(alter) = parsed else {
+            panic!("expected ALTER INGESTOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterIngestor(alter), reparsed);
     }
 
     #[test]

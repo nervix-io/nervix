@@ -291,6 +291,7 @@ pub struct EntityGateRequest {
     pub operation_id: u64,
     pub domain: Domain,
     pub relays: Vec<Identifier>,
+    pub affected_entities: Vec<EntityReference>,
     pub deadline_millis: u64,
     pub reason: String,
 }

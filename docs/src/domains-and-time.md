@@ -60,11 +60,12 @@ the domain. There is no NSPL `PAUSE` or `RESUME` statement.
 
 Before changing the live graph, the leader validates the complete candidate graph without writing
 it while holding the domain's exclusive ALTER lock. For an entity-pause alteration, Nervix gates
-the affected relays on every live node and waits only for their rings and target-node work to
-drain. Unrelated graph paths continue to run. For a domain-pause alteration, Nervix instead stops
-domain ingestion and generators on every node, keeps the processing graph and domain clock alive,
-force-flushes processor and emitter output, and waits for ingestors, generators, ACK roots, and
-emitter buffers to drain. Both waits are condition-based and bounded to 60 seconds by default.
+the affected relays or stops the affected ingestor instances on every live node, then waits only
+for their rings and target-node work to drain. Unrelated graph paths continue to run. For a
+domain-pause alteration, Nervix instead stops domain ingestion and generators on every node, keeps
+the processing graph and domain clock alive, force-flushes processor and emitter output, and waits
+for ingestors, generators, ACK roots, and emitter buffers to drain. Both waits are condition-based
+and bounded to 60 seconds by default.
 
 After a successful drain, Nervix atomically installs the model batch, replaces the schedule while
 ingestion is still withheld, and resumes the domain on the new graph. A timeout or cutover failure

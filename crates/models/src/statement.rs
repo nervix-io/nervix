@@ -26,6 +26,7 @@ pub enum Statement {
     AlterRelay(AlterRelay),
     AlterJunction(AlterJunction),
     AlterEmitter(AlterEmitter),
+    AlterIngestor(AlterIngestor),
     Drop(DropModel),
     DropNode(DropNode),
     CordonNode(CordonNode),
@@ -61,6 +62,7 @@ impl Statement {
             | Self::AlterRelay(_)
             | Self::AlterJunction(_)
             | Self::AlterEmitter(_)
+            | Self::AlterIngestor(_)
             | Self::Drop(_) => true,
             Self::CreateDomain(_)
             | Self::CreateUser(_)
@@ -1556,6 +1558,123 @@ pub struct CreateIngestor {
     pub filter_where: Option<crate::Expression>,
 }
 
+impl CreateIngestor {
+    pub fn apply_alter(&mut self, alter: &AlterIngestor) -> Result<(), AlterIngestorError> {
+        if self.name != alter.ingestor {
+            return Err(AlterIngestorError::IngestorNameMismatch {
+                stored: self.name.clone(),
+                requested: alter.ingestor.clone(),
+            });
+        }
+
+        let mut candidate = self.clone();
+        for operation in &alter.operations {
+            candidate.apply_alter_operation(operation)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn apply_alter_operation(
+        &mut self,
+        operation: &AlterIngestorOperation,
+    ) -> Result<(), AlterIngestorError> {
+        match operation {
+            AlterIngestorOperation::SetSource { source } => {
+                self.source = source.clone();
+            }
+            AlterIngestorOperation::SetDecodeUsing { codec } => {
+                self.decode_using_codec = codec.clone();
+            }
+            AlterIngestorOperation::SetTimestamp { source } => {
+                self.timestamp_source = Some(source.clone());
+            }
+            AlterIngestorOperation::DropTimestamp => {
+                self.timestamp_source = None;
+            }
+            AlterIngestorOperation::SetFilterWhere { where_clause } => {
+                self.filter_where = Some(where_clause.clone());
+            }
+            AlterIngestorOperation::DropFilterWhere => {
+                self.filter_where = None;
+            }
+            AlterIngestorOperation::AddRoute { route } => {
+                self.output_routes.routes.push(route.clone());
+            }
+            AlterIngestorOperation::DropRoute { relay } => {
+                let index = self.unique_route_index(relay)?;
+                if self.output_routes.routes.len() == 1 {
+                    return Err(AlterIngestorError::CannotDropLastRoute);
+                }
+                self.output_routes.routes.remove(index);
+            }
+            AlterIngestorOperation::ReplaceRoute { route } => {
+                let index = self.unique_route_index(&route.relay)?;
+                self.output_routes.routes[index] = route.clone();
+            }
+            AlterIngestorOperation::SetGeneralError { policy } => {
+                self.general_error_policy = policy.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn unique_route_index(&self, relay: &Identifier) -> Result<usize, AlterIngestorError> {
+        let mut indexes = self
+            .output_routes
+            .routes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
+        let Some(index) = indexes.next() else {
+            return Err(AlterIngestorError::RouteTargetNotFound {
+                relay: relay.clone(),
+            });
+        };
+        if indexes.next().is_some() {
+            return Err(AlterIngestorError::RouteTargetAmbiguous {
+                relay: relay.clone(),
+            });
+        }
+        Ok(index)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterIngestor {
+    pub ingestor: Identifier,
+    pub operations: Vec<AlterIngestorOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlterIngestorOperation {
+    SetSource { source: IngestSource },
+    SetDecodeUsing { codec: Identifier },
+    SetTimestamp { source: IngestTimestampSource },
+    DropTimestamp,
+    SetFilterWhere { where_clause: crate::Expression },
+    DropFilterWhere,
+    AddRoute { route: ProcessorOutput },
+    DropRoute { relay: Identifier },
+    ReplaceRoute { route: ProcessorOutput },
+    SetGeneralError { policy: GeneralErrorPolicy },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterIngestorError {
+    #[error("ALTER targets ingestor `{requested}`, but the stored ingestor is `{stored}`")]
+    IngestorNameMismatch {
+        stored: Identifier,
+        requested: Identifier,
+    },
+    #[error("route target `{relay}` is not configured")]
+    RouteTargetNotFound { relay: Identifier },
+    #[error("route target `{relay}` is ambiguous because it is configured more than once")]
+    RouteTargetAmbiguous { relay: Identifier },
+    #[error("an ingestor must retain at least one route")]
+    CannotDropLastRoute,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessorOutput {
     pub relay: Identifier,
@@ -2916,13 +3035,13 @@ pub enum AckMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterJunction,
-        AlterJunctionError, AlterJunctionOperation, AlterRelay, AlterRelayError,
-        AlterRelayOperation, BranchSelection, ClusterSchedule, CreateEmitter, CreateRelay,
-        CreateSchema, DomainSchedule, EmitSink, ErrorPolicies, GeneralErrorPolicy,
-        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
-        InferencerTensorSchema, KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind,
-        RelayBranching, ScheduledNode,
+        AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestor,
+        AlterIngestorError, AlterIngestorOperation, AlterJunction, AlterJunctionError,
+        AlterJunctionOperation, AlterRelay, AlterRelayError, AlterRelayOperation, BranchSelection,
+        ClusterSchedule, CreateEmitter, CreateRelay, CreateSchema, DomainSchedule, EmitSink,
+        ErrorPolicies, GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
+        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule,
+        MaterializedRelayState, Model, ModelKind, OutputFlushPolicy, RelayBranching, ScheduledNode,
     };
     use crate::{
         CreateIngestor, CreateJunction, Domain, EndpointIngestMode, Expression, Identifier,
@@ -3678,5 +3797,167 @@ mod tests {
             assert_eq!(candidate.apply_alter(&alter), Err(expected));
             assert_eq!(candidate, emitter);
         }
+    }
+
+    #[test]
+    fn ingestor_alter_applies_operations_in_order_and_is_atomic() {
+        let route = ProcessorOutput {
+            relay: identifier("events"),
+            construction: crate::RouteConstruction::default(),
+            flush_policy: Some(OutputFlushPolicy {
+                flush_each: "1s".to_string(),
+                max_batch_size: Some("1MiB".to_string()),
+            }),
+            message_error_policy: super::MessageErrorPolicy::Log,
+            branch: Some(crate::OutputBranch::Unbranched),
+        };
+        let mut ingestor = CreateIngestor {
+            name: identifier("event_source"),
+            output_routes: ProcessorOutputs::new(vec![route.clone()]),
+            decode_using_codec: identifier("event_codec"),
+            timestamp_source: None,
+            source: IngestSource::Endpoint {
+                endpoint: identifier("ingress_a"),
+                mode: EndpointIngestMode::NoAckSequential,
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        };
+        ingestor
+            .apply_alter(&AlterIngestor {
+                ingestor: identifier("event_source"),
+                operations: vec![
+                    AlterIngestorOperation::SetSource {
+                        source: IngestSource::Endpoint {
+                            endpoint: identifier("ingress_b"),
+                            mode: EndpointIngestMode::NoAckSequential,
+                        },
+                    },
+                    AlterIngestorOperation::SetDecodeUsing {
+                        codec: identifier("event_codec_v2"),
+                    },
+                    AlterIngestorOperation::SetTimestamp {
+                        source: super::IngestTimestampSource::Now,
+                    },
+                    AlterIngestorOperation::SetFilterWhere {
+                        where_clause: Expression::Literal(Literal::Bool(true)),
+                    },
+                    AlterIngestorOperation::ReplaceRoute {
+                        route: ProcessorOutput {
+                            relay: identifier("events"),
+                            flush_policy: Some(OutputFlushPolicy {
+                                flush_each: "IMMEDIATE".to_string(),
+                                max_batch_size: None,
+                            }),
+                            ..route.clone()
+                        },
+                    },
+                    AlterIngestorOperation::AddRoute {
+                        route: ProcessorOutput {
+                            relay: identifier("audit"),
+                            ..route.clone()
+                        },
+                    },
+                    AlterIngestorOperation::SetGeneralError {
+                        policy: GeneralErrorPolicy::Ignore,
+                    },
+                ],
+            })
+            .expect("ingestor alter should apply");
+
+        assert_eq!(
+            ingestor.source,
+            IngestSource::Endpoint {
+                endpoint: identifier("ingress_b"),
+                mode: EndpointIngestMode::NoAckSequential,
+            }
+        );
+        assert_eq!(ingestor.decode_using_codec, identifier("event_codec_v2"));
+        assert_eq!(
+            ingestor.timestamp_source,
+            Some(super::IngestTimestampSource::Now)
+        );
+        assert_eq!(ingestor.output_routes.routes.len(), 2);
+        assert_eq!(ingestor.general_error_policy, GeneralErrorPolicy::Ignore);
+
+        let before = ingestor.clone();
+        let error = ingestor
+            .apply_alter(&AlterIngestor {
+                ingestor: identifier("event_source"),
+                operations: vec![
+                    AlterIngestorOperation::SetDecodeUsing {
+                        codec: identifier("event_codec_v3"),
+                    },
+                    AlterIngestorOperation::DropRoute {
+                        relay: identifier("missing"),
+                    },
+                ],
+            })
+            .expect_err("missing route target should fail");
+        assert_eq!(
+            error,
+            AlterIngestorError::RouteTargetNotFound {
+                relay: identifier("missing")
+            }
+        );
+        assert_eq!(ingestor, before, "failed ALTER must not partially apply");
+    }
+
+    #[test]
+    fn ingestor_alter_reports_name_ambiguity_and_last_route_errors() {
+        let route = ProcessorOutput::new(identifier("events"));
+        let base = CreateIngestor {
+            name: identifier("event_source"),
+            output_routes: ProcessorOutputs::new(vec![route.clone()]),
+            decode_using_codec: identifier("event_codec"),
+            timestamp_source: None,
+            source: IngestSource::Endpoint {
+                endpoint: identifier("ingress"),
+                mode: EndpointIngestMode::NoAckSequential,
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        };
+
+        let mut candidate = base.clone();
+        assert_eq!(
+            candidate.apply_alter(&AlterIngestor {
+                ingestor: identifier("other"),
+                operations: Vec::new(),
+            }),
+            Err(AlterIngestorError::IngestorNameMismatch {
+                stored: identifier("event_source"),
+                requested: identifier("other"),
+            })
+        );
+        assert_eq!(candidate, base);
+
+        let mut candidate = base.clone();
+        assert_eq!(
+            candidate.apply_alter(&AlterIngestor {
+                ingestor: identifier("event_source"),
+                operations: vec![AlterIngestorOperation::DropRoute {
+                    relay: identifier("events"),
+                }],
+            }),
+            Err(AlterIngestorError::CannotDropLastRoute)
+        );
+        assert_eq!(candidate, base);
+
+        let mut ambiguous = base.clone();
+        ambiguous.output_routes.routes.push(route);
+        let before = ambiguous.clone();
+        assert_eq!(
+            ambiguous.apply_alter(&AlterIngestor {
+                ingestor: identifier("event_source"),
+                operations: vec![AlterIngestorOperation::DropRoute {
+                    relay: identifier("events"),
+                }],
+            }),
+            Err(AlterIngestorError::RouteTargetAmbiguous {
+                relay: identifier("events"),
+            })
+        );
+        assert_eq!(ambiguous, before);
     }
 }
