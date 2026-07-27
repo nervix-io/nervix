@@ -98,6 +98,6 @@ CREATE INGESTOR ingest_binance_ws
   ON GENERAL ERROR LOG;
 
 CREATE SUBSCRIPTION binance_ws_events_subscription TO binance_ws_events;
-START;
-
 COMMIT;
+
+START;
