@@ -6980,6 +6980,19 @@ impl SessionServiceImpl {
                     ));
                     mutations.push(RegistryMutation::AlterJunction(alter));
                 }
+                Statement::AlterEmitter(alter) => {
+                    let model_id = alter.emitter.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered emitter '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterEmitter(alter));
+                }
                 Statement::Drop(drop) => {
                     let model_id = drop.name.clone();
                     refresh_http_tls |= drop.kind == ModelKind::Vhost;
@@ -7342,6 +7355,7 @@ impl SessionServiceImpl {
             | Statement::AlterWireSchema(_)
             | Statement::AlterRelay(_)
             | Statement::AlterJunction(_)
+            | Statement::AlterEmitter(_)
             | Statement::Drop(_) => {
                 unreachable!("model mutations are handled before statement dispatch")
             }

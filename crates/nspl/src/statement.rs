@@ -144,6 +144,7 @@ pub fn statement_parser<'src>()
         crate::schema::alter_wire_schema_parser_any().map(Statement::AlterWireSchema),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
         crate::junction::alter_junction_parser().map(Statement::AlterJunction),
+        crate::emitter::alter_emitter_parser().map(Statement::AlterEmitter),
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
@@ -1145,6 +1146,7 @@ mod tests {
         let input = "ALTER ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"RELAY".to_string()));
+        assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(suggestions.contains(&"SCHEMA".to_string()));
         assert!(suggestions.contains(&"WIRE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1921,6 +1923,23 @@ mod tests {
         let canonical = alter.to_canonical_nspl().expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::AlterJunction(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_emitter() {
+        let parsed = parse_statement(
+            "ALTER EMITTER event_sink SET TO ZEROMQ sink_b, SET CLIENT sink_c, SET ENCODE USING \
+             event_codec, SET COLLECT FOR 10ms MAX BATCH SIZE 1MiB, SET DETACHED, SET FLUSH \
+             IMMEDIATE;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterEmitter(alter) = parsed else {
+            panic!("expected ALTER EMITTER");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterEmitter(alter), reparsed);
     }
 
     #[test]

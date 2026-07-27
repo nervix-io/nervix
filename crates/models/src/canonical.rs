@@ -1,22 +1,22 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    AlterJunction, AlterJunctionOperation, AlterRelay, AlterRelayOperation, AlterSchema,
-    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AlterWireSchemaStmt,
-    AssignmentTargetScope, AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction,
-    BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
-    CodecEncodingRule, CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction,
-    CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
-    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
-    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
-    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    AlterEmitter, AlterEmitterOperation, AlterJunction, AlterJunctionOperation, AlterRelay,
+    AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+    AlterWireSchemaOperation, AlterWireSchemaStmt, AssignmentTargetScope, AvroType,
+    AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection, ClickHouseConfigEntry,
+    ClickHouseValueMapping, CodecEncoding, CodecEncodingRule, CodecJaqTransformations,
+    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
+    CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression,
+    FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
     KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
@@ -486,6 +486,21 @@ impl AlterJunction {
         Ok(format!(
             "ALTER JUNCTION {} {operations};",
             self.junction.as_str()
+        ))
+    }
+}
+
+impl AlterEmitter {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_emitter_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER EMITTER {} {operations};",
+            self.emitter.as_str()
         ))
     }
 }
@@ -1706,6 +1721,42 @@ fn alter_junction_operation_to_nspl(
         AlterJunctionOperation::ReplaceRoute { route } => Ok(format!(
             "REPLACE ROUTE {}",
             processor_output_to_nspl(route)?
+        )),
+    }
+}
+
+fn alter_emitter_operation_to_nspl(
+    operation: &AlterEmitterOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterEmitterOperation::SetSink { sink } => {
+            Ok(format!("SET TO {}", emit_sink_to_nspl(sink)?))
+        }
+        AlterEmitterOperation::SetClient { client } => {
+            Ok(format!("SET CLIENT {}", client.as_str()))
+        }
+        AlterEmitterOperation::SetEncodeUsing { codec } => {
+            Ok(format!("SET ENCODE USING {}", codec.as_str()))
+        }
+        AlterEmitterOperation::DropEncode => Ok("DROP ENCODE".to_string()),
+        AlterEmitterOperation::SetCollect { policy } => {
+            Ok(format!("SET {}", collect_policy_to_nspl(policy)))
+        }
+        AlterEmitterOperation::DropCollect => Ok("DROP COLLECT".to_string()),
+        AlterEmitterOperation::SetMode { mode } => Ok(format!("SET {}", mode.as_ref())),
+        AlterEmitterOperation::SetFlush {
+            flush_each,
+            max_batch_size,
+        } => Ok(format!(
+            "SET {}",
+            flush_policy_to_nspl_with_max(flush_each, max_batch_size.as_deref())
+        )),
+        AlterEmitterOperation::SetCommit {
+            commit_each,
+            max_commit_size,
+        } => Ok(format!(
+            "SET {}",
+            commit_policy_to_nspl(commit_each, max_commit_size)
         )),
     }
 }

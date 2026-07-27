@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, IntoStaticStr};
 
 use crate::{
-    CreateJunction, CreateRelay, CreateSchema, CreateWireSchemaStmt, Identifier,
-    MessageErrorPolicy, Model, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    CreateEmitter, CreateJunction, CreateRelay, CreateSchema, CreateWireSchemaStmt, EmitSink,
+    Identifier, MessageErrorPolicy, Model, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
 };
 
 #[derive(
@@ -46,6 +46,10 @@ pub enum DynamicModelUpdate {
         junction: Identifier,
         config: CreateJunction,
     },
+    Emitter {
+        emitter: Identifier,
+        config: CreateEmitter,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +70,16 @@ pub enum ModelChangeAspect {
     JunctionMode,
     JunctionBranching,
     JunctionMaterializedState,
+    EmitterInput,
+    EmitterSink,
+    EmitterClient,
+    EmitterCodec,
+    EmitterCollectPolicy,
+    EmitterMode,
+    EmitterFlushPolicy,
+    EmitterConstruction,
+    EmitterErrorPolicies,
+    EmitterMaterializedState,
     SchemaDefinition,
     WireSchemaDefinition,
     EntityReplaced,
@@ -83,6 +97,7 @@ impl ModelChangeAspect {
             | Self::JunctionRouteFlushPolicy
             | Self::JunctionCollectPolicy
             | Self::JunctionMessageErrorPolicy
+            | Self::EmitterFlushPolicy
             | Self::EntityReplaced
             | Self::EntityCreated
             | Self::EntityDropped => QuiesceLevel::Dynamic,
@@ -92,9 +107,18 @@ impl ModelChangeAspect {
             | Self::JunctionRoutes
             | Self::JunctionMode
             | Self::JunctionBranching
-            | Self::JunctionMaterializedState => QuiesceLevel::EntityPause,
+            | Self::JunctionMaterializedState
+            | Self::EmitterSink
+            | Self::EmitterClient
+            | Self::EmitterCodec
+            | Self::EmitterCollectPolicy
+            | Self::EmitterMode
+            | Self::EmitterConstruction
+            | Self::EmitterErrorPolicies
+            | Self::EmitterMaterializedState => QuiesceLevel::EntityPause,
             Self::RelaySchema
             | Self::RelayBranching
+            | Self::EmitterInput
             | Self::SchemaDefinition
             | Self::WireSchemaDefinition => QuiesceLevel::DomainPause,
         }
@@ -160,6 +184,9 @@ impl Model {
             (Self::Relay(base), Self::Relay(candidate)) => relay_change_aspects(base, candidate),
             (Self::Junction(base), Self::Junction(candidate)) => {
                 junction_change_aspects(base, candidate)
+            }
+            (Self::Emitter(base), Self::Emitter(candidate)) => {
+                emitter_change_aspects(base, candidate)
             }
             (Self::Schema(base), Self::Schema(candidate)) => {
                 let CreateSchema {
@@ -462,6 +489,289 @@ fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&Identifier> {
     targets
 }
 
+fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> ModelChangeAspects {
+    let CreateEmitter {
+        name: base_name,
+        from_relay: base_from_relay,
+        collect_policy: base_collect_policy,
+        encode_using_codec: base_codec,
+        sink: base_sink,
+        flush_each: base_flush_each,
+        max_batch_size: base_max_batch_size,
+        error_policies: base_error_policies,
+        mode: base_mode,
+        construction: base_construction,
+        materialized_state: base_materialized_state,
+    } = base;
+    let CreateEmitter {
+        name: candidate_name,
+        from_relay: candidate_from_relay,
+        collect_policy: candidate_collect_policy,
+        encode_using_codec: candidate_codec,
+        sink: candidate_sink,
+        flush_each: candidate_flush_each,
+        max_batch_size: candidate_max_batch_size,
+        error_policies: candidate_error_policies,
+        mode: candidate_mode,
+        construction: candidate_construction,
+        materialized_state: candidate_materialized_state,
+    } = candidate;
+
+    if base_name != candidate_name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    if base_from_relay != candidate_from_relay {
+        changes.push(ModelChangeAspect::EmitterInput);
+    }
+    if base_sink.client() != candidate_sink.client() {
+        changes.push(ModelChangeAspect::EmitterClient);
+    }
+    if !emitter_sink_definition_eq(base_sink, candidate_sink) {
+        changes.push(ModelChangeAspect::EmitterSink);
+    }
+    if base_codec != candidate_codec {
+        changes.push(ModelChangeAspect::EmitterCodec);
+    }
+    if base_collect_policy != candidate_collect_policy {
+        changes.push(ModelChangeAspect::EmitterCollectPolicy);
+    }
+    if base_mode != candidate_mode {
+        changes.push(ModelChangeAspect::EmitterMode);
+    }
+    if base_construction != candidate_construction {
+        changes.push(ModelChangeAspect::EmitterConstruction);
+    }
+    if base_error_policies != candidate_error_policies {
+        changes.push(ModelChangeAspect::EmitterErrorPolicies);
+    }
+    if base_materialized_state != candidate_materialized_state {
+        changes.push(ModelChangeAspect::EmitterMaterializedState);
+    }
+    if base_flush_each != candidate_flush_each || base_max_batch_size != candidate_max_batch_size {
+        changes.push_dynamic(
+            ModelChangeAspect::EmitterFlushPolicy,
+            DynamicModelUpdate::Emitter {
+                emitter: candidate_name.clone(),
+                config: candidate.clone(),
+            },
+        );
+    }
+    changes
+}
+
+fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
+    match (base, candidate) {
+        (
+            EmitSink::Kafka {
+                client: _,
+                topic: base_topic,
+            },
+            EmitSink::Kafka {
+                client: _,
+                topic: candidate_topic,
+            },
+        )
+        | (
+            EmitSink::Pulsar {
+                client: _,
+                topic: base_topic,
+            },
+            EmitSink::Pulsar {
+                client: _,
+                topic: candidate_topic,
+            },
+        )
+        | (
+            EmitSink::Mqtt {
+                client: _,
+                topic: base_topic,
+            },
+            EmitSink::Mqtt {
+                client: _,
+                topic: candidate_topic,
+            },
+        ) => base_topic == candidate_topic,
+        (
+            EmitSink::RabbitMq {
+                client: _,
+                queue: base_queue,
+            },
+            EmitSink::RabbitMq {
+                client: _,
+                queue: candidate_queue,
+            },
+        )
+        | (
+            EmitSink::Sqs {
+                client: _,
+                queue: base_queue,
+            },
+            EmitSink::Sqs {
+                client: _,
+                queue: candidate_queue,
+            },
+        ) => base_queue == candidate_queue,
+        (
+            EmitSink::Redis {
+                client: _,
+                channel: base_channel,
+            },
+            EmitSink::Redis {
+                client: _,
+                channel: candidate_channel,
+            },
+        ) => base_channel == candidate_channel,
+        (
+            EmitSink::Nats {
+                client: _,
+                subject: base_subject,
+            },
+            EmitSink::Nats {
+                client: _,
+                subject: candidate_subject,
+            },
+        ) => base_subject == candidate_subject,
+        (EmitSink::ZeroMq { client: _ }, EmitSink::ZeroMq { client: _ })
+        | (EmitSink::Sentry { client: _ }, EmitSink::Sentry { client: _ }) => true,
+        (
+            EmitSink::ClickHouse {
+                client: _,
+                table: base_table,
+                values: base_values,
+                flush_each: _,
+            },
+            EmitSink::ClickHouse {
+                client: _,
+                table: candidate_table,
+                values: candidate_values,
+                flush_each: _,
+            },
+        ) => base_table == candidate_table && base_values == candidate_values,
+        (
+            EmitSink::Postgres {
+                client: _,
+                table: base_table,
+                values: base_values,
+                conflict_action: base_conflict,
+                max_batch: base_max_batch,
+                flush_each: _,
+            },
+            EmitSink::Postgres {
+                client: _,
+                table: candidate_table,
+                values: candidate_values,
+                conflict_action: candidate_conflict,
+                max_batch: candidate_max_batch,
+                flush_each: _,
+            },
+        ) => {
+            base_table == candidate_table
+                && base_values == candidate_values
+                && base_conflict == candidate_conflict
+                && base_max_batch == candidate_max_batch
+        }
+        (
+            EmitSink::MySql {
+                client: _,
+                table: base_table,
+                values: base_values,
+                conflict_action: base_conflict,
+                max_batch: base_max_batch,
+                flush_each: _,
+            },
+            EmitSink::MySql {
+                client: _,
+                table: candidate_table,
+                values: candidate_values,
+                conflict_action: candidate_conflict,
+                max_batch: candidate_max_batch,
+                flush_each: _,
+            },
+        ) => {
+            base_table == candidate_table
+                && base_values == candidate_values
+                && base_conflict == candidate_conflict
+                && base_max_batch == candidate_max_batch
+        }
+        (
+            EmitSink::MongoDb {
+                client: _,
+                collection: base_collection,
+                values: base_values,
+                conflict_action: base_conflict,
+                max_batch: base_max_batch,
+                flush_each: _,
+            },
+            EmitSink::MongoDb {
+                client: _,
+                collection: candidate_collection,
+                values: candidate_values,
+                conflict_action: candidate_conflict,
+                max_batch: candidate_max_batch,
+                flush_each: _,
+            },
+        ) => {
+            base_collection == candidate_collection
+                && base_values == candidate_values
+                && base_conflict == candidate_conflict
+                && base_max_batch == candidate_max_batch
+        }
+        (
+            EmitSink::Iceberg {
+                backend: base_backend,
+                client: _,
+                table: base_table,
+                values: base_values,
+                location: base_location,
+                catalog: base_catalog,
+                flush_each: _,
+                max_batch_size: _,
+                commit_each: base_commit_each,
+                max_commit_size: base_max_commit_size,
+            },
+            EmitSink::Iceberg {
+                backend: candidate_backend,
+                client: _,
+                table: candidate_table,
+                values: candidate_values,
+                location: candidate_location,
+                catalog: candidate_catalog,
+                flush_each: _,
+                max_batch_size: _,
+                commit_each: candidate_commit_each,
+                max_commit_size: candidate_max_commit_size,
+            },
+        ) => {
+            base_backend == candidate_backend
+                && base_table == candidate_table
+                && base_values == candidate_values
+                && base_location == candidate_location
+                && base_catalog == candidate_catalog
+                && base_commit_each == candidate_commit_each
+                && base_max_commit_size == candidate_max_commit_size
+        }
+        (
+            EmitSink::Kafka { .. }
+            | EmitSink::Pulsar { .. }
+            | EmitSink::RabbitMq { .. }
+            | EmitSink::Redis { .. }
+            | EmitSink::Mqtt { .. }
+            | EmitSink::Nats { .. }
+            | EmitSink::ZeroMq { .. }
+            | EmitSink::Sqs { .. }
+            | EmitSink::Sentry { .. }
+            | EmitSink::ClickHouse { .. }
+            | EmitSink::Postgres { .. }
+            | EmitSink::MySql { .. }
+            | EmitSink::MongoDb { .. }
+            | EmitSink::Iceberg { .. },
+            _,
+        ) => false,
+    }
+}
+
 fn wire_schema_change_aspects(
     base: &CreateWireSchemaStmt,
     candidate: &CreateWireSchemaStmt,
@@ -489,10 +799,11 @@ fn wire_schema_change_aspects(
 #[cfg(test)]
 mod tests {
     use crate::{
-        AckMode, BranchSelection, CreateJunction, CreateRelay, Identifier, InputCollectPolicy,
-        MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-        MessageErrorPolicy, Model, ModelChangeAspect, OutputFlushPolicy, ProcessorInputWhere,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
+        AckMode, BranchSelection, CreateEmitter, CreateJunction, CreateRelay, EmitSink,
+        ErrorPolicies, Identifier, InputCollectPolicy, MaterializedRelayState,
+        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+        ModelChangeAspect, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -521,6 +832,24 @@ mod tests {
             branched_by: BranchSelection::unbranched(),
             mode: AckMode::Attached,
             filter_where: None,
+            materialized_state: Vec::new(),
+        }
+    }
+
+    fn emitter() -> CreateEmitter {
+        CreateEmitter {
+            name: identifier("emit"),
+            from_relay: identifier("events"),
+            collect_policy: None,
+            encode_using_codec: Some(identifier("event_codec")),
+            sink: EmitSink::ZeroMq {
+                client: identifier("sink"),
+            },
+            flush_each: "1s".to_string(),
+            max_batch_size: Some("1MiB".to_string()),
+            error_policies: ErrorPolicies::handled_by_log(),
+            mode: AckMode::Attached,
+            construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),
         }
     }
@@ -736,6 +1065,85 @@ mod tests {
             Model::Junction(dlq),
             ModelChangeAspect::JunctionErrorRouteTargets,
             QuiesceLevel::EntityPause,
+        );
+    }
+
+    #[test]
+    fn emitter_aspects_have_dynamic_entity_and_domain_levels() {
+        let base = emitter();
+
+        let mut flush = base.clone();
+        flush.flush_each = "IMMEDIATE".to_string();
+        flush.max_batch_size = None;
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(flush.clone()),
+            ModelChangeAspect::EmitterFlushPolicy,
+            QuiesceLevel::Dynamic,
+        );
+        let dynamic = Model::Emitter(base.clone()).change_aspects_against(&Model::Emitter(flush));
+        assert_eq!(dynamic.dynamic_updates().len(), 1);
+
+        let mut client = base.clone();
+        client.sink = EmitSink::ZeroMq {
+            client: identifier("sink_two"),
+        };
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(client),
+            ModelChangeAspect::EmitterClient,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut sink = base.clone();
+        sink.sink = EmitSink::Nats {
+            client: identifier("sink"),
+            subject: identifier("events"),
+        };
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(sink),
+            ModelChangeAspect::EmitterSink,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut codec = base.clone();
+        codec.encode_using_codec = Some(identifier("event_codec_v2"));
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(codec),
+            ModelChangeAspect::EmitterCodec,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut collect = base.clone();
+        collect.collect_policy = Some(InputCollectPolicy {
+            collect_for: "10ms".to_string(),
+            max_batch_size: Some("1MiB".to_string()),
+        });
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(collect),
+            ModelChangeAspect::EmitterCollectPolicy,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut mode = base.clone();
+        mode.mode = AckMode::Detached;
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(mode),
+            ModelChangeAspect::EmitterMode,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut source = base;
+        source.from_relay = identifier("other_events");
+        assert_single_aspect(
+            Model::Emitter(emitter()),
+            Model::Emitter(source),
+            ModelChangeAspect::EmitterInput,
+            QuiesceLevel::DomainPause,
         );
     }
 }
