@@ -2383,6 +2383,14 @@ pub struct ActiveGraph {
     indices: HashMap<RegistryKey, NodeIndex>,
 }
 
+#[cfg(feature = "testing")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerMode {
+    #[default]
+    Sticky,
+    Random,
+}
+
 impl ActiveGraph {
     pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
         let models = schedule
@@ -2531,6 +2539,39 @@ impl ActiveGraph {
         cluster_nodes: &[String],
         replica_count: usize,
     ) -> DomainSchedule {
+        #[cfg(feature = "testing")]
+        {
+            self.schedule_for_domain_inner(
+                domain,
+                cluster_nodes,
+                replica_count,
+                SchedulerMode::Sticky,
+            )
+        }
+        #[cfg(not(feature = "testing"))]
+        {
+            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count)
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn schedule_for_domain_with_mode(
+        &self,
+        domain: &Domain,
+        cluster_nodes: &[String],
+        replica_count: usize,
+        scheduler_mode: SchedulerMode,
+    ) -> DomainSchedule {
+        self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, scheduler_mode)
+    }
+
+    fn schedule_for_domain_inner(
+        &self,
+        domain: &Domain,
+        cluster_nodes: &[String],
+        replica_count: usize,
+        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
+    ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
         let mut next_assignment = 0usize;
         let mut node_load = HashMap::<String, usize>::new();
@@ -2576,6 +2617,8 @@ impl ActiveGraph {
                         node_load: &node_load,
                         next_assignment: &mut next_assignment,
                         replica_count,
+                        #[cfg(feature = "testing")]
+                        scheduler_mode,
                     };
                     let assigned_nodes =
                         assignment_for_model(&mut assignment_planner, index, node.config.as_ref());
@@ -3794,6 +3837,8 @@ struct AssignmentPlanner<'a> {
     node_load: &'a HashMap<String, usize>,
     next_assignment: &'a mut usize,
     replica_count: usize,
+    #[cfg(feature = "testing")]
+    scheduler_mode: SchedulerMode,
 }
 
 impl AssignmentPlanner<'_> {
@@ -3820,6 +3865,14 @@ impl AssignmentPlanner<'_> {
             | Model::WindowProcessor(_)
             | Model::WasmProcessor(_)
             | Model::Emitter(_) => {
+                #[cfg(feature = "testing")]
+                if let SchedulerMode::Random = self.scheduler_mode {
+                    let mut nodes = self.cluster_nodes.to_vec();
+                    fastrand::shuffle(&mut nodes);
+                    nodes.truncate(self.replica_count.saturating_add(1));
+                    return nodes;
+                }
+
                 let preferred_order =
                     locality_affinity_scores(self.graph, index, self.assigned_by_key);
                 let mut ordered_nodes = self
@@ -9149,6 +9202,8 @@ mod tests {
         QuiesceLevel, RelayBranching, ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
+    #[cfg(feature = "testing")]
+    use super::SchedulerMode;
     use super::{ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange};
 
     fn temp_db_path() -> PathBuf {
@@ -11127,6 +11182,49 @@ mod tests {
 
         assert_eq!(processor_node, ingestor_node);
         assert_eq!(emitter_node, processor_node);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn random_test_schedule_ignores_upstream_locality() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+
+        registry
+            .apply_batch(&domain, full_graph_batch())
+            .expect("batch should succeed");
+
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let cluster_nodes = [
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ];
+        let observed_cross_node_path = (0..32).any(|_| {
+            let schedule = graph.schedule_for_domain_with_mode(
+                &domain,
+                &cluster_nodes,
+                0,
+                SchedulerMode::Random,
+            );
+            let ingestor =
+                scheduled_node(&schedule, ModelKind::Ingestor, "ing").assigned_single_node();
+            let processor = scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc")
+                .assigned_single_node();
+            let emitter =
+                scheduled_node(&schedule, ModelKind::Emitter, "emit").assigned_single_node();
+            ingestor != processor || processor != emitter
+        });
+
+        assert!(
+            observed_cross_node_path,
+            "independent random assignments should eventually split the dedicated path"
+        );
 
         let _ = fs::remove_dir_all(path);
     }

@@ -150,6 +150,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
 };
 
+#[cfg(feature = "testing")]
+use crate::registry::SchedulerMode;
 use crate::registry::{ActiveGraph, Registry, RegistryError, RegistryMutation};
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -2965,6 +2967,8 @@ struct SessionServiceImpl {
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     runtime: Arc<Runtime>,
     replica_count: usize,
+    #[cfg(feature = "testing")]
+    scheduler_mode: SchedulerMode,
     shutdown: CancellationToken,
     events: broadcast::Sender<ServerEvent>,
     subscription_interest_counts: Arc<DashMap<(Domain, Identifier), usize, RandomState>>,
@@ -3235,6 +3239,9 @@ pub struct Application {
     pub raft_election_timeout_max: Duration,
     #[builder(default = 0)]
     pub replica_count: usize,
+    #[cfg(feature = "testing")]
+    #[builder(default)]
+    pub scheduler_mode: SchedulerMode,
     #[builder(default = Duration::from_secs(30))]
     pub state_snapshot_interval: Duration,
     #[builder(default)]
@@ -8567,6 +8574,14 @@ impl SessionServiceImpl {
             .await;
         let schedule = match graph {
             Some(graph) => {
+                #[cfg(feature = "testing")]
+                let mut schedule = graph.schedule_for_domain_with_mode(
+                    domain,
+                    &cluster_nodes,
+                    self.replica_count,
+                    self.scheduler_mode,
+                );
+                #[cfg(not(feature = "testing"))]
                 let mut schedule =
                     graph.schedule_for_domain(domain, &cluster_nodes, self.replica_count);
                 let current = self.consensus.current_schedule().await;
@@ -8636,6 +8651,14 @@ impl SessionServiceImpl {
         let live_node_ids = self.cluster.live_node_ids().await;
         let cluster_nodes = self.consensus.live_voter_ids(live_node_ids).await;
         for (domain, graph) in self.registry.active_graphs() {
+            #[cfg(feature = "testing")]
+            let mut schedule = graph.schedule_for_domain_with_mode(
+                &domain,
+                &cluster_nodes,
+                self.replica_count,
+                self.scheduler_mode,
+            );
+            #[cfg(not(feature = "testing"))]
             let mut schedule =
                 graph.schedule_for_domain(&domain, &cluster_nodes, self.replica_count);
             Self::merge_existing_schedule_data(
@@ -8741,6 +8764,14 @@ impl SessionServiceImpl {
             let mut moved_this_iteration = false;
 
             for (domain, graph) in self.registry.active_graphs() {
+                #[cfg(feature = "testing")]
+                let desired = graph.schedule_for_domain_with_mode(
+                    &domain,
+                    &replacement_nodes,
+                    self.replica_count,
+                    self.scheduler_mode,
+                );
+                #[cfg(not(feature = "testing"))]
                 let desired =
                     graph.schedule_for_domain(&domain, &replacement_nodes, self.replica_count);
                 let Some(current_domain) = current_schedule.domain(&domain) else {
@@ -12841,6 +12872,8 @@ impl Application {
         let raft_election_timeout_min = self.raft_election_timeout_min;
         let raft_election_timeout_max = self.raft_election_timeout_max;
         let replica_count = self.replica_count;
+        #[cfg(feature = "testing")]
+        let scheduler_mode = self.scheduler_mode;
         let state_snapshot_interval = self.state_snapshot_interval;
         let memory_pressure_controller = self
             .memory_pressure
@@ -13378,8 +13411,19 @@ impl Application {
                         }
                     }
                     for (domain, graph) in registry_for_reconcile.active_graphs() {
-                        let mut schedule =
-                            graph.schedule_for_domain(&domain, &schedulable_node_ids, replica_count);
+                        #[cfg(feature = "testing")]
+                        let mut schedule = graph.schedule_for_domain_with_mode(
+                            &domain,
+                            &schedulable_node_ids,
+                            replica_count,
+                            scheduler_mode,
+                        );
+                        #[cfg(not(feature = "testing"))]
+                        let mut schedule = graph.schedule_for_domain(
+                            &domain,
+                            &schedulable_node_ids,
+                            replica_count,
+                        );
                         SessionServiceImpl::merge_existing_schedule_data(
                             &mut schedule,
                             current_schedule.domain(&domain),
@@ -13563,6 +13607,8 @@ impl Application {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: runtime.clone(),
             replica_count,
+            #[cfg(feature = "testing")]
+            scheduler_mode,
             shutdown: shutdown.clone(),
             events: events.clone(),
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -14661,6 +14707,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -16125,6 +16173,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -16298,6 +16348,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -16467,6 +16519,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -16713,6 +16767,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),

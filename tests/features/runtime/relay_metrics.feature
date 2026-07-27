@@ -203,6 +203,7 @@ Feature: Relay metrics
 
   Scenario: Relay edge metrics are preserved when the owning node is drained
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """

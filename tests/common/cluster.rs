@@ -23,6 +23,8 @@ use lapin::{
 };
 use nervix_client_core::{Client, CommandOutcomeKind, ConnectOptions, TlsRequirement};
 pub use nervix_proto as proto;
+#[cfg(feature = "testing")]
+use nervix_server::SchedulerMode;
 use nervix_server::{
     application::{Application, InternalTransportMode, init_tracing_to_file},
     memory_pressure::MemoryPressureConfig,
@@ -301,6 +303,8 @@ pub(crate) struct Cluster {
 #[derive(Debug, Clone)]
 pub(crate) struct TestClusterConfig {
     pub replica_count: usize,
+    #[cfg(feature = "testing")]
+    pub scheduler_mode: Option<SchedulerMode>,
     pub state_snapshot_interval: Duration,
     pub grpc_mode: InternalTransportMode,
     pub cluster_api_mode: InternalTransportMode,
@@ -316,6 +320,8 @@ impl Default for TestClusterConfig {
     fn default() -> Self {
         Self {
             replica_count: TEST_REPLICA_COUNT,
+            #[cfg(feature = "testing")]
+            scheduler_mode: None,
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
             grpc_mode: InternalTransportMode::Http,
             cluster_api_mode: InternalTransportMode::Http,
@@ -333,9 +339,15 @@ impl Cluster {
     pub(crate) async fn start_with_config(
         node_count: usize,
         runtime_test_hooks: RuntimeTestHooks,
-        config: TestClusterConfig,
+        mut config: TestClusterConfig,
     ) -> io::Result<Self> {
         assert!(node_count >= 1, "cluster must contain at least one node");
+        #[cfg(feature = "testing")]
+        config.scheduler_mode.get_or_insert(if node_count == 3 {
+            SchedulerMode::Random
+        } else {
+            SchedulerMode::Sticky
+        });
         truncate_test_log_once()?;
         init_tracing_to_file(std::path::Path::new(TEST_LOG_FILE))?;
         let root_dir = tempdir()?;
@@ -1491,7 +1503,7 @@ impl NodeHandle {
         *self.failure.lock() = None;
         let shutdown = CancellationToken::new();
         let db_path = self.spec.db_path()?;
-        let application = Application::builder()
+        let application_builder = Application::builder()
             .addr(parse_addr(&self.spec.grpc_addr())?)
             .grpc_mode(self.config.grpc_mode)
             .grpc_https_listen_addr(Some(parse_addr(&self.spec.grpc_https_addr())?))
@@ -1527,7 +1539,14 @@ impl NodeHandle {
             .raft_heartbeat_interval(TEST_RAFT_HEARTBEAT_INTERVAL)
             .raft_election_timeout_min(TEST_RAFT_ELECTION_TIMEOUT_MIN)
             .raft_election_timeout_max(TEST_RAFT_ELECTION_TIMEOUT_MAX)
-            .replica_count(self.config.replica_count)
+            .replica_count(self.config.replica_count);
+        #[cfg(feature = "testing")]
+        let application_builder = application_builder.scheduler_mode(
+            self.config
+                .scheduler_mode
+                .expect("test scheduler mode must be resolved before node startup"),
+        );
+        let application = application_builder
             .state_snapshot_interval(self.config.state_snapshot_interval)
             .memory_pressure(self.config.memory_pressure)
             .cluster_bootstrap_host(self.spec.bootstrap_host.clone())

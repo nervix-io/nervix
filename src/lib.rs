@@ -15,3 +15,5 @@ pub mod runtime_ack;
 pub mod runtime_schema;
 
 pub use nervix_proto as proto;
+#[cfg(feature = "testing")]
+pub use registry::SchedulerMode;

@@ -47,6 +47,8 @@ use mysql_async::{
     prelude::Queryable as MySqlQueryable,
 };
 use nervix_client_core::Client;
+#[cfg(feature = "testing")]
+use nervix_server::SchedulerMode;
 use nervix_server::{
     application::InternalTransportMode, memory_pressure::MemoryPressureConfig,
     runtime::RuntimeTestHooks,
@@ -1665,6 +1667,16 @@ async fn given_runtime_replication_is_configured(
     world.cluster_config.replica_count = replica_count;
     world.cluster_config.state_snapshot_interval = humantime::parse_duration(&snapshot_interval)
         .expect("snapshot interval must be a valid duration");
+}
+
+#[cfg(feature = "testing")]
+#[given("the production sticky scheduler is configured")]
+async fn given_production_sticky_scheduler_is_configured(world: &mut ScenarioWorld) {
+    assert!(
+        world.cluster.is_none(),
+        "the scheduler must be configured before cluster startup"
+    );
+    world.cluster_config.scheduler_mode = Some(SchedulerMode::Sticky);
 }
 
 #[given("temporary files use a custom temp directory")]
@@ -6915,6 +6927,36 @@ fn scheduled_node_placement_from_status<'a>(
             None
         }
     })
+}
+
+#[then(expr = "the last cluster status schedules nodes on at least {int} distinct owners")]
+async fn then_last_cluster_status_uses_at_least_distinct_owners(
+    world: &mut ScenarioWorld,
+    expected_owner_count: usize,
+) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("a cluster status output must exist before checking scheduled owners");
+    let domain_field = format!("domain={}", world.domain);
+    let owners = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("- ") && line.split_whitespace().any(|field| field == domain_field)
+        })
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("owner="))
+        })
+        .filter(|owner| *owner != "-")
+        .collect::<BTreeSet<_>>();
+    assert!(
+        owners.len() >= expected_owner_count,
+        "expected at least {expected_owner_count} distinct scheduled owners for domain '{}', got \
+         {owners:?} in: {output}",
+        world.domain
+    );
 }
 
 #[then(expr = "the last command output owner is saved as placeholder {string}")]

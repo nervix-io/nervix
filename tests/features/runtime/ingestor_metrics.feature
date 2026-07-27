@@ -346,7 +346,8 @@ Feature: Ingestor metrics
 
   Scenario: DESCRIBE INGESTOR from a non-owner node reports owner metrics after restart
     Given Redis is running
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
