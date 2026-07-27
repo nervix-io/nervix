@@ -75,6 +75,18 @@ pub(super) struct BranchedNodeSpecs {
     pub(super) processors: Vec<BranchedProcessorNodeSpec>,
 }
 
+impl BranchedNodeSpecs {
+    pub(super) fn processor(
+        &self,
+        kind: ModelKind,
+        identifier: &Identifier,
+    ) -> Option<&BranchedProcessorNodeSpec> {
+        self.processors
+            .iter()
+            .find(|node| node.spec.kind == kind && &node.spec.processor == identifier)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BranchInstanceAckBoundary {
     Preserve,
@@ -138,6 +150,12 @@ pub(super) enum BranchedProcessorOperationSpec {
         resource_version: Option<u64>,
         file: String,
     },
+}
+
+impl BranchedProcessorOperationSpec {
+    pub(super) fn supports_entity_handoff(&self) -> bool {
+        !matches!(self, Self::WasmProcessor { .. })
+    }
 }
 
 #[derive(Debug, Clone)]

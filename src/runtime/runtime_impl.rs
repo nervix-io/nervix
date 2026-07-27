@@ -412,21 +412,34 @@ impl Runtime {
         let Some(execution) = self.executions.get(domain) else {
             return Vec::new();
         };
+        Self::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
+    }
+
+    fn entity_pause_relays_for_schedule(
+        schedule: &DomainSchedule,
+        affected_entities: &[RegistryEntity],
+    ) -> Vec<Identifier> {
+        let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let mut relays = affected_entities
             .iter()
             .flat_map(|entity| {
                 if entity.kind == ModelKind::Relay {
                     return vec![entity.identifier.clone()];
                 }
-                execution
-                    .schedule
+                if let Some(processor) = processor_specs.processor(entity.kind, &entity.identifier)
+                {
+                    return processor.spec.input_relays.clone();
+                }
+                schedule
                     .nodes
                     .iter()
                     .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
-                    .and_then(|node| match node.config.as_ref() {
-                        Model::Junction(junction) => Some(junction.from.relays().to_vec()),
-                        Model::Emitter(emitter) => Some(vec![emitter.from_relay.clone()]),
-                        _ => None,
+                    .and_then(|node| {
+                        if let Model::Emitter(emitter) = node.config.as_ref() {
+                            Some(vec![emitter.from_relay.clone()])
+                        } else {
+                            None
+                        }
                     })
                     .unwrap_or_default()
             })
@@ -4322,14 +4335,18 @@ impl Runtime {
         Ok(())
     }
 
-    async fn swap_scheduled_nodes(
+    pub(super) async fn swap_scheduled_nodes(
         &self,
         domain: &Domain,
         schedule: DomainSchedule,
         entities: &[RegistryEntity],
         dynamic_updates: &[nervix_models::DynamicModelUpdate],
     ) -> Result<(), RuntimeError> {
-        let relays = self.entity_pause_relays(domain, entities);
+        let desired_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
+        let mut relays = self.entity_pause_relays(domain, entities);
+        relays.extend(Self::entity_pause_relays_for_schedule(&schedule, entities));
+        relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        relays.dedup();
         let local_gate_hold = self.engage_entity_gates(
             domain,
             &relays,
@@ -4345,7 +4362,6 @@ impl Runtime {
             },
         )?);
         let graph_handle = self.domain_graph_handle(domain).await;
-        let desired_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
         let desired_model_index = schedule
             .nodes
             .iter()
@@ -4623,16 +4639,6 @@ impl Runtime {
                 }
                 continue;
             }
-            if entity.kind != ModelKind::Junction {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "entity swap for {} '{}' is not implemented",
-                        entity.kind.as_str(),
-                        entity.identifier.as_str()
-                    ),
-                });
-            }
             let desired_node = schedule
                 .nodes
                 .iter()
@@ -4646,19 +4652,26 @@ impl Runtime {
                     ),
                 })?;
             let desired_spec = desired_specs
-                .processors
-                .iter()
-                .find(|node| {
-                    node.spec.kind == entity.kind && node.spec.processor == entity.identifier
-                })
+                .processor(entity.kind, &entity.identifier)
                 .cloned()
                 .ok_or_else(|| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!(
-                        "missing desired processor spec for '{}'",
+                        "entity swap for {} '{}' has no scheduled processor spec",
+                        entity.kind.as_str(),
                         entity.identifier.as_str()
                     ),
                 })?;
+            if !desired_spec.spec.operation.supports_entity_handoff() {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "{} '{}' cannot hand off node-local processor state",
+                        entity.kind.as_str(),
+                        entity.identifier.as_str()
+                    ),
+                });
+            }
 
             let (old_spec, old_task, mut template) = {
                 let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
@@ -4667,14 +4680,10 @@ impl Runtime {
                         reason: "domain execution is unavailable for entity swap".to_string(),
                     }
                 })?;
-                let old_specs =
-                    branched_ingestor_specs_from_scheduled_nodes(&execution.schedule.nodes);
+                let old_specs = branched_node_specs_from_scheduled_nodes(&execution.schedule.nodes);
                 let old_spec = old_specs
-                    .processors
-                    .into_iter()
-                    .find(|node| {
-                        node.spec.kind == entity.kind && node.spec.processor == entity.identifier
-                    })
+                    .processor(entity.kind, &entity.identifier)
+                    .cloned()
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
@@ -4791,7 +4800,7 @@ impl Runtime {
         local_node_id: &str,
     ) -> HashMap<Identifier, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<Identifier, Vec<RemoteRuntimeConsumer>>::new();
-        let processor_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
+        let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         for spec in processor_specs.processors {
             let Some(node) = schedule
                 .nodes
@@ -5067,7 +5076,7 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: format!("failed to compile domain UDFs: {error}"),
             })?;
-        let all_branched_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
+        let all_branched_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
         let branched_specs = all_branched_specs
             .entrypoints
@@ -7150,7 +7159,7 @@ impl Runtime {
         let mut tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
-        let branched_specs = branched_ingestor_specs_from_active_graph(&graph);
+        let branched_specs = branched_node_specs_from_active_graph(&graph);
         let branch_relays = branch_relays_from_branched_specs(&branched_specs);
         let model_index = graph
             .nodes()

@@ -115,20 +115,20 @@ fn processor_node_spec(
     }
 }
 
-pub(in crate::runtime) fn branched_ingestor_specs_from_scheduled_nodes(
+pub(in crate::runtime) fn branched_node_specs_from_scheduled_nodes(
     nodes: &[ScheduledNode],
 ) -> BranchedNodeSpecs {
-    branched_ingestor_specs_from_models(
+    branched_node_specs_from_models(
         nodes
             .iter()
             .map(|node| (node.kind, node.identifier.clone(), (*node.config).clone())),
     )
 }
 
-pub(in crate::runtime) fn branched_ingestor_specs_from_active_graph(
+pub(in crate::runtime) fn branched_node_specs_from_active_graph(
     graph: &ActiveGraph,
 ) -> BranchedNodeSpecs {
-    branched_ingestor_specs_from_models(
+    branched_node_specs_from_models(
         graph
             .nodes()
             .into_iter()
@@ -136,7 +136,7 @@ pub(in crate::runtime) fn branched_ingestor_specs_from_active_graph(
     )
 }
 
-pub(in crate::runtime) fn branched_ingestor_specs_from_models(
+pub(in crate::runtime) fn branched_node_specs_from_models(
     nodes: impl Iterator<Item = (ModelKind, Identifier, Model)>,
 ) -> BranchedNodeSpecs {
     let nodes = nodes.collect::<Vec<_>>();
@@ -766,6 +766,32 @@ fn materialize_nodes(
         });
     }
     Ok(out)
+}
+
+pub(in crate::runtime) fn processor_template_for_graph_node(
+    graph: &ActiveGraph,
+    kind: ModelKind,
+    processor: &Identifier,
+    relay_schemas: &HashMap<Identifier, Arc<CompiledSchema>>,
+    udfs: Option<&UdfExecutor>,
+) -> Result<RelayProcessorTemplate, String> {
+    let specs = branched_node_specs_from_active_graph(graph);
+    let node = specs.processor(kind, processor).ok_or_else(|| {
+        format!(
+            "{} '{}' has no scheduled processor specification",
+            kind.as_str(),
+            processor.as_str()
+        )
+    })?;
+    materialize_nodes(std::slice::from_ref(&node.spec), relay_schemas, udfs)?
+        .pop()
+        .ok_or_else(|| {
+            format!(
+                "{} '{}' did not produce a processor template",
+                kind.as_str(),
+                processor.as_str()
+            )
+        })
 }
 
 fn parse_branch_ttl_setting(
