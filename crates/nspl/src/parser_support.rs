@@ -80,6 +80,21 @@ pub fn kw_phrase3<'src>(
         .boxed()
 }
 
+pub fn alter_op_separator<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    let operation_head = choice((
+        kw(Identifier::Add),
+        kw(Identifier::Drop),
+        kw(Identifier::Alter),
+        kw(Identifier::Set),
+        kw(Identifier::Replace),
+    ));
+    tok(Token::Comma)
+        .and_is(tok(Token::Comma).ignore_then(operation_head))
+        .labelled("alter_operation_separator")
+        .boxed()
+}
+
 pub fn if_not_exists_clause<'src>()
 -> impl Parser<'src, &'src [Token], bool, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase3(Identifier::If, Identifier::Not, Identifier::Exists)
@@ -248,17 +263,21 @@ pub fn materialized_state_dependency<'src>()
         .ignore_then(kw(Identifier::Materialized))
         .ignore_then(kw(Identifier::State))
         .ignore_then(relay_ref())
-        .then(choice((
-            kw(Identifier::Required)
-                .ignore_then(kw(Identifier::Skip))
-                .to(MaterializedStatePolicy::RequiredSkip),
-            kw(Identifier::Required)
-                .ignore_then(kw(Identifier::Wait))
-                .to(MaterializedStatePolicy::RequiredWait),
-            materialized_default_assignments().map(MaterializedStatePolicy::Default),
-        )))
+        .then(materialized_state_policy())
         .map(|(relay, policy)| MaterializedStateDependency { relay, policy })
         .boxed()
+}
+
+pub fn materialized_state_policy<'src>()
+-> impl Parser<'src, &'src [Token], MaterializedStatePolicy, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw_phrase2(Identifier::Required, Identifier::Skip)
+            .to(MaterializedStatePolicy::RequiredSkip),
+        kw_phrase2(Identifier::Required, Identifier::Wait)
+            .to(MaterializedStatePolicy::RequiredWait),
+        materialized_default_assignments().map(MaterializedStatePolicy::Default),
+    ))
+    .boxed()
 }
 
 pub fn materialized_state_dependencies<'src>()
@@ -679,6 +698,64 @@ pub fn message_error_policy<'src>()
         .boxed()
 }
 
+fn alter_message_error_policy<'src>()
+-> impl Parser<'src, &'src [Token], MessageErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::On)
+        .ignore_then(kw(Identifier::Message))
+        .then_ignore(kw(Identifier::Error))
+        .ignore_then(choice((
+            kw(Identifier::Ignore).to(MessageErrorPolicy::Ignore),
+            kw(Identifier::Log).to(MessageErrorPolicy::Log),
+            kw_phrase2(Identifier::Send, Identifier::To)
+                .ignore_then(message_error_relay_ref())
+                .then(alter_route_construction())
+                .try_map(|(relay, construction), span| {
+                    if construction.inherit.is_some()
+                        || construction.where_clause.is_some()
+                        || !construction.invocations.is_empty()
+                        || construction.assignments.is_empty()
+                        || construction.assignments.iter().any(|assignment| {
+                            assignment.target.scope != AssignmentTargetScope::Bare
+                        })
+                    {
+                        return Err(Rich::custom(
+                            span,
+                            "ON MESSAGE ERROR SEND TO requires bare SET assignments only",
+                        ));
+                    }
+                    Ok(MessageErrorPolicy::Dlq {
+                        relay,
+                        assignments: construction.assignments,
+                    })
+                }),
+        )))
+        .boxed()
+}
+
+pub fn alter_flushed_route_body<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(alter_route_construction().or_not())
+        .then(flush_each())
+        .then(alter_message_error_policy())
+        .map(
+            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
+                ProcessorOutput {
+                    relay,
+                    construction: construction.unwrap_or_default(),
+                    flush_policy: Some(OutputFlushPolicy {
+                        flush_each,
+                        max_batch_size,
+                    }),
+                    message_error_policy,
+                    branch: None,
+                }
+            },
+        )
+        .boxed()
+}
+
 pub fn general_error_policy<'src>()
 -> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::On)
@@ -777,6 +854,30 @@ pub fn route_construction<'src>()
         .boxed()
 }
 
+fn alter_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    route_construction_head()
+        .then(
+            any()
+                .and_is(alter_op_separator().not())
+                .filter(|token: &Token| !route_boundary_token(token))
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .try_map(|(head, tail), span| {
+            let head: &'static str = head.into();
+            let tail = render_vm_program_tokens(&tail);
+            let source = if tail.is_empty() {
+                head.to_string()
+            } else {
+                format!("{head} {tail}")
+            };
+            crate::semantic_program::parse_route_construction(&source)
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
+        .boxed()
+}
+
 fn explicit_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Set)
@@ -817,6 +918,29 @@ fn source_where_clause_with_boundary<'src>(
         .ignore_then(
             any()
                 .filter(move |token: &Token| !boundary(token))
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .try_map(|tokens, span| {
+            let source = render_vm_program_tokens(&tokens);
+            crate::parse_expression(&source)
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
+        .boxed()
+}
+
+pub fn where_expression<'src, P>(
+    boundary: P,
+) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone
+where
+    P: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    kw(Identifier::Where)
+        .ignore_then(
+            any()
+                .and_is(boundary.not())
+                .filter(|token: &Token| !matches!(token, Token::Semicolon))
                 .repeated()
                 .at_least(1)
                 .collect::<Vec<_>>(),

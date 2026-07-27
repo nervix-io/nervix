@@ -99,6 +99,13 @@ Feature: Relay capacity
     When these NSPL commands are executed on the leader node
       """
       ALTER RELAY notifications SET CAPACITY 5;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DYNAMIC
+      """
+    When these NSPL commands are executed on the leader node
+      """
       SHOW CREATE RELAY notifications;
       """
     Then the last command output contains

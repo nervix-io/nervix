@@ -224,15 +224,15 @@ fn branch_model_tuple(
 }
 
 fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices> {
-    Arc::new(super::RelayBoundaryServices {
-        fanout: super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(
+    Arc::new(super::RelayBoundaryServices::new(
+        super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(
             STUPID_CHANNEL_CAPACITY_REMOVE_ME,
         )),
-        attached_runtime_consumer_count: 0,
-        detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from(Vec::new()),
-        remote_dispatcher: None,
-    })
+        0,
+        0,
+        Vec::new(),
+        None,
+    ))
 }
 
 #[tokio::test]
@@ -2948,6 +2948,57 @@ fn runtime_state_store_purges_only_the_requested_domain() {
 }
 
 #[test]
+fn runtime_state_store_purges_only_the_requested_entity() {
+    let dir = tempdir().expect("temp dir should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("db should open");
+    let store = RuntimeStateStore::from_database(db).expect("state store should open");
+    let removed = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeStateKind::MaterializedRelay,
+        kind: ModelKind::Materializer,
+        identifier: identifier("events"),
+        schema_fingerprint: [1; 32],
+        branch_key: None,
+    };
+    let retained = RuntimeStatePlacement {
+        identifier: identifier("audit"),
+        ..removed.clone()
+    };
+    store
+        .persist_latest_snapshot(&removed, 1, b"removed")
+        .expect("removed snapshot should persist");
+    store
+        .persist_latest_snapshot(&retained, 2, b"retained")
+        .expect("retained snapshot should persist");
+
+    store
+        .purge_entity(
+            &removed.domain,
+            removed.state,
+            removed.kind,
+            &removed.identifier,
+        )
+        .expect("entity snapshots should purge");
+
+    assert!(
+        store
+            .latest_snapshot(&removed)
+            .expect("removed snapshot lookup should succeed")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .latest_snapshot(&retained)
+            .expect("retained snapshot lookup should succeed")
+            .expect("unrelated entity snapshot should remain")
+            .payload,
+        b"retained".to_vec()
+    );
+}
+
+#[test]
 fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -3648,13 +3699,13 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
     let mut second_fan_in = super::RelayRuntimeFanIn::new(
         branch_collapse.runtime_consumer_receiver_for_mode(AckMode::Attached),
     );
-    let services = Arc::new(super::RelayBoundaryServices {
-        fanout: super::RelayBoundaryFanout::BranchCollapse(branch_collapse),
-        attached_runtime_consumer_count: 2,
-        detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from(Vec::new()),
-        remote_dispatcher: None,
-    });
+    let services = Arc::new(super::RelayBoundaryServices::new(
+        super::RelayBoundaryFanout::BranchCollapse(branch_collapse),
+        2,
+        0,
+        Vec::new(),
+        None,
+    ));
     let mut relay_runtime = super::ConcreteRelayRuntime::new(super::ConcreteRelayRuntimeBuild {
         runtime: runtime.clone(),
         domain: domain.clone(),
@@ -4261,6 +4312,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             lookups: HashMap::default(),
             udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
+            node_tasks: HashMap::default(),
             tasks: Vec::new(),
         },
     );
@@ -4334,6 +4386,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 lookups: HashMap::default(),
                 udfs: nervix_roto::UdfExecutor::default(),
                 endpoint_routes: HashMap::default(),
+                node_tasks: HashMap::default(),
                 tasks: Vec::new(),
             },
         )
@@ -4392,6 +4445,7 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             lookups: HashMap::default(),
             udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
+            node_tasks: HashMap::default(),
             tasks: Vec::new(),
         },
     );
@@ -6719,6 +6773,7 @@ async fn branched_root_without_children_acks_success() {
         .into_iter()
         .collect(),
         materializers: HashMap::default(),
+        materializer_epoch: None,
         processors: HashMap::default(),
     };
     let graph = StdArc::new(ArcSwapOption::from(None));
@@ -6758,13 +6813,13 @@ async fn reingestor_branched_entrypoint_splits_batches_with_arrow_filters() {
     ));
     let mut fan_in =
         super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(super::RelayBoundaryServices {
+    let services = Arc::new(super::RelayBoundaryServices::new(
         fanout,
-        attached_runtime_consumer_count: 1,
-        detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from(Vec::new()),
-        remote_dispatcher: None,
-    });
+        1,
+        0,
+        Vec::new(),
+        None,
+    ));
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
     let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Reingestor,
@@ -6868,13 +6923,13 @@ async fn reingestor_branched_entrypoint_reuses_existing_branches() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
     let root_relay = identifier("tenant_orders");
-    let services = Arc::new(super::RelayBoundaryServices {
-        fanout: super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1)),
-        attached_runtime_consumer_count: 0,
-        detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from(Vec::new()),
-        remote_dispatcher: None,
-    });
+    let services = Arc::new(super::RelayBoundaryServices::new(
+        super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1)),
+        0,
+        0,
+        Vec::new(),
+        None,
+    ));
     let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
     let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Reingestor,
@@ -6992,6 +7047,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             lookups: HashMap::default(),
             udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
+            node_tasks: HashMap::default(),
             tasks: Vec::new(),
         },
     );
@@ -7197,6 +7253,7 @@ fn branch_runtime_detach_removes_relay_presence_without_deleting_materialized_st
         .into_iter()
         .collect(),
         materializers: [(relay, materialized_state.clone())].into_iter().collect(),
+        materializer_epoch: None,
         processors: HashMap::default(),
         error_policies: ErrorPolicies::handled_by_log(),
     };
@@ -7289,13 +7346,13 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
     let mut fan_in =
         super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(super::RelayBoundaryServices {
+    let services = Arc::new(super::RelayBoundaryServices::new(
         fanout,
-        attached_runtime_consumer_count: 1,
-        detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from(Vec::new()),
-        remote_dispatcher: None,
-    });
+        1,
+        0,
+        Vec::new(),
+        None,
+    ));
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let branched_runtime = super::BranchExecutionRuntime::new(
         runtime,
@@ -7356,13 +7413,13 @@ async fn ingestor_route_applies_size_boundaries_independently_per_branch() {
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
     let mut fan_in =
         super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(super::RelayBoundaryServices {
+    let services = Arc::new(super::RelayBoundaryServices::new(
         fanout,
-        attached_runtime_consumer_count: 1,
-        detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from(Vec::new()),
-        remote_dispatcher: None,
-    });
+        1,
+        0,
+        Vec::new(),
+        None,
+    ));
     let schema = test_schema(&[
         ("tenant", ParseAsType::String),
         ("user_id", ParseAsType::U32),
@@ -7478,13 +7535,13 @@ async fn canceled_branched_dispatch_does_not_leave_detached_branch_tasks() {
     let fanout = super::RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
     let mut fan_in =
         super::RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(super::RelayBoundaryServices {
-        fanout: fanout.clone(),
-        attached_runtime_consumer_count: 1,
-        detached_runtime_consumer_count: 0,
-        remote_runtime_consumers: Arc::from(Vec::new()),
-        remote_dispatcher: None,
-    });
+    let services = Arc::new(super::RelayBoundaryServices::new(
+        fanout.clone(),
+        1,
+        0,
+        Vec::new(),
+        None,
+    ));
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
     let template = super::BranchInstanceTemplate {
         source_kind: ModelKind::Ingestor,
@@ -9176,6 +9233,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             lookups: HashMap::default(),
             udfs: nervix_roto::UdfExecutor::default(),
             endpoint_routes: HashMap::default(),
+            node_tasks: HashMap::default(),
             tasks: Vec::new(),
         },
     );

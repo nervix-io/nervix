@@ -28,6 +28,7 @@ pub struct RuntimeTestHooks {
     pub ingestor_faults: Arc<IngestorFaultInjector>,
     pub branch_instance_expiration_scan_interval: Option<Duration>,
     pub domain_drain_timeout: Option<Duration>,
+    pub entity_gate_deadline: Option<Duration>,
     pub leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
 }
 
@@ -45,6 +46,7 @@ impl Default for RuntimeTestHooks {
             ingestor_faults: Arc::default(),
             branch_instance_expiration_scan_interval: None,
             domain_drain_timeout: None,
+            entity_gate_deadline: None,
             leadership_transfers,
         }
     }

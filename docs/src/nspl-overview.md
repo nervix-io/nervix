@@ -61,7 +61,29 @@ CREATE [IF NOT EXISTS] RELAY <name> SCHEMA <schema> [CAPACITY <n>]
 Core alter statements:
 
 ```nspl
-ALTER RELAY <name> SET CAPACITY <n>;
+ALTER RELAY <name>
+  SET CAPACITY <n> |
+  SET SCHEMA <schema> |
+  SET BRANCHED BY <branch> |
+  SET UNBRANCHED |
+  SET MATERIALIZED STATE LAST BY TIMESTAMP |
+  DROP MATERIALIZED STATE
+  [, ...];
+
+ALTER JUNCTION <name>
+  ADD FROM <relay> [WHERE <expr>] |
+  DROP FROM <relay> |
+  ALTER FROM <relay> SET WHERE <expr> |
+  ALTER FROM <relay> DROP WHERE |
+  SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>] |
+  DROP COLLECT |
+  SET FILTER WHERE <expr> |
+  DROP FILTER WHERE |
+  SET ATTACHED | SET DETACHED |
+  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  ADD|DROP|ALTER MATERIALIZED STATE ... |
+  ADD|DROP|REPLACE ROUTE ...
+  [, ...];
 
 ALTER SCHEMA <name>
   ADD FIELD <field> <type> [OPTIONAL] [SENSITIVE],
@@ -80,9 +102,11 @@ ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
   SET STRICT|LOOSE;
 ```
 
-See [Streams And State](relay.md#capacity) for live relay capacity resize
-behavior and [Schemas And Codecs](schemas-and-codecs.md#altering-schemas) for
-ordered schema changes and atomic migrations.
+Operations in one `ALTER RELAY` or `ALTER JUNCTION` execute in written order. See
+[Streams And State](relay.md#altering-relays) for relay operations,
+[Processors](processors.md#altering-junctions) for the full junction operation shapes, and
+[Schemas And Codecs](schemas-and-codecs.md#altering-schemas) for ordered schema changes and atomic
+migrations.
 
 All `CREATE` statements may optionally insert `IF NOT EXISTS` immediately after `CREATE`.
 

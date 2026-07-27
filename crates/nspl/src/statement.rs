@@ -143,6 +143,7 @@ pub fn statement_parser<'src>()
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),
         crate::schema::alter_wire_schema_parser_any().map(Statement::AlterWireSchema),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
+        crate::junction::alter_junction_parser().map(Statement::AlterJunction),
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
@@ -1050,6 +1051,7 @@ mod tests {
         assert!(suggestions.contains(&"INGESTOR".to_string()));
         assert!(suggestions.contains(&"RELAY".to_string()));
         assert!(suggestions.contains(&"JUNCTION".to_string()));
+        assert!(suggestions.contains(&"JUNCTION".to_string()));
         assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1179,7 +1181,7 @@ mod tests {
             parsed,
             Statement::AlterRelay(AlterRelay {
                 relay: ModelIdentifier::try_from("notifications").expect("valid identifier"),
-                operation: AlterRelayOperation::SetCapacity { capacity: 32 },
+                operations: vec![AlterRelayOperation::SetCapacity { capacity: 32 }],
             })
         );
     }
@@ -1885,6 +1887,40 @@ mod tests {
         let canonical = alter.to_canonical_nspl().expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::AlterWireSchema(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_relay() {
+        let parsed = parse_statement(
+            "ALTER RELAY notifications SET CAPACITY 8, SET SCHEMA event_v2, SET BRANCHED BY \
+             by_tenant, SET MATERIALIZED STATE LAST BY TIMESTAMP;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterRelay(alter) = parsed else {
+            panic!("expected ALTER RELAY");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterRelay(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_junction() {
+        let parsed = parse_statement(
+            "ALTER JUNCTION route_events ADD FROM incoming_b WHERE input.kind = 'event', SET \
+             COLLECT FOR 10ms MAX BATCH SIZE 1MiB, SET FILTER WHERE input.kind != '', ADD \
+             MATERIALIZED STATE profiles REQUIRED WAIT, ADD ROUTE TO projected INHERIT ALL FLUSH \
+             IMMEDIATE ON MESSAGE ERROR SEND TO errors SET code = error.code, SET DETACHED;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterJunction(alter) = parsed else {
+            panic!("expected ALTER JUNCTION");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterJunction(alter), reparsed);
     }
 
     #[test]

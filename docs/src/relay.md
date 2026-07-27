@@ -27,6 +27,33 @@ CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
 CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 ```
 
+## Altering Relays
+
+`ALTER RELAY` accepts one or more comma-separated operations. Operations execute in written order,
+so later operations may replace values set earlier in the same statement:
+
+```nspl
+ALTER RELAY notifications
+  SET CAPACITY 8,
+  SET SCHEMA notification_v2,
+  SET BRANCHED BY by_tenant,
+  SET MATERIALIZED STATE LAST BY TIMESTAMP;
+```
+
+The available operations are `SET CAPACITY`, `SET SCHEMA`, `SET BRANCHED BY`, `SET UNBRANCHED`,
+`SET MATERIALIZED STATE LAST BY TIMESTAMP`, and `DROP MATERIALIZED STATE`. Dropping materialized
+state when it is not configured is an error. The registry validates the complete resulting graph,
+so schema or branching changes must be submitted in the same transaction as every dependent model
+change needed to make the candidate graph valid.
+
+Capacity changes are dynamically applied to a running domain without replacing relay fan-outs or
+their buffered batches. Schema and branching changes use domain pause because Arrow schemas and
+branch identity are compiled into producers and consumers. Materialized-state add/drop uses entity
+pause: Nervix gates and drains the relay, changes materializer membership, advances the
+materializer epoch observed by branch runtimes, and releases the gate. Adding state therefore has
+no interval in which post-commit records can bypass materialization. Dropping state purges the
+relay's in-memory and persisted materialized records before flow resumes.
+
 An ingestor or reingestor uses `BRANCHED BY <branch>` to compute the branch key for each record. When records for a key arrive, Nervix uses a branch instance for that key. A branch instance is the runtime execution path for one concrete key.
 
 Inside a branch, records move through relay instances. Each relay instance has:

@@ -51,25 +51,30 @@ Important runtime consequences:
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
 
-## Automatic Schema-Change Quiescing
+## Automatic Model-Alteration Quiescing
 
-`ALTER SCHEMA` and `ALTER WIRE ... SCHEMA` use an internal paused lifecycle state when their domain
-is running. There is no NSPL `PAUSE` or `RESUME` statement.
+Nervix derives a quiesce level from the complete validated model diff. `ALTER SCHEMA`,
+`ALTER WIRE ... SCHEMA`, relay schema changes, and relay branching changes use an internal paused
+lifecycle state when their domain is running. Dynamic changes such as relay capacity do not pause
+the domain. There is no NSPL `PAUSE` or `RESUME` statement.
 
 Before changing the live graph, the leader validates the complete candidate graph without writing
-it. Nervix then stops domain ingestion and generators on every node, keeps the processing graph and
-domain clock alive, force-flushes processor and emitter output, and waits for ingestors, generators,
-ACK roots, and emitter buffers to drain. The wait is condition-based and bounded to 60 seconds by
-default.
+it while holding the domain's exclusive ALTER lock. For an entity-pause alteration, Nervix gates
+the affected relays on every live node and waits only for their rings and target-node work to
+drain. Unrelated graph paths continue to run. For a domain-pause alteration, Nervix instead stops
+domain ingestion and generators on every node, keeps the processing graph and domain clock alive,
+force-flushes processor and emitter output, and waits for ingestors, generators, ACK roots, and
+emitter buffers to drain. Both waits are condition-based and bounded to 60 seconds by default.
 
 After a successful drain, Nervix atomically installs the model batch, replaces the schedule while
 ingestion is still withheld, and resumes the domain on the new graph. A timeout or cutover failure
 leaves the mutation unapplied, restores the old graph, and automatically resumes it with a clear
-outstanding-work error. A schema ALTER on a stopped domain only validates and persists the new
-schedule. Pure `CREATE` and `DROP` batches keep the immediate schedule-rebuild behavior.
+outstanding-work error. An ALTER on a stopped domain only validates and persists the new schedule.
+Pure `CREATE` and `DROP` batches keep the immediate schedule-rebuild behavior. An all-no-op batch
+writes and publishes nothing and never pauses.
 
-Pause is not a restart: domain clock state, start version, and broker offsets are preserved across
-the quiesce cycle.
+Pause is not a restart: domain clock state, start version, broker offsets, branch identity, and
+eligible handoff residue are preserved across the quiesce cycle.
 
 ## Ingestion Timestamps
 

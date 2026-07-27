@@ -131,6 +131,12 @@ pub enum ControlEnvelope {
     DataflowNodeStatusResponse(DataflowNodeStatusResponse),
     DomainDrainStatusRequest(DomainDrainStatusRequest),
     DomainDrainStatusResponse(DomainDrainStatusResponse),
+    EntityGateRequest(EntityGateRequest),
+    EntityGateResponse(EntityGateResponse),
+    EntityDrainStatusRequest(EntityDrainStatusRequest),
+    EntityDrainStatusResponse(EntityDrainStatusResponse),
+    EntityGateReleaseRequest(EntityGateReleaseRequest),
+    EntityGateReleaseResponse(EntityGateReleaseResponse),
     DescribeMetricsRequest(DescribeMetricsRequest),
     DescribeMetricsResponse(DescribeMetricsResponse),
     DescribeRelayRequest(DescribeRelayRequest),
@@ -271,6 +277,61 @@ pub struct DomainDrainStatusRequest {
 pub struct DomainDrainStatusResponse {
     pub correlation_id: u64,
     pub result: Result<DomainDrainStatusEnvelope, String>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityReference {
+    pub kind: ModelKind,
+    pub identifier: Identifier,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityGateRequest {
+    pub correlation_id: u64,
+    pub operation_id: u64,
+    pub domain: Domain,
+    pub relays: Vec<Identifier>,
+    pub deadline_millis: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityGateResponse {
+    pub correlation_id: u64,
+    pub result: Result<(), String>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityDrainStatusEnvelope {
+    pub buffered_relay_batches: u64,
+    pub node_work_items: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityDrainStatusRequest {
+    pub correlation_id: u64,
+    pub domain: Domain,
+    pub relays: Vec<Identifier>,
+    pub affected_entities: Vec<EntityReference>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityDrainStatusResponse {
+    pub correlation_id: u64,
+    pub result: Result<EntityDrainStatusEnvelope, String>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityGateReleaseRequest {
+    pub correlation_id: u64,
+    pub operation_id: u64,
+    pub domain: Domain,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityGateReleaseResponse {
+    pub correlation_id: u64,
+    pub result: Result<(), String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

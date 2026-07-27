@@ -27,7 +27,7 @@ fn branched_outputs(outputs: &ModelProcessorOutputs) -> BranchedProcessorOutputs
     }
 }
 
-fn processor_input_where_by_relay(
+pub(in crate::runtime) fn processor_input_where_by_relay(
     from_where: &[ProcessorInputWhere],
 ) -> HashMap<Identifier, nervix_models::Expression> {
     from_where
@@ -470,7 +470,7 @@ fn parse_optional_window_duration(
         .transpose()
 }
 
-fn materialize_output(
+pub(in crate::runtime) fn materialize_output(
     output: &BranchedProcessorOutputSpec,
 ) -> Result<RelayProcessorOutputTemplate, String> {
     Ok(RelayProcessorOutputTemplate {
@@ -544,7 +544,7 @@ fn parse_branch_flush_policy(
     })
 }
 
-fn parse_input_collect_policy(
+pub(in crate::runtime) fn parse_input_collect_policy(
     kind: &str,
     processor: &Identifier,
     policy: &nervix_models::InputCollectPolicy,

@@ -71,9 +71,15 @@ use nervix_interconnect::{
     DescribeRelayRequest as RemoteDescribeRelayRequest,
     DescribeRelayResponse as RemoteDescribeRelayResponse, DomainClockStart, DomainClockStop,
     DomainDrainStatusEnvelope, DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
-    DomainDrainStatusResponse as RemoteDomainDrainStatusResponse, DomainTickEnvelope, Envelope,
-    IngestorDescribeEnvelope, LocalIdentity, LookupDescribeEnvelope,
-    LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse, PeerVerifier,
+    DomainDrainStatusResponse as RemoteDomainDrainStatusResponse, DomainTickEnvelope,
+    EntityDrainStatusEnvelope, EntityDrainStatusRequest as RemoteEntityDrainStatusRequest,
+    EntityDrainStatusResponse as RemoteEntityDrainStatusResponse,
+    EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
+    EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
+    EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
+    EntityReference as RemoteEntityReference, Envelope, IngestorDescribeEnvelope, LocalIdentity,
+    LookupDescribeEnvelope, LookupRequest as RemoteLookupRequest,
+    LookupResponse as RemoteLookupResponse, PeerVerifier,
     StateSyncResponse as RemoteStateSyncResponse, TlsConfigBundle, Transport,
     TransportMode as InterconnectTransportMode,
 };
@@ -88,9 +94,9 @@ use nervix_models::{
     IcebergCatalog, Identifier, InferencerTensorDimension, InferencerTensorSchema, IngestSource,
     IngestTimestampSource, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, Model, ModelKind,
     MongoDbConflictAction, MySqlConflictAction, ParseAsType, PostgresConflictAction,
-    ProcessorInputs, ProcessorOutputs, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
-    ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
+    ProcessorInputs, ProcessorOutputs, QuiesceLevel, ResourceNodeState, ResourceNodeStatus,
+    ResourceReplicaKey, ScheduledNode, ShowRelayMaterializedState, StartDomain, Statement,
+    StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, Timestamp,
     UploadResource, VhostTlsResource, expression_to_nspl,
 };
 use nervix_nspl::{
@@ -167,6 +173,135 @@ const WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500)
 const DEFAULT_USER: &str = "default";
 const BASIC_AUTH_REALM: &str = "Nervix";
 const AUTH_RATE_LIMIT_PER_SECOND: u32 = 10;
+
+#[derive(Debug, Clone)]
+struct DrainOutstanding {
+    domain: Domain,
+    node: Option<String>,
+    active_ingestors: u64,
+    active_generators: u64,
+    outstanding_acks: u64,
+    buffered_emitter_messages: u64,
+    status_error: Option<String>,
+}
+
+impl std::fmt::Display for DrainOutstanding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total = self
+            .active_ingestors
+            .saturating_add(self.active_generators)
+            .saturating_add(self.outstanding_acks)
+            .saturating_add(self.buffered_emitter_messages);
+        if let Some(node) = &self.node {
+            write!(
+                formatter,
+                "timed out draining domain '{}' on node '{}': {} outstanding work item(s) \
+                 (ingestors={}, generators={}, acknowledgements={}, emitter_buffers={})",
+                self.domain.as_str(),
+                node,
+                total,
+                self.active_ingestors,
+                self.active_generators,
+                self.outstanding_acks,
+                self.buffered_emitter_messages,
+            )
+        } else if let Some(status_error) = &self.status_error {
+            write!(
+                formatter,
+                "timed out draining domain '{}': {status_error}",
+                self.domain.as_str()
+            )
+        } else {
+            write!(
+                formatter,
+                "timed out draining domain '{}' because no node reported drain status",
+                self.domain.as_str()
+            )
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+enum DomainAlterError {
+    #[error("domain '{domain}' already has a model alteration in progress")]
+    ConcurrentAlter { domain: Domain },
+    #[error("{outstanding}")]
+    QuiesceTimeout { outstanding: DrainOutstanding },
+    #[error(
+        "timed out draining domain '{domain}' for entity alteration: \
+         relay_buffers={buffered_relay_batches}, node_work_items={node_work_items}"
+    )]
+    EntityQuiesceTimeout {
+        domain: Domain,
+        buffered_relay_batches: usize,
+        node_work_items: usize,
+    },
+    #[error("failed to pause domain '{domain}' for model alteration: {reason}")]
+    PauseDomain { domain: Domain, reason: String },
+    #[error("failed to stop ingestion in domain '{domain}' for model alteration: {reason}")]
+    StopIngestion { domain: Domain, reason: String },
+    #[error("failed to resume domain '{domain}' after model alteration: {reason}")]
+    ResumeDomain { domain: Domain, reason: String },
+    #[error("failed to restore ingestion in domain '{domain}' after model alteration: {reason}")]
+    RestoreIngestion { domain: Domain, reason: String },
+    #[error("failed to roll back model alteration in domain '{domain}': {reason}")]
+    Rollback { domain: Domain, reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlterExecutionMode {
+    Dynamic,
+    EntityPause,
+    DomainPause { classified: QuiesceLevel },
+}
+
+impl AlterExecutionMode {
+    fn resolve(classified: QuiesceLevel) -> Self {
+        match classified {
+            QuiesceLevel::Dynamic => Self::Dynamic,
+            QuiesceLevel::EntityPause => Self::EntityPause,
+            QuiesceLevel::DomainPause => Self::DomainPause { classified },
+        }
+    }
+
+    fn executed_level(self) -> QuiesceLevel {
+        match self {
+            Self::Dynamic => QuiesceLevel::Dynamic,
+            Self::EntityPause => QuiesceLevel::EntityPause,
+            Self::DomainPause { .. } => QuiesceLevel::DomainPause,
+        }
+    }
+
+    fn response_suffix(self) -> String {
+        let executed = self.executed_level().as_str();
+        match self {
+            Self::DomainPause {
+                classified: QuiesceLevel::EntityPause,
+            } => format!("; quiesce level: {executed} (escalated from ENTITY_PAUSE)"),
+            Self::Dynamic | Self::EntityPause | Self::DomainPause { .. } => {
+                format!("; quiesce level: {executed}")
+            }
+        }
+    }
+
+    fn requires_domain_pause(self) -> bool {
+        if let Self::DomainPause { .. } = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn requires_entity_pause(self) -> bool {
+        self == Self::EntityPause
+    }
+}
+
+struct ClusterEntityGate {
+    operation_id: u64,
+    nodes: Vec<String>,
+}
+
 struct OnnxModelMetadata {
     inputs: HashMap<String, OnnxTensorMetadata>,
     outputs: HashMap<String, OnnxTensorMetadata>,
@@ -2788,6 +2923,9 @@ enum PendingClusterCommand {
     DescribeIngestor(oneshot::Sender<Result<IngestorDescribeEnvelope, String>>),
     DataflowNodeStatus(oneshot::Sender<Result<DataflowNodeStatusEnvelope, String>>),
     DomainDrainStatus(oneshot::Sender<Result<DomainDrainStatusEnvelope, String>>),
+    EntityGate(oneshot::Sender<Result<(), String>>),
+    EntityDrainStatus(oneshot::Sender<Result<EntityDrainStatusEnvelope, String>>),
+    EntityGateRelease(oneshot::Sender<Result<(), String>>),
     DescribeMetrics(oneshot::Sender<Result<Vec<String>, String>>),
     DescribeLookup(oneshot::Sender<Result<LookupDescribeEnvelope, String>>),
     LookupQuery(oneshot::Sender<Result<Option<runtime_schema::DecodedRecord>, String>>),
@@ -4967,23 +5105,328 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn pause_and_drain_domain_for_schema_change(
+    fn local_entity_drain_status(
         &self,
         domain: &Domain,
+        relays: &[Identifier],
+        affected_entities: &[crate::registry::RegistryEntity],
+    ) -> EntityDrainStatusEnvelope {
+        let status = self
+            .runtime
+            .entity_drain_status(domain, relays, affected_entities);
+        EntityDrainStatusEnvelope {
+            buffered_relay_batches: u64::try_from(status.buffered_relay_batches)
+                .unwrap_or(u64::MAX),
+            node_work_items: u64::try_from(status.node_work_items).unwrap_or(u64::MAX),
+        }
+    }
+
+    async fn engage_entity_gate_on_node(
+        &self,
+        node_id: &str,
+        operation_id: u64,
+        domain: &Domain,
+        relays: &[Identifier],
+        deadline: tokio::time::Instant,
+        reason: &str,
     ) -> Result<(), String> {
-        if !self.runtime.begin_schema_change(domain) {
-            return Err(format!(
-                "domain '{}' already has a schema migration in progress",
-                domain.as_str()
-            ));
+        if node_id == self.consensus.local_node_id() {
+            self.runtime.engage_entity_gate_operation(
+                operation_id,
+                domain,
+                relays,
+                deadline,
+                reason,
+            );
+            return Ok(());
         }
-        if let Err(error) = self.consensus.pause_domain(domain.clone()).await {
-            self.runtime.finish_schema_change(domain);
-            return Err(format!(
-                "failed to pause domain '{}' for schema change: {error}",
-                domain.as_str()
-            ));
+        let correlation_id = self.next_cluster_command_correlation_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending_cluster_commands
+            .insert(correlation_id, PendingClusterCommand::EntityGate(tx));
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
+        if let Err(error) = self
+            .dispatch_interconnect_control(
+                node_id,
+                ControlEnvelope::EntityGateRequest(RemoteEntityGateRequest {
+                    correlation_id,
+                    operation_id,
+                    domain: domain.clone(),
+                    relays: relays.to_vec(),
+                    deadline_millis,
+                    reason: reason.to_string(),
+                }),
+            )
+            .await
+        {
+            self.pending_cluster_commands.remove(&correlation_id);
+            return Err(error);
         }
+        match tokio::time::timeout(remaining.min(Duration::from_secs(2)), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(format!("node '{node_id}' closed the entity gate request")),
+            Err(_) => {
+                self.pending_cluster_commands.remove(&correlation_id);
+                Err(format!("node '{node_id}' timed out engaging entity gates"))
+            }
+        }
+    }
+
+    async fn entity_drain_status_on_node(
+        &self,
+        node_id: &str,
+        domain: &Domain,
+        relays: &[Identifier],
+        affected_entities: &[crate::registry::RegistryEntity],
+        deadline: tokio::time::Instant,
+    ) -> Result<EntityDrainStatusEnvelope, String> {
+        if node_id == self.consensus.local_node_id() {
+            self.runtime.force_flush_domain(domain);
+            return Ok(self.local_entity_drain_status(domain, relays, affected_entities));
+        }
+        let correlation_id = self.next_cluster_command_correlation_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending_cluster_commands
+            .insert(correlation_id, PendingClusterCommand::EntityDrainStatus(tx));
+        if let Err(error) = self
+            .dispatch_interconnect_control(
+                node_id,
+                ControlEnvelope::EntityDrainStatusRequest(RemoteEntityDrainStatusRequest {
+                    correlation_id,
+                    domain: domain.clone(),
+                    relays: relays.to_vec(),
+                    affected_entities: affected_entities
+                        .iter()
+                        .map(|entity| RemoteEntityReference {
+                            kind: entity.kind,
+                            identifier: entity.identifier.clone(),
+                        })
+                        .collect(),
+                }),
+            )
+            .await
+        {
+            self.pending_cluster_commands.remove(&correlation_id);
+            return Err(error);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining.min(Duration::from_secs(2)), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(format!(
+                "node '{node_id}' closed the entity drain status request"
+            )),
+            Err(_) => {
+                self.pending_cluster_commands.remove(&correlation_id);
+                Err(format!(
+                    "node '{node_id}' timed out reporting entity drain status"
+                ))
+            }
+        }
+    }
+
+    async fn release_entity_gate_on_node(
+        &self,
+        node_id: &str,
+        operation_id: u64,
+        domain: &Domain,
+    ) -> Result<(), String> {
+        if node_id == self.consensus.local_node_id() {
+            self.runtime
+                .release_entity_gate_operation(operation_id, domain);
+            return Ok(());
+        }
+        let correlation_id = self.next_cluster_command_correlation_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending_cluster_commands
+            .insert(correlation_id, PendingClusterCommand::EntityGateRelease(tx));
+        if let Err(error) = self
+            .dispatch_interconnect_control(
+                node_id,
+                ControlEnvelope::EntityGateReleaseRequest(RemoteEntityGateReleaseRequest {
+                    correlation_id,
+                    operation_id,
+                    domain: domain.clone(),
+                }),
+            )
+            .await
+        {
+            self.pending_cluster_commands.remove(&correlation_id);
+            return Err(error);
+        }
+        match tokio::time::timeout(Duration::from_secs(2), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(format!(
+                "node '{node_id}' closed the entity gate release request"
+            )),
+            Err(_) => {
+                self.pending_cluster_commands.remove(&correlation_id);
+                Err(format!("node '{node_id}' timed out releasing entity gates"))
+            }
+        }
+    }
+
+    fn handle_entity_gate_response(&self, response: RemoteEntityGateResponse) {
+        if let Some((_, PendingClusterCommand::EntityGate(sender))) = self
+            .pending_cluster_commands
+            .remove(&response.correlation_id)
+        {
+            let _ = sender.send(response.result);
+        }
+    }
+
+    fn handle_entity_drain_status_response(&self, response: RemoteEntityDrainStatusResponse) {
+        if let Some((_, PendingClusterCommand::EntityDrainStatus(sender))) = self
+            .pending_cluster_commands
+            .remove(&response.correlation_id)
+        {
+            let _ = sender.send(response.result);
+        }
+    }
+
+    fn handle_entity_gate_release_response(&self, response: RemoteEntityGateReleaseResponse) {
+        if let Some((_, PendingClusterCommand::EntityGateRelease(sender))) = self
+            .pending_cluster_commands
+            .remove(&response.correlation_id)
+        {
+            let _ = sender.send(response.result);
+        }
+    }
+
+    async fn engage_cluster_entity_gates(
+        &self,
+        domain: &Domain,
+        relays: &[Identifier],
+        deadline: tokio::time::Instant,
+    ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
+        let mut nodes = self.cluster.live_node_ids().await;
+        if !nodes
+            .iter()
+            .any(|node| node == self.consensus.local_node_id())
+        {
+            nodes.push(self.consensus.local_node_id().to_string());
+        }
+        nodes.sort();
+        nodes.dedup();
+        let operation_id = self.next_cluster_command_correlation_id();
+        let mut engaged = Vec::new();
+        for node in &nodes {
+            tokio::task::consume_budget().await;
+            if let Err(error) = self
+                .engage_entity_gate_on_node(
+                    node,
+                    operation_id,
+                    domain,
+                    relays,
+                    deadline,
+                    "leader-orchestrated entity alteration",
+                )
+                .await
+            {
+                let gate = ClusterEntityGate {
+                    operation_id,
+                    nodes: engaged,
+                };
+                self.release_cluster_entity_gates(domain, gate).await;
+                return Err(Report::new(DomainAlterError::PauseDomain {
+                    domain: domain.clone(),
+                    reason: format!("failed to engage entity gates on node '{node}': {error}"),
+                }));
+            }
+            engaged.push(node.clone());
+        }
+        Ok(ClusterEntityGate {
+            operation_id,
+            nodes,
+        })
+    }
+
+    async fn wait_for_cluster_entity_drain(
+        &self,
+        domain: &Domain,
+        gate: &ClusterEntityGate,
+        relays: &[Identifier],
+        affected_entities: &[crate::registry::RegistryEntity],
+        deadline: tokio::time::Instant,
+    ) -> Result<(), Report<DomainAlterError>> {
+        let mut polling = interval(Duration::from_millis(25));
+        polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_status = EntityDrainStatusEnvelope {
+            buffered_relay_batches: 0,
+            node_work_items: 0,
+        };
+        loop {
+            tokio::task::consume_budget().await;
+            polling.tick().await;
+            let mut all_drained = true;
+            for node in &gate.nodes {
+                tokio::task::consume_budget().await;
+                match self
+                    .entity_drain_status_on_node(node, domain, relays, affected_entities, deadline)
+                    .await
+                {
+                    Ok(status)
+                        if status.buffered_relay_batches == 0 && status.node_work_items == 0 => {}
+                    Ok(status) => {
+                        all_drained = false;
+                        last_status = status;
+                    }
+                    Err(error) => {
+                        all_drained = false;
+                        if tokio::time::Instant::now() >= deadline {
+                            warn!(
+                                domain = domain.as_str(),
+                                node, error, "failed to retrieve entity drain status"
+                            );
+                        }
+                    }
+                }
+            }
+            if all_drained {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Report::new(DomainAlterError::EntityQuiesceTimeout {
+                    domain: domain.clone(),
+                    buffered_relay_batches: usize::try_from(last_status.buffered_relay_batches)
+                        .unwrap_or(usize::MAX),
+                    node_work_items: usize::try_from(last_status.node_work_items)
+                        .unwrap_or(usize::MAX),
+                }));
+            }
+        }
+    }
+
+    async fn release_cluster_entity_gates(&self, domain: &Domain, gate: ClusterEntityGate) {
+        for node in gate.nodes {
+            tokio::task::consume_budget().await;
+            if let Err(error) = self
+                .release_entity_gate_on_node(&node, gate.operation_id, domain)
+                .await
+            {
+                warn!(
+                    domain = domain.as_str(),
+                    node,
+                    error,
+                    "failed to release entity gates; deadline expiry remains the backstop"
+                );
+            }
+        }
+    }
+
+    async fn pause_and_drain_domain_for_alter(
+        &self,
+        domain: &Domain,
+    ) -> Result<(), Report<DomainAlterError>> {
+        self.consensus
+            .pause_domain(domain.clone())
+            .await
+            .map_err(|error| {
+                Report::new(DomainAlterError::PauseDomain {
+                    domain: domain.clone(),
+                    reason: error.to_string(),
+                })
+            })?;
 
         self.runtime
             .sync_domains(&self.consensus.current_domains().await);
@@ -4996,23 +5439,26 @@ impl SessionServiceImpl {
             .await
         {
             return Err(self
-                .abort_schema_change_pause(
+                .abort_domain_alter_pause(
                     domain,
-                    format!(
-                        "failed to stop ingestion in domain '{}' for schema change: {error}",
-                        domain.as_str()
-                    ),
+                    Report::new(DomainAlterError::StopIngestion {
+                        domain: domain.clone(),
+                        reason: error.to_string(),
+                    }),
                 )
                 .await);
         }
 
         match self.wait_for_paused_domain_drain(domain).await {
             Ok(()) => Ok(()),
-            Err(reason) => Err(self.abort_schema_change_pause(domain, reason).await),
+            Err(reason) => Err(self.abort_domain_alter_pause(domain, reason).await),
         }
     }
 
-    async fn wait_for_paused_domain_drain(&self, domain: &Domain) -> Result<(), String> {
+    async fn wait_for_paused_domain_drain(
+        &self,
+        domain: &Domain,
+    ) -> Result<(), Report<DomainAlterError>> {
         let mut nodes = self.cluster.live_node_ids().await;
         if !nodes
             .iter()
@@ -5027,6 +5473,7 @@ impl SessionServiceImpl {
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_pending = None::<(String, DomainDrainStatusEnvelope)>;
+        let mut last_status_error = None;
 
         loop {
             tokio::task::consume_budget().await;
@@ -5046,8 +5493,9 @@ impl SessionServiceImpl {
                     }
                     Err(error) => {
                         all_drained = false;
+                        last_status_error = Some(error);
                         if tokio::time::Instant::now() >= deadline {
-                            return Err(error);
+                            break;
                         }
                     }
                 }
@@ -5059,91 +5507,100 @@ impl SessionServiceImpl {
                 continue;
             }
 
-            let reason = if let Some((node, status)) = last_pending {
-                let outstanding = status
-                    .active_ingestors
-                    .saturating_add(status.active_generators)
-                    .saturating_add(status.outstanding_acks)
-                    .saturating_add(status.buffered_emitter_messages);
-                format!(
-                    "timed out draining domain '{}' on node '{}': {} outstanding work item(s) \
-                     (ingestors={}, generators={}, acknowledgements={}, emitter_buffers={})",
-                    domain.as_str(),
-                    node,
-                    outstanding,
-                    status.active_ingestors,
-                    status.active_generators,
-                    status.outstanding_acks,
-                    status.buffered_emitter_messages,
-                )
+            let outstanding = if let Some((node, status)) = last_pending {
+                DrainOutstanding {
+                    domain: domain.clone(),
+                    node: Some(node),
+                    active_ingestors: status.active_ingestors,
+                    active_generators: status.active_generators,
+                    outstanding_acks: status.outstanding_acks,
+                    buffered_emitter_messages: status.buffered_emitter_messages,
+                    status_error: last_status_error,
+                }
             } else {
-                format!(
-                    "timed out draining domain '{}' because no node reported drain status",
-                    domain.as_str()
-                )
+                DrainOutstanding {
+                    domain: domain.clone(),
+                    node: None,
+                    active_ingestors: 0,
+                    active_generators: 0,
+                    outstanding_acks: 0,
+                    buffered_emitter_messages: 0,
+                    status_error: last_status_error,
+                }
             };
-            return Err(reason);
+            return Err(Report::new(DomainAlterError::QuiesceTimeout {
+                outstanding,
+            }));
         }
     }
 
-    async fn abort_schema_change_pause(&self, domain: &Domain, reason: String) -> String {
-        match self.resume_domain_after_schema_change(domain).await {
+    async fn abort_domain_alter_pause(
+        &self,
+        domain: &Domain,
+        reason: Report<DomainAlterError>,
+    ) -> Report<DomainAlterError> {
+        match self.resume_domain_after_alter(domain).await {
             Ok(()) => reason,
-            Err(resume_error) => format!("{reason}; automatic resume failed: {resume_error}"),
+            Err(resume_error) => Report::new(DomainAlterError::Rollback {
+                domain: domain.clone(),
+                reason: format!("{reason}; automatic resume failed: {resume_error}"),
+            }),
         }
     }
 
-    async fn resume_domain_after_schema_change(&self, domain: &Domain) -> Result<(), String> {
-        let result = async {
-            self.consensus
-                .resume_domain(domain.clone())
-                .await
-                .map_err(|error| {
-                    format!(
-                        "failed to resume domain '{}' after schema change: {error}",
-                        domain.as_str()
-                    )
-                })?;
-            self.runtime
-                .sync_domains(&self.consensus.current_domains().await);
-            self.runtime
-                .apply_cluster_schedule(
-                    self.consensus.local_node_id(),
-                    &self.consensus.current_schedule().await,
-                )
-                .await
-                .map_err(|error| {
-                    format!(
-                        "failed to restore ingestion in domain '{}' after schema change: {error}",
-                        domain.as_str()
-                    )
+    async fn resume_domain_after_alter(
+        &self,
+        domain: &Domain,
+    ) -> Result<(), Report<DomainAlterError>> {
+        self.consensus
+            .resume_domain(domain.clone())
+            .await
+            .map_err(|error| {
+                Report::new(DomainAlterError::ResumeDomain {
+                    domain: domain.clone(),
+                    reason: error.to_string(),
                 })
-        }
-        .await;
-        self.runtime.finish_schema_change(domain);
-        result
+            })?;
+        self.runtime
+            .sync_domains(&self.consensus.current_domains().await);
+        self.runtime
+            .apply_cluster_schedule(
+                self.consensus.local_node_id(),
+                &self.consensus.current_schedule().await,
+            )
+            .await
+            .map_err(|error| {
+                Report::new(DomainAlterError::RestoreIngestion {
+                    domain: domain.clone(),
+                    reason: error.to_string(),
+                })
+            })
     }
 
-    async fn rollback_schema_change_and_resume(
+    async fn rollback_domain_alter_and_resume(
         &self,
         domain: &Domain,
         planned: crate::registry::PlannedMutations,
-    ) -> Result<(), String> {
+    ) -> Result<(), Report<DomainAlterError>> {
         let rollback_result = async {
-            let runtime_changes = self
-                .registry
-                .rollback_committed(planned)
-                .map_err(|error| format!("registry rollback failed: {error}"))?;
+            let runtime_changes = self.registry.rollback_committed(planned).map_err(|error| {
+                Report::new(DomainAlterError::Rollback {
+                    domain: domain.clone(),
+                    reason: format!("registry rollback failed: {error}"),
+                })
+            })?;
             self.publish_domain_schedule(domain, runtime_changes.graph)
                 .await
-                .map_err(|error| format!("old schedule restore failed: {error}"))
+                .map_err(|error| {
+                    Report::new(DomainAlterError::Rollback {
+                        domain: domain.clone(),
+                        reason: format!("old schedule restore failed: {error}"),
+                    })
+                })
         }
         .await;
-        if let Err(error) = rollback_result {
-            self.runtime.finish_schema_change(domain);
-            return Err(error);
-        }
-        self.resume_domain_after_schema_change(domain).await
+        rollback_result?;
+        self.resume_domain_after_alter(domain).await
     }
 
     async fn describe_metrics_for_scheduled_node(
@@ -6372,12 +6829,23 @@ impl SessionServiceImpl {
             return self.not_leader_response(query, leader).await;
         }
 
+        let alter_guard = match self.runtime.try_begin_domain_alter(&domain) {
+            Some(guard) => guard,
+            None => {
+                return command_error(
+                    DomainAlterError::ConcurrentAlter {
+                        domain: domain.clone(),
+                    }
+                    .to_string(),
+                );
+            }
+        };
         let Some(domain_state) = self.consensus.current_domain(&domain).await else {
             return command_error(format!("domain '{}' does not exist", domain.as_str()));
         };
         if let DomainStatus::Paused = domain_state.status {
             return command_error(format!(
-                "domain '{}' is paused by a schema migration",
+                "domain '{}' is paused by a model alteration",
                 domain.as_str()
             ));
         }
@@ -6499,6 +6967,19 @@ impl SessionServiceImpl {
                     ));
                     mutations.push(RegistryMutation::AlterRelay(alter));
                 }
+                Statement::AlterJunction(alter) => {
+                    let model_id = alter.junction.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered junction '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterJunction(alter));
+                }
                 Statement::Drop(drop) => {
                     let model_id = drop.name.clone();
                     refresh_http_tls |= drop.kind == ModelKind::Vhost;
@@ -6533,13 +7014,6 @@ impl SessionServiceImpl {
                 .first()
                 .map(|(_, id, _)| id.clone())
                 .expect("non-empty mutation batch must have a first model");
-            let requires_quiesce = if let DomainStatus::Running = domain_state.status {
-                mutations
-                    .iter()
-                    .any(RegistryMutation::requires_domain_quiesce)
-            } else {
-                false
-            };
             let planned = match self.registry.plan_mutations(&domain, &mutations) {
                 Ok(planned) => planned,
                 Err(err) => {
@@ -6551,106 +7025,178 @@ impl SessionServiceImpl {
                     return create_registry_error_response(query, &domain, &error_target, &err);
                 }
             };
-            if requires_quiesce
-                && let Err(error) = self.pause_and_drain_domain_for_schema_change(&domain).await
-            {
-                return command_error(error);
+            let classified_level = if let DomainStatus::Running = domain_state.status {
+                planned.quiesce().level()
+            } else {
+                QuiesceLevel::Dynamic
+            };
+            alter_guard.set_level(classified_level);
+            let execution_mode = AlterExecutionMode::resolve(classified_level);
+            let requires_domain_pause = execution_mode.requires_domain_pause();
+            let affected_entities = planned.quiesce().affected_entities().to_vec();
+            let is_noop = planned.is_noop();
+            let mut cluster_entity_gate = None;
+
+            if is_noop {
+                info!(
+                    domain = domain.as_str(),
+                    "model mutation batch has no model diff; skipping persistence and schedule \
+                     publication"
+                );
             }
-            let mut rollback_plan = requires_quiesce.then(|| planned.clone());
-            let runtime_changes = match self.registry.commit_planned(planned) {
-                Ok(changes) => changes,
-                Err(err) => {
-                    let resume_error = if requires_quiesce {
-                        self.resume_domain_after_schema_change(&domain).await.err()
-                    } else {
-                        None
-                    };
+            if !is_noop
+                && requires_domain_pause
+                && let Err(error) = self.pause_and_drain_domain_for_alter(&domain).await
+            {
+                return command_error(error.to_string());
+            }
+            if !is_noop && execution_mode.requires_entity_pause() {
+                let relays = self
+                    .runtime
+                    .entity_pause_relays(&domain, &affected_entities);
+                let deadline = tokio::time::Instant::now() + self.runtime.entity_gate_deadline();
+                let gate = match self
+                    .engage_cluster_entity_gates(&domain, &relays, deadline)
+                    .await
+                {
+                    Ok(gate) => gate,
+                    Err(error) => return command_error(error.to_string()),
+                };
+                if let Err(error) = self
+                    .wait_for_cluster_entity_drain(
+                        &domain,
+                        &gate,
+                        &relays,
+                        &affected_entities,
+                        deadline,
+                    )
+                    .await
+                {
+                    self.release_cluster_entity_gates(&domain, gate).await;
+                    return command_error(error.to_string());
+                }
+                cluster_entity_gate = Some(gate);
+            }
+
+            if !is_noop {
+                let mut rollback_plan = requires_domain_pause.then(|| planned.clone());
+                let runtime_changes = match self.registry.commit_planned(planned) {
+                    Ok(changes) => changes,
+                    Err(err) => {
+                        if let Some(gate) = cluster_entity_gate.take() {
+                            self.release_cluster_entity_gates(&domain, gate).await;
+                        }
+                        if let RegistryError::ConcurrentMutation { .. } = err.current_context() {
+                            error!(
+                                domain = domain.as_str(),
+                                error = %err,
+                                "registry base-model CAS fired while the exclusive domain ALTER \
+                                 lock was held"
+                            );
+                        }
+                        let resume_error = if requires_domain_pause {
+                            self.resume_domain_after_alter(&domain).await.err()
+                        } else {
+                            None
+                        };
+                        warn!(
+                            domain = domain.as_str(),
+                            error = %err,
+                            "failed to apply model mutation batch"
+                        );
+                        if let Some(resume_error) = resume_error {
+                            return command_error(format!(
+                                "failed to apply model mutation batch: {err}; {resume_error}"
+                            ));
+                        }
+                        return create_registry_error_response(query, &domain, &error_target, &err);
+                    }
+                };
+                if let Some(prepared_udfs) = prepared_udfs {
+                    self.runtime
+                        .install_prepared_domain_udfs(&domain, prepared_udfs);
+                }
+
+                if let Err(err) = self
+                    .publish_domain_schedule(&domain, runtime_changes.graph.clone())
+                    .await
+                {
+                    if let Some(gate) = cluster_entity_gate.take() {
+                        self.release_cluster_entity_gates(&domain, gate).await;
+                    }
+                    if let Some(rollback_plan) = rollback_plan.take()
+                        && let Err(rollback_error) = self
+                            .rollback_domain_alter_and_resume(&domain, rollback_plan)
+                            .await
+                    {
+                        return command_error(format!(
+                            "failed to publish model alteration schedule for domain '{}': {err}; \
+                             {rollback_error}",
+                            domain.as_str()
+                        ));
+                    }
+                    self.broadcast_error(format!(
+                        "schedule publish failed in domain '{}': {}",
+                        domain.as_str(),
+                        err
+                    ));
                     warn!(
                         domain = domain.as_str(),
                         error = %err,
-                        "failed to apply model mutation batch"
+                        "failed to publish schedule for model mutation batch"
                     );
-                    if let Some(resume_error) = resume_error {
-                        return command_error(format!(
-                            "failed to apply schema mutation batch: {err}; {resume_error}"
-                        ));
-                    }
-                    return create_registry_error_response(query, &domain, &error_target, &err);
+                    return CommandResult {
+                        success: false,
+                        message: format!(
+                            "failed to publish schedule for domain '{}'",
+                            domain.as_str()
+                        ),
+                        diagnostics: vec![Diagnostic {
+                            message: err,
+                            span_start: 0,
+                            span_end: u32::try_from(query.len()).unwrap_or(0),
+                        }],
+                        kind: CommandResultKind::Error as i32,
+                        ..Default::default()
+                    };
                 }
-            };
-            if let Some(prepared_udfs) = prepared_udfs {
-                self.runtime
-                    .install_prepared_domain_udfs(&domain, prepared_udfs);
-            }
 
-            if let Err(err) = self
-                .publish_domain_schedule(&domain, runtime_changes.graph.clone())
-                .await
-            {
-                if let Some(rollback_plan) = rollback_plan.take()
-                    && let Err(rollback_error) = self
-                        .rollback_schema_change_and_resume(&domain, rollback_plan)
-                        .await
-                {
-                    return command_error(format!(
-                        "failed to publish schema migration schedule for domain '{}': {err}; \
-                         {rollback_error}",
-                        domain.as_str()
-                    ));
+                if requires_domain_pause {
+                    if let Err(error) = self.wait_for_paused_domain_drain(&domain).await {
+                        if let Some(rollback_plan) = rollback_plan.take()
+                            && let Err(rollback_error) = self
+                                .rollback_domain_alter_and_resume(&domain, rollback_plan)
+                                .await
+                        {
+                            return command_error(format!("{error}; {rollback_error}"));
+                        }
+                        return command_error(error.to_string());
+                    }
+                    if let Err(error) = self.resume_domain_after_alter(&domain).await {
+                        if let Some(rollback_plan) = rollback_plan.take()
+                            && let Err(rollback_error) = self
+                                .rollback_domain_alter_and_resume(&domain, rollback_plan)
+                                .await
+                        {
+                            return command_error(format!("{error}; {rollback_error}"));
+                        }
+                        return command_error(error.to_string());
+                    }
                 }
-                self.broadcast_error(format!(
-                    "schedule publish failed in domain '{}': {}",
-                    domain.as_str(),
-                    err
-                ));
-                warn!(
-                    domain = domain.as_str(),
-                    error = %err,
-                    "failed to publish schedule for model mutation batch"
-                );
-                return CommandResult {
-                    success: false,
-                    message: format!(
-                        "failed to publish schedule for domain '{}'",
-                        domain.as_str()
-                    ),
-                    diagnostics: vec![Diagnostic {
-                        message: err,
-                        span_start: 0,
-                        span_end: u32::try_from(query.len()).unwrap_or(0),
-                    }],
-                    kind: CommandResultKind::Error as i32,
-                    ..Default::default()
-                };
             }
-
-            if requires_quiesce {
-                if let Err(error) = self.wait_for_paused_domain_drain(&domain).await {
-                    if let Some(rollback_plan) = rollback_plan.take()
-                        && let Err(rollback_error) = self
-                            .rollback_schema_change_and_resume(&domain, rollback_plan)
-                            .await
-                    {
-                        return command_error(format!("{error}; {rollback_error}"));
-                    }
-                    return command_error(error);
-                }
-                if let Err(error) = self.resume_domain_after_schema_change(&domain).await {
-                    if let Some(rollback_plan) = rollback_plan.take()
-                        && let Err(rollback_error) = self
-                            .rollback_schema_change_and_resume(&domain, rollback_plan)
-                            .await
-                    {
-                        return command_error(format!("{error}; {rollback_error}"));
-                    }
-                    return command_error(error);
-                }
+            if let Some(gate) = cluster_entity_gate {
+                self.release_cluster_entity_gates(&domain, gate).await;
             }
 
             if refresh_http_tls && let Err(error) = self.refresh_http_tls_server_config().await {
                 self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
             }
-            for (index, _, message) in applied {
+            let mut first_applied = true;
+            for (index, _, mut message) in applied {
+                if first_applied {
+                    message.push_str(&execution_mode.response_suffix());
+                    first_applied = false;
+                }
                 results[index] = Some(CommandResult {
                     success: true,
                     message,
@@ -6791,387 +7337,13 @@ impl SessionServiceImpl {
                 let domain = domain.as_ref().expect("domain required");
                 self.stop_domain(domain, stop).await
             }
-            Statement::Create(model) => {
-                let domain = domain.as_ref().expect("domain required");
-                let Some(domain_state) = self.consensus.current_domain(domain).await else {
-                    return command_error(format!("domain '{}' does not exist", domain.as_str()));
-                };
-                let if_not_exists = model.if_not_exists;
-                let model = model.body;
-                if let Ok(Some(_)) = self.registry.get(domain, model.kind(), model.identifier())
-                    && if_not_exists
-                {
-                    return command_ok_already_existed(format!(
-                        "model '{}' already exists in domain '{}'",
-                        model.identifier().as_str(),
-                        domain.as_str()
-                    ));
-                }
-                if let Model::Ingestor(ingestor) = model.as_ref()
-                    && let DomainPace::Paced = domain_state.config.pace
-                    && ingestor.timestamp_source.is_none()
-                {
-                    return command_error(format!(
-                        "paced domain '{}' requires ingestor '{}' to declare TIMESTAMP NOW or \
-                         TIMESTAMP AT <field>",
-                        domain.as_str(),
-                        ingestor.name.as_str()
-                    ));
-                }
-                if let Model::Vhost(vhost) = model.as_ref()
-                    && let Some(tls) = vhost.tls.as_ref()
-                    && let Err(error) = self.validate_vhost_tls_binding(tls).await
-                {
-                    return command_error(format!(
-                        "invalid TLS resource for VHOST '{}': {error}",
-                        vhost.name.as_str()
-                    ));
-                }
-                if let Model::Lookup(lookup) = model.as_ref()
-                    && let Err(error) = self.validate_lookup_binding(lookup).await
-                {
-                    return command_error(format!(
-                        "invalid HASH MAP '{}': {error}",
-                        lookup.name.as_str()
-                    ));
-                }
-                if let Model::Inferencer(processor) = model.as_ref()
-                    && let Err(error) = self.validate_inferencer_binding(processor).await
-                {
-                    return command_error(format!(
-                        "invalid INFERENCER '{}': {error}",
-                        processor.name.as_str()
-                    ));
-                }
-                let created_udfs = match model.as_ref() {
-                    Model::Udf(udf) => vec![udf.clone()],
-                    _ => Vec::new(),
-                };
-                let prepared_udfs = match self.prepare_created_udfs(domain, &created_udfs).await {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        let udf = created_udfs
-                            .first()
-                            .expect("UDF preparation only fails for a UDF create");
-                        return command_error(format!(
-                            "invalid UDF '{}': {error}",
-                            udf.name.as_str()
-                        ));
-                    }
-                };
-                let model_id = model.as_ref().identifier().clone();
-                let model_kind = model.as_ref().kind();
-                info!(
-                    domain = domain.as_str(),
-                    model = model_id.as_str(),
-                    kind = model_kind.as_str(),
-                    "applying create statement"
-                );
-
-                let runtime_changes = match self
-                    .registry
-                    .apply_batch(domain, vec![(*model).clone()])
-                {
-                    Ok(changes) => changes,
-                    Err(err) => {
-                        if if_not_exists
-                            && matches!(err.current_context(), RegistryError::AlreadyExists { .. })
-                        {
-                            return command_ok_already_existed(format!(
-                                "model '{}' already exists in domain '{}'",
-                                model_id.as_str(),
-                                domain.as_str()
-                            ));
-                        }
-                        warn!(
-                            domain = domain.as_str(),
-                            model = model_id.as_str(),
-                            kind = model_kind.as_str(),
-                            error = %err,
-                            "failed to apply create statement"
-                        );
-                        return create_registry_error_response(query, domain, &model_id, &err);
-                    }
-                };
-                if let Some(prepared_udfs) = prepared_udfs {
-                    self.runtime
-                        .install_prepared_domain_udfs(domain, prepared_udfs);
-                }
-
-                if let Err(err) = self
-                    .publish_domain_schedule(domain, runtime_changes.graph.clone())
-                    .await
-                {
-                    self.broadcast_error(format!(
-                        "schedule publish failed in domain '{}': {}",
-                        domain.as_str(),
-                        err
-                    ));
-                    warn!(
-                        domain = domain.as_str(),
-                        model = model_id.as_str(),
-                        kind = model_kind.as_str(),
-                        error = %err,
-                        "failed to publish schedule for create statement"
-                    );
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "failed to publish schedule for domain '{}'",
-                            domain.as_str()
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: err,
-                            span_start: 0,
-                            span_end: u32::try_from(query.len()).unwrap_or(0),
-                        }],
-                        kind: CommandResultKind::Error as i32,
-                        ..Default::default()
-                    };
-                }
-
-                info!(
-                    domain = domain.as_str(),
-                    model = model_id.as_str(),
-                    kind = model_kind.as_str(),
-                    "applied create statement"
-                );
-
-                if model_kind == ModelKind::Vhost
-                    && let Err(error) = self.refresh_http_tls_server_config().await
-                {
-                    self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
-                }
-
-                CommandResult {
-                    success: true,
-                    message: format!(
-                        "stored model '{}' in domain '{}'",
-                        model_id.as_str(),
-                        domain.as_str()
-                    ),
-                    diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
-                    ..Default::default()
-                }
-            }
-            Statement::AlterSchema(alter) => {
-                let domain = domain.as_ref().expect("domain required");
-                let model_id = alter.schema.clone();
-                let runtime_changes = match self.registry.alter_schema(domain, alter) {
-                    Ok(changes) => changes,
-                    Err(error) => {
-                        return create_registry_error_response(query, domain, &model_id, &error);
-                    }
-                };
-                if let Err(error) = self
-                    .publish_domain_schedule(domain, runtime_changes.graph)
-                    .await
-                {
-                    return command_error(format!(
-                        "failed to publish schedule for domain '{}': {error}",
-                        domain.as_str()
-                    ));
-                }
-                CommandResult {
-                    success: true,
-                    message: format!(
-                        "altered schema '{}' in domain '{}'",
-                        model_id.as_str(),
-                        domain.as_str()
-                    ),
-                    diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
-                    ..Default::default()
-                }
-            }
-            Statement::AlterWireSchema(alter) => {
-                let domain = domain.as_ref().expect("domain required");
-                let model_id = alter.schema().clone();
-                let runtime_changes = match self.registry.alter_wire_schema(domain, alter) {
-                    Ok(changes) => changes,
-                    Err(error) => {
-                        return create_registry_error_response(query, domain, &model_id, &error);
-                    }
-                };
-                if let Err(error) = self
-                    .publish_domain_schedule(domain, runtime_changes.graph)
-                    .await
-                {
-                    return command_error(format!(
-                        "failed to publish schedule for domain '{}': {error}",
-                        domain.as_str()
-                    ));
-                }
-                CommandResult {
-                    success: true,
-                    message: format!(
-                        "altered wire schema '{}' in domain '{}'",
-                        model_id.as_str(),
-                        domain.as_str()
-                    ),
-                    diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
-                    ..Default::default()
-                }
-            }
-            Statement::AlterRelay(alter) => {
-                let domain = domain.as_ref().expect("domain required");
-                let model_id = alter.relay.clone();
-                let model_kind = ModelKind::Relay;
-                info!(
-                    domain = domain.as_str(),
-                    model = model_id.as_str(),
-                    kind = model_kind.as_str(),
-                    "applying alter relay statement"
-                );
-
-                let runtime_changes = match self.registry.alter_relay(domain, alter.clone()) {
-                    Ok(changes) => changes,
-                    Err(err) => {
-                        warn!(
-                            domain = domain.as_str(),
-                            model = model_id.as_str(),
-                            kind = model_kind.as_str(),
-                            error = %err,
-                            "failed to apply alter relay statement"
-                        );
-                        return create_registry_error_response(query, domain, &model_id, &err);
-                    }
-                };
-
-                if let Err(err) = self
-                    .publish_domain_schedule(domain, runtime_changes.graph.clone())
-                    .await
-                {
-                    self.broadcast_error(format!(
-                        "schedule publish failed in domain '{}': {}",
-                        domain.as_str(),
-                        err
-                    ));
-                    warn!(
-                        domain = domain.as_str(),
-                        model = model_id.as_str(),
-                        kind = model_kind.as_str(),
-                        error = %err,
-                        "failed to publish schedule for alter relay statement"
-                    );
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "failed to publish schedule for domain '{}'",
-                            domain.as_str()
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: err,
-                            span_start: 0,
-                            span_end: u32::try_from(query.len()).unwrap_or(0),
-                        }],
-                        kind: CommandResultKind::Error as i32,
-                        ..Default::default()
-                    };
-                }
-
-                info!(
-                    domain = domain.as_str(),
-                    model = model_id.as_str(),
-                    kind = model_kind.as_str(),
-                    "applied alter relay statement"
-                );
-
-                CommandResult {
-                    success: true,
-                    message: format!(
-                        "altered relay '{}' in domain '{}'",
-                        model_id.as_str(),
-                        domain.as_str()
-                    ),
-                    diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
-                    ..Default::default()
-                }
-            }
-            Statement::Drop(drop) => {
-                let domain = domain.as_ref().expect("domain required");
-                let model_id = drop.name.clone();
-                let model_kind = drop.kind;
-                info!(
-                    domain = domain.as_str(),
-                    model = model_id.as_str(),
-                    kind = model_kind.as_str(),
-                    "applying drop statement"
-                );
-
-                let runtime_changes = match self.registry.drop_batch(domain, vec![drop.clone()]) {
-                    Ok(changes) => changes,
-                    Err(err) => {
-                        warn!(
-                            domain = domain.as_str(),
-                            model = model_id.as_str(),
-                            kind = model_kind.as_str(),
-                            error = %err,
-                            "failed to apply drop statement"
-                        );
-                        return create_registry_error_response(query, domain, &model_id, &err);
-                    }
-                };
-
-                if let Err(err) = self
-                    .publish_domain_schedule(domain, runtime_changes.graph.clone())
-                    .await
-                {
-                    self.broadcast_error(format!(
-                        "schedule publish failed in domain '{}': {}",
-                        domain.as_str(),
-                        err
-                    ));
-                    warn!(
-                        domain = domain.as_str(),
-                        model = model_id.as_str(),
-                        kind = model_kind.as_str(),
-                        error = %err,
-                        "failed to publish schedule for drop statement"
-                    );
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "failed to publish schedule for domain '{}'",
-                            domain.as_str()
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: err,
-                            span_start: 0,
-                            span_end: u32::try_from(query.len()).unwrap_or(0),
-                        }],
-                        kind: CommandResultKind::Error as i32,
-                        ..Default::default()
-                    };
-                }
-
-                info!(
-                    domain = domain.as_str(),
-                    model = model_id.as_str(),
-                    kind = model_kind.as_str(),
-                    "applied drop statement"
-                );
-
-                if model_kind == ModelKind::Vhost
-                    && let Err(error) = self.refresh_http_tls_server_config().await
-                {
-                    self.broadcast_error(format!("failed to refresh HTTP TLS config: {error}"));
-                }
-
-                CommandResult {
-                    success: true,
-                    message: format!(
-                        "dropped model '{}' from domain '{}'",
-                        model_id.as_str(),
-                        domain.as_str()
-                    ),
-                    diagnostics: Vec::new(),
-                    kind: CommandResultKind::Ok as i32,
-                    ..Default::default()
-                }
+            Statement::Create(_)
+            | Statement::AlterSchema(_)
+            | Statement::AlterWireSchema(_)
+            | Statement::AlterRelay(_)
+            | Statement::AlterJunction(_)
+            | Statement::Drop(_) => {
+                unreachable!("model mutations are handled before statement dispatch")
             }
             Statement::DropNode(drop) => self.drop_node(drop.node_id).await,
             Statement::CordonNode(cordon) => self.set_node_cordoned(cordon.node_id, true).await,
@@ -7804,7 +7976,7 @@ impl SessionServiceImpl {
         }
         if let DomainStatus::Paused = domain.status {
             return command_error(format!(
-                "domain '{}' is paused for a schema migration",
+                "domain '{}' is paused for a model alteration",
                 domain_id.as_str()
             ));
         }
@@ -13030,13 +13202,13 @@ impl Application {
                 {
                     for (domain, state) in consensus_for_reconcile.current_domains().await {
                         if let DomainStatus::Paused = state.status
-                            && !runtime_for_reconcile.schema_change_is_active(&domain)
+                            && !runtime_for_reconcile.domain_alter_is_active(&domain)
                         {
                             match consensus_for_reconcile.resume_domain(domain.clone()).await {
                                 Ok(()) => {
                                     info!(
                                         domain = domain.as_str(),
-                                        "resumed orphaned schema-change pause after leadership \
+                                        "resumed orphaned ALTER pause after leadership \
                                          acquisition"
                                     );
                                 }
@@ -13044,7 +13216,7 @@ impl Application {
                                     warn!(
                                         domain = domain.as_str(),
                                         error = %error,
-                                        "failed to resume orphaned schema-change pause"
+                                        "failed to resume orphaned ALTER pause"
                                     );
                                 }
                             }
@@ -13654,6 +13826,82 @@ impl Application {
                             }
                             Envelope::Control(ControlEnvelope::DomainDrainStatusResponse(response)) => {
                                 service_for_interconnect.handle_domain_drain_status_response(response);
+                            }
+                            Envelope::Control(ControlEnvelope::EntityGateRequest(request)) => {
+                                service_for_interconnect.runtime.engage_entity_gate_operation(
+                                    request.operation_id,
+                                    &request.domain,
+                                    &request.relays,
+                                    tokio::time::Instant::now()
+                                        + Duration::from_millis(request.deadline_millis),
+                                    &request.reason,
+                                );
+                                if let Err(error) = message.reply.send(Envelope::Control(
+                                    ControlEnvelope::EntityGateResponse(
+                                        RemoteEntityGateResponse {
+                                            correlation_id: request.correlation_id,
+                                            result: Ok(()),
+                                        },
+                                    ),
+                                )).await {
+                                    warn!(error = %error, "failed to send entity gate response");
+                                }
+                            }
+                            Envelope::Control(ControlEnvelope::EntityGateResponse(response)) => {
+                                service_for_interconnect.handle_entity_gate_response(response);
+                            }
+                            Envelope::Control(ControlEnvelope::EntityDrainStatusRequest(request)) => {
+                                service_for_interconnect
+                                    .runtime
+                                    .force_flush_domain(&request.domain);
+                                let affected_entities = request
+                                    .affected_entities
+                                    .iter()
+                                    .map(|entity| crate::registry::RegistryEntity {
+                                        kind: entity.kind,
+                                        identifier: entity.identifier.clone(),
+                                    })
+                                    .collect::<Vec<_>>();
+                                let result: Result<EntityDrainStatusEnvelope, String> =
+                                    Ok(service_for_interconnect.local_entity_drain_status(
+                                        &request.domain,
+                                        &request.relays,
+                                        &affected_entities,
+                                    ));
+                                if let Err(error) = message.reply.send(Envelope::Control(
+                                    ControlEnvelope::EntityDrainStatusResponse(
+                                        RemoteEntityDrainStatusResponse {
+                                            correlation_id: request.correlation_id,
+                                            result,
+                                        },
+                                    ),
+                                )).await {
+                                    warn!(error = %error, "failed to send entity drain status response");
+                                }
+                            }
+                            Envelope::Control(ControlEnvelope::EntityDrainStatusResponse(response)) => {
+                                service_for_interconnect.handle_entity_drain_status_response(response);
+                            }
+                            Envelope::Control(ControlEnvelope::EntityGateReleaseRequest(request)) => {
+                                service_for_interconnect
+                                    .runtime
+                                    .release_entity_gate_operation(
+                                        request.operation_id,
+                                        &request.domain,
+                                    );
+                                if let Err(error) = message.reply.send(Envelope::Control(
+                                    ControlEnvelope::EntityGateReleaseResponse(
+                                        RemoteEntityGateReleaseResponse {
+                                            correlation_id: request.correlation_id,
+                                            result: Ok(()),
+                                        },
+                                    ),
+                                )).await {
+                                    warn!(error = %error, "failed to send entity gate release response");
+                                }
+                            }
+                            Envelope::Control(ControlEnvelope::EntityGateReleaseResponse(response)) => {
+                                service_for_interconnect.handle_entity_gate_release_response(response);
                             }
                             Envelope::Control(ControlEnvelope::DescribeMetricsRequest(request)) => {
                                 let result = service_for_interconnect

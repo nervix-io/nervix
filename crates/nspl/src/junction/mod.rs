@@ -1,13 +1,16 @@
 use chumsky::prelude::*;
-use nervix_models::{AckMode, CreateJunction, CreateStatement};
+use nervix_models::{
+    AckMode, AlterJunction, AlterJunctionOperation, CreateJunction, CreateStatement,
+};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
-        into_parse_error, junction_name, kw, lex_input, materialized_state_dependencies,
-        suggestions_from_errors, tok,
+        ParseError, ParseFromSourceError, ack_mode, alter_flushed_route_body, alter_op_separator,
+        branch_selection, collect_for, current_word_prefix, filter_where_clause,
+        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error,
+        junction_name, junction_ref, kw, lex_input, materialized_state_dependencies,
+        materialized_state_policy, relay_ref, suggestions_from_errors, tok, where_expression,
     },
 };
 
@@ -52,6 +55,130 @@ pub fn create_junction_parser<'src>()
         .boxed()
 }
 
+pub fn alter_junction_parser<'src>()
+-> impl Parser<'src, &'src [Token], AlterJunction, extra::Err<ParseError<'src>>> + Clone {
+    let add_from = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .then(where_expression(alter_op_separator()).or_not())
+        .map(|(relay, where_clause)| AlterJunctionOperation::AddFrom {
+            relay,
+            where_clause,
+        });
+    let drop_from = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterJunctionOperation::DropFrom { relay });
+    let alter_from = kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .then(choice((
+            kw(Identifier::Set)
+                .ignore_then(where_expression(alter_op_separator()))
+                .map(Some),
+            kw(Identifier::Drop)
+                .ignore_then(kw(Identifier::Where))
+                .to(None),
+        )))
+        .map(|(relay, where_clause)| match where_clause {
+            Some(where_clause) => AlterJunctionOperation::AlterFromSetWhere {
+                relay,
+                where_clause,
+            },
+            None => AlterJunctionOperation::AlterFromDropWhere { relay },
+        });
+    let set_collect = kw(Identifier::Set)
+        .ignore_then(collect_for())
+        .map(|policy| AlterJunctionOperation::SetCollect { policy });
+    let drop_collect = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Collect))
+        .to(AlterJunctionOperation::DropCollect);
+    let set_filter = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Filter))
+        .ignore_then(where_expression(alter_op_separator()))
+        .map(|where_clause| AlterJunctionOperation::SetFilterWhere { where_clause });
+    let drop_filter = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Filter))
+        .ignore_then(kw(Identifier::Where))
+        .to(AlterJunctionOperation::DropFilterWhere);
+    let set_mode = kw(Identifier::Set)
+        .ignore_then(ack_mode())
+        .map(|mode| AlterJunctionOperation::SetMode { mode });
+    let set_branching = kw(Identifier::Set)
+        .ignore_then(branch_selection())
+        .map(|branching| AlterJunctionOperation::SetBranching { branching });
+    let add_materialized = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .then(materialized_state_policy())
+        .map(
+            |(relay, policy)| AlterJunctionOperation::AddMaterializedState {
+                dependency: nervix_models::MaterializedStateDependency { relay, policy },
+            },
+        );
+    let drop_materialized = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterJunctionOperation::DropMaterializedState { relay });
+    let alter_materialized = kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .then_ignore(kw(Identifier::Set))
+        .then(materialized_state_policy())
+        .map(|(relay, policy)| AlterJunctionOperation::AlterMaterializedState { relay, policy });
+    let add_route = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(alter_flushed_route_body())
+        .map(|route| AlterJunctionOperation::AddRoute { route });
+    let drop_route = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterJunctionOperation::DropRoute { relay });
+    let replace_route = kw(Identifier::Replace)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(alter_flushed_route_body())
+        .map(|route| AlterJunctionOperation::ReplaceRoute { route });
+
+    let operation = choice((
+        add_from,
+        drop_from,
+        alter_from,
+        set_collect,
+        drop_collect,
+        set_filter,
+        drop_filter,
+        set_mode,
+        set_branching,
+        add_materialized,
+        drop_materialized,
+        alter_materialized,
+        add_route,
+        drop_route,
+        replace_route,
+    ))
+    .boxed();
+
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Junction))
+        .ignore_then(junction_ref())
+        .then(
+            operation
+                .separated_by(alter_op_separator())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .map(|(junction, operations)| AlterJunction {
+            junction,
+            operations,
+        })
+        .boxed()
+}
+
 pub fn parse_create_junction_tokens(
     tokens: &[Token],
 ) -> Result<CreateStatement<CreateJunction>, Vec<ParseError<'_>>> {
@@ -73,6 +200,23 @@ pub fn parse_create_junction(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
+pub fn parse_alter_junction_tokens(tokens: &[Token]) -> Result<AlterJunction, Vec<ParseError<'_>>> {
+    let out = alter_junction_parser().then_ignore(end()).parse(tokens);
+    if out.has_errors() {
+        Err(out.into_errors())
+    } else {
+        Ok(out
+            .into_output()
+            .expect("successful parse must have output"))
+    }
+}
+
+pub fn parse_alter_junction(input: &str) -> Result<AlterJunction, ParseFromSourceError> {
+    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    parse_alter_junction_tokens(&tokens)
+        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+}
+
 pub fn suggest_create_junction(input: &str, cursor: usize) -> Vec<String> {
     let safe_cursor = cursor.min(input.len());
     let prefix_src = &input[..safe_cursor];
@@ -84,6 +228,26 @@ pub fn suggest_create_junction(input: &str, cursor: usize) -> Vec<String> {
     };
 
     let out = create_junction_parser()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if !out.has_errors() {
+        return Vec::new();
+    }
+
+    suggestions_from_errors(out.into_errors(), &prefix)
+}
+
+pub fn suggest_alter_junction(input: &str, cursor: usize) -> Vec<String> {
+    let safe_cursor = cursor.min(input.len());
+    let prefix_src = &input[..safe_cursor];
+    let prefix = current_word_prefix(prefix_src);
+
+    let (_, _, tokens) = match lex_input(prefix_src) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let out = alter_junction_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
     if !out.has_errors() {
@@ -132,6 +296,80 @@ mod tests {
         ));
         assert_eq!(route.construction.assignments.len(), 2);
         assert!(route.construction.where_clause.is_some());
+    }
+
+    #[test]
+    fn parses_alter_junction_expression_commas_and_dlq_tail_before_next_operation() {
+        let parsed = parse_alter_junction(
+            "ALTER JUNCTION project_events SET FILTER WHERE concat(input.kind, ',') != '', ADD \
+             ROUTE TO projected SET normalized = concat(input.raw, ',ready') FLUSH IMMEDIATE ON \
+             MESSAGE ERROR SEND TO errors SET code = concat(error.code, ',bad'), SET DETACHED;",
+        )
+        .expect("ALTER JUNCTION should preserve expression commas and find operation separators");
+
+        assert_eq!(parsed.operations.len(), 3);
+        assert!(matches!(
+            parsed.operations[0],
+            AlterJunctionOperation::SetFilterWhere { .. }
+        ));
+        assert!(matches!(
+            parsed.operations[1],
+            AlterJunctionOperation::AddRoute { .. }
+        ));
+        assert_eq!(
+            parsed.operations[2],
+            AlterJunctionOperation::SetMode {
+                mode: AckMode::Detached
+            }
+        );
+    }
+
+    #[test]
+    fn parses_alter_junction_structural_operations() {
+        let parsed = parse_alter_junction(
+            "ALTER JUNCTION project_events ADD FROM incoming WHERE input.kind = 'event', ALTER \
+             FROM incoming DROP WHERE, SET COLLECT FOR 10ms MAX BATCH SIZE 1MiB, ADD MATERIALIZED \
+             STATE profiles REQUIRED WAIT, ALTER MATERIALIZED STATE profiles SET REQUIRED SKIP, \
+             DROP MATERIALIZED STATE profiles, DROP FROM incoming;",
+        )
+        .expect("structural operations should parse");
+
+        assert_eq!(parsed.operations.len(), 7);
+    }
+
+    #[test]
+    fn rejects_alter_junction_without_operations_or_complete_route_contracts() {
+        assert!(parse_alter_junction("ALTER JUNCTION project_events;").is_err());
+        assert!(
+            parse_alter_junction(
+                "ALTER JUNCTION project_events ADD ROUTE TO projected INHERIT ALL;"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn alter_junction_completion_comes_from_operation_grammar() {
+        let suggestions = suggest_alter_junction("ALTER JUNCTION project_events ", usize::MAX);
+        for expected in ["ADD", "DROP", "ALTER", "SET", "REPLACE"] {
+            assert!(
+                suggestions.contains(&expected.to_string()),
+                "missing {expected}: {suggestions:?}"
+            );
+        }
+        assert!(!suggestions.contains(&"SCHEMA".to_string()));
+        assert!(!suggestions.contains(&"WIRE".to_string()));
+    }
+
+    #[test]
+    fn alter_expression_documents_operation_head_field_corner() {
+        assert!(
+            parse_alter_junction(
+                "ALTER JUNCTION project_events SET FILTER WHERE concat(input.add, set);"
+            )
+            .is_err(),
+            "an operation-head field immediately after a comma is an intentional grammar boundary"
+        );
     }
 
     #[test]

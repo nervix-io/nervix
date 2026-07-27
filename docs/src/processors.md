@@ -135,6 +135,53 @@ CREATE JUNCTION route_notifications
     ON MESSAGE ERROR LOG;
 ```
 
+### Altering Junctions
+
+`ALTER JUNCTION` accepts comma-separated operations and applies them in written order. Input,
+materialized-dependency, and route order are preserved:
+
+```nspl
+ALTER JUNCTION route_notifications
+  ADD FROM priority_notifications WHERE input.active,
+  SET COLLECT FOR 25ms MAX BATCH SIZE 1MiB,
+  SET FILTER WHERE input.amount >= 10,
+  ALTER MATERIALIZED STATE profiles SET REQUIRED WAIT,
+  REPLACE ROUTE TO accepted
+    INHERIT ALL
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG,
+  SET DETACHED;
+```
+
+Input operations are `ADD FROM`, `DROP FROM`, and `ALTER FROM ... SET|DROP WHERE`. A junction must
+retain at least one input. `DROP FROM` also removes that input's `WHERE`. Collection, node filter,
+attachment mode, and branch selection each have `SET` forms; collection and filtering also have
+`DROP` forms.
+
+Materialized dependencies support `ADD MATERIALIZED STATE <relay> <policy>`,
+`DROP MATERIALIZED STATE <relay>`, and
+`ALTER MATERIALIZED STATE <relay> SET <policy>`. Adding appends; altering keeps the existing order
+position; duplicate dependencies are invalid.
+
+Routes support `ADD ROUTE TO <relay> <full route body>`, `DROP ROUTE TO <relay>`, and
+`REPLACE ROUTE TO <relay> <full route body>`. Adding appends and replacing keeps the route's index.
+Multiple routes may target the same relay, so drop and replace require that their target identify
+exactly one route. A junction must retain at least one route.
+
+Filter, per-input `WHERE`, construction, flush, collect, and same-target message-error policy
+changes are classified dynamic and hot-applied from the published schedule. Existing input
+collectors, buffered route output, pending materialized-state work, subscriptions, and branch-local
+processor state remain in place. The runtime invalidates only compiled expression programs whose
+source changed; a flush-policy update also forces an immediate convergence pass so buffered output
+is evaluated against the new policy without waiting for another input.
+
+Input/route topology, attachment, branching, dependencies, and changed error-route targets are
+classified entity pause. Nervix gates their source relays across the cluster, drains affected
+relay rings and node work, and swaps only the altered junction task. Pending materialized-state
+work and branch presence residue are handed to the replacement before it resumes. Other nodes in
+the domain continue to run; sibling consumers of a gated relay can experience bounded
+backpressure until the gate is released.
+
 ## Deduplicator
 
 Deduplication expressions are structured and evaluated in source order:
