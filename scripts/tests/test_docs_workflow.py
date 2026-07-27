@@ -68,6 +68,32 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertIn("--variable=geometry:margin=0.8in", justfile)
         self.assertIn("--variable=linestretch:1.08", justfile)
 
+    def test_docs_ci_handles_pushes_without_pull_request_context(self) -> None:
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        _, build_book = workflow.split("\n  build-book:", maxsplit=1)
+        docs_target, comment_step = build_book.split(
+            "\n      - name: Comment docs link on PR",
+            maxsplit=1,
+        )
+
+        self.assertIn(
+            'if [[ "${{ github.event_name }}" == "pull_request" ]]; then',
+            docs_target,
+        )
+        self.assertIn(
+            'docs_target="main-${{ github.sha }}"',
+            docs_target,
+        )
+        self.assertIn(
+            'just publish-book "${{ steps.docs.outputs.target }}"',
+            docs_target,
+        )
+        self.assertTrue(
+            comment_step.lstrip().startswith(
+                "if: github.event_name == 'pull_request'\n"
+            )
+        )
+
     def test_pdf_title_page_contains_canonical_product_metadata(self) -> None:
         title_page = Path("docs/theme/nervix-pdf-title.tex").read_text()
 
