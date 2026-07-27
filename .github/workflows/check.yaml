@@ -3,6 +3,8 @@ name: Check
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
 
 env:
   TINYGO_VERSION: "0.41.1"
@@ -16,6 +18,7 @@ concurrency:
 
 jobs:
   conventional-pr-title:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -137,6 +140,9 @@ jobs:
     name: tests
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
@@ -214,6 +220,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Blacksmith cache
         uses: actions/cache@v4
@@ -229,6 +237,14 @@ jobs:
       - name: Tests Coverage
         run: |
             just test-coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: ./lcov.info
+          use_oidc: true
 
       - name: Upload test logs
         if: always()

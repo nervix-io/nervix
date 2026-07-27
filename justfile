@@ -52,7 +52,7 @@ test-coverage: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --all-targets --all-features --features testing --workspace --lcov --output-path lcov.info
-    cargo crap --lcov lcov.info
+    cargo crap --lcov lcov.info --min 30 --threshold 30
 
 cargo-fmt:
     cargo +nightly fmt
