@@ -187,14 +187,18 @@ jobs:
       - name: Compute docs target
         id: docs
         run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             docs_target="pr-${{ github.event.pull_request.number }}-${{ github.sha }}"
-            docs_url="https://docs.nervix.io/${docs_target}/"
-            llms_url="https://docs.nervix.io/${docs_target}/llms.txt"
-            pdf_url="https://docs.nervix.io/${docs_target}/nervix.pdf"
-            echo "target=${docs_target}" >> "$GITHUB_OUTPUT"
-            echo "url=${docs_url}" >> "$GITHUB_OUTPUT"
-            echo "llms_url=${llms_url}" >> "$GITHUB_OUTPUT"
-            echo "pdf_url=${pdf_url}" >> "$GITHUB_OUTPUT"
+          else
+            docs_target="main-${{ github.sha }}"
+          fi
+          docs_url="https://docs.nervix.io/${docs_target}/"
+          llms_url="https://docs.nervix.io/${docs_target}/llms.txt"
+          pdf_url="https://docs.nervix.io/${docs_target}/nervix.pdf"
+          echo "target=${docs_target}" >> "$GITHUB_OUTPUT"
+          echo "url=${docs_url}" >> "$GITHUB_OUTPUT"
+          echo "llms_url=${llms_url}" >> "$GITHUB_OUTPUT"
+          echo "pdf_url=${pdf_url}" >> "$GITHUB_OUTPUT"
 
       - name: Publish Book
         env:
@@ -202,20 +206,21 @@ jobs:
           CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-            just publish-book pr-${{ github.event.pull_request.number }}-${{ github.sha }} "$CLOUDFLARE_ZONE_ID"
+          just publish-book "${{ steps.docs.outputs.target }}" "$CLOUDFLARE_ZONE_ID"
 
       - name: Publish docs link to build summary
         run: |
-            {
-              echo "## Documentation Preview"
-              echo
-              echo "- Target: \`${{ steps.docs.outputs.target }}\`"
-              echo "- Book: ${{ steps.docs.outputs.url }}"
-              echo "- PDF: ${{ steps.docs.outputs.pdf_url }}"
-              echo "- NSPL agent index: ${{ steps.docs.outputs.llms_url }}"
-            } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Documentation Preview"
+            echo
+            echo "- Target: \`${{ steps.docs.outputs.target }}\`"
+            echo "- Book: ${{ steps.docs.outputs.url }}"
+            echo "- PDF: ${{ steps.docs.outputs.pdf_url }}"
+            echo "- NSPL agent index: ${{ steps.docs.outputs.llms_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment docs link on PR
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
