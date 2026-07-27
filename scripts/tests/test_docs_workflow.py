@@ -47,12 +47,62 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertIn("fonts-noto-core", build_book)
         self.assertIn("lmodern", build_book)
         self.assertIn("texlive-fonts-recommended", build_book)
+        self.assertIn("texlive-latex-extra", build_book)
         self.assertIn("texlive-lang-chinese", build_book)
         self.assertIn("texlive-lang-cjk", build_book)
         self.assertIn("texlive-xetex", build_book)
         self.assertIn("just book-pdf", justfile)
         self.assertIn('output_path="docs/book/nervix.pdf"', justfile)
         self.assertIn("--pdf-engine=xelatex", justfile)
+        self.assertIn(
+            "--include-before-body=docs/theme/nervix-pdf-title.tex",
+            justfile,
+        )
+        self.assertIn(
+            "--include-in-header=docs/theme/nervix-pdf-header.tex",
+            justfile,
+        )
+        self.assertIn("--variable=graphics", justfile)
+        self.assertIn("--toc \\", justfile)
+        self.assertIn("--toc-depth=2", justfile)
+        self.assertIn("--variable=geometry:margin=0.8in", justfile)
+        self.assertIn("--variable=linestretch:1.08", justfile)
+
+    def test_pdf_title_page_contains_canonical_product_metadata(self) -> None:
+        title_page = Path("docs/theme/nervix-pdf-title.tex").read_text()
+
+        self.assertIn("Nervix", title_page)
+        self.assertIn("https://docs.nervix.io/", title_page)
+        self.assertIn("https://github.com/nervix-io/nervix", title_page)
+        self.assertIn("Copyright 2026 Emergentix, Inc.", title_page)
+        self.assertIn("FCL-1.0-ALv2", title_page)
+        self.assertIn(
+            r"\includegraphics[width=1.2in]{docs/theme/nervix-pdf-mark.pdf}",
+            title_page,
+        )
+        self.assertTrue(Path("docs/theme/nervix-pdf-mark.pdf").is_file())
+
+    def test_pdf_code_blocks_wrap_at_print_width(self) -> None:
+        pdf_header = Path("docs/theme/nervix-pdf-header.tex").read_text()
+
+        self.assertIn(r"\usepackage{fvextra}", pdf_header)
+        self.assertIn(r"\RecustomVerbatimEnvironment{Highlighting}", pdf_header)
+        self.assertIn("breaklines=true", pdf_header)
+        self.assertIn("breakanywhere=true", pdf_header)
+        self.assertIn("breaknonspaceingroup=true", pdf_header)
+        self.assertIn("NervixCodeBackground", pdf_header)
+        self.assertIn("NervixCodeBorder", pdf_header)
+        self.assertIn(r"]{Shaded}", pdf_header)
+
+    def test_pdf_blockquotes_are_visually_distinct(self) -> None:
+        pdf_header = Path("docs/theme/nervix-pdf-header.tex").read_text()
+
+        self.assertIn(r"\usepackage{mdframed}", pdf_header)
+        self.assertIn("NervixQuoteBackground", pdf_header)
+        self.assertIn("NervixQuoteRule", pdf_header)
+        self.assertIn(r"\renewmdenv", pdf_header)
+        self.assertIn("leftmargin=1.5em", pdf_header)
+        self.assertIn(r"font=\itshape", pdf_header)
 
     def test_docs_publisher_does_not_shell_out_for_storage_operations(self) -> None:
         publisher = Path("scripts/publish_docs_alias.py").read_text()

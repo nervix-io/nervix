@@ -171,6 +171,7 @@ jobs:
             lmodern \
             pandoc \
             texlive-fonts-recommended \
+            texlive-latex-extra \
             texlive-lang-chinese \
             texlive-lang-cjk \
             texlive-xetex
