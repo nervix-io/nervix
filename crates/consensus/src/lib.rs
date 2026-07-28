@@ -207,6 +207,21 @@ pub struct GossipState {
     pub dead_node_ids: BTreeSet<String>,
 }
 
+impl GossipState {
+    fn admission_candidates(&self) -> impl Iterator<Item = &GossipNode> {
+        self.live_nodes
+            .iter()
+            .filter(|node| !self.dead_node_ids.contains(&node.node_id))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsensusRuntimeState {
+    pub revision: u64,
+    pub schedule: ClusterSchedule,
+    pub domains: BTreeMap<DomainId, DomainState>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct StateMachineData {
     last_applied_log_id: Option<LogIdOf>,
@@ -408,6 +423,18 @@ impl ConsensusHandle {
         self.store.inner.state_machine.read().await.domains.clone()
     }
 
+    pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
+        let state = self.store.inner.state_machine.read().await;
+        ConsensusRuntimeState {
+            revision: state
+                .last_applied_log_id
+                .as_ref()
+                .map_or(0, |log_id| log_id.index),
+            schedule: state.schedule.clone(),
+            domains: state.domains.clone(),
+        }
+    }
+
     pub async fn current_domain(&self, domain_id: &DomainId) -> Option<DomainState> {
         self.store
             .inner
@@ -514,7 +541,7 @@ impl ConsensusHandle {
         let mut desired_voters = current_voters.clone();
         let mut added_learner = false;
 
-        for node in &gossip.live_nodes {
+        for node in gossip.admission_candidates() {
             if node.cluster_api_advertise_addr.is_empty() {
                 continue;
             }
@@ -1810,14 +1837,49 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallStore, KEY_CLUSTER_SCHEDULE,
-        StateMachineData, UserCredentials, apply_consensus_command, decode, encode, io_error,
-        load_value, read_key, write_key,
+        ClusterSchedule, ConsensusCommand, ConsensusResponse, FjallStore, GossipNode, GossipState,
+        KEY_CLUSTER_SCHEDULE, StateMachineData, UserCredentials, apply_consensus_command, decode,
+        encode, io_error, load_value, read_key, write_key,
     };
     use crate::{ConsensusError, VoteOf};
 
     fn domain(raw: &str) -> Domain {
         Domain::try_from(raw).expect("valid domain")
+    }
+
+    #[test]
+    fn dead_gossip_nodes_are_not_membership_admission_candidates() {
+        let state = GossipState {
+            live_nodes: vec![
+                GossipNode {
+                    node_id: "node-2".to_string(),
+                    cluster_api_advertise_addr: "http://node-2".to_string(),
+                    grpc_advertise_addr: String::new(),
+                    web_console_advertise_addr: String::new(),
+                    interconnect_advertise_addr: String::new(),
+                    interconnect_mode: String::new(),
+                    interconnect_public_key: String::new(),
+                },
+                GossipNode {
+                    node_id: "node-3".to_string(),
+                    cluster_api_advertise_addr: "http://node-3".to_string(),
+                    grpc_advertise_addr: String::new(),
+                    web_console_advertise_addr: String::new(),
+                    interconnect_advertise_addr: String::new(),
+                    interconnect_mode: String::new(),
+                    interconnect_public_key: String::new(),
+                },
+            ],
+            dead_node_ids: ["node-3".to_string()].into_iter().collect(),
+        };
+
+        assert_eq!(
+            state
+                .admission_candidates()
+                .map(|node| node.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["node-2"]
+        );
     }
 
     fn domain_schedule(raw: &str) -> DomainSchedule {

@@ -66,64 +66,65 @@ Feature: Deduplicator metrics
       """
       deduplicator: dedup_metrics_node
       """
+    And the last command output owner is saved as placeholder "deduplicator_metrics_owner"
     And the last command output contains
       """
-      messages_total received relay=raw_txns physical_node=node-1 total=3
-      """
-    And the last command output contains
-      """
-      messages_total sent relay=deduped_txns physical_node=node-1 total=2
+      messages_total received relay=raw_txns physical_node={{deduplicator_metrics_owner}} total=3
       """
     And the last command output contains
       """
-      batches_total received relay=raw_txns physical_node=node-1 total=1
+      messages_total sent relay=deduped_txns physical_node={{deduplicator_metrics_owner}} total=2
       """
     And the last command output contains
       """
-      batches_total sent relay=deduped_txns physical_node=node-1 total=1
+      batches_total received relay=raw_txns physical_node={{deduplicator_metrics_owner}} total=1
       """
     And the last command output contains
       """
-      delivery_latency_seconds received relay=raw_txns physical_node=node-1
+      batches_total sent relay=deduped_txns physical_node={{deduplicator_metrics_owner}} total=1
+      """
+    And the last command output contains
+      """
+      delivery_latency_seconds received relay=raw_txns physical_node={{deduplicator_metrics_owner}}
       """
     And the last command output contains
       """
       p90_1m=
       """
-    And the last command output metric "messages_total" "received" relay "raw_txns" physical node "node-1" has values
+    And the last command output metric "messages_total" "received" relay "raw_txns" physical node "{{deduplicator_metrics_owner}}" has values
       """
       total=3
       """
-    And the last command output metric "messages_total" "sent" relay "deduped_txns" physical node "node-1" has values
+    And the last command output metric "messages_total" "sent" relay "deduped_txns" physical node "{{deduplicator_metrics_owner}}" has values
       """
       total=2
       """
-    And the last command output metric "batches_total" "received" relay "raw_txns" physical node "node-1" has values
+    And the last command output metric "batches_total" "received" relay "raw_txns" physical node "{{deduplicator_metrics_owner}}" has values
       """
       total=1
       """
-    And the last command output metric "batches_total" "sent" relay "deduped_txns" physical node "node-1" has values
+    And the last command output metric "batches_total" "sent" relay "deduped_txns" physical node "{{deduplicator_metrics_owner}}" has values
       """
       total=1
       """
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target_kind="DEDUPLICATOR"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="dedup_metrics_node"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains "nervix_delivery_latency_seconds_bucket"
-    And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 3
+    And node "{{deduplicator_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target_kind="DEDUPLICATOR"'
+    And node "{{deduplicator_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target="dedup_metrics_node"'
+    And node "{{deduplicator_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains "nervix_delivery_latency_seconds_bucket"
+    And node "{{deduplicator_metrics_owner}}" observability metric "nervix_messages_total" with labels eventually equals 3
       """
       target_kind="DEDUPLICATOR"
       target="dedup_metrics_node"
       direction="received"
       relay="raw_txns"
       """
-    And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 2
+    And node "{{deduplicator_metrics_owner}}" observability metric "nervix_messages_total" with labels eventually equals 2
       """
       target_kind="DEDUPLICATOR"
       target="dedup_metrics_node"
       direction="sent"
       relay="deduped_txns"
       """
-    And node "node-1" observability metric "nervix_delivery_latency_seconds_count" with labels eventually equals 3
+    And node "{{deduplicator_metrics_owner}}" observability metric "nervix_delivery_latency_seconds_count" with labels eventually equals 3
       """
       target_kind="DEDUPLICATOR"
       target="dedup_metrics_node"

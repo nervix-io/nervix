@@ -9,8 +9,8 @@ workspace = true
 
 [features]
 default = []
-# Test-only feature used by the standard test recipes to lower intentionally
-# expensive password hashing parameters.
+# Test-only feature used by the standard test recipes for random multinode scheduling and to lower
+# intentionally expensive password hashing parameters.
 testing = []
 
 [dependencies]

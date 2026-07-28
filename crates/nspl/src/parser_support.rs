@@ -757,6 +757,44 @@ pub fn alter_flushed_route_body<'src>()
         .boxed()
 }
 
+pub fn alter_generator_route_body<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(alter_route_construction().try_map(|construction, span| {
+            if construction.assignments.is_empty() {
+                Err(Rich::custom(
+                    span,
+                    "output route must contain SET assignments and may contain WHERE",
+                ))
+            } else if construction.inherit.is_some() || !construction.invocations.is_empty() {
+                Err(Rich::custom(
+                    span,
+                    "set-only output route may contain SET assignments and WHERE only",
+                ))
+            } else {
+                Ok(construction)
+            }
+        }))
+        .then(flush_each())
+        .then(alter_message_error_policy())
+        .map(
+            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
+                ProcessorOutput {
+                    relay,
+                    construction,
+                    flush_policy: Some(OutputFlushPolicy {
+                        flush_each,
+                        max_batch_size,
+                    }),
+                    message_error_policy,
+                    branch: None,
+                }
+            },
+        )
+        .boxed()
+}
+
 pub fn alter_ingestor_route_body<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
@@ -787,6 +825,21 @@ pub fn alter_ingestor_route_body<'src>()
 
 pub fn alter_processor_operation<'src>()
 -> impl Parser<'src, &'src [Token], AlterProcessorOperation, extra::Err<ParseError<'src>>> + Clone {
+    alter_processor_operation_with_routes(alter_flushed_route_body(), true)
+}
+
+pub fn alter_reingestor_operation<'src>()
+-> impl Parser<'src, &'src [Token], AlterProcessorOperation, extra::Err<ParseError<'src>>> + Clone {
+    alter_processor_operation_with_routes(alter_ingestor_route_body(), false)
+}
+
+fn alter_processor_operation_with_routes<'src, P>(
+    route_body: P,
+    supports_node_branching: bool,
+) -> impl Parser<'src, &'src [Token], AlterProcessorOperation, extra::Err<ParseError<'src>>> + Clone
+where
+    P: Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone + 'src,
+{
     let add_from = kw(Identifier::Add)
         .ignore_then(kw(Identifier::From))
         .ignore_then(relay_ref())
@@ -861,7 +914,7 @@ pub fn alter_processor_operation<'src>()
         .map(|(relay, policy)| AlterProcessorOperation::AlterMaterializedState { relay, policy });
     let add_route = kw(Identifier::Add)
         .ignore_then(kw(Identifier::Route))
-        .ignore_then(alter_flushed_route_body())
+        .ignore_then(route_body.clone())
         .map(|route| AlterProcessorOperation::AddRoute { route });
     let drop_route = kw(Identifier::Drop)
         .ignore_then(kw(Identifier::Route))
@@ -870,10 +923,10 @@ pub fn alter_processor_operation<'src>()
         .map(|relay| AlterProcessorOperation::DropRoute { relay });
     let replace_route = kw(Identifier::Replace)
         .ignore_then(kw(Identifier::Route))
-        .ignore_then(alter_flushed_route_body())
+        .ignore_then(route_body)
         .map(|route| AlterProcessorOperation::ReplaceRoute { route });
 
-    choice((
+    let common = choice((
         add_from,
         drop_from,
         alter_from,
@@ -882,7 +935,6 @@ pub fn alter_processor_operation<'src>()
         set_filter,
         drop_filter,
         set_mode,
-        set_branching,
         add_materialized,
         drop_materialized,
         alter_materialized,
@@ -890,7 +942,13 @@ pub fn alter_processor_operation<'src>()
         drop_route,
         replace_route,
     ))
-    .boxed()
+    .boxed();
+
+    if supports_node_branching {
+        choice((common, set_branching)).boxed()
+    } else {
+        common
+    }
 }
 
 pub fn general_error_policy<'src>()

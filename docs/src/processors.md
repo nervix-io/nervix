@@ -394,6 +394,77 @@ key. The reingestor resolves the outgoing branch before buffering the route, so 
 outgoing branch has an independent flush interval and size boundary. Downstream branch execution
 receives the completed Arrow batch and does not apply a second flush policy.
 
+### Altering Reingestors
+
+`ALTER REINGESTOR` applies the shared input, collection, filter, attachment, materialized-state,
+and route operations in written order:
+
+```nspl
+ALTER REINGESTOR repartition_events
+  ADD FROM priority_events WHERE input.active,
+  SET COLLECT FOR 25ms MAX BATCH SIZE 1MiB,
+  SET FILTER WHERE input.amount > 0,
+  SET DETACHED,
+  REPLACE ROUTE TO by_user_events
+    INHERIT ALL
+    BRANCHED BY by_user
+    SET tenant = message.tenant,
+        user_id = message.user_id
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+```
+
+The input, collection, filter, attachment, and materialized-state forms are the same as for
+junctions. Route add/replace bodies include the reingestor's required per-route `BRANCHED BY ...`
+or `UNBRANCHED` construction. Reingestors do not have a node-wide branching operation.
+
+Every reingestor change uses entity pause because inputs, route construction, attachment, and
+dependency changes affect its relay consumers or branch-entrypoint wiring. Nervix gates both old
+and desired input relays, force-flushes collected input, drains node work, stops only the affected
+reingestor tasks, rebuilds their branch entrypoints, and reconnects their relay consumers. Other
+domain nodes continue to run.
+
+## Generator
+
+Generators run from a materialized relay on a domain-clock cadence. Their routes are set-only:
+
+```nspl
+CREATE GENERATOR synth_notifications
+  USING MATERIALIZED STATE notifications
+  EACH 100ms
+  UNBRANCHED
+  TO generated_notifications
+    SET user_id = relay_state.notifications.user_id,
+        amount = relay_state.notifications.amount
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+```
+
+### Altering Generators
+
+`ALTER GENERATOR` supports `SET MATERIALIZED STATE <relay>`, `SET EACH <duration>`,
+`SET BRANCHED BY <branch>`, `SET UNBRANCHED`, and the ordered `ADD ROUTE`, `DROP ROUTE`, and
+`REPLACE ROUTE` operations:
+
+```nspl
+ALTER GENERATOR synth_notifications
+  SET EACH 250ms,
+  REPLACE ROUTE TO generated_notifications
+    SET user_id = relay_state.notifications.user_id,
+        amount = relay_state.notifications.amount
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+```
+
+Generator route bodies remain set-only and must contain at least one `SET` assignment. Drop and
+replace require a unique target when duplicate target relays exist, and the generator must retain
+at least one route.
+
+Every generator change uses entity pause. Nervix gates its old and desired materialized source
+relays, lets the old timed task force-flush pending route output, waits until that task reports
+quiescent, then replaces only that generator task from the published schedule. The gate has a
+deadline expiry backstop, so a failed control-plane operation cannot leave generation wedged.
+
 ## Message errors
 
 `ON MESSAGE ERROR` terminates each route. `SEND TO` constructs an error relay record with ordered
