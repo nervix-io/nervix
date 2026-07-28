@@ -14,16 +14,16 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterEmitter, AlterIngestor, AlterJunction, AlterRelay, AlterSchema, AlterWireSchemaStmt,
-    Assignment, AssignmentTarget, AvroType, BranchSelection, CodecEncoding, CodecEncodingRule,
-    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator,
-    CreateDeduplicator, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
-    CreateMaterializer, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
-    CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
-    Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputBranch,
-    ParseAsType, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode,
-    SchemaField,
+    AlterDeduplicator, AlterEmitter, AlterIngestor, AlterJunction, AlterRelay, AlterReorderer,
+    AlterSchema, AlterWireSchemaStmt, Assignment, AssignmentTarget, AvroType, BranchSelection,
+    CodecEncoding, CodecEncodingRule, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
+    CreateCodec, CreateCorrelator, CreateDeduplicator, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateLookup, CreateMaterializer, CreateSchema, CreateSignalingProtocol,
+    CreateWindowProcessor, CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink,
+    EndpointType, Expression, Identifier, IngestSource, IngestTimestampSource, JsonType,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+    ModelChangeAspect, ModelKind, OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs,
+    QuiesceLevel, RouteConstruction, ScheduledNode, SchemaField,
 };
 use nervix_nspl::{
     vm_program::{
@@ -572,6 +572,68 @@ impl Registry {
                         })
                     })?;
                 }
+                RegistryMutation::AlterDeduplicator(alter) => {
+                    let key = RegistryKey::new(ModelKind::Deduplicator, alter.deduplicator.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.deduplicator.as_str(),
+                        kind = ModelKind::Deduplicator.as_str(),
+                        "staging deduplicator alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.deduplicator.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Deduplicator(deduplicator) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.deduplicator.as_str().to_string(),
+                            expected_kind: ModelKind::Deduplicator.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    deduplicator.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.deduplicator.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
+                RegistryMutation::AlterReorderer(alter) => {
+                    let key = RegistryKey::new(ModelKind::Reorderer, alter.reorderer.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.reorderer.as_str(),
+                        kind = ModelKind::Reorderer.as_str(),
+                        "staging reorderer alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reorderer.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Reorderer(reorderer) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reorderer.as_str().to_string(),
+                            expected_kind: ModelKind::Reorderer.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    reorderer.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reorderer.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
                 RegistryMutation::AlterEmitter(alter) => {
                     let key = RegistryKey::new(ModelKind::Emitter, alter.emitter.clone());
                     info!(
@@ -973,6 +1035,8 @@ pub enum RegistryMutation {
     AlterWireSchema(AlterWireSchemaStmt),
     AlterRelay(AlterRelay),
     AlterJunction(AlterJunction),
+    AlterDeduplicator(AlterDeduplicator),
+    AlterReorderer(AlterReorderer),
     AlterEmitter(AlterEmitter),
     AlterIngestor(AlterIngestor),
     Drop(DropModel),

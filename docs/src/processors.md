@@ -202,6 +202,34 @@ CREATE DEDUPLICATOR unique_notifications
 Deduplication state is branch-local. Duplicate details are logged at `debug` or `trace`, never at
 `info`.
 
+### Altering Deduplicators
+
+`ALTER DEDUPLICATOR` applies comma-separated operations in written order:
+
+```nspl
+ALTER DEDUPLICATOR unique_notifications
+  SET DEDUPLICATE ON input.tenant, input.external_id,
+  SET MAX TIME 30m,
+  SET FILTER WHERE input.active,
+  REPLACE ROUTE TO unique_events
+    INHERIT ALL
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+```
+
+The deduplicator-specific operations are `SET DEDUPLICATE ON <expr>, ...` and
+`SET MAX TIME <duration>`. It also supports the junction-style input, collection, filter,
+attachment, branching, materialized-state, and route operations described above. A processor must
+retain at least one input and one route. Duplicate materialized dependencies are rejected, and
+drop/replace route operations require a unique target when multiple routes use the same relay.
+
+Changing only `MAX TIME`, filters, per-input `WHERE`, collection, route construction/flush, or a
+same-target message-error policy is dynamic. Changing the deduplication expressions is an
+entity-pause operation: Nervix gates and drains the input relays, stops the old task, purges its
+branch-local and persisted deduplication keyspace, then starts the replacement. Input/route
+topology, attachment, branching, dependencies, and changed error-route targets also use entity
+pause.
+
 ## Reorderer
 
 ```nspl
@@ -217,6 +245,29 @@ CREATE REORDERER ordered_notifications
 ```
 
 Ordering buffers and maximum-time release are independent per concrete branch.
+
+### Altering Reorderers
+
+`ALTER REORDERER` uses the same ordered common processor operations, plus `SET BY` and
+`SET MAX TIME`:
+
+```nspl
+ALTER REORDERER ordered_notifications
+  SET BY input.priority, input.occurred_at, input.sequence,
+  SET MAX TIME 10s,
+  SET COLLECT FOR 25ms MAX BATCH SIZE 1MiB,
+  SET ATTACHED;
+```
+
+`SET BY <expr>, ...` replaces the complete ordering expression list. `SET MAX TIME <duration>`
+changes only the maximum holding time. The shared input, filter, route, materialized-state,
+attachment, and branching operations have the same validation and ordering semantics as
+deduplicators and junctions.
+
+`MAX TIME` and the shared expression/configuration-only aspects are dynamic. Changing `BY` uses
+entity pause: the old ordering buffers are force-flushed while the input relays are gated, then the
+node task is replaced with the new ordering program. Structural shared operations also use entity
+pause.
 
 ## Window processor
 

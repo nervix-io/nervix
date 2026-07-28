@@ -52,12 +52,14 @@ request can mix those phases.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, schema, wire-schema,
-relay, junction, emitter, or ingestor `ALTER`, and `DROP` for one domain in the same transaction;
+relay, junction, deduplicator, reorderer, emitter, or ingestor `ALTER`, and `DROP` for one domain in
+the same transaction;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
 changes pause the domain; structural junction, emitter sink/client/codec/collect/mode, ingestor,
-and relay materialized-state changes gate and drain only affected entities. In `ALTER INGESTOR`,
-use a complete transport-specific source body after `SET FROM`.
+and relay materialized-state changes gate and drain only affected entities. Deduplicator key and
+reorderer ordering changes also use entity pause; their `MAX TIME` changes are dynamic. In `ALTER
+INGESTOR`, use a complete transport-specific source body after `SET FROM`.
 
 ## Preserve NSPL semantics
 
@@ -68,7 +70,8 @@ use a complete transport-specific source body after `SET FROM`.
   optional destination.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
-- Preserve written operation order in schema, relay, junction, emitter, and ingestor ALTER
+- Preserve written operation order in schema, relay, junction, deduplicator, reorderer, emitter, and
+  ingestor ALTER
   statements.
   Include every dependent wire, internal, codec, and node mutation required for the candidate graph
   to validate in the same transaction.
