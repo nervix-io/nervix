@@ -51,11 +51,11 @@ use nervix_client_core::{
     TlsRequirement as ClientTlsRequirement,
 };
 use nervix_consensus::{
-    AppendEntriesRequest as RaftAppendEntriesRequest, ConsensusHandle, ConsensusSettings,
-    InstallSnapshotRequest as RaftInstallSnapshotRequest, RAFT_APPEND_ENTRIES_PATH,
-    RAFT_CONTENT_TYPE_CBOR, RAFT_INSTALL_SNAPSHOT_PATH, RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH,
-    TransferLeaderRequest as RaftTransferLeaderRequest, TypeConfig, UserCredentials,
-    VoteRequest as RaftVoteRequest,
+    AppendEntriesRequest as RaftAppendEntriesRequest, ConsensusHandle, ConsensusRuntimeState,
+    ConsensusSettings, InstallSnapshotRequest as RaftInstallSnapshotRequest,
+    RAFT_APPEND_ENTRIES_PATH, RAFT_CONTENT_TYPE_CBOR, RAFT_INSTALL_SNAPSHOT_PATH,
+    RAFT_TRANSFER_LEADER_PATH, RAFT_VOTE_PATH, TransferLeaderRequest as RaftTransferLeaderRequest,
+    TypeConfig, UserCredentials, VoteRequest as RaftVoteRequest,
 };
 use nervix_dataflow_graph::{DataflowGraph, DataflowNodeStatus};
 use nervix_interconnect::{
@@ -66,6 +66,7 @@ use nervix_interconnect::{
     DescribeIngestorResponse as RemoteDescribeIngestorResponse,
     DescribeLookupRequest as RemoteDescribeLookupRequest,
     DescribeLookupResponse as RemoteDescribeLookupResponse,
+    DescribeMetricsEnvelope as RemoteDescribeMetricsEnvelope,
     DescribeMetricsRequest as RemoteDescribeMetricsRequest,
     DescribeMetricsResponse as RemoteDescribeMetricsResponse,
     DescribeRelayRequest as RemoteDescribeRelayRequest,
@@ -80,8 +81,10 @@ use nervix_interconnect::{
     EntityReference as RemoteEntityReference, Envelope, IngestorDescribeEnvelope, LocalIdentity,
     LookupDescribeEnvelope, LookupRequest as RemoteLookupRequest,
     LookupResponse as RemoteLookupResponse, PeerVerifier,
-    StateSyncResponse as RemoteStateSyncResponse, TlsConfigBundle, Transport,
-    TransportMode as InterconnectTransportMode,
+    RuntimeErrorEvent as RemoteRuntimeErrorEvent, StateSyncResponse as RemoteStateSyncResponse,
+    SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
+    SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
+    TlsConfigBundle, Transport, TransportMode as InterconnectTransportMode,
 };
 use nervix_models::{
     BranchSelection, CreateCorrelator, CreateDeduplicator, CreateDomain, CreateEmitter,
@@ -150,9 +153,17 @@ use tokio_tungstenite::{
     tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
 };
 
+#[cfg(feature = "testing")]
+use crate::registry::SchedulerMode;
 use crate::registry::{ActiveGraph, Registry, RegistryError, RegistryMutation};
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
+const REMOTE_DESCRIBE_INGESTOR_TIMEOUT: Duration = Duration::from_secs(10);
+const REMOTE_DESCRIBE_INGESTOR_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const SUBSCRIPTION_INTEREST_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(5);
+const SUBSCRIPTION_INTEREST_CHECK_TIMEOUT: Duration = Duration::from_millis(250);
+const RUNTIME_REVISION_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+const RUNTIME_REVISION_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const OBSERVABILITY_LIVEZ_PATH: &str = "/livez";
 const OBSERVABILITY_READYZ_PATH: &str = "/readyz";
@@ -2926,9 +2937,10 @@ enum PendingClusterCommand {
     EntityGate(oneshot::Sender<Result<(), String>>),
     EntityDrainStatus(oneshot::Sender<Result<EntityDrainStatusEnvelope, String>>),
     EntityGateRelease(oneshot::Sender<Result<(), String>>),
-    DescribeMetrics(oneshot::Sender<Result<Vec<String>, String>>),
+    DescribeMetrics(oneshot::Sender<Result<RemoteDescribeMetricsEnvelope, String>>),
     DescribeLookup(oneshot::Sender<Result<LookupDescribeEnvelope, String>>),
     LookupQuery(oneshot::Sender<Result<Option<runtime_schema::DecodedRecord>, String>>),
+    SubscriptionInterestVisibility(oneshot::Sender<bool>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2965,6 +2977,8 @@ struct SessionServiceImpl {
     http_tls_server_config: Arc<RwLock<Option<StdArc<ServerConfig>>>>,
     runtime: Arc<Runtime>,
     replica_count: usize,
+    #[cfg(feature = "testing")]
+    scheduler_mode: SchedulerMode,
     shutdown: CancellationToken,
     events: broadcast::Sender<ServerEvent>,
     subscription_interest_counts: Arc<DashMap<(Domain, Identifier), usize, RandomState>>,
@@ -3139,6 +3153,8 @@ pub enum AppError {
     OpenResourceStore,
     #[error("failed to start consensus")]
     StartConsensus,
+    #[error("failed to synchronize registry from consensus schedule: {0}")]
+    SynchronizeRegistry(String),
     #[error("failed to apply startup runtime changes: {0}")]
     ApplyStartupRuntime(String),
     #[error("failed to open runtime state store")]
@@ -3235,6 +3251,9 @@ pub struct Application {
     pub raft_election_timeout_max: Duration,
     #[builder(default = 0)]
     pub replica_count: usize,
+    #[cfg(feature = "testing")]
+    #[builder(default)]
+    pub scheduler_mode: SchedulerMode,
     #[builder(default = Duration::from_secs(30))]
     pub state_snapshot_interval: Duration,
     #[builder(default)]
@@ -3783,12 +3802,78 @@ impl SessionService for SessionServiceImpl {
     }
 }
 
+async fn apply_cluster_runtime_state(
+    runtime: &Runtime,
+    cluster: &cluster::ClusterHandle,
+    local_node_id: &str,
+    state: ConsensusRuntimeState,
+) -> Result<(), crate::runtime::RuntimeError> {
+    let has_running_domain = state
+        .domains
+        .values()
+        .any(|domain| matches!(domain.status, DomainStatus::Running));
+    runtime
+        .apply_cluster_state(
+            local_node_id,
+            state.revision,
+            &state.domains,
+            &state.schedule,
+        )
+        .await?;
+    cluster
+        .set_local_runtime_revision_ready(state.revision)
+        .await;
+    if !has_running_domain {
+        return Ok(());
+    }
+
+    let deadline = tokio::time::Instant::now() + RUNTIME_REVISION_READINESS_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        let expected_nodes = cluster
+            .live_node_ids()
+            .await
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let ready_nodes = cluster
+            .nodes_ready_for_runtime_revision(state.revision)
+            .await;
+        let pending_nodes = expected_nodes
+            .difference(&ready_nodes)
+            .cloned()
+            .collect::<Vec<_>>();
+        if pending_nodes.is_empty() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
+                revision: state.revision,
+                pending_nodes,
+            });
+        }
+        tokio::time::sleep(RUNTIME_REVISION_READINESS_POLL_INTERVAL).await;
+    }
+
+    runtime.start_running_domain_ingestors().await
+}
+
 impl SessionServiceImpl {
     fn new_auth_rate_limiter() -> Arc<AuthRateLimiter> {
         let quota = Quota::per_second(
             NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND).expect("auth rate limit must be positive"),
         );
         Arc::new(RateLimiter::keyed(quota))
+    }
+
+    async fn apply_current_cluster_state(&self) -> Result<(), crate::runtime::RuntimeError> {
+        let state = self.consensus.current_runtime_state().await;
+        apply_cluster_runtime_state(
+            &self.runtime,
+            &self.cluster,
+            self.consensus.local_node_id(),
+            state,
+        )
+        .await
     }
 
     async fn authenticate_grpc_metadata(&self, metadata: &MetadataMap) -> Result<(), Status> {
@@ -4312,14 +4397,138 @@ impl SessionServiceImpl {
         }
     }
 
-    async fn register_subscription_interest(&self, domain: &Domain, relay: &Identifier) {
+    async fn register_subscription_interest(
+        &self,
+        domain: &Domain,
+        relay: &Identifier,
+    ) -> Result<(), String> {
         let key = (domain.clone(), relay.clone());
-        let mut entry = self.subscription_interest_counts.entry(key).or_insert(0);
-        *entry += 1;
-        if *entry == 1 {
+        let first_interest = {
+            let mut entry = self.subscription_interest_counts.entry(key).or_insert(0);
+            *entry += 1;
+            *entry == 1
+        };
+        if first_interest {
             self.cluster
                 .set_local_subscription_interest(domain.as_str(), relay.as_str(), true)
                 .await;
+        }
+        if let Err(error) = self
+            .wait_for_subscription_interest_visibility(domain, relay)
+            .await
+        {
+            self.unregister_subscription_interest(domain, relay).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn wait_for_subscription_interest_visibility(
+        &self,
+        domain: &Domain,
+        relay: &Identifier,
+    ) -> Result<(), String> {
+        let local_node_id = self.consensus.local_node_id();
+        let mut pending_nodes = self
+            .cluster
+            .live_node_ids()
+            .await
+            .into_iter()
+            .filter(|node_id| node_id != local_node_id)
+            .collect::<BTreeSet<_>>();
+        let deadline = tokio::time::Instant::now() + SUBSCRIPTION_INTEREST_VISIBILITY_TIMEOUT;
+        let mut last_errors = HashMap::new();
+
+        while !pending_nodes.is_empty() {
+            tokio::task::consume_budget().await;
+            for node_id in pending_nodes.clone() {
+                tokio::task::consume_budget().await;
+                match self
+                    .subscription_interest_is_visible(&node_id, local_node_id, domain, relay)
+                    .await
+                {
+                    Ok(true) => {
+                        pending_nodes.remove(&node_id);
+                        last_errors.remove(&node_id);
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        last_errors.insert(node_id, error);
+                    }
+                }
+            }
+            if pending_nodes.is_empty() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for subscription interest in relay '{}' in domain '{}' to \
+                     become visible on nodes {:?}; last errors: {:?}",
+                    relay.as_str(),
+                    domain.as_str(),
+                    pending_nodes,
+                    last_errors,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn subscription_interest_is_visible(
+        &self,
+        target_node_id: &str,
+        subscriber_node_id: &str,
+        domain: &Domain,
+        relay: &Identifier,
+    ) -> Result<bool, String> {
+        let correlation_id = self.next_cluster_command_correlation_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending_cluster_commands.insert(
+            correlation_id,
+            PendingClusterCommand::SubscriptionInterestVisibility(tx),
+        );
+        if let Err(error) = self
+            .dispatch_interconnect_control(
+                target_node_id,
+                ControlEnvelope::SubscriptionInterestVisibilityRequest(
+                    RemoteSubscriptionInterestVisibilityRequest {
+                        correlation_id,
+                        subscriber_node_id: subscriber_node_id.to_string(),
+                        domain: domain.clone(),
+                        relay: relay.clone(),
+                    },
+                ),
+            )
+            .await
+        {
+            self.pending_cluster_commands.remove(&correlation_id);
+            return Err(error);
+        }
+        match tokio::time::timeout(SUBSCRIPTION_INTEREST_CHECK_TIMEOUT, rx).await {
+            Ok(Ok(visible)) => Ok(visible),
+            Ok(Err(_)) => Err(format!(
+                "subscription interest visibility response channel from '{}' closed",
+                target_node_id
+            )),
+            Err(_) => {
+                self.pending_cluster_commands.remove(&correlation_id);
+                Err(format!(
+                    "timed out checking subscription interest visibility on '{}'",
+                    target_node_id
+                ))
+            }
+        }
+    }
+
+    fn handle_subscription_interest_visibility_response(
+        &self,
+        response: RemoteSubscriptionInterestVisibilityResponse,
+    ) {
+        if let Some((_, PendingClusterCommand::SubscriptionInterestVisibility(sender))) = self
+            .pending_cluster_commands
+            .remove(&response.correlation_id)
+        {
+            let _ = sender.send(response.visible);
         }
     }
 
@@ -4361,38 +4570,52 @@ impl SessionServiceImpl {
         node_id: &str,
         envelope: ControlEnvelope,
     ) -> Result<(), String> {
-        let target = self
-            .cluster
-            .gossip_state()
-            .await
-            .live_nodes
-            .into_iter()
-            .find(|node| node.node_id == node_id)
-            .ok_or_else(|| format!("node '{}' is not live", node_id))?;
-        let addr = target
-            .interconnect_advertise_addr
-            .parse::<SocketAddr>()
-            .map_err(|error| format!("invalid interconnect address for '{}': {error}", node_id))?;
-        let mode = match target.interconnect_mode.as_str() {
-            "https" => InterconnectTransportMode::Tls,
-            _ => InterconnectTransportMode::Plain,
-        };
-        let connection = self
-            .interconnect
-            .connection_for(addr, "localhost", mode)
-            .await
-            .map_err(|error| {
-                format!("failed to connect interconnect for '{}': {error}", node_id)
-            })?;
-        connection
-            .send(Envelope::Control(envelope))
-            .await
-            .map_err(|error| {
-                format!(
-                    "failed to send interconnect control to '{}': {error}",
-                    node_id
-                )
-            })
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::task::consume_budget().await;
+            let result = async {
+                let target = self
+                    .cluster
+                    .gossip_state()
+                    .await
+                    .live_nodes
+                    .into_iter()
+                    .find(|node| node.node_id == node_id)
+                    .ok_or_else(|| format!("node '{node_id}' is not live"))?;
+                let addr = target
+                    .interconnect_advertise_addr
+                    .parse::<SocketAddr>()
+                    .map_err(|error| {
+                        format!("invalid interconnect address for '{node_id}': {error}")
+                    })?;
+                let mode = match target.interconnect_mode.as_str() {
+                    "https" => InterconnectTransportMode::Tls,
+                    _ => InterconnectTransportMode::Plain,
+                };
+                let connection = self
+                    .interconnect
+                    .connection_for(addr, "localhost", mode)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to connect interconnect for '{node_id}': {error}")
+                    })?;
+                connection
+                    .send(Envelope::Control(envelope.clone()))
+                    .await
+                    .map_err(|error| {
+                        format!("failed to send interconnect control to '{node_id}': {error}")
+                    })
+            }
+            .await;
+            let error = match result {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(error);
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
     }
 
     async fn start_domain_clock(
@@ -4410,40 +4633,43 @@ impl SessionServiceImpl {
         })?;
         let start = DomainClockStart {
             domain_id: domain_id.clone(),
+            owner_node_id: owner,
             wall_started_at,
             logical_start,
             time_rate,
         };
-        if owner == self.consensus.local_node_id() {
-            self.handle_domain_clock_start(start);
-            Ok(())
-        } else {
-            self.dispatch_interconnect_control(&owner, ControlEnvelope::DomainClockStart(start))
-                .await
+        for node_id in self.domain_tick_target_nodes(&domain_id).await {
+            tokio::task::consume_budget().await;
+            if node_id == self.consensus.local_node_id() {
+                self.handle_domain_clock_start(start.clone());
+                continue;
+            }
+            self.dispatch_interconnect_control(
+                &node_id,
+                ControlEnvelope::DomainClockStart(start.clone()),
+            )
+            .await?;
         }
+        Ok(())
     }
 
     async fn stop_domain_clock(&self, domain_id: &Domain) -> Result<(), String> {
-        let owner = self.domain_clock_owner(domain_id).await.ok_or_else(|| {
-            format!(
-                "no live node available to own domain '{}'",
-                domain_id.as_str()
-            )
-        })?;
-        if owner == self.consensus.local_node_id() {
-            self.handle_domain_clock_stop(DomainClockStop {
-                domain_id: domain_id.clone(),
-            });
-            Ok(())
-        } else {
+        let stop = DomainClockStop {
+            domain_id: domain_id.clone(),
+        };
+        for node_id in self.domain_tick_target_nodes(domain_id).await {
+            tokio::task::consume_budget().await;
+            if node_id == self.consensus.local_node_id() {
+                self.handle_domain_clock_stop(stop.clone());
+                continue;
+            }
             self.dispatch_interconnect_control(
-                &owner,
-                ControlEnvelope::DomainClockStop(DomainClockStop {
-                    domain_id: domain_id.clone(),
-                }),
+                &node_id,
+                ControlEnvelope::DomainClockStop(stop.clone()),
             )
-            .await
+            .await?;
         }
+        Ok(())
     }
 
     fn handle_domain_clock_start(&self, start: DomainClockStart) {
@@ -4454,6 +4680,10 @@ impl SessionServiceImpl {
             start.wall_started_at,
             &start.time_rate,
         );
+        if start.owner_node_id != self.consensus.local_node_id() {
+            self.domain_clock_events.notify_waiters();
+            return;
+        }
         self.domain_clocks.insert(
             domain_id.clone(),
             DomainClockRuntimeState {
@@ -4840,33 +5070,42 @@ impl SessionServiceImpl {
                 })
         } else if let Some(owner) = ingestor_node.execution_node() {
             let correlation_id = self.next_cluster_command_correlation_id();
-            let (tx, rx) = oneshot::channel();
+            let (tx, mut rx) = oneshot::channel();
             self.pending_cluster_commands
                 .insert(correlation_id, PendingClusterCommand::DescribeIngestor(tx));
-            if let Err(message) = self
-                .dispatch_interconnect_control(
-                    owner,
-                    ControlEnvelope::DescribeIngestorRequest(RemoteDescribeIngestorRequest {
-                        correlation_id,
-                        domain: domain.clone(),
-                        name: describe.ingestor.clone(),
-                    }),
-                )
-                .await
-            {
-                self.pending_cluster_commands.remove(&correlation_id);
-                return command_error(message);
-            }
-            match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                Ok(Ok(Ok(summary))) => Ok(runtime_ingestor_describe_from_envelope(summary)),
-                Ok(Ok(Err(message))) => Err(message),
-                Ok(Err(_)) => Err("describe ingestor response channel closed".to_string()),
-                Err(_) => {
-                    self.pending_cluster_commands.remove(&correlation_id);
-                    Err(format!(
-                        "timed out waiting for DESCRIBE INGESTOR response from '{}'",
-                        owner
-                    ))
+            let deadline = tokio::time::Instant::now() + REMOTE_DESCRIBE_INGESTOR_TIMEOUT;
+            loop {
+                tokio::task::consume_budget().await;
+                let dispatch_result = self
+                    .dispatch_interconnect_control(
+                        owner,
+                        ControlEnvelope::DescribeIngestorRequest(RemoteDescribeIngestorRequest {
+                            correlation_id,
+                            domain: domain.clone(),
+                            name: describe.ingestor.clone(),
+                        }),
+                    )
+                    .await;
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let retry_after = remaining.min(REMOTE_DESCRIBE_INGESTOR_RETRY_INTERVAL);
+                match tokio::time::timeout(retry_after, &mut rx).await {
+                    Ok(Ok(Ok(summary))) => {
+                        break Ok(runtime_ingestor_describe_from_envelope(summary));
+                    }
+                    Ok(Ok(Err(message))) => break Err(message),
+                    Ok(Err(_)) => {
+                        break Err("describe ingestor response channel closed".to_string());
+                    }
+                    Err(_) if tokio::time::Instant::now() < deadline => {}
+                    Err(_) => {
+                        self.pending_cluster_commands.remove(&correlation_id);
+                        break Err(dispatch_result.err().unwrap_or_else(|| {
+                            format!(
+                                "timed out waiting for DESCRIBE INGESTOR response from '{}'",
+                                owner
+                            )
+                        }));
+                    }
                 }
             }
         } else {
@@ -5442,16 +5681,7 @@ impl SessionServiceImpl {
                 })
             })?;
 
-        self.runtime
-            .sync_domains(&self.consensus.current_domains().await);
-        if let Err(error) = self
-            .runtime
-            .apply_cluster_schedule(
-                self.consensus.local_node_id(),
-                &self.consensus.current_schedule().await,
-            )
-            .await
-        {
+        if let Err(error) = self.apply_current_cluster_state().await {
             return Err(self
                 .abort_domain_alter_pause(
                     domain,
@@ -5575,20 +5805,12 @@ impl SessionServiceImpl {
                     reason: error.to_string(),
                 })
             })?;
-        self.runtime
-            .sync_domains(&self.consensus.current_domains().await);
-        self.runtime
-            .apply_cluster_schedule(
-                self.consensus.local_node_id(),
-                &self.consensus.current_schedule().await,
-            )
-            .await
-            .map_err(|error| {
-                Report::new(DomainAlterError::RestoreIngestion {
-                    domain: domain.clone(),
-                    reason: error.to_string(),
-                })
+        self.apply_current_cluster_state().await.map_err(|error| {
+            Report::new(DomainAlterError::RestoreIngestion {
+                domain: domain.clone(),
+                reason: error.to_string(),
             })
+        })
     }
 
     async fn rollback_domain_alter_and_resume(
@@ -5624,22 +5846,28 @@ impl SessionServiceImpl {
         identifier: &Identifier,
         scheduled_node: Option<&ScheduledNode>,
     ) -> Result<Vec<String>, String> {
+        self.describe_runtime_for_scheduled_node(domain, kind, identifier, scheduled_node)
+            .await
+            .map(|details| details.metrics)
+    }
+
+    async fn describe_runtime_for_scheduled_node(
+        &self,
+        domain: &Domain,
+        kind: ModelKind,
+        identifier: &Identifier,
+        scheduled_node: Option<&ScheduledNode>,
+    ) -> Result<RemoteDescribeMetricsEnvelope, String> {
         let metric_kind = kind.as_str().to_ascii_uppercase();
         let Some(node) = scheduled_node else {
-            return Ok(self
-                .runtime
-                .describe_metrics_for(domain, &metric_kind, identifier));
+            return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
         let local_node_id = self.consensus.local_node_id();
         if node.executes_on(local_node_id) {
-            return Ok(self
-                .runtime
-                .describe_metrics_for(domain, &metric_kind, identifier));
+            return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         }
         let Some(owner) = node.execution_node() else {
-            return Ok(self
-                .runtime
-                .describe_metrics_for(domain, &metric_kind, identifier));
+            return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
 
         let correlation_id = self.next_cluster_command_correlation_id();
@@ -5675,16 +5903,35 @@ impl SessionServiceImpl {
         }
     }
 
+    fn local_runtime_describe(
+        &self,
+        domain: &Domain,
+        kind: ModelKind,
+        identifier: &Identifier,
+        metric_kind: &str,
+    ) -> RemoteDescribeMetricsEnvelope {
+        let state = if let ModelKind::WasmProcessor = kind {
+            self.runtime
+                .describe_wasm_processor_state_for(domain, identifier)
+        } else {
+            Vec::new()
+        };
+        RemoteDescribeMetricsEnvelope {
+            metrics: self
+                .runtime
+                .describe_metrics_for(domain, metric_kind, identifier),
+            state,
+        }
+    }
+
     async fn handle_describe_metrics_request(
         &self,
         request: RemoteDescribeMetricsRequest,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<RemoteDescribeMetricsEnvelope, String> {
         self.prepare_owner_control_request(&request.domain, request.kind, &request.name)
             .await?;
         let metric_kind = request.kind.as_str().to_ascii_uppercase();
-        Ok(self
-            .runtime
-            .describe_metrics_for(&request.domain, &metric_kind, &request.name))
+        Ok(self.local_runtime_describe(&request.domain, request.kind, &request.name, &metric_kind))
     }
 
     fn handle_describe_metrics_response(&self, response: RemoteDescribeMetricsResponse) {
@@ -6229,8 +6476,8 @@ impl SessionServiceImpl {
             .scheduled_model_node(domain, ModelKind::WasmProcessor, &describe.name)
             .await;
 
-        let metrics = match self
-            .describe_metrics_for_scheduled_node(
+        let runtime_details = match self
+            .describe_runtime_for_scheduled_node(
                 domain,
                 ModelKind::WasmProcessor,
                 &describe.name,
@@ -6246,10 +6493,9 @@ impl SessionServiceImpl {
                 &describe.name,
                 &processor,
                 scheduled_node.as_ref(),
-                self.runtime
-                    .describe_wasm_processor_state_for(domain, &describe.name),
+                runtime_details.state,
             ),
-            metrics,
+            runtime_details.metrics,
         ))
     }
 
@@ -7835,17 +8081,29 @@ impl SessionServiceImpl {
     }
 
     async fn reconcile_running_domain_runtime(&self, domain: &Domain) -> Result<(), String> {
-        let domains = self.consensus.current_domains().await;
-        self.runtime.sync_domains(&domains);
-        let Some(domain_state) = domains.get(domain) else {
+        let state = self.consensus.current_runtime_state().await;
+        let Some(domain_state) = state.domains.get(domain) else {
             return Ok(());
         };
         if !matches!(domain_state.status, DomainStatus::Running) {
             return Ok(());
         }
-        let schedule = self.consensus.current_schedule().await;
         self.runtime
-            .apply_cluster_schedule(self.consensus.local_node_id(), &schedule)
+            .apply_cluster_state(
+                self.consensus.local_node_id(),
+                state.revision,
+                &state.domains,
+                &state.schedule,
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to restore runtime for running domain '{}': {error}",
+                    domain.as_str()
+                )
+            })?;
+        self.runtime
+            .start_running_domain_ingestors()
             .await
             .map_err(|error| {
                 format!(
@@ -7878,8 +8136,12 @@ impl SessionServiceImpl {
         };
         match self.consensus.put_domain(state).await {
             Ok(()) => {
-                self.runtime
-                    .sync_domains(&self.consensus.current_domains().await);
+                if let Err(error) = self.apply_current_cluster_state().await {
+                    self.broadcast_error(format!(
+                        "failed to reconcile runtime after creating domain '{}': {error}",
+                        create.id.as_str(),
+                    ));
+                }
                 command_ok(format!("created domain '{}'", create.id.as_str()))
             }
             Err(error) => command_error(format!(
@@ -8097,17 +8359,9 @@ impl SessionServiceImpl {
             .await
         {
             Ok(()) => {
-                self.runtime
-                    .sync_domains(&self.consensus.current_domains().await);
-                let schedule = self.consensus.current_schedule().await;
-                if let Err(error) = self
-                    .runtime
-                    .apply_cluster_schedule(self.consensus.local_node_id(), &schedule)
-                    .await
-                {
+                if let Err(error) = self.apply_current_cluster_state().await {
                     let _ = self.consensus.stop_domain(domain_id.clone()).await;
-                    self.runtime
-                        .sync_domains(&self.consensus.current_domains().await);
+                    let _ = self.apply_current_cluster_state().await;
                     return command_error(format!(
                         "failed to start domain '{}': {error}",
                         domain_id.as_str()
@@ -8163,8 +8417,12 @@ impl SessionServiceImpl {
         }
         match self.consensus.stop_domain(domain_id.clone()).await {
             Ok(()) => {
-                self.runtime
-                    .sync_domains(&self.consensus.current_domains().await);
+                if let Err(error) = self.apply_current_cluster_state().await {
+                    self.broadcast_error(format!(
+                        "failed to reconcile runtime after stopping domain '{}': {error}",
+                        domain_id.as_str(),
+                    ));
+                }
                 command_ok(format!("stopped domain '{}'", domain_id.as_str()))
             }
             Err(error) => command_error(format!(
@@ -8623,6 +8881,14 @@ impl SessionServiceImpl {
             .await;
         let schedule = match graph {
             Some(graph) => {
+                #[cfg(feature = "testing")]
+                let mut schedule = graph.schedule_for_domain_with_mode(
+                    domain,
+                    &cluster_nodes,
+                    self.replica_count,
+                    self.scheduler_mode,
+                );
+                #[cfg(not(feature = "testing"))]
                 let mut schedule =
                     graph.schedule_for_domain(domain, &cluster_nodes, self.replica_count);
                 let current = self.consensus.current_schedule().await;
@@ -8639,20 +8905,12 @@ impl SessionServiceImpl {
             .replace_domain_schedule(domain.clone(), schedule)
             .await
             .map_err(|error| error.to_string())?;
-        self.runtime
-            .sync_domains(&self.consensus.current_domains().await);
-        self.runtime
-            .apply_cluster_schedule(
-                self.consensus.local_node_id(),
-                &self.consensus.current_schedule().await,
+        self.apply_current_cluster_state().await.map_err(|error| {
+            format!(
+                "failed to instantiate runtime schedule for domain '{}': {error}",
+                domain.as_str()
             )
-            .await
-            .map_err(|error| {
-                format!(
-                    "failed to instantiate runtime schedule for domain '{}': {error}",
-                    domain.as_str()
-                )
-            })
+        })
     }
 
     async fn drop_node(&self, node_id: String) -> CommandResult {
@@ -8692,6 +8950,14 @@ impl SessionServiceImpl {
         let live_node_ids = self.cluster.live_node_ids().await;
         let cluster_nodes = self.consensus.live_voter_ids(live_node_ids).await;
         for (domain, graph) in self.registry.active_graphs() {
+            #[cfg(feature = "testing")]
+            let mut schedule = graph.schedule_for_domain_with_mode(
+                &domain,
+                &cluster_nodes,
+                self.replica_count,
+                self.scheduler_mode,
+            );
+            #[cfg(not(feature = "testing"))]
             let mut schedule =
                 graph.schedule_for_domain(&domain, &cluster_nodes, self.replica_count);
             Self::merge_existing_schedule_data(
@@ -8797,6 +9063,14 @@ impl SessionServiceImpl {
             let mut moved_this_iteration = false;
 
             for (domain, graph) in self.registry.active_graphs() {
+                #[cfg(feature = "testing")]
+                let desired = graph.schedule_for_domain_with_mode(
+                    &domain,
+                    &replacement_nodes,
+                    self.replica_count,
+                    self.scheduler_mode,
+                );
+                #[cfg(not(feature = "testing"))]
                 let desired =
                     graph.schedule_for_domain(&domain, &replacement_nodes, self.replica_count);
                 let Some(current_domain) = current_schedule.domain(&domain) else {
@@ -8862,6 +9136,12 @@ impl SessionServiceImpl {
             if !moved_this_iteration {
                 break;
             }
+        }
+
+        if let Err(error) = self.apply_current_cluster_state().await {
+            return command_error(format!(
+                "drained node '{node_id}', but failed to activate the updated schedule: {error}"
+            ));
         }
 
         command_ok(format!(
@@ -10211,7 +10491,13 @@ impl SessionServiceImpl {
             }
         };
 
-        self.register_subscription_interest(domain, &relay).await;
+        if let Err(error) = self.register_subscription_interest(domain, &relay).await {
+            return command_error(format!(
+                "failed to register subscription interest for relay '{}' in domain '{}': {error}",
+                relay.as_str(),
+                domain.as_str(),
+            ));
+        }
         subscriptions.insert(
             subscription.name.clone(),
             domain.clone(),
@@ -12897,6 +13183,8 @@ impl Application {
         let raft_election_timeout_min = self.raft_election_timeout_min;
         let raft_election_timeout_max = self.raft_election_timeout_max;
         let replica_count = self.replica_count;
+        #[cfg(feature = "testing")]
+        let scheduler_mode = self.scheduler_mode;
         let state_snapshot_interval = self.state_snapshot_interval;
         let memory_pressure_controller = self
             .memory_pressure
@@ -13133,6 +13421,14 @@ impl Application {
             .consensus
             .as_ref()
             .expect("consensus is initialized before cluster startup");
+        if let Err(error) = startup
+            .registry
+            .synchronize_cluster_schedule(&consensus.current_schedule().await)
+        {
+            let error = Report::new(AppError::SynchronizeRegistry(error.to_string()));
+            startup.terminate().await;
+            return Err(error);
+        }
         startup.runtime.attach_resources(
             startup.resource_store.clone(),
             consensus.current_resources().await,
@@ -13434,8 +13730,19 @@ impl Application {
                         }
                     }
                     for (domain, graph) in registry_for_reconcile.active_graphs() {
-                        let mut schedule =
-                            graph.schedule_for_domain(&domain, &schedulable_node_ids, replica_count);
+                        #[cfg(feature = "testing")]
+                        let mut schedule = graph.schedule_for_domain_with_mode(
+                            &domain,
+                            &schedulable_node_ids,
+                            replica_count,
+                            scheduler_mode,
+                        );
+                        #[cfg(not(feature = "testing"))]
+                        let mut schedule = graph.schedule_for_domain(
+                            &domain,
+                            &schedulable_node_ids,
+                            replica_count,
+                        );
                         SessionServiceImpl::merge_existing_schedule_data(
                             &mut schedule,
                             current_schedule.domain(&domain),
@@ -13560,14 +13867,31 @@ impl Application {
             }
         }));
         let runtime_for_schedule = runtime.clone();
+        let registry_for_schedule = registry.clone();
         let mut schedule_rx = consensus.subscribe_schedule();
+        let consensus_for_schedule = consensus.clone();
+        let cluster_for_schedule = cluster.clone();
         let schedule_local_node_id = consensus.local_node_id().to_string();
         let schedule_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
-            let initial_schedule = schedule_rx.borrow().clone();
-            if let Err(error) = runtime_for_schedule
-                .apply_cluster_schedule(&schedule_local_node_id, &initial_schedule)
-                .await
+            let initial_state = consensus_for_schedule.current_runtime_state().await;
+            if consensus_for_schedule.current_leader().await.as_deref()
+                != Some(schedule_local_node_id.as_str())
+                && let Err(error) =
+                    registry_for_schedule.synchronize_cluster_schedule(&initial_state.schedule)
+            {
+                warn!(
+                    error = %error,
+                    "failed to synchronize registry from initial cluster schedule"
+                );
+            }
+            if let Err(error) = apply_cluster_runtime_state(
+                &runtime_for_schedule,
+                &cluster_for_schedule,
+                &schedule_local_node_id,
+                initial_state,
+            )
+            .await
             {
                 warn!(error = %error, "failed to apply initial cluster schedule");
             }
@@ -13579,10 +13903,24 @@ impl Application {
                         if changed.is_err() {
                             break;
                         }
-                        let schedule = schedule_rx.borrow().clone();
-                        if let Err(error) = runtime_for_schedule
-                            .apply_cluster_schedule(&schedule_local_node_id, &schedule)
-                            .await
+                        let state = consensus_for_schedule.current_runtime_state().await;
+                        if consensus_for_schedule.current_leader().await.as_deref()
+                            != Some(schedule_local_node_id.as_str())
+                            && let Err(error) =
+                                registry_for_schedule.synchronize_cluster_schedule(&state.schedule)
+                        {
+                            warn!(
+                                error = %error,
+                                "failed to synchronize registry from updated cluster schedule"
+                            );
+                        }
+                        if let Err(error) = apply_cluster_runtime_state(
+                            &runtime_for_schedule,
+                            &cluster_for_schedule,
+                            &schedule_local_node_id,
+                            state,
+                        )
+                        .await
                         {
                             warn!(error = %error, "failed to apply updated cluster schedule");
                         }
@@ -13619,6 +13957,8 @@ impl Application {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: runtime.clone(),
             replica_count,
+            #[cfg(feature = "testing")]
+            scheduler_mode,
             shutdown: shutdown.clone(),
             events: events.clone(),
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -13632,6 +13972,51 @@ impl Application {
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: Arc::new(DashMap::with_hasher(RandomState::new())),
         };
+
+        let runtime_event_service = service.clone();
+        let runtime_event_shutdown = shutdown.clone();
+        let mut runtime_event_rx = runtime.subscribe_events();
+        background_tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::task::consume_budget().await;
+                tokio::select! {
+                    _ = runtime_event_shutdown.cancelled() => break,
+                    received = runtime_event_rx.recv() => match received {
+                        Ok(RuntimeEvent::Error(message)) => {
+                            let mut node_ids =
+                                runtime_event_service.cluster.live_node_ids().await;
+                            node_ids.sort();
+                            node_ids.dedup();
+                            for node_id in node_ids {
+                                tokio::task::consume_budget().await;
+                                if node_id == runtime_event_service.consensus.local_node_id() {
+                                    continue;
+                                }
+                                if let Err(error) = runtime_event_service
+                                    .dispatch_interconnect_control(
+                                        &node_id,
+                                        ControlEnvelope::RuntimeErrorEvent(
+                                            RemoteRuntimeErrorEvent {
+                                                message: message.clone(),
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        node_id,
+                                        error,
+                                        "failed to fan out runtime error event"
+                                    );
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }));
 
         let resource_service = service.clone();
         let resource_shutdown = shutdown.clone();
@@ -13655,19 +14040,10 @@ impl Application {
 
         let domain_service = service.clone();
         let domain_shutdown = shutdown.clone();
-        let domain_local_node_id = consensus.local_node_id().to_string();
         background_tasks.push(tokio::spawn(async move {
             let mut domains_rx = domain_service.consensus.subscribe_domains();
             let mut tasks: HashMap<Domain, (CancellationToken, JoinHandle<()>)> = HashMap::new();
-            let initial_domains = domains_rx.borrow().clone();
-
-            domain_service.runtime.sync_domains(&initial_domains);
-            let initial_schedule = domain_service.consensus.current_schedule().await;
-            if let Err(error) = domain_service
-                .runtime
-                .apply_cluster_schedule(&domain_local_node_id, &initial_schedule)
-                .await
-            {
+            if let Err(error) = domain_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
             }
 
@@ -13681,15 +14057,7 @@ impl Application {
                         if changed.is_err() {
                             break;
                         }
-                        domain_service
-                            .runtime
-                            .sync_domains(&domains_rx.borrow().clone());
-                        let schedule = domain_service.consensus.current_schedule().await;
-                        if let Err(error) = domain_service
-                            .runtime
-                            .apply_cluster_schedule(&domain_local_node_id, &schedule)
-                            .await
-                        {
+                        if let Err(error) = domain_service.apply_current_cluster_state().await {
                             warn!(error = %error, "failed to apply cluster schedule after domain sync");
                         }
                     }
@@ -13789,20 +14157,24 @@ impl Application {
                                     }
                                     Err(error) => Err(error),
                                 };
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::StateSyncResponse(
-                                        RemoteStateSyncResponse {
-                                            correlation_id: request.correlation_id,
-                                            result: result.map(|snapshot| {
-                                                snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
-                                                    lsm: snapshot.lsm,
-                                                    schema_fingerprint: snapshot.schema_fingerprint,
-                                                    payload: snapshot.payload,
-                                                })
-                                            }),
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::StateSyncResponse(
+                                            RemoteStateSyncResponse {
+                                                correlation_id: request.correlation_id,
+                                                result: result.map(|snapshot| {
+                                                    snapshot.map(|snapshot| nervix_interconnect::StateSnapshotEnvelope {
+                                                        lsm: snapshot.lsm,
+                                                        schema_fingerprint: snapshot.schema_fingerprint,
+                                                        payload: snapshot.payload,
+                                                    })
+                                                }),
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send state sync response");
                                 }
                             }
@@ -13840,14 +14212,18 @@ impl Application {
                                 let result = service_for_interconnect
                                     .handle_describe_stream_request(request.clone())
                                     .await;
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::DescribeRelayResponse(
-                                        RemoteDescribeRelayResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::DescribeRelayResponse(
+                                            RemoteDescribeRelayResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send DESCRIBE RELAY response");
                                 }
                             }
@@ -13855,19 +14231,27 @@ impl Application {
                                 service_for_interconnect.handle_describe_stream_response(response);
                             }
                             Envelope::Control(ControlEnvelope::DescribeIngestorRequest(request)) => {
-                                let result = service_for_interconnect
-                                    .handle_describe_ingestor_request(request.clone())
-                                    .await;
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::DescribeIngestorResponse(
-                                        RemoteDescribeIngestorResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
-                                    warn!(error = %error, "failed to send DESCRIBE INGESTOR response");
-                                }
+                                let request_service = service_for_interconnect.clone();
+                                let peer_node_id = message.peer_node_id.clone();
+                                service_for_interconnect.service_tasks.spawn(async move {
+                                    let result = request_service
+                                        .handle_describe_ingestor_request(request.clone())
+                                        .await;
+                                    if let Err(error) = request_service
+                                        .dispatch_interconnect_control(
+                                            &peer_node_id,
+                                            ControlEnvelope::DescribeIngestorResponse(
+                                            RemoteDescribeIngestorResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        warn!(error = %error, "failed to send DESCRIBE INGESTOR response");
+                                    }
+                                });
                             }
                             Envelope::Control(ControlEnvelope::DescribeIngestorResponse(response)) => {
                                 service_for_interconnect.handle_describe_ingestor_response(response);
@@ -13876,14 +14260,18 @@ impl Application {
                                 let result = service_for_interconnect
                                     .handle_dataflow_node_status_request(request.clone())
                                     .await;
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::DataflowNodeStatusResponse(
-                                        RemoteDataflowNodeStatusResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::DataflowNodeStatusResponse(
+                                            RemoteDataflowNodeStatusResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send dataflow node status response");
                                 }
                             }
@@ -13891,17 +14279,8 @@ impl Application {
                                 service_for_interconnect.handle_dataflow_node_status_response(response);
                             }
                             Envelope::Control(ControlEnvelope::DomainDrainStatusRequest(request)) => {
-                                let domains =
-                                    service_for_interconnect.consensus.current_domains().await;
-                                service_for_interconnect.runtime.sync_domains(&domains);
-                                let schedule =
-                                    service_for_interconnect.consensus.current_schedule().await;
                                 let result = service_for_interconnect
-                                    .runtime
-                                    .apply_cluster_schedule(
-                                        service_for_interconnect.consensus.local_node_id(),
-                                        &schedule,
-                                    )
+                                    .apply_current_cluster_state()
                                     .await
                                     .map_err(|error| error.to_string())
                                     .map(|()| {
@@ -13911,14 +14290,18 @@ impl Application {
                                         service_for_interconnect
                                             .local_domain_drain_status(&request.domain)
                                     });
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::DomainDrainStatusResponse(
-                                        RemoteDomainDrainStatusResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::DomainDrainStatusResponse(
+                                            RemoteDomainDrainStatusResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send domain drain status response");
                                 }
                             }
@@ -13946,14 +14329,18 @@ impl Application {
                                         &request.reason,
                                     )
                                     .await;
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::EntityGateResponse(
-                                        RemoteEntityGateResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::EntityGateResponse(
+                                            RemoteEntityGateResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send entity gate response");
                                 }
                             }
@@ -13978,14 +14365,18 @@ impl Application {
                                         &request.relays,
                                         &affected_entities,
                                     ));
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::EntityDrainStatusResponse(
-                                        RemoteEntityDrainStatusResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::EntityDrainStatusResponse(
+                                            RemoteEntityDrainStatusResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send entity drain status response");
                                 }
                             }
@@ -14000,14 +14391,18 @@ impl Application {
                                         &request.domain,
                                     )
                                     .await;
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::EntityGateReleaseResponse(
-                                        RemoteEntityGateReleaseResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::EntityGateReleaseResponse(
+                                            RemoteEntityGateReleaseResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send entity gate release response");
                                 }
                             }
@@ -14018,14 +14413,18 @@ impl Application {
                                 let result = service_for_interconnect
                                     .handle_describe_metrics_request(request.clone())
                                     .await;
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::DescribeMetricsResponse(
-                                        RemoteDescribeMetricsResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::DescribeMetricsResponse(
+                                            RemoteDescribeMetricsResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send DESCRIBE metrics response");
                                 }
                             }
@@ -14036,14 +14435,18 @@ impl Application {
                                 let result = service_for_interconnect
                                     .handle_describe_lookup_request(request.clone())
                                     .await;
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::DescribeLookupResponse(
-                                        RemoteDescribeLookupResponse {
-                                            correlation_id: request.correlation_id,
-                                            result,
-                                        },
-                                    ),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::DescribeLookupResponse(
+                                            RemoteDescribeLookupResponse {
+                                                correlation_id: request.correlation_id,
+                                                result,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send DESCRIBE LOOKUP response");
                                 }
                             }
@@ -14053,17 +14456,59 @@ impl Application {
                             Envelope::Control(ControlEnvelope::LookupRequest(request)) => {
                                 let result =
                                     service_for_interconnect.handle_lookup_request(request.clone()).await;
-                                if let Err(error) = message.reply.send(Envelope::Control(
-                                    ControlEnvelope::LookupResponse(RemoteLookupResponse {
-                                        correlation_id: request.correlation_id,
-                                        result: result.map(|record| record.map(|record| record.to_remote())),
-                                    }),
-                                )).await {
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::LookupResponse(RemoteLookupResponse {
+                                            correlation_id: request.correlation_id,
+                                            result: result.map(|record| record.map(|record| record.to_remote())),
+                                        }),
+                                    )
+                                    .await
+                                {
                                     warn!(error = %error, "failed to send LOOKUP response");
                                 }
                             }
                             Envelope::Control(ControlEnvelope::LookupResponse(response)) => {
                                 service_for_interconnect.handle_lookup_response(response);
+                            }
+                            Envelope::Control(
+                                ControlEnvelope::SubscriptionInterestVisibilityRequest(request),
+                            ) => {
+                                let visible = service_for_interconnect
+                                    .cluster
+                                    .nodes_with_subscription_interest(
+                                        request.domain.as_str(),
+                                        request.relay.as_str(),
+                                    )
+                                    .await
+                                    .contains(&request.subscriber_node_id);
+                                if let Err(error) = service_for_interconnect
+                                    .dispatch_interconnect_control(
+                                        &message.peer_node_id,
+                                        ControlEnvelope::SubscriptionInterestVisibilityResponse(
+                                            RemoteSubscriptionInterestVisibilityResponse {
+                                                correlation_id: request.correlation_id,
+                                                visible,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        error = %error,
+                                        "failed to send subscription interest visibility response"
+                                    );
+                                }
+                            }
+                            Envelope::Control(
+                                ControlEnvelope::SubscriptionInterestVisibilityResponse(response),
+                            ) => {
+                                service_for_interconnect
+                                    .handle_subscription_interest_visibility_response(response);
+                            }
+                            Envelope::Control(ControlEnvelope::RuntimeErrorEvent(event)) => {
+                                service_for_interconnect.broadcast_error(event.message);
                             }
                         }
                     }
@@ -14717,6 +15162,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -16181,6 +16628,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -16354,6 +16803,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -16523,6 +16974,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),
@@ -16769,6 +17222,8 @@ mod tests {
             http_tls_server_config: Arc::new(RwLock::new(None)),
             runtime: Arc::new(Runtime::new()),
             replica_count: 0,
+            #[cfg(feature = "testing")]
+            scheduler_mode: SchedulerMode::Sticky,
             shutdown: CancellationToken::new(),
             events: broadcast::channel(16).0,
             subscription_interest_counts: Arc::new(DashMap::with_hasher(RandomState::new())),

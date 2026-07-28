@@ -16,7 +16,7 @@ use nervix_dataflow_graph::{
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterReingestor,
     AlterRelay, AlterReorderer, AlterSchema, AlterWireSchemaStmt, Assignment, AssignmentTarget,
-    AvroType, BranchSelection, CodecEncoding, CodecEncodingRule, CodecWireFormat,
+    AvroType, BranchSelection, ClusterSchedule, CodecEncoding, CodecEncodingRule, CodecWireFormat,
     CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup, CreateMaterializer,
     CreateSchema, CreateSignalingProtocol, CreateWindowProcessor, CreateWireSchemaStmt, Domain,
@@ -371,6 +371,100 @@ impl Registry {
                 (changes.graph.is_some() || !changes.changes.is_empty()).then_some(changes)
             })
             .collect())
+    }
+
+    pub fn synchronize_cluster_schedule(
+        &self,
+        schedule: &ClusterSchedule,
+    ) -> Result<(), Report<RegistryError>> {
+        let desired_domains = schedule
+            .domains
+            .iter()
+            .map(|domain| domain.domain.clone())
+            .collect::<HashSet<_>>();
+        for domain_schedule in &schedule.domains {
+            let models = domain_schedule
+                .nodes
+                .iter()
+                .filter_map(|node| {
+                    if let Model::Materializer(_) = node.config.as_ref() {
+                        return None;
+                    }
+                    Some((
+                        RegistryKey::new(node.kind, node.identifier.clone()),
+                        node.config.as_ref().clone(),
+                    ))
+                })
+                .collect::<HashMap<_, _>>();
+            self.synchronize_domain_models(&domain_schedule.domain, models)?;
+        }
+        let stale_domains = self
+            .state
+            .read()
+            .domains
+            .keys()
+            .filter(|domain| !desired_domains.contains(*domain))
+            .cloned()
+            .collect::<Vec<_>>();
+        for domain in stale_domains {
+            self.synchronize_domain_models(&domain, HashMap::new())?;
+        }
+        Ok(())
+    }
+
+    fn synchronize_domain_models(
+        &self,
+        domain: &Domain,
+        models: HashMap<RegistryKey, Model>,
+    ) -> Result<(), Report<RegistryError>> {
+        let _commit_guard = self.commit_lock.lock();
+        let current_models = self
+            .storage
+            .list_models(domain)
+            .change_context(RegistryError::LoadStoredModels)?
+            .into_iter()
+            .map(|record| (record.key, record.model))
+            .collect::<HashMap<_, _>>();
+        if current_models == models {
+            return Ok(());
+        }
+
+        let domain_state = self.build_domain_state(domain, &models)?;
+        let models_to_persist = models
+            .iter()
+            .filter_map(|(key, model)| match current_models.get(key) {
+                None => Some((key.clone(), RegistryPersistMutation::Create(model.clone()))),
+                Some(current) if current != model => {
+                    Some((key.clone(), RegistryPersistMutation::Replace(model.clone())))
+                }
+                Some(_) => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let drops = current_models
+            .keys()
+            .filter(|key| !models.contains_key(*key))
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.storage
+            .commit_batch(domain, &models_to_persist, &drops)
+            .change_context(RegistryError::PersistBatch)?;
+
+        let current = self.state.read();
+        let mut domains = current.domains.clone();
+        if domain_state.graph.node_count() == 0 {
+            domains.remove(domain);
+        } else {
+            domains.insert(domain.clone(), domain_state);
+        }
+        drop(current);
+        *self.state.write() = Arc::new(RegistryState { domains });
+
+        info!(
+            domain = domain.as_str(),
+            model_count = models.len(),
+            "synchronized registry models from consensus schedule"
+        );
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2511,6 +2605,14 @@ pub struct ActiveGraph {
     indices: HashMap<RegistryKey, NodeIndex>,
 }
 
+#[cfg(feature = "testing")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerMode {
+    #[default]
+    Sticky,
+    Random,
+}
+
 impl ActiveGraph {
     pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
         let models = schedule
@@ -2659,7 +2761,48 @@ impl ActiveGraph {
         cluster_nodes: &[String],
         replica_count: usize,
     ) -> DomainSchedule {
+        #[cfg(feature = "testing")]
+        {
+            self.schedule_for_domain_inner(
+                domain,
+                cluster_nodes,
+                replica_count,
+                SchedulerMode::Sticky,
+            )
+        }
+        #[cfg(not(feature = "testing"))]
+        {
+            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count)
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn schedule_for_domain_with_mode(
+        &self,
+        domain: &Domain,
+        cluster_nodes: &[String],
+        replica_count: usize,
+        scheduler_mode: SchedulerMode,
+    ) -> DomainSchedule {
+        self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, scheduler_mode)
+    }
+
+    fn schedule_for_domain_inner(
+        &self,
+        domain: &Domain,
+        cluster_nodes: &[String],
+        replica_count: usize,
+        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
+    ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
+        #[cfg(feature = "testing")]
+        let random_schedule_seed = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"nervix/test-random-scheduler/domain");
+            hasher.update(&[0]);
+            hasher.update(domain.as_str().as_bytes());
+            *hasher.finalize().as_bytes()
+        };
         let mut next_assignment = 0usize;
         let mut node_load = HashMap::<String, usize>::new();
         let mut assigned_by_key = HashMap::<RegistryKey, Vec<String>>::new();
@@ -2704,6 +2847,10 @@ impl ActiveGraph {
                         node_load: &node_load,
                         next_assignment: &mut next_assignment,
                         replica_count,
+                        #[cfg(feature = "testing")]
+                        scheduler_mode,
+                        #[cfg(feature = "testing")]
+                        random_schedule_seed,
                     };
                     let assigned_nodes =
                         assignment_for_model(&mut assignment_planner, index, node.config.as_ref());
@@ -3922,9 +4069,31 @@ struct AssignmentPlanner<'a> {
     node_load: &'a HashMap<String, usize>,
     next_assignment: &'a mut usize,
     replica_count: usize,
+    #[cfg(feature = "testing")]
+    scheduler_mode: SchedulerMode,
+    #[cfg(feature = "testing")]
+    random_schedule_seed: [u8; 32],
 }
 
 impl AssignmentPlanner<'_> {
+    #[cfg(feature = "testing")]
+    fn random_schedule_seed_for(&self, index: NodeIndex) -> u64 {
+        let node = self
+            .graph
+            .node_weight(index)
+            .expect("scheduled graph node must exist");
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nervix/test-random-scheduler/model");
+        hasher.update(&[0]);
+        hasher.update(&self.random_schedule_seed);
+        hasher.update(node.kind.as_str().as_bytes());
+        hasher.update(&[0]);
+        hasher.update(node.identifier.as_str().as_bytes());
+        let mut seed = [0; 8];
+        seed.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+        u64::from_le_bytes(seed)
+    }
+
     fn for_model(&mut self, index: NodeIndex, model: &Model) -> Vec<String> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
@@ -3948,6 +4117,15 @@ impl AssignmentPlanner<'_> {
             | Model::WindowProcessor(_)
             | Model::WasmProcessor(_)
             | Model::Emitter(_) => {
+                #[cfg(feature = "testing")]
+                if let SchedulerMode::Random = self.scheduler_mode {
+                    let mut nodes = self.cluster_nodes.to_vec();
+                    fastrand::Rng::with_seed(self.random_schedule_seed_for(index))
+                        .shuffle(&mut nodes);
+                    nodes.truncate(self.replica_count.saturating_add(1));
+                    return nodes;
+                }
+
                 let preferred_order =
                     locality_affinity_scores(self.graph, index, self.assigned_by_key);
                 let mut ordered_nodes = self
@@ -9262,7 +9440,7 @@ mod tests {
         AckMode, AlterEmitter, AlterJunction, AlterJunctionOperation, AlterRelay,
         AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
         AlterWireSchemaOperation, AlterWireSchemaStmt, Assignment, AssignmentTarget,
-        AssignmentTargetScope, BranchSelection, ClientConfigEntry, CodecEncoding,
+        AssignmentTargetScope, BranchSelection, ClientConfigEntry, ClusterSchedule, CodecEncoding,
         CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
         CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
         CreateBranch, CreateClientHttp, CreateClientKafka, CreateCodec, CreateCorrelator,
@@ -9277,6 +9455,8 @@ mod tests {
         QuiesceLevel, RelayBranching, ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
+    #[cfg(feature = "testing")]
+    use super::SchedulerMode;
     use super::{ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange};
 
     fn temp_db_path() -> PathBuf {
@@ -10212,6 +10392,61 @@ mod tests {
         assert_eq!(loaded, model);
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn synchronized_domain_schedule_persists_models_for_restart() {
+        let source_path = temp_db_path();
+        let source = Registry::open(&source_path).expect("source registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let mut models = full_graph_batch();
+        let Model::Relay(notifications) = models
+            .iter_mut()
+            .find(|model| {
+                model.kind() == ModelKind::Relay && model.identifier().as_str() == "notifications"
+            })
+            .expect("notifications relay should exist")
+        else {
+            panic!("notifications model should be a relay");
+        };
+        notifications.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+        source
+            .apply_batch(&domain, models)
+            .expect("source graph should be valid");
+        let schedule = source
+            .active_graph(&domain)
+            .expect("source graph should exist")
+            .schedule_for_domain(&domain, &["node-1".to_string()], 0);
+        assert!(
+            schedule
+                .nodes
+                .iter()
+                .any(|node| node.kind == ModelKind::Materializer),
+            "fixture schedule must include its synthetic materializer"
+        );
+
+        let replica_path = temp_db_path();
+        {
+            let replica = Registry::open(&replica_path).expect("replica registry should open");
+            replica
+                .synchronize_cluster_schedule(&ClusterSchedule {
+                    domains: vec![schedule],
+                })
+                .expect("schedule models should synchronize");
+        }
+
+        let reopened = Registry::open(&replica_path).expect("replica registry should reopen");
+        assert_eq!(
+            reopened
+                .get(&domain, ModelKind::Ingestor, &identifier("ing"))
+                .expect("replica model read should succeed"),
+            source
+                .get(&domain, ModelKind::Ingestor, &identifier("ing"))
+                .expect("source model read should succeed")
+        );
+
+        let _ = fs::remove_dir_all(source_path);
+        let _ = fs::remove_dir_all(replica_path);
     }
 
     #[test]
@@ -11255,6 +11490,88 @@ mod tests {
 
         assert_eq!(processor_node, ingestor_node);
         assert_eq!(emitter_node, processor_node);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn random_test_schedule_is_stable_for_unchanged_inputs() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+
+        registry
+            .apply_batch(&domain, full_graph_batch())
+            .expect("batch should succeed");
+
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let cluster_nodes = [
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ];
+        let expected =
+            graph.schedule_for_domain_with_mode(&domain, &cluster_nodes, 0, SchedulerMode::Random);
+        for _ in 0..32 {
+            assert_eq!(
+                graph.schedule_for_domain_with_mode(
+                    &domain,
+                    &cluster_nodes,
+                    0,
+                    SchedulerMode::Random,
+                ),
+                expected,
+                "periodic reconciliation must not move an unchanged random schedule"
+            );
+        }
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn random_test_schedule_ignores_upstream_locality_across_domains() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+
+        registry
+            .apply_batch(&domain, full_graph_batch())
+            .expect("batch should succeed");
+
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let cluster_nodes = [
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ];
+        let observed_cross_node_path = (0..32).any(|suffix| {
+            let scheduled_domain =
+                Domain::parse(&format!("test_{suffix}")).expect("valid test domain");
+            let schedule = graph.schedule_for_domain_with_mode(
+                &scheduled_domain,
+                &cluster_nodes,
+                0,
+                SchedulerMode::Random,
+            );
+            let ingestor =
+                scheduled_node(&schedule, ModelKind::Ingestor, "ing").assigned_single_node();
+            let processor = scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc")
+                .assigned_single_node();
+            let emitter =
+                scheduled_node(&schedule, ModelKind::Emitter, "emit").assigned_single_node();
+            ingestor != processor || processor != emitter
+        });
+
+        assert!(
+            observed_cross_node_path,
+            "independent random assignments should split paths across test domains"
+        );
 
         let _ = fs::remove_dir_all(path);
     }

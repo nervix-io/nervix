@@ -2285,6 +2285,82 @@ async fn paused_schedule_keeps_full_execution_without_rebuilding_unchanged_graph
 }
 
 #[tokio::test]
+async fn stale_cluster_state_cannot_replace_a_newer_runtime_schedule() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let schema = identifier("notification");
+    let relay = identifier("notifications");
+    let domains = BTreeMap::from([(
+        domain.clone(),
+        DomainState {
+            id: domain.clone(),
+            config: DomainConfig {
+                pace: DomainPace::Unpaced,
+                period: "1s".to_string(),
+                skew: "0s".to_string(),
+            },
+            status: DomainStatus::Running,
+            start_version: 1,
+            last_start: nervix_models::DomainStartPoint::Resume,
+        },
+    )]);
+    let schema_node = scheduled_model(
+        ModelKind::Schema,
+        schema.clone(),
+        nervix_models::Model::Schema(CreateSchema {
+            name: schema.clone(),
+            fields: vec![SchemaField {
+                name: identifier("user_id"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        }),
+    );
+    let stale_schedule = ClusterSchedule {
+        domains: vec![DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![schema_node.clone()],
+        }],
+    };
+    let current_schedule = ClusterSchedule {
+        domains: vec![DomainSchedule {
+            domain: domain.clone(),
+            nodes: vec![
+                schema_node,
+                scheduled_model(
+                    ModelKind::Relay,
+                    relay.clone(),
+                    nervix_models::Model::Relay(CreateRelay {
+                        name: relay.clone(),
+                        schema,
+                        buffer: 2,
+                        branching: RelayBranching::unbranched(),
+                        materialized_state: None,
+                    }),
+                ),
+            ],
+        }],
+    };
+
+    runtime
+        .apply_cluster_state("node-1", 2, &domains, &current_schedule)
+        .await
+        .expect("current cluster state should build");
+    runtime
+        .apply_cluster_state("node-1", 1, &domains, &stale_schedule)
+        .await
+        .expect("stale cluster state should be ignored");
+
+    let execution = runtime
+        .executions
+        .get(&domain)
+        .expect("current execution should remain");
+    assert_eq!(execution.schedule, current_schedule.domains[0]);
+    assert!(execution.relay_registries.contains_key(&relay));
+}
+
+#[tokio::test]
 async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
@@ -2658,11 +2734,11 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
     };
 
     runtime
-        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule))
+        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule), true)
         .await
         .expect("standalone branch-preserving processors must build");
     runtime
-        .rebuild_domain_from_schedule("node-1", &domain, None)
+        .rebuild_domain_from_schedule("node-1", &domain, None, true)
         .await
         .expect("domain teardown must stop processor runtimes");
 }
@@ -2734,7 +2810,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     };
 
     runtime
-        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule.clone()))
+        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule.clone()), true)
         .await
         .expect("scheduled deduplicator must build");
     let entity = crate::registry::RegistryEntity {
@@ -4009,6 +4085,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
                     ),
                 ],
             }),
+            true,
         )
         .await
         .expect("unbranched relay execution should build");
@@ -4491,6 +4568,7 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
                 nodes: Vec::new(),
             },
             passive_only: false,
+            start_version: 0,
             shutdown,
             graph: StdArc::new(ArcSwapOption::empty()),
             relay_registries,
@@ -4569,6 +4647,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                     nodes: Vec::new(),
                 },
                 passive_only: false,
+                start_version: 0,
                 shutdown,
                 graph: StdArc::new(ArcSwapOption::empty()),
                 relay_registries: HashMap::default(),
@@ -4632,6 +4711,7 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
                 nodes: Vec::new(),
             },
             passive_only: false,
+            start_version: 0,
             shutdown,
             graph: StdArc::new(ArcSwapOption::empty()),
             relay_registries: HashMap::default(),
@@ -7233,6 +7313,7 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
                 nodes: Vec::new(),
             },
             passive_only: false,
+            start_version: 0,
             shutdown: execution_shutdown,
             graph: StdArc::new(ArcSwapOption::empty()),
             relay_registries: HashMap::default(),
@@ -9428,6 +9509,7 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
                 nodes: Vec::new(),
             },
             passive_only: false,
+            start_version: 0,
             shutdown,
             graph: StdArc::new(ArcSwapOption::empty()),
             relay_registries: HashMap::default(),

@@ -274,9 +274,15 @@ language or interface changes.
 - Cucumber scenarios keep step semantics aligned: `Given` establishes preconditions, `When`
   performs the action or event under test, and `Then` asserts the observable outcome.
 - Runtime cucumber behavior uses scenario outlines covering one-node and three-node clusters unless
-  the behavior is explicitly topology-specific. Scheduling, leader/follower restrictions, and
-  inter-node mechanics use dedicated scenarios or lower-level tests rather than being folded into
-  generic runtime scenarios.
+  the behavior is explicitly topology-specific. Every three-node Cucumber cluster uses the
+  conditionally compiled random test scheduler by default, independently assigning schedulable graph
+  nodes to exercise cross-node paths instead of locality-driven colocation. Random assignments must
+  remain stable for unchanged domain, model, and topology inputs so periodic reconciliation never
+  causes artificial ownership churn. Scenarios whose subject is production placement, cordon, drain,
+  scheduled-node failover, or full-cluster recovery from node-owned persisted state must explicitly
+  configure the production sticky scheduler before cluster startup. Scheduling, leader/follower
+  restrictions, and inter-node mechanics use dedicated scenarios or lower-level tests rather than
+  being folded into generic runtime scenarios.
 - Stateful processor scenarios must prove branch isolation and field preservation with interleaved
   records from at least two branches.
 - Tests must explicitly provision required external entities.

@@ -211,6 +211,7 @@ Feature: Window processor runtime behavior
 
   Scenario Outline: Window processor restores branch-local state after cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -263,6 +264,7 @@ Feature: Window processor runtime behavior
       """
       {"tenant":"acme","latency":10}
       """
+    And within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "metrics" across physical nodes totals 1
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed on the leader node

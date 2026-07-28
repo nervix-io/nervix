@@ -82,60 +82,61 @@ Feature: Window processor metrics
       """
       window processor: window_metrics_node
       """
+    And the last command output owner is saved as placeholder "window_metrics_owner"
     And the last command output contains
       """
-      messages_total received relay=metrics_input physical_node=node-1 total=6
-      """
-    And the last command output contains
-      """
-      messages_total sent relay=metrics_summary physical_node=node-1 total=2
+      messages_total received relay=metrics_input physical_node={{window_metrics_owner}} total=6
       """
     And the last command output contains
       """
-      batches_total received relay=metrics_input physical_node=node-1 total=2
+      messages_total sent relay=metrics_summary physical_node={{window_metrics_owner}} total=2
       """
     And the last command output contains
       """
-      batches_total sent relay=metrics_summary physical_node=node-1 total=2
+      batches_total received relay=metrics_input physical_node={{window_metrics_owner}} total=2
       """
     And the last command output contains
       """
-      delivery_latency_seconds received relay=metrics_input physical_node=node-1
+      batches_total sent relay=metrics_summary physical_node={{window_metrics_owner}} total=2
       """
-    And the last command output metric "messages_total" "received" relay "metrics_input" physical node "node-1" has values
+    And the last command output contains
+      """
+      delivery_latency_seconds received relay=metrics_input physical_node={{window_metrics_owner}}
+      """
+    And the last command output metric "messages_total" "received" relay "metrics_input" physical node "{{window_metrics_owner}}" has values
       """
       total=6
       """
-    And the last command output metric "messages_total" "sent" relay "metrics_summary" physical node "node-1" has values
+    And the last command output metric "messages_total" "sent" relay "metrics_summary" physical node "{{window_metrics_owner}}" has values
       """
       total=2
       """
-    And the last command output metric "batches_total" "received" relay "metrics_input" physical node "node-1" has values
+    And the last command output metric "batches_total" "received" relay "metrics_input" physical node "{{window_metrics_owner}}" has values
       """
       total=2
       """
-    And the last command output metric "batches_total" "sent" relay "metrics_summary" physical node "node-1" has values
+    And the last command output metric "batches_total" "sent" relay "metrics_summary" physical node "{{window_metrics_owner}}" has values
       """
       total=2
       """
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target_kind="WINDOW_PROCESSOR"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="window_metrics_node"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains "nervix_batches_total"
-    And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 6
+    And node "{{window_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target_kind="WINDOW_PROCESSOR"'
+    And node "{{window_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target="window_metrics_node"'
+    And node "{{window_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains "nervix_batches_total"
+    And node "{{window_metrics_owner}}" observability metric "nervix_messages_total" with labels eventually equals 6
       """
       target_kind="WINDOW_PROCESSOR"
       target="window_metrics_node"
       direction="received"
       relay="metrics_input"
       """
-    And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 2
+    And node "{{window_metrics_owner}}" observability metric "nervix_messages_total" with labels eventually equals 2
       """
       target_kind="WINDOW_PROCESSOR"
       target="window_metrics_node"
       direction="sent"
       relay="metrics_summary"
       """
-    And node "node-1" observability metric "nervix_delivery_latency_seconds_count" with labels eventually equals 6
+    And node "{{window_metrics_owner}}" observability metric "nervix_delivery_latency_seconds_count" with labels eventually equals 6
       """
       target_kind="WINDOW_PROCESSOR"
       target="window_metrics_node"

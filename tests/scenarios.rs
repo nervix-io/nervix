@@ -47,6 +47,8 @@ use mysql_async::{
     prelude::Queryable as MySqlQueryable,
 };
 use nervix_client_core::Client;
+#[cfg(feature = "testing")]
+use nervix_server::SchedulerMode;
 use nervix_server::{
     application::InternalTransportMode, memory_pressure::MemoryPressureConfig,
     runtime::RuntimeTestHooks,
@@ -601,6 +603,10 @@ impl IngestorLogicTransportFixture {
 
     async fn await_ready(self, world: &mut ScenarioWorld) {
         let _ = world;
+    }
+
+    fn executes_on_scheduled_owner(self) -> bool {
+        matches!(self, Self::Kafka | Self::Mqtt | Self::Nats | Self::ZeroMq)
     }
 
     fn setup_fragment(self) -> &'static str {
@@ -1665,6 +1671,16 @@ async fn given_runtime_replication_is_configured(
     world.cluster_config.replica_count = replica_count;
     world.cluster_config.state_snapshot_interval = humantime::parse_duration(&snapshot_interval)
         .expect("snapshot interval must be a valid duration");
+}
+
+#[cfg(feature = "testing")]
+#[given("the production sticky scheduler is configured")]
+async fn given_production_sticky_scheduler_is_configured(world: &mut ScenarioWorld) {
+    assert!(
+        world.cluster.is_none(),
+        "the scheduler must be configured before cluster startup"
+    );
+    world.cluster_config.scheduler_mode = Some(SchedulerMode::Sticky);
 }
 
 #[given("temporary files use a custom temp directory")]
@@ -3969,8 +3985,45 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
     let session = execute_nspl_commands_on_node(world, &leader, &commands)
         .await
         .expect("failed to start ingestor logic fixture on leader");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    if transport.executes_on_scheduled_owner() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let owner = loop {
+            tokio::task::consume_budget().await;
+            let output = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+                .await
+                .expect("failed to inspect ingestor logic schedule");
+            if let Some((owner, _)) = scheduled_node_placement_from_status(
+                &output,
+                &world.domain,
+                "ingestor",
+                "logic_ingestor",
+            ) {
+                break owner.to_string();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for logic_ingestor schedule placement; last output: {output}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        if owner == leader {
+            world.active_session = Some(session);
+        } else {
+            let owner_session = execute_nspl_commands_on_node(
+                world,
+                &owner,
+                "CREATE SUBSCRIPTION logic_notifications_owner_subscription TO \
+                 logic_notifications;",
+            )
+            .await
+            .expect("failed to create ingestor logic subscription on scheduled owner");
+            world.active_session = Some(owner_session);
+        }
+        world.active_session_node = Some(owner);
+    } else {
+        world.active_session = Some(session);
+        world.active_session_node = Some(leader);
+    }
     world.active_session_has_subscription = true;
     transport.await_ready(world).await;
 }
@@ -6599,6 +6652,10 @@ async fn then_last_command_output_metric_has_values(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before assertion");
+    let metric = expand_placeholders(world, &metric);
+    let direction = expand_placeholders(world, &direction);
+    let relay = expand_placeholders(world, &relay);
+    let physical_node = expand_placeholders(world, &physical_node);
     let prefix = format!("{metric} {direction} relay={relay} physical_node={physical_node}");
     let line = output
         .lines()
@@ -6647,6 +6704,10 @@ async fn then_last_command_output_metric_has_numeric_values(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before assertion");
+    let metric = expand_placeholders(world, &metric);
+    let direction = expand_placeholders(world, &direction);
+    let relay = expand_placeholders(world, &relay);
+    let physical_node = expand_placeholders(world, &physical_node);
     let prefix = format!("{metric} {direction} relay={relay} physical_node={physical_node}");
     let line = output
         .lines()
@@ -6684,6 +6745,9 @@ async fn then_last_command_output_metric_on_any_physical_node_has_values(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before assertion");
+    let metric = expand_placeholders(world, &metric);
+    let direction = expand_placeholders(world, &direction);
+    let relay = expand_placeholders(world, &relay);
     let prefix = format!("{metric} {direction} relay={relay} physical_node=");
     let line = output
         .lines()
@@ -6731,6 +6795,9 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
         .last_command_output
         .as_deref()
         .expect("a command output must exist before assertion");
+    let metric = expand_placeholders(world, &metric);
+    let direction = expand_placeholders(world, &direction);
+    let relay = expand_placeholders(world, &relay);
     let prefix = format!("{metric} {direction} relay={relay} physical_node=");
     let assertions = expand_placeholders(world, docstring(step))
         .lines()
@@ -6763,6 +6830,93 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
          {output}",
         assertions
     );
+}
+
+#[then(
+    expr = "within {string} DESCRIBE DOMAIN section {string} metric {string} {string} relay \
+            {string} across physical nodes totals {int}"
+)]
+async fn then_within_duration_describe_domain_section_metric_across_physical_nodes_totals(
+    world: &mut ScenarioWorld,
+    duration: String,
+    section: String,
+    metric: String,
+    direction: String,
+    relay: String,
+    expected_total: u64,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let section = expand_placeholders(world, &section);
+    let metric = expand_placeholders(world, &metric);
+    let direction = expand_placeholders(world, &direction);
+    let relay = expand_placeholders(world, &relay);
+    let prefix = format!("{metric} {direction} relay={relay} physical_node=");
+    let deadline = Instant::now() + duration;
+    let mut last_totals = Vec::new();
+
+    loop {
+        tokio::task::consume_budget().await;
+        let mut outputs = Vec::new();
+        let mut command_error = None;
+        last_totals.clear();
+        for node_id in world.cluster().node_ids() {
+            tokio::task::consume_budget().await;
+            match run_nspl_commands_on_node(world, &node_id, "DESCRIBE DOMAIN;").await {
+                Ok(output) => {
+                    last_totals.extend(metric_totals_in_indented_section(
+                        &output, &section, &prefix,
+                    ));
+                    outputs.push(output);
+                }
+                Err(error) => {
+                    command_error = Some(format!("{node_id}: {error}"));
+                    break;
+                }
+            }
+        }
+        world.last_command_error = command_error;
+        world.last_command_output = Some(outputs.join("\n"));
+        if world.last_command_error.is_none()
+            && !last_totals.is_empty()
+            && last_totals.iter().sum::<u64>() == expected_total
+        {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE DOMAIN section '{section}' metric lines starting with \
+             '{prefix}' to total {expected_total}; last totals: {last_totals:?}, last output: \
+             {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn metric_totals_in_indented_section(output: &str, section: &str, prefix: &str) -> Vec<u64> {
+    let header = format!("{section}:");
+    let mut lines = output.lines();
+    let Some(header_line) = lines.find(|line| line.trim() == header) else {
+        return Vec::new();
+    };
+    let header_indent = header_line.len() - header_line.trim_start().len();
+
+    lines
+        .take_while(|line| {
+            line.trim().is_empty() || line.len() - line.trim_start().len() > header_indent
+        })
+        .map(str::trim)
+        .filter(|line| line.starts_with(prefix))
+        .map(|line| {
+            metric_line_value(line, "total")
+                .unwrap_or_else(|| panic!("expected total in metric line '{line}'"))
+                .parse::<u64>()
+                .unwrap_or_else(|error| panic!("invalid total in metric line '{line}': {error}"))
+        })
+        .collect()
 }
 
 fn metric_line_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
@@ -6915,6 +7069,36 @@ fn scheduled_node_placement_from_status<'a>(
             None
         }
     })
+}
+
+#[then(expr = "the last cluster status schedules nodes on at least {int} distinct owners")]
+async fn then_last_cluster_status_uses_at_least_distinct_owners(
+    world: &mut ScenarioWorld,
+    expected_owner_count: usize,
+) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("a cluster status output must exist before checking scheduled owners");
+    let domain_field = format!("domain={}", world.domain);
+    let owners = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("- ") && line.split_whitespace().any(|field| field == domain_field)
+        })
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("owner="))
+        })
+        .filter(|owner| *owner != "-")
+        .collect::<BTreeSet<_>>();
+    assert!(
+        owners.len() >= expected_owner_count,
+        "expected at least {expected_owner_count} distinct scheduled owners for domain '{}', got \
+         {owners:?} in: {output}",
+        world.domain
+    );
 }
 
 #[then(expr = "the last command output owner is saved as placeholder {string}")]
@@ -7410,6 +7594,9 @@ async fn then_node_observability_path_eventually_responds(
     expected_status: u16,
     expected_body: String,
 ) {
+    let node_id = expand_placeholders(world, &node_id);
+    let path = expand_placeholders(world, &path);
+    let expected_body = expand_placeholders(world, &expected_body);
     world
         .cluster()
         .wait_for_observability_response(&node_id, &path, expected_status, &expected_body)
@@ -7428,6 +7615,9 @@ async fn then_node_observability_path_eventually_responds_containing(
     expected_status: u16,
     expected_body_fragment: String,
 ) {
+    let node_id = expand_placeholders(world, &node_id);
+    let path = expand_placeholders(world, &path);
+    let expected_body_fragment = expand_placeholders(world, &expected_body_fragment);
     world
         .cluster()
         .wait_for_observability_response_containing(
@@ -10657,10 +10847,6 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
         "step docstring must contain at least one expected payload fragment"
     );
 
-    let observer = world
-        .broker_observer
-        .as_mut()
-        .expect("a broker observer must exist before assertion");
     let deadline = Instant::now() + duration;
     let mut remaining = expected_fragments
         .iter()
@@ -10679,16 +10865,39 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
             observed
         );
         let wait = deadline.saturating_duration_since(now);
-        let payload = observer
+        let payload = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
             .try_next_payload(wait)
             .await
-            .expect("failed while waiting for broker payloads")
-            .unwrap_or_else(|| {
-                panic!(
-                    "timed out waiting for broker payloads. expected remaining {:?}, observed {:?}",
-                    remaining, observed
-                )
-            });
+            .expect("failed while waiting for broker payloads");
+        let Some(payload) = payload else {
+            let mut runtime_diagnostics = Vec::new();
+            for node_id in world.cluster().node_ids() {
+                tokio::task::consume_budget().await;
+                let mut node_diagnostics = Vec::new();
+                for command in [
+                    "SHOW CLUSTER STATUS;",
+                    "DESCRIBE DOMAIN;",
+                    "DESCRIBE INGESTOR ws_notifications;",
+                    "DESCRIBE EMITTER kafka_forward;",
+                ] {
+                    tokio::task::consume_budget().await;
+                    let result = world
+                        .cluster()
+                        .run_command(&node_id, &world.domain, command)
+                        .await;
+                    node_diagnostics.push(format!("{command} => {result:?}"));
+                }
+                runtime_diagnostics.push(format!("{node_id}: {node_diagnostics:?}"));
+            }
+            panic!(
+                "timed out waiting for broker payloads. expected remaining {:?}, observed {:?}. \
+                 runtime diagnostics: {:?}",
+                remaining, observed, runtime_diagnostics
+            );
+        };
         observed.push(payload.clone());
         world.last_broker_payload = Some(payload.clone());
 
@@ -10744,10 +10953,6 @@ async fn capture_and_assert_subscription_payload(
     {
         return;
     }
-    let session = world
-        .active_session
-        .as_mut()
-        .expect("an active session with subscription must exist");
     let deadline = Instant::now() + timeout;
     let mut observed = Vec::new();
 
@@ -10761,16 +10966,29 @@ async fn capture_and_assert_subscription_payload(
             observed
         );
         let wait = deadline.saturating_duration_since(now);
-        let event = session
+        let event = world
+            .active_session
+            .as_mut()
+            .expect("an active session with subscription must exist")
             .try_next_subscription(wait)
             .await
-            .expect("failed to receive subscription event")
-            .unwrap_or_else(|| {
-                panic!(
-                    "timed out waiting for subscription payload containing {}. observed {:?}",
-                    expected_payload, observed
-                )
-            });
+            .expect("failed to receive subscription event");
+        let Some(event) = event else {
+            let mut domain_descriptions = Vec::new();
+            for node_id in world.cluster().node_ids() {
+                tokio::task::consume_budget().await;
+                let result = world
+                    .cluster()
+                    .run_command(&node_id, &world.domain, "DESCRIBE DOMAIN;")
+                    .await;
+                domain_descriptions.push(format!("{node_id}: {result:?}"));
+            }
+            panic!(
+                "timed out waiting for subscription payload containing {}. observed {:?}. domain \
+                 descriptions: {:?}",
+                expected_payload, observed, domain_descriptions
+            );
+        };
         let payload = event.payload;
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());

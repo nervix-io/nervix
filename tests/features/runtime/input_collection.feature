@@ -49,7 +49,9 @@ Feature: Runtime node input collection
         ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION collected_subscription TO collected;
       START;
+      SHOW CLUSTER STATUS;
       """
+    Then the last cluster status owner for scheduled "junction" "input_collector" is saved as placeholder "junction_owner"
     And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/input-collection"
       """
       {"tenant":"alpha","sequence":1}
@@ -75,7 +77,7 @@ Feature: Runtime node input collection
       {"sequence":1,"tenant":"beta"}
       {"sequence":2,"tenant":"beta"}
       """
-    And node "node-1" observability metric "nervix_batches_total" with labels eventually equals 2
+    And node "{{junction_owner}}" observability metric "nervix_batches_total" with labels eventually equals 2
       """
       target_kind="JUNCTION"
       target="input_collector"
