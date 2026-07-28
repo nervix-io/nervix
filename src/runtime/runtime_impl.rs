@@ -656,6 +656,43 @@ impl Runtime {
         Ok(())
     }
 
+    fn purge_deduplicator_state(
+        &self,
+        domain: &Domain,
+        deduplicator: &Identifier,
+    ) -> Result<(), RuntimeError> {
+        let placements = self
+            .replicated_deduplicator_states
+            .iter()
+            .filter(|entry| {
+                entry.key().domain == *domain
+                    && entry.key().kind == ModelKind::Deduplicator
+                    && entry.key().identifier == *deduplicator
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for placement in placements {
+            self.replicated_deduplicator_states.remove(&placement);
+        }
+        if let Some(store) = &self.state_store {
+            store
+                .purge_entity(
+                    domain,
+                    RuntimeStateKind::Deduplicator,
+                    ModelKind::Deduplicator,
+                    deduplicator,
+                )
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "failed to purge state for deduplicator '{}': {error}",
+                        deduplicator.as_str()
+                    ),
+                })?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn try_begin_domain_alter(&self, domain: &Domain) -> Option<DomainAlterGuard> {
         let level = Arc::new(RwLock::new(nervix_models::QuiesceLevel::Dynamic));
         let active = ActiveDomainAlter {
@@ -4673,8 +4710,8 @@ impl Runtime {
                 });
             }
 
-            let (old_spec, old_task, mut template) = {
-                let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+            let old_spec = {
+                let execution = self.executions.get(domain).ok_or_else(|| {
                     RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: "domain execution is unavailable for entity swap".to_string(),
@@ -4691,6 +4728,33 @@ impl Runtime {
                             entity.identifier.as_str()
                         ),
                     })?;
+                old_spec
+            };
+            let deduplicator_keyspace_changed =
+                match (&old_spec.spec.operation, &desired_spec.spec.operation) {
+                    (
+                        BranchedProcessorOperationSpec::Deduplicator {
+                            deduplicate_on: old,
+                            ..
+                        },
+                        BranchedProcessorOperationSpec::Deduplicator {
+                            deduplicate_on: desired,
+                            ..
+                        },
+                    ) => old != desired,
+                    _ => false,
+                };
+            if deduplicator_keyspace_changed {
+                self.purge_deduplicator_state(domain, &entity.identifier)?;
+            }
+
+            let (old_task, mut template) = {
+                let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                    RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: "domain execution is unavailable for entity swap".to_string(),
+                    }
+                })?;
                 let template = materialize_processor_instance_template(
                     &desired_spec,
                     &desired_model_index,
@@ -4704,7 +4768,7 @@ impl Runtime {
                     reason,
                 })?;
                 let old_task = execution.node_tasks.remove(entity);
-                (old_spec, old_task, template)
+                (old_task, template)
             };
 
             template
@@ -4897,7 +4961,7 @@ impl Runtime {
                     };
                     self.set_relay_capacity(domain, relay, capacity);
                 }
-                nervix_models::DynamicModelUpdate::Junction { .. } => {}
+                nervix_models::DynamicModelUpdate::Processor { .. } => {}
                 nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
                     let commands = self.executions.get(domain).and_then(|execution| {
                         execution

@@ -280,15 +280,15 @@ mod tests {
                 assigned_nodes: vec!["node-1".to_string()],
             }],
         };
-        let mut dynamic_config = junction.clone();
+        let mut dynamic_config = junction;
         dynamic_config.filter_where = Some(Expression::Literal(Literal::Bool(true)));
         let mut desired = existing.clone();
-        desired.nodes[0].config = Box::new(Model::Junction(dynamic_config.clone()));
+        desired.nodes[0].config = Box::new(Model::Junction(dynamic_config));
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
-            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Junction {
-                junction: identifier("route_events"),
-                config: dynamic_config,
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Processor {
+                kind: ModelKind::Junction,
+                processor: identifier("route_events"),
             }])
         );
 

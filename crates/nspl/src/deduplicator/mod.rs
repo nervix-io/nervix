@@ -1,11 +1,14 @@
 use chumsky::prelude::*;
-use nervix_models::{AckMode, CreateDeduplicator, CreateStatement};
+use nervix_models::{
+    AckMode, AlterDeduplicator, AlterDeduplicatorOperation, CreateDeduplicator, CreateStatement,
+};
 
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        deduplicator_name, duration_lit, filter_where_clause, flushed_processor_outputs,
+        ParseError, ParseFromSourceError, ack_mode, alter_expression_list, alter_op_separator,
+        alter_processor_operation, branch_selection, current_word_prefix, deduplicator_name,
+        deduplicator_ref, duration_lit, filter_where_clause, flushed_processor_outputs,
         from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
         materialized_state_dependencies, render_vm_program_tokens, suggestions_from_errors, tok,
         vm_program_error_message,
@@ -98,6 +101,43 @@ pub fn create_deduplicator_parser<'src>()
         .boxed()
 }
 
+pub fn alter_deduplicator_parser<'src>()
+-> impl Parser<'src, &'src [Token], AlterDeduplicator, extra::Err<ParseError<'src>>> + Clone {
+    let set_deduplicate_on = kw(Identifier::Set)
+        .ignore_then(kw_phrase2(Identifier::Deduplicate, Identifier::On))
+        .ignore_then(alter_expression_list(
+            alter_op_separator(),
+            "deduplicate_on",
+        ))
+        .map(|expressions| AlterDeduplicatorOperation::SetDeduplicateOn { expressions });
+    let set_max_time = kw(Identifier::Set)
+        .ignore_then(kw_phrase2(Identifier::Max, Identifier::Time))
+        .ignore_then(duration_lit())
+        .map(|max_time| AlterDeduplicatorOperation::SetMaxTime { max_time });
+    let operation = choice((
+        set_deduplicate_on,
+        set_max_time,
+        alter_processor_operation().map(AlterDeduplicatorOperation::Processor),
+    ))
+    .boxed();
+
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Deduplicator))
+        .ignore_then(deduplicator_ref())
+        .then(
+            operation
+                .separated_by(alter_op_separator())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .map(|(deduplicator, operations)| AlterDeduplicator {
+            deduplicator,
+            operations,
+        })
+        .boxed()
+}
+
 pub fn parse_create_deduplicator_tokens(
     tokens: &[Token],
 ) -> Result<CreateStatement<CreateDeduplicator>, Vec<ParseError<'_>>> {
@@ -113,11 +153,30 @@ pub fn parse_create_deduplicator_tokens(
     }
 }
 
+pub fn parse_alter_deduplicator_tokens(
+    tokens: &[Token],
+) -> Result<AlterDeduplicator, Vec<ParseError<'_>>> {
+    let out = alter_deduplicator_parser().then_ignore(end()).parse(tokens);
+    if out.has_errors() {
+        Err(out.into_errors())
+    } else {
+        Ok(out
+            .into_output()
+            .expect("successful parse must have output"))
+    }
+}
+
 pub fn parse_create_deduplicator(
     input: &str,
 ) -> Result<CreateStatement<CreateDeduplicator>, ParseFromSourceError> {
     let (source, spanned_tokens, tokens) = lex_input(input)?;
     parse_create_deduplicator_tokens(&tokens)
+        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+}
+
+pub fn parse_alter_deduplicator(input: &str) -> Result<AlterDeduplicator, ParseFromSourceError> {
+    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    parse_alter_deduplicator_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
@@ -138,6 +197,23 @@ pub fn suggest_create_deduplicator(input: &str, cursor: usize) -> Vec<String> {
         return Vec::new();
     }
 
+    suggestions_from_errors(out.into_errors(), &prefix)
+}
+
+pub fn suggest_alter_deduplicator(input: &str, cursor: usize) -> Vec<String> {
+    let safe_cursor = cursor.min(input.len());
+    let prefix_src = &input[..safe_cursor];
+    let prefix = current_word_prefix(prefix_src);
+    let (_, _, tokens) = match lex_input(prefix_src) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let out = alter_deduplicator_parser()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if !out.has_errors() {
+        return Vec::new();
+    }
     suggestions_from_errors(out.into_errors(), &prefix)
 }
 
@@ -186,6 +262,46 @@ mod tests {
         );
         assert_eq!(parsed.max_time, "10m");
         assert_eq!(parsed.mode, AckMode::Attached);
+    }
+
+    #[test]
+    fn parses_alter_deduplicator_operations_and_expression_commas() {
+        let parsed = parse_alter_deduplicator(
+            "ALTER DEDUPLICATOR dedup_txns SET DEDUPLICATE ON concat(input.source, ','), \
+             input.transaction_id, SET MAX TIME 20m, SET FILTER WHERE concat(input.source, ',') \
+             != '', ADD FROM ss2 WHERE input.active, ADD ROUTE TO ss3 INHERIT ALL FLUSH IMMEDIATE \
+             ON MESSAGE ERROR LOG;",
+        )
+        .expect("ALTER DEDUPLICATOR should parse");
+
+        assert_eq!(parsed.operations.len(), 5);
+        let AlterDeduplicatorOperation::SetDeduplicateOn { expressions } = &parsed.operations[0]
+        else {
+            panic!("first operation should set the deduplication key");
+        };
+        assert_eq!(expressions.len(), 2);
+    }
+
+    #[test]
+    fn rejects_alter_deduplicator_without_operations_or_complete_key() {
+        assert!(parse_alter_deduplicator("ALTER DEDUPLICATOR dedup_txns;").is_err());
+        assert!(
+            parse_alter_deduplicator(
+                "ALTER DEDUPLICATOR dedup_txns SET DEDUPLICATE ON, SET MAX TIME 1s;"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn alter_deduplicator_completion_exposes_specific_and_shared_operations() {
+        let input = "ALTER DEDUPLICATOR dedup_txns SET ";
+        let suggestions = suggest_alter_deduplicator(input, input.len());
+        assert!(suggestions.contains(&"DEDUPLICATE ON".to_string()));
+        assert!(suggestions.contains(&"MAX TIME".to_string()));
+        assert!(suggestions.contains(&"FILTER".to_string()));
+        assert!(suggestions.contains(&"ATTACHED".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
     }
 
     #[test]

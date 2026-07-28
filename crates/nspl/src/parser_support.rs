@@ -5,10 +5,11 @@ use chumsky::{
     prelude::*,
 };
 use nervix_models::{
-    AckMode, AssignmentTargetScope, BranchSelection, Domain, Expression, GeneralErrorPolicy,
-    Identifier as ModelIdentifier, InputCollectPolicy, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, OutputBranch, OutputFlushPolicy,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RouteConstruction,
+    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchSelection, Domain, Expression,
+    GeneralErrorPolicy, Identifier as ModelIdentifier, InputCollectPolicy,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, OutputBranch,
+    OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    RouteConstruction,
 };
 use sorted_vec::SortedSet;
 
@@ -784,6 +785,114 @@ pub fn alter_ingestor_route_body<'src>()
         .boxed()
 }
 
+pub fn alter_processor_operation<'src>()
+-> impl Parser<'src, &'src [Token], AlterProcessorOperation, extra::Err<ParseError<'src>>> + Clone {
+    let add_from = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .then(where_expression(alter_op_separator()).or_not())
+        .map(|(relay, where_clause)| AlterProcessorOperation::AddFrom {
+            relay,
+            where_clause,
+        });
+    let drop_from = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterProcessorOperation::DropFrom { relay });
+    let alter_from = kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .then(choice((
+            kw(Identifier::Set)
+                .ignore_then(where_expression(alter_op_separator()))
+                .map(Some),
+            kw(Identifier::Drop)
+                .ignore_then(kw(Identifier::Where))
+                .to(None),
+        )))
+        .map(|(relay, where_clause)| match where_clause {
+            Some(where_clause) => AlterProcessorOperation::AlterFromSetWhere {
+                relay,
+                where_clause,
+            },
+            None => AlterProcessorOperation::AlterFromDropWhere { relay },
+        });
+    let set_collect = kw(Identifier::Set)
+        .ignore_then(collect_for())
+        .map(|policy| AlterProcessorOperation::SetCollect { policy });
+    let drop_collect = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Collect))
+        .to(AlterProcessorOperation::DropCollect);
+    let set_filter = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Filter))
+        .ignore_then(where_expression(alter_op_separator()))
+        .map(|where_clause| AlterProcessorOperation::SetFilterWhere { where_clause });
+    let drop_filter = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Filter))
+        .ignore_then(kw(Identifier::Where))
+        .to(AlterProcessorOperation::DropFilterWhere);
+    let set_mode = kw(Identifier::Set)
+        .ignore_then(ack_mode())
+        .map(|mode| AlterProcessorOperation::SetMode { mode });
+    let set_branching = kw(Identifier::Set)
+        .ignore_then(branch_selection())
+        .map(|branching| AlterProcessorOperation::SetBranching { branching });
+    let add_materialized = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .then(materialized_state_policy())
+        .map(
+            |(relay, policy)| AlterProcessorOperation::AddMaterializedState {
+                dependency: MaterializedStateDependency { relay, policy },
+            },
+        );
+    let drop_materialized = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterProcessorOperation::DropMaterializedState { relay });
+    let alter_materialized = kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .then_ignore(kw(Identifier::Set))
+        .then(materialized_state_policy())
+        .map(|(relay, policy)| AlterProcessorOperation::AlterMaterializedState { relay, policy });
+    let add_route = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(alter_flushed_route_body())
+        .map(|route| AlterProcessorOperation::AddRoute { route });
+    let drop_route = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterProcessorOperation::DropRoute { relay });
+    let replace_route = kw(Identifier::Replace)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(alter_flushed_route_body())
+        .map(|route| AlterProcessorOperation::ReplaceRoute { route });
+
+    choice((
+        add_from,
+        drop_from,
+        alter_from,
+        set_collect,
+        drop_collect,
+        set_filter,
+        drop_filter,
+        set_mode,
+        set_branching,
+        add_materialized,
+        drop_materialized,
+        alter_materialized,
+        add_route,
+        drop_route,
+        replace_route,
+    ))
+    .boxed()
+}
+
 pub fn general_error_policy<'src>()
 -> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::On)
@@ -978,6 +1087,27 @@ where
             crate::parse_expression(&source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
+        .boxed()
+}
+
+pub fn alter_expression_list<'src, P>(
+    boundary: P,
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], Vec<Expression>, extra::Err<ParseError<'src>>> + Clone
+where
+    P: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    any()
+        .and_is(boundary.not())
+        .filter(|token: &Token| !matches!(token, Token::Semicolon))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .try_map(|tokens, span| {
+            crate::parse_expression_list(&render_vm_program_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
+        .labelled(label)
         .boxed()
 }
 

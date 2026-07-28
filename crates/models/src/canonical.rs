@@ -1,23 +1,24 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    AlterEmitter, AlterEmitterOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
-    AlterJunctionOperation, AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation,
-    AlterWireSchema, AlterWireSchemaOperation, AlterWireSchemaStmt, AssignmentTargetScope,
-    AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection,
-    ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding, CodecEncodingRule,
-    CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
-    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
-    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
-    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
-    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
-    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
-    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
+    AlterIngestor, AlterIngestorOperation, AlterJunction, AlterJunctionOperation,
+    AlterProcessorOperation, AlterRelay, AlterRelayOperation, AlterReorderer,
+    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+    AlterWireSchemaOperation, AlterWireSchemaStmt, AssignmentTargetScope, AvroType,
+    AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection, ClickHouseConfigEntry,
+    ClickHouseValueMapping, CodecEncoding, CodecEncodingRule, CodecJaqTransformations,
+    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
+    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
+    CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
+    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression,
+    FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
     KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
@@ -487,6 +488,36 @@ impl AlterJunction {
         Ok(format!(
             "ALTER JUNCTION {} {operations};",
             self.junction.as_str()
+        ))
+    }
+}
+
+impl AlterDeduplicator {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_deduplicator_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER DEDUPLICATOR {} {operations};",
+            self.deduplicator.as_str()
+        ))
+    }
+}
+
+impl AlterReorderer {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_reorderer_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER REORDERER {} {operations};",
+            self.reorderer.as_str()
         ))
     }
 }
@@ -1735,6 +1766,113 @@ fn alter_junction_operation_to_nspl(
             Ok(format!("DROP ROUTE TO {}", relay.as_str()))
         }
         AlterJunctionOperation::ReplaceRoute { route } => Ok(format!(
+            "REPLACE ROUTE {}",
+            processor_output_to_nspl(route)?
+        )),
+    }
+}
+
+fn alter_deduplicator_operation_to_nspl(
+    operation: &AlterDeduplicatorOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterDeduplicatorOperation::Processor(operation) => {
+            alter_processor_operation_to_nspl(operation)
+        }
+        AlterDeduplicatorOperation::SetDeduplicateOn { expressions } => Ok(format!(
+            "SET DEDUPLICATE ON {}",
+            expressions
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        AlterDeduplicatorOperation::SetMaxTime { max_time } => {
+            Ok(format!("SET MAX TIME {max_time}"))
+        }
+    }
+}
+
+fn alter_reorderer_operation_to_nspl(
+    operation: &AlterReordererOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterReordererOperation::Processor(operation) => {
+            alter_processor_operation_to_nspl(operation)
+        }
+        AlterReordererOperation::SetOrderBy { expressions } => Ok(format!(
+            "SET BY {}",
+            expressions
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        AlterReordererOperation::SetMaxTime { max_time } => Ok(format!("SET MAX TIME {max_time}")),
+    }
+}
+
+fn alter_processor_operation_to_nspl(
+    operation: &AlterProcessorOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterProcessorOperation::AddFrom {
+            relay,
+            where_clause,
+        } => Ok(format!(
+            "ADD FROM {}{}",
+            relay.as_str(),
+            where_clause
+                .as_ref()
+                .map(|expression| Ok(format!(" WHERE {}", expression_to_nspl(expression)?)))
+                .transpose()?
+                .unwrap_or_default()
+        )),
+        AlterProcessorOperation::DropFrom { relay } => Ok(format!("DROP FROM {}", relay.as_str())),
+        AlterProcessorOperation::AlterFromSetWhere {
+            relay,
+            where_clause,
+        } => Ok(format!(
+            "ALTER FROM {} SET WHERE {}",
+            relay.as_str(),
+            expression_to_nspl(where_clause)?
+        )),
+        AlterProcessorOperation::AlterFromDropWhere { relay } => {
+            Ok(format!("ALTER FROM {} DROP WHERE", relay.as_str()))
+        }
+        AlterProcessorOperation::SetCollect { policy } => {
+            Ok(format!("SET {}", collect_policy_to_nspl(policy)))
+        }
+        AlterProcessorOperation::DropCollect => Ok("DROP COLLECT".to_string()),
+        AlterProcessorOperation::SetFilterWhere { where_clause } => Ok(format!(
+            "SET FILTER WHERE {}",
+            expression_to_nspl(where_clause)?
+        )),
+        AlterProcessorOperation::DropFilterWhere => Ok("DROP FILTER WHERE".to_string()),
+        AlterProcessorOperation::SetMode { mode } => Ok(format!("SET {}", mode.as_ref())),
+        AlterProcessorOperation::SetBranching { branching } => {
+            Ok(format!("SET {}", branch_selection_to_nspl(branching)))
+        }
+        AlterProcessorOperation::AddMaterializedState { dependency } => Ok(format!(
+            "ADD MATERIALIZED STATE {} {}",
+            dependency.relay.as_str(),
+            materialized_state_policy_to_nspl(&dependency.policy)?
+        )),
+        AlterProcessorOperation::DropMaterializedState { relay } => {
+            Ok(format!("DROP MATERIALIZED STATE {}", relay.as_str()))
+        }
+        AlterProcessorOperation::AlterMaterializedState { relay, policy } => Ok(format!(
+            "ALTER MATERIALIZED STATE {} SET {}",
+            relay.as_str(),
+            materialized_state_policy_to_nspl(policy)?
+        )),
+        AlterProcessorOperation::AddRoute { route } => {
+            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+        }
+        AlterProcessorOperation::DropRoute { relay } => {
+            Ok(format!("DROP ROUTE TO {}", relay.as_str()))
+        }
+        AlterProcessorOperation::ReplaceRoute { route } => Ok(format!(
             "REPLACE ROUTE {}",
             processor_output_to_nspl(route)?
         )),
