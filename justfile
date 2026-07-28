@@ -128,20 +128,26 @@ book-pdf version="" output="":
     fi
     tmp_html="$(mktemp --suffix=.html)"
     trap 'rm -f "${tmp_html}"' EXIT
-    perl -0ne '
-        if (m{<main>(.*)</main>}s) {
-            print "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"></head><body><main>$1</main></body></html>";
-        } else {
-            die "failed to extract <main> from docs/book/print.html\n";
-        }
-    ' docs/book/print.html > "${tmp_html}"
+    python3 scripts/prepare_pdf_html.py \
+        --print-html docs/book/print.html \
+        --summary docs/src/SUMMARY.md \
+        --src-dir docs/src \
+        --output "${tmp_html}"
     pandoc \
         --from=html \
         --to=pdf \
         --pdf-engine=xelatex \
+        --top-level-division=chapter \
+        --variable=documentclass:report \
         --include-in-header=docs/theme/nervix-pdf-header.tex \
         --include-before-body=docs/theme/nervix-pdf-title.tex \
         --variable=graphics \
+        --variable=colorlinks \
+        --variable=linkcolor:NervixLink \
+        --variable=urlcolor:NervixLink \
+        --variable=filecolor:NervixLink \
+        --variable=citecolor:NervixLink \
+        --variable=toccolor:black \
         --toc \
         --toc-depth=2 \
         --variable=geometry:margin=0.8in \
