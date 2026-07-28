@@ -1,12 +1,13 @@
 use chumsky::prelude::*;
-use nervix_models::{CreateGenerator, CreateStatement};
+use nervix_models::{AlterGenerator, AlterGeneratorOperation, CreateGenerator, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, branch_selection, current_word_prefix,
-        flushed_explicit_processor_outputs, generator_name, if_not_exists_clause, into_parse_error,
-        kw, kw_phrase3, lex_input, relay_ref, suggestions_from_errors, tok,
+        ParseError, ParseFromSourceError, alter_generator_route_body, alter_op_separator,
+        branch_selection, current_word_prefix, duration_lit, flushed_explicit_processor_outputs,
+        generator_name, generator_ref, if_not_exists_clause, into_parse_error, kw, kw_phrase3,
+        lex_input, relay_ref, suggestions_from_errors, tok,
     },
 };
 
@@ -47,10 +48,77 @@ pub fn create_generator_parser<'src>()
         )
 }
 
+pub fn alter_generator_parser<'src>()
+-> impl Parser<'src, &'src [Token], AlterGenerator, extra::Err<ParseError<'src>>> + Clone {
+    let set_materialized_state = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterGeneratorOperation::SetMaterializedState { relay });
+    let set_each = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Each))
+        .ignore_then(duration_lit())
+        .map(|each| AlterGeneratorOperation::SetEach { each });
+    let set_branching = kw(Identifier::Set)
+        .ignore_then(branch_selection())
+        .map(|branching| AlterGeneratorOperation::SetBranching { branching });
+    let add_route = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(alter_generator_route_body())
+        .map(|route| AlterGeneratorOperation::AddRoute { route });
+    let drop_route = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterGeneratorOperation::DropRoute { relay });
+    let replace_route = kw(Identifier::Replace)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(alter_generator_route_body())
+        .map(|route| AlterGeneratorOperation::ReplaceRoute { route });
+    let operation = choice((
+        set_materialized_state,
+        set_each,
+        set_branching,
+        add_route,
+        drop_route,
+        replace_route,
+    ))
+    .boxed();
+
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Generator))
+        .ignore_then(generator_ref())
+        .then(
+            operation
+                .separated_by(alter_op_separator())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .map(|(generator, operations)| AlterGenerator {
+            generator,
+            operations,
+        })
+        .boxed()
+}
+
 pub fn parse_create_generator_tokens(
     tokens: &[Token],
 ) -> Result<CreateStatement<CreateGenerator>, Vec<ParseError<'_>>> {
     let out = create_generator_parser().then_ignore(end()).parse(tokens);
+    if out.has_errors() {
+        Err(out.into_errors())
+    } else {
+        Ok(out
+            .into_output()
+            .expect("successful parse must have output"))
+    }
+}
+
+pub fn parse_alter_generator_tokens(
+    tokens: &[Token],
+) -> Result<AlterGenerator, Vec<ParseError<'_>>> {
+    let out = alter_generator_parser().then_ignore(end()).parse(tokens);
     if out.has_errors() {
         Err(out.into_errors())
     } else {
@@ -65,6 +133,12 @@ pub fn parse_create_generator(
 ) -> Result<CreateStatement<CreateGenerator>, ParseFromSourceError> {
     let (source, spanned_tokens, tokens) = lex_input(input)?;
     parse_create_generator_tokens(&tokens)
+        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+}
+
+pub fn parse_alter_generator(input: &str) -> Result<AlterGenerator, ParseFromSourceError> {
+    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    parse_alter_generator_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
@@ -85,6 +159,23 @@ pub fn suggest_create_generator(input: &str, cursor: usize) -> Vec<String> {
         return Vec::new();
     }
 
+    suggestions_from_errors(out.into_errors(), &prefix)
+}
+
+pub fn suggest_alter_generator(input: &str, cursor: usize) -> Vec<String> {
+    let safe_cursor = cursor.min(input.len());
+    let prefix_src = &input[..safe_cursor];
+    let prefix = current_word_prefix(prefix_src);
+    let (_, _, tokens) = match lex_input(prefix_src) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let out = alter_generator_parser()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if !out.has_errors() {
+        return Vec::new();
+    }
     suggestions_from_errors(out.into_errors(), &prefix)
 }
 
@@ -252,6 +343,46 @@ mod tests {
         let input = "CREATE GENERATOR synth USING MATERIALIZED STATE notifications ";
         let suggestions = suggest_create_generator(input, input.len());
         assert!(suggestions.contains(&"EACH".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
+    }
+
+    #[test]
+    fn parses_alter_generator_operations_in_written_order() {
+        let parsed = parse_alter_generator_tokens(&to_tokens(
+            "ALTER GENERATOR synth SET MATERIALIZED STATE state_v2, SET EACH 250ms, SET \
+             UNBRANCHED, REPLACE ROUTE TO alerts SET user_id = relay_state.state_v2.user_id FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
+        ))
+        .expect("ALTER GENERATOR should parse");
+
+        assert_eq!(parsed.generator.as_str(), "synth");
+        assert_eq!(parsed.operations.len(), 4);
+        let AlterGeneratorOperation::ReplaceRoute { route } = &parsed.operations[3] else {
+            panic!("last operation should replace the route");
+        };
+        assert_eq!(route.relay.as_str(), "alerts");
+        assert_eq!(route.construction.assignments.len(), 1);
+    }
+
+    #[test]
+    fn rejects_alter_generator_inherit_route() {
+        let tokens = to_tokens(
+            "ALTER GENERATOR synth REPLACE ROUTE TO alerts INHERIT ALL FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG;",
+        );
+        let errors =
+            parse_alter_generator_tokens(&tokens).expect_err("generator routes remain set-only");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn alter_generator_completion_exposes_operations_without_schema_leakage() {
+        let input = "ALTER GENERATOR synth ";
+        let suggestions = suggest_alter_generator(input, input.len());
+        assert!(suggestions.contains(&"SET".to_string()));
+        assert!(suggestions.contains(&"ADD".to_string()));
+        assert!(suggestions.contains(&"DROP".to_string()));
+        assert!(suggestions.contains(&"REPLACE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
     }
 }

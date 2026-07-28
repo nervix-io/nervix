@@ -1,12 +1,13 @@
 use chumsky::prelude::*;
-use nervix_models::{AckMode, CreateReingestor, CreateStatement};
+use nervix_models::{AckMode, AlterReingestor, CreateReingestor, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, current_word_prefix, filter_where_clause,
-        flushed_ingestor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
-        lex_input, materialized_state_dependencies, reingestor_name, suggestions_from_errors, tok,
+        ParseError, ParseFromSourceError, ack_mode, alter_op_separator, alter_reingestor_operation,
+        current_word_prefix, filter_where_clause, flushed_ingestor_outputs, from_relay_clauses,
+        if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
+        reingestor_name, reingestor_ref, suggestions_from_errors, tok,
     },
 };
 
@@ -44,10 +45,42 @@ pub fn create_reingestor_parser<'src>()
         )
 }
 
+pub fn alter_reingestor_parser<'src>()
+-> impl Parser<'src, &'src [Token], AlterReingestor, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Reingestor))
+        .ignore_then(reingestor_ref())
+        .then(
+            alter_reingestor_operation()
+                .separated_by(alter_op_separator())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .map(|(reingestor, operations)| AlterReingestor {
+            reingestor,
+            operations,
+        })
+        .boxed()
+}
+
 pub fn parse_create_reingestor_tokens(
     tokens: &[Token],
 ) -> Result<CreateStatement<CreateReingestor>, Vec<ParseError<'_>>> {
     let out = create_reingestor_parser().then_ignore(end()).parse(tokens);
+    if out.has_errors() {
+        Err(out.into_errors())
+    } else {
+        Ok(out
+            .into_output()
+            .expect("successful parse must have output"))
+    }
+}
+
+pub fn parse_alter_reingestor_tokens(
+    tokens: &[Token],
+) -> Result<AlterReingestor, Vec<ParseError<'_>>> {
+    let out = alter_reingestor_parser().then_ignore(end()).parse(tokens);
     if out.has_errors() {
         Err(out.into_errors())
     } else {
@@ -62,6 +95,12 @@ pub fn parse_create_reingestor(
 ) -> Result<CreateStatement<CreateReingestor>, ParseFromSourceError> {
     let (source, spanned_tokens, tokens) = lex_input(input)?;
     parse_create_reingestor_tokens(&tokens)
+        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+}
+
+pub fn parse_alter_reingestor(input: &str) -> Result<AlterReingestor, ParseFromSourceError> {
+    let (source, spanned_tokens, tokens) = lex_input(input)?;
+    parse_alter_reingestor_tokens(&tokens)
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
@@ -82,6 +121,23 @@ pub fn suggest_create_reingestor(input: &str, cursor: usize) -> Vec<String> {
         return Vec::new();
     }
 
+    suggestions_from_errors(out.into_errors(), &prefix)
+}
+
+pub fn suggest_alter_reingestor(input: &str, cursor: usize) -> Vec<String> {
+    let safe_cursor = cursor.min(input.len());
+    let prefix_src = &input[..safe_cursor];
+    let prefix = current_word_prefix(prefix_src);
+    let (_, _, tokens) = match lex_input(prefix_src) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let out = alter_reingestor_parser()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if !out.has_errors() {
+        return Vec::new();
+    }
     suggestions_from_errors(out.into_errors(), &prefix)
 }
 
@@ -280,5 +336,38 @@ mod tests {
         let input = "CREATE REINGESTOR r FROM input TO output UNBRANCHED FL";
         let suggestions = suggest_create_reingestor(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
+    }
+
+    #[test]
+    fn parses_alter_reingestor_multi_operation_with_expression_commas() {
+        let parsed = parse_alter_reingestor_tokens(&to_tokens(
+            "ALTER REINGESTOR repartition SET FILTER WHERE concat(input.tenant, input.region) = \
+             'acme-us', SET DETACHED, REPLACE ROUTE TO tenant_notifications INHERIT ALL \
+             UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        ))
+        .expect("ALTER REINGESTOR should parse");
+
+        assert_eq!(parsed.reingestor.as_str(), "repartition");
+        assert_eq!(parsed.operations.len(), 3);
+    }
+
+    #[test]
+    fn rejects_node_wide_branching_on_alter_reingestor() {
+        let tokens = to_tokens("ALTER REINGESTOR repartition SET BRANCHED BY tenant;");
+        let errors = parse_alter_reingestor_tokens(&tokens)
+            .expect_err("reingestor branching is configured per route");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn alter_reingestor_completion_exposes_shared_operations_without_schema_leakage() {
+        let input = "ALTER REINGESTOR repartition ";
+        let suggestions = suggest_alter_reingestor(input, input.len());
+        assert!(suggestions.contains(&"SET".to_string()));
+        assert!(suggestions.contains(&"ADD".to_string()));
+        assert!(suggestions.contains(&"DROP".to_string()));
+        assert!(suggestions.contains(&"ALTER".to_string()));
+        assert!(suggestions.contains(&"REPLACE".to_string()));
+        assert!(!suggestions.contains(&"JSON".to_string()));
     }
 }

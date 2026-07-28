@@ -62,6 +62,7 @@ impl RelayDispatchGate {
             reason: reason.into(),
         });
         self.closed.store(true, Ordering::Release);
+        self.changed.notify_waiters();
         token
     }
 
@@ -76,7 +77,6 @@ impl RelayDispatchGate {
         self.changed.notify_waiters();
     }
 
-    #[cfg(test)]
     pub(crate) fn is_closed(&self) -> bool {
         self.clear_if_expired();
         self.closed.load(Ordering::Acquire)
@@ -112,6 +112,20 @@ impl RelayDispatchGate {
         }
     }
 
+    pub(crate) async fn wait_closed(&self) {
+        loop {
+            tokio::task::consume_budget().await;
+            if self.is_closed() {
+                return;
+            }
+            let changed = self.changed.notified();
+            if self.is_closed() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn reason(&self) -> Option<String> {
         self.clear_if_expired();
@@ -122,7 +136,6 @@ impl RelayDispatchGate {
             .map(|engagement| engagement.reason.clone())
     }
 
-    #[cfg(test)]
     fn clear_if_expired(&self) {
         if !self.closed.load(Ordering::Acquire) {
             return;

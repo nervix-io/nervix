@@ -38,12 +38,12 @@ of being treated as an implicit batch.
 
 Within a transaction, each consecutive run of model mutations for one domain can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
-`ALTER REORDERER`, `ALTER EMITTER`, `ALTER INGESTOR`, and `DROP`. Nervix applies that run as one
-registry mutation: all operations are evaluated in written order against one candidate model map,
-the complete domain graph is revalidated, and one atomic storage batch persists the result. A
-failure writes nothing and does not swap the active registry state. This supports coordinated
-wire-schema, internal-schema, codec, relay, processor, emitter, ingestor, and dependent-node
-migrations without exposing an invalid intermediate graph.
+`ALTER REORDERER`, `ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`, and
+`DROP`. Nervix applies that run as one registry mutation: all operations are evaluated in written
+order against one candidate model map, the complete domain graph is revalidated, and one atomic
+storage batch persists the result. A failure writes nothing and does not swap the active registry
+state. This supports coordinated wire-schema, internal-schema, codec, relay, processor, emitter,
+ingestor, generator, and dependent-node migrations without exposing an invalid intermediate graph.
 
 Transaction control also queues lifecycle and other server statements, but those statements are
 not folded into the registry mutation batch. Data-plane records are likewise outside this
@@ -74,7 +74,8 @@ that produced it. The batch uses the highest level contributed by any changed en
   place. Emitter sink, client, codec, input-collection, and attachment changes drain and replace
   only the affected emitter task. Every current ingestor alteration stops and drains only the
   affected ingestor instances, then starts their desired source configuration from the published
-  schedule.
+  schedule. Reingestor alterations replace their relay consumers and branch-entrypoint wiring;
+  generator alterations quiesce and replace their timed task after flushing pending route output.
 - `DOMAIN_PAUSE` changes stop ingestion and generators across the domain and fully drain attached
   work before commit. Relay schema or branching changes and schema or wire-schema definition
   changes use this level.

@@ -29,6 +29,8 @@ pub enum Statement {
     AlterReorderer(AlterReorderer),
     AlterEmitter(AlterEmitter),
     AlterIngestor(AlterIngestor),
+    AlterReingestor(AlterReingestor),
+    AlterGenerator(AlterGenerator),
     Drop(DropModel),
     DropNode(DropNode),
     CordonNode(CordonNode),
@@ -67,6 +69,8 @@ impl Statement {
             | Self::AlterReorderer(_)
             | Self::AlterEmitter(_)
             | Self::AlterIngestor(_)
+            | Self::AlterReingestor(_)
+            | Self::AlterGenerator(_)
             | Self::Drop(_) => true,
             Self::CreateDomain(_)
             | Self::CreateUser(_)
@@ -946,6 +950,99 @@ pub struct CreateGenerator {
     pub branched_by: BranchSelection,
     pub each: String,
     pub output_routes: ProcessorOutputs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterGenerator {
+    pub generator: Identifier,
+    pub operations: Vec<AlterGeneratorOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlterGeneratorOperation {
+    SetMaterializedState { relay: Identifier },
+    SetEach { each: String },
+    SetBranching { branching: BranchSelection },
+    AddRoute { route: ProcessorOutput },
+    DropRoute { relay: Identifier },
+    ReplaceRoute { route: ProcessorOutput },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterGeneratorError {
+    #[error("ALTER targets generator `{requested}`, but the stored generator is `{stored}`")]
+    GeneratorNameMismatch {
+        stored: Identifier,
+        requested: Identifier,
+    },
+    #[error("route target `{relay}` is not configured")]
+    RouteTargetNotFound { relay: Identifier },
+    #[error("route target `{relay}` is ambiguous because it is configured more than once")]
+    RouteTargetAmbiguous { relay: Identifier },
+    #[error("a generator must retain at least one route")]
+    CannotDropLastRoute,
+}
+
+impl CreateGenerator {
+    pub fn apply_alter(&mut self, alter: &AlterGenerator) -> Result<(), AlterGeneratorError> {
+        if self.name != alter.generator {
+            return Err(AlterGeneratorError::GeneratorNameMismatch {
+                stored: self.name.clone(),
+                requested: alter.generator.clone(),
+            });
+        }
+
+        let mut candidate = self.clone();
+        for operation in &alter.operations {
+            match operation {
+                AlterGeneratorOperation::SetMaterializedState { relay } => {
+                    candidate.materialized_relay = relay.clone();
+                }
+                AlterGeneratorOperation::SetEach { each } => {
+                    candidate.each = each.clone();
+                }
+                AlterGeneratorOperation::SetBranching { branching } => {
+                    candidate.branched_by = branching.clone();
+                }
+                AlterGeneratorOperation::AddRoute { route } => {
+                    candidate.output_routes.routes.push(route.clone());
+                }
+                AlterGeneratorOperation::DropRoute { relay } => {
+                    let index = candidate.unique_route_index(relay)?;
+                    if candidate.output_routes.routes.len() == 1 {
+                        return Err(AlterGeneratorError::CannotDropLastRoute);
+                    }
+                    candidate.output_routes.routes.remove(index);
+                }
+                AlterGeneratorOperation::ReplaceRoute { route } => {
+                    let index = candidate.unique_route_index(&route.relay)?;
+                    candidate.output_routes.routes[index] = route.clone();
+                }
+            }
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn unique_route_index(&self, relay: &Identifier) -> Result<usize, AlterGeneratorError> {
+        let mut indexes = self
+            .output_routes
+            .routes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
+        let Some(index) = indexes.next() else {
+            return Err(AlterGeneratorError::RouteTargetNotFound {
+                relay: relay.clone(),
+            });
+        };
+        if indexes.next().is_some() {
+            return Err(AlterGeneratorError::RouteTargetAmbiguous {
+                relay: relay.clone(),
+            });
+        }
+        Ok(index)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1862,6 +1959,52 @@ pub struct CreateReingestor {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_where: Option<crate::Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterReingestor {
+    pub reingestor: Identifier,
+    pub operations: Vec<AlterProcessorOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterReingestorError {
+    #[error("ALTER targets reingestor `{requested}`, but the stored reingestor is `{stored}`")]
+    ReingestorNameMismatch {
+        stored: Identifier,
+        requested: Identifier,
+    },
+    #[error(transparent)]
+    Processor(#[from] AlterProcessorError),
+}
+
+impl CreateReingestor {
+    pub fn apply_alter(&mut self, alter: &AlterReingestor) -> Result<(), AlterReingestorError> {
+        if self.name != alter.reingestor {
+            return Err(AlterReingestorError::ReingestorNameMismatch {
+                stored: self.name.clone(),
+                requested: alter.reingestor.clone(),
+            });
+        }
+
+        let mut candidate = self.clone();
+        for operation in &alter.operations {
+            candidate.processor_alter_target().apply(operation)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+        ProcessorAlterTarget {
+            from: &mut self.from,
+            output_routes: &mut self.output_routes,
+            branched_by: None,
+            mode: &mut self.mode,
+            filter_where: &mut self.filter_where,
+            materialized_state: &mut self.materialized_state,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2973,7 +3116,7 @@ impl CreateDeduplicator {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
-            branched_by: &mut self.branched_by,
+            branched_by: Some(&mut self.branched_by),
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
@@ -3090,7 +3233,7 @@ impl CreateReorderer {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
-            branched_by: &mut self.branched_by,
+            branched_by: Some(&mut self.branched_by),
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
@@ -3169,12 +3312,14 @@ pub enum AlterProcessorError {
     RouteTargetAmbiguous { relay: Identifier },
     #[error("a processor must retain at least one route")]
     CannotDropLastRoute,
+    #[error("this processor configures branching per route")]
+    BranchingUnsupported,
 }
 
 struct ProcessorAlterTarget<'a> {
     from: &'a mut ProcessorInputs,
     output_routes: &'a mut ProcessorOutputs,
-    branched_by: &'a mut BranchSelection,
+    branched_by: Option<&'a mut BranchSelection>,
     mode: &'a mut AckMode,
     filter_where: &'a mut Option<crate::Expression>,
     materialized_state: &'a mut Vec<crate::MaterializedStateDependency>,
@@ -3255,7 +3400,10 @@ impl ProcessorAlterTarget<'_> {
                 *self.mode = *mode;
             }
             AlterProcessorOperation::SetBranching { branching } => {
-                *self.branched_by = branching.clone();
+                let Some(branched_by) = self.branched_by.as_deref_mut() else {
+                    return Err(AlterProcessorError::BranchingUnsupported);
+                };
+                *branched_by = branching.clone();
             }
             AlterProcessorOperation::AddMaterializedState { dependency } => {
                 if self
@@ -3413,12 +3561,14 @@ pub enum AckMode {
 mod tests {
     use super::{
         AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation,
-        AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestor, AlterIngestorError,
+        AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator,
+        AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
         AlterIngestorOperation, AlterJunction, AlterJunctionError, AlterJunctionOperation,
-        AlterProcessorError, AlterProcessorOperation, AlterRelay, AlterRelayError,
-        AlterRelayOperation, AlterReorderer, AlterReordererError, AlterReordererOperation,
-        BranchSelection, ClusterSchedule, CreateDeduplicator, CreateEmitter, CreateRelay,
-        CreateReorderer, CreateSchema, DomainSchedule, EmitSink, ErrorPolicies, GeneralErrorPolicy,
+        AlterProcessorError, AlterProcessorOperation, AlterReingestor, AlterReingestorError,
+        AlterRelay, AlterRelayError, AlterRelayOperation, AlterReorderer, AlterReordererError,
+        AlterReordererOperation, BranchSelection, ClusterSchedule, CreateDeduplicator,
+        CreateEmitter, CreateGenerator, CreateReingestor, CreateRelay, CreateReorderer,
+        CreateSchema, DomainSchedule, EmitSink, ErrorPolicies, GeneralErrorPolicy,
         InferencerTensorDimension, InferencerTensorElementType, InferencerTensorRepresentation,
         InferencerTensorSchema, KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind,
         OutputFlushPolicy, RelayBranching, ScheduledNode,
@@ -4489,5 +4639,138 @@ mod tests {
             })
         );
         assert_eq!(reorderer, original);
+    }
+
+    #[test]
+    fn reingestor_alter_is_ordered_atomic_and_rejects_node_branching() {
+        let mut reingestor = CreateReingestor {
+            name: identifier("repartition"),
+            from: ProcessorInputs::single(identifier("incoming")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(identifier(
+                "outgoing",
+            ))]),
+            mode: AckMode::Attached,
+            materialized_state: Vec::new(),
+            filter_where: None,
+        };
+        reingestor
+            .apply_alter(&AlterReingestor {
+                reingestor: identifier("repartition"),
+                operations: vec![
+                    AlterProcessorOperation::SetMode {
+                        mode: AckMode::Detached,
+                    },
+                    AlterProcessorOperation::AddFrom {
+                        relay: identifier("secondary"),
+                        where_clause: Some(Expression::Literal(Literal::Bool(true))),
+                    },
+                    AlterProcessorOperation::SetFilterWhere {
+                        where_clause: Expression::Literal(Literal::Bool(true)),
+                    },
+                ],
+            })
+            .expect("reingestor alter should apply");
+        assert_eq!(reingestor.mode, AckMode::Detached);
+        assert_eq!(reingestor.from.from.len(), 2);
+        assert!(reingestor.filter_where.is_some());
+
+        let before = reingestor.clone();
+        assert_eq!(
+            reingestor.apply_alter(&AlterReingestor {
+                reingestor: identifier("repartition"),
+                operations: vec![
+                    AlterProcessorOperation::SetMode {
+                        mode: AckMode::Attached,
+                    },
+                    AlterProcessorOperation::SetBranching {
+                        branching: BranchSelection::unbranched(),
+                    },
+                ],
+            }),
+            Err(AlterReingestorError::Processor(
+                AlterProcessorError::BranchingUnsupported
+            ))
+        );
+        assert_eq!(reingestor, before, "failed ALTER must not partially apply");
+    }
+
+    #[test]
+    fn generator_alter_is_ordered_atomic_and_reports_route_errors() {
+        let route = ProcessorOutput::new(identifier("outgoing"));
+        let mut generator = CreateGenerator {
+            name: identifier("synth"),
+            materialized_relay: identifier("state"),
+            branched_by: BranchSelection::unbranched(),
+            each: "1s".to_string(),
+            output_routes: ProcessorOutputs::new(vec![route.clone()]),
+        };
+        generator
+            .apply_alter(&AlterGenerator {
+                generator: identifier("synth"),
+                operations: vec![
+                    AlterGeneratorOperation::SetEach {
+                        each: "500ms".to_string(),
+                    },
+                    AlterGeneratorOperation::SetEach {
+                        each: "250ms".to_string(),
+                    },
+                    AlterGeneratorOperation::SetMaterializedState {
+                        relay: identifier("state_v2"),
+                    },
+                    AlterGeneratorOperation::AddRoute {
+                        route: ProcessorOutput::new(identifier("audit")),
+                    },
+                ],
+            })
+            .expect("generator alter should apply");
+        assert_eq!(generator.each, "250ms");
+        assert_eq!(generator.materialized_relay, identifier("state_v2"));
+        assert_eq!(generator.output_routes.routes.len(), 2);
+
+        let before = generator.clone();
+        assert_eq!(
+            generator.apply_alter(&AlterGenerator {
+                generator: identifier("synth"),
+                operations: vec![
+                    AlterGeneratorOperation::SetEach {
+                        each: "10ms".to_string(),
+                    },
+                    AlterGeneratorOperation::DropRoute {
+                        relay: identifier("missing"),
+                    },
+                ],
+            }),
+            Err(AlterGeneratorError::RouteTargetNotFound {
+                relay: identifier("missing")
+            })
+        );
+        assert_eq!(generator, before, "failed ALTER must not partially apply");
+
+        let mut single = CreateGenerator {
+            output_routes: ProcessorOutputs::new(vec![route.clone()]),
+            ..generator
+        };
+        assert_eq!(
+            single.apply_alter(&AlterGenerator {
+                generator: identifier("synth"),
+                operations: vec![AlterGeneratorOperation::DropRoute {
+                    relay: identifier("outgoing"),
+                }],
+            }),
+            Err(AlterGeneratorError::CannotDropLastRoute)
+        );
+
+        single.output_routes.routes.push(route);
+        assert_eq!(
+            single.apply_alter(&AlterGenerator {
+                generator: identifier("synth"),
+                operations: vec![AlterGeneratorOperation::DropRoute {
+                    relay: identifier("outgoing"),
+                }],
+            }),
+            Err(AlterGeneratorError::RouteTargetAmbiguous {
+                relay: identifier("outgoing")
+            })
+        );
     }
 }

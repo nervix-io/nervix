@@ -2,23 +2,24 @@ use std::fmt::{Display, Formatter};
 
 use crate::{
     AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
-    AlterIngestor, AlterIngestorOperation, AlterJunction, AlterJunctionOperation,
-    AlterProcessorOperation, AlterRelay, AlterRelayOperation, AlterReorderer,
-    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
-    AlterWireSchemaOperation, AlterWireSchemaStmt, AssignmentTargetScope, AvroType,
-    AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection, ClickHouseConfigEntry,
-    ClickHouseValueMapping, CodecEncoding, CodecEncodingRule, CodecJaqTransformations,
-    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
-    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientWebsockets,
-    CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor, CreateJunction,
-    CreateLookup, CreateMaterializer, CreateReingestor, CreateRelay, CreateReorderer, CreateSchema,
-    CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression,
-    FieldScope, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
+    AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
+    AlterJunctionOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
+    AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
+    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AlterWireSchemaStmt,
+    AssignmentTargetScope, AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction,
+    BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding,
+    CodecEncodingRule, CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction,
+    CreateBranch, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientPostgres, CreateClientPrometheus,
+    CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
+    CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
+    CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
+    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
+    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
+    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
     IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
     KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
@@ -518,6 +519,36 @@ impl AlterReorderer {
         Ok(format!(
             "ALTER REORDERER {} {operations};",
             self.reorderer.as_str()
+        ))
+    }
+}
+
+impl AlterReingestor {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_processor_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER REINGESTOR {} {operations};",
+            self.reingestor.as_str()
+        ))
+    }
+}
+
+impl AlterGenerator {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_generator_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER GENERATOR {} {operations};",
+            self.generator.as_str()
         ))
     }
 }
@@ -1809,6 +1840,30 @@ fn alter_reorderer_operation_to_nspl(
                 .join(", ")
         )),
         AlterReordererOperation::SetMaxTime { max_time } => Ok(format!("SET MAX TIME {max_time}")),
+    }
+}
+
+fn alter_generator_operation_to_nspl(
+    operation: &AlterGeneratorOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterGeneratorOperation::SetMaterializedState { relay } => {
+            Ok(format!("SET MATERIALIZED STATE {}", relay.as_str()))
+        }
+        AlterGeneratorOperation::SetEach { each } => Ok(format!("SET EACH {each}")),
+        AlterGeneratorOperation::SetBranching { branching } => {
+            Ok(format!("SET {}", branch_selection_to_nspl(branching)))
+        }
+        AlterGeneratorOperation::AddRoute { route } => {
+            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+        }
+        AlterGeneratorOperation::DropRoute { relay } => {
+            Ok(format!("DROP ROUTE TO {}", relay.as_str()))
+        }
+        AlterGeneratorOperation::ReplaceRoute { route } => Ok(format!(
+            "REPLACE ROUTE {}",
+            processor_output_to_nspl(route)?
+        )),
     }
 }
 

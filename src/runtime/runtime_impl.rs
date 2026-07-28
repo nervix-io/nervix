@@ -434,12 +434,13 @@ impl Runtime {
                     .nodes
                     .iter()
                     .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
-                    .and_then(|node| {
-                        if let Model::Emitter(emitter) = node.config.as_ref() {
-                            Some(vec![emitter.from_relay.clone()])
-                        } else {
-                            None
+                    .and_then(|node| match node.config.as_ref() {
+                        Model::Emitter(emitter) => Some(vec![emitter.from_relay.clone()]),
+                        Model::Reingestor(reingestor) => Some(reingestor.from.from.clone()),
+                        Model::Generator(generator) => {
+                            Some(vec![generator.materialized_relay.clone()])
                         }
+                        _ => None,
                     })
                     .unwrap_or_default()
             })
@@ -4676,6 +4677,350 @@ impl Runtime {
                 }
                 continue;
             }
+            if entity.kind == ModelKind::Reingestor {
+                let desired_node = schedule
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.kind == ModelKind::Reingestor && node.identifier == entity.identifier
+                    })
+                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing desired reingestor '{}'",
+                            entity.identifier.as_str()
+                        ),
+                    })?;
+                let Model::Reingestor(desired_reingestor) = desired_node.config.as_ref() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "desired reingestor '{}' has the wrong model kind",
+                            entity.identifier.as_str()
+                        ),
+                    });
+                };
+                let desired_reingestor = desired_reingestor.clone();
+                let (old_tasks, old_entrypoints, shutdown) = {
+                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution is unavailable for reingestor swap"
+                                .to_string(),
+                        }
+                    })?;
+                    let old_reingestor = execution
+                        .schedule
+                        .nodes
+                        .iter()
+                        .find(|node| {
+                            node.kind == ModelKind::Reingestor
+                                && node.identifier == entity.identifier
+                        })
+                        .and_then(|node| {
+                            if let Model::Reingestor(reingestor) = node.config.as_ref() {
+                                Some(reingestor.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing existing reingestor '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                    let old_tasks = execution
+                        .reingestor_tasks
+                        .remove(entity)
+                        .unwrap_or_default();
+                    if !old_tasks.is_empty() {
+                        for relay in old_reingestor.from.relays() {
+                            if let Some(services) = execution.relay_services.get(relay) {
+                                services.remove_local_runtime_consumer(old_reingestor.mode);
+                            }
+                        }
+                    }
+                    let old_entrypoints = execution
+                        .branched_entrypoints
+                        .remove(&entity.identifier)
+                        .unwrap_or_default();
+                    execution.branched_ingestors.remove(&entity.identifier);
+                    (old_tasks, old_entrypoints, execution.shutdown.clone())
+                };
+                for task in old_tasks {
+                    tokio::task::consume_budget().await;
+                    task.abort();
+                    let _ = task.await;
+                }
+                for runtime in old_entrypoints {
+                    tokio::task::consume_budget().await;
+                    runtime.shutdown().await;
+                }
+
+                graph_handle.store(Some(desired_graph.clone()));
+                if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
+                    let desired_entrypoint_specs = desired_specs
+                        .entrypoints
+                        .iter()
+                        .filter(|spec| {
+                            spec.kind == ModelKind::Reingestor
+                                && spec.identifier == entity.identifier
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let templates = {
+                        let execution = self.executions.get(domain).ok_or_else(|| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "domain execution disappeared during reingestor swap"
+                                    .to_string(),
+                            }
+                        })?;
+                        desired_entrypoint_specs
+                            .iter()
+                            .map(|spec| {
+                                materialize_ingestor_route_template(
+                                    spec,
+                                    &desired_model_index,
+                                    &execution.relay_registries,
+                                    &execution.relay_services,
+                                )
+                                .map(|template| (spec.clone(), template))
+                                .map_err(|reason| {
+                                    RuntimeError::BuildDomainExecution {
+                                        domain: domain.as_str().to_string(),
+                                        reason,
+                                    }
+                                })
+                            })
+                            .collect::<Result<Vec<_>, RuntimeError>>()?
+                    };
+                    let mut entrypoints = Vec::with_capacity(templates.len());
+                    let mut entrypoint_senders = HashMap::default();
+                    for (spec, template) in templates {
+                        tokio::task::consume_budget().await;
+                        let Some(runtime) = self.start_branched_entrypoint_runtime(
+                            domain,
+                            &entity.identifier,
+                            Some((graph_handle.clone(), template)),
+                        ) else {
+                            continue;
+                        };
+                        entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
+                        entrypoints.push(runtime);
+                    }
+
+                    let receivers = {
+                        let execution = self.executions.get(domain).ok_or_else(|| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "domain execution disappeared before reingestor spawn"
+                                    .to_string(),
+                            }
+                        })?;
+                        desired_reingestor
+                            .from
+                            .relays()
+                            .iter()
+                            .map(|relay| {
+                                execution
+                                    .relay_services
+                                    .get(relay)
+                                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                        domain: domain.as_str().to_string(),
+                                        reason: format!(
+                                            "missing reingestor input relay services '{}'",
+                                            relay.as_str()
+                                        ),
+                                    })
+                                    .map(|services| {
+                                        (
+                                            relay.clone(),
+                                            services.add_local_runtime_consumer(
+                                                desired_reingestor.mode,
+                                            ),
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, RuntimeError>>()?
+                    };
+                    let mut tasks = Vec::with_capacity(receivers.len());
+                    for (from_relay, receiver) in receivers {
+                        tokio::task::consume_budget().await;
+                        tasks.push(self.spawn_reingestor_task(
+                            domain,
+                            &shutdown,
+                            &entrypoint_senders,
+                            desired_reingestor.clone(),
+                            from_relay,
+                            receiver,
+                        )?);
+                    }
+                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution disappeared after reingestor spawn"
+                                .to_string(),
+                        }
+                    })?;
+                    execution
+                        .branched_ingestors
+                        .insert(entity.identifier.clone(), desired_entrypoint_specs);
+                    execution
+                        .branched_entrypoints
+                        .insert(entity.identifier.clone(), entrypoints);
+                    execution.reingestor_tasks.insert(entity.clone(), tasks);
+                }
+                continue;
+            }
+            if entity.kind == ModelKind::Generator {
+                let desired_node = schedule
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.kind == ModelKind::Generator && node.identifier == entity.identifier
+                    })
+                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing desired generator '{}'",
+                            entity.identifier.as_str()
+                        ),
+                    })?;
+                let Model::Generator(desired_generator) = desired_node.config.as_ref() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "desired generator '{}' has the wrong model kind",
+                            entity.identifier.as_str()
+                        ),
+                    });
+                };
+                let desired_generator = desired_generator.clone();
+                let old_task = self
+                    .executions
+                    .get_mut(domain)
+                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: "domain execution is unavailable for generator swap".to_string(),
+                    })?
+                    .generator_tasks
+                    .remove(entity);
+                if let Some(task) = old_task {
+                    task.abort();
+                    let _ = task.await;
+                }
+
+                graph_handle.store(Some(desired_graph.clone()));
+                if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
+                    let (shutdown, spec) = {
+                        let execution = self.executions.get(domain).ok_or_else(|| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "domain execution disappeared during generator swap"
+                                    .to_string(),
+                            }
+                        })?;
+                        let source_schema = execution
+                            .relay_schemas
+                            .get(&desired_generator.materialized_relay)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing generator source relay schema '{}'",
+                                    desired_generator.materialized_relay.as_str()
+                                ),
+                            })?;
+                        let source_branch_schema = execution
+                            .relay_branching_schemas
+                            .get(&desired_generator.materialized_relay)
+                            .cloned()
+                            .flatten();
+                        let source_branching = execution
+                            .relay_branchings
+                            .get(&desired_generator.materialized_relay)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut routes =
+                            Vec::with_capacity(desired_generator.output_routes.routes.len());
+                        for output in desired_generator.output_routes.outputs() {
+                            let output_schema = execution
+                                .relay_schemas
+                                .get(&output.relay)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: format!(
+                                        "missing generator output relay schema '{}'",
+                                        output.relay.as_str()
+                                    ),
+                                })?;
+                            let output_registry = execution
+                                .relay_registries
+                                .get(&output.relay)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: format!(
+                                        "missing generator output relay '{}'",
+                                        output.relay.as_str()
+                                    ),
+                                })?;
+                            let output_services = execution
+                                .relay_services
+                                .get(&output.relay)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: format!(
+                                        "missing generator output relay services '{}'",
+                                        output.relay.as_str()
+                                    ),
+                                })?;
+                            let program = compile_generator_set_program(
+                                domain,
+                                &desired_generator,
+                                output,
+                                output_schema.arrow_schema(),
+                                output_schema.vm_sensitivity(),
+                                source_schema.arrow_schema(),
+                                source_branch_schema.clone(),
+                                Some(&execution.udfs),
+                            )?;
+                            routes.push(GeneratorTaskRouteSpec {
+                                output: output.clone(),
+                                program,
+                                output_schema,
+                                output_registry,
+                                output_services,
+                            });
+                        }
+                        (
+                            execution.shutdown.clone(),
+                            GeneratorTaskSpec {
+                                source_relay: desired_generator.materialized_relay.clone(),
+                                generator: desired_generator.clone(),
+                                source_branching,
+                                routes,
+                            },
+                        )
+                    };
+                    let task = self.spawn_generator_task(domain, &shutdown, spec)?;
+                    self.executions
+                        .get_mut(domain)
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution disappeared after generator spawn"
+                                .to_string(),
+                        })?
+                        .generator_tasks
+                        .insert(entity.clone(), task);
+                }
+                continue;
+            }
             let desired_node = schedule
                 .nodes
                 .iter()
@@ -5115,6 +5460,8 @@ impl Runtime {
         let mut tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
+        let mut generator_tasks = HashMap::new();
+        let mut reingestor_tasks = HashMap::new();
         let remote_dispatcher = self.remote_dispatcher.read().clone();
         let model_index = schedule
             .nodes
@@ -5790,16 +6137,23 @@ impl Runtime {
                     output_services,
                 });
             }
-            tasks.push(self.spawn_generator_task(
-                domain,
-                &shutdown_tx,
-                GeneratorTaskSpec {
-                    source_relay: generator.materialized_relay.clone(),
-                    generator,
-                    source_branching,
-                    routes,
-                },
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Generator,
+                identifier: generator.name.clone(),
+            };
+            generator_tasks.insert(
+                entity,
+                self.spawn_generator_task(
+                    domain,
+                    &shutdown_tx,
+                    GeneratorTaskSpec {
+                        source_relay: generator.materialized_relay.clone(),
+                        generator,
+                        source_branching,
+                        routes,
+                    },
+                )?,
+            );
         }
 
         for (emitter, receiver) in emitter_specs {
@@ -5824,14 +6178,21 @@ impl Runtime {
         }
 
         for (reingestor, from_relay, receiver) in reingestor_specs {
-            tasks.push(self.spawn_reingestor_task(
-                domain,
-                &shutdown_tx,
-                &branched_entrypoint_senders,
-                reingestor,
-                from_relay,
-                receiver,
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Reingestor,
+                identifier: reingestor.name.clone(),
+            };
+            reingestor_tasks
+                .entry(entity)
+                .or_insert_with(Vec::new)
+                .push(self.spawn_reingestor_task(
+                    domain,
+                    &shutdown_tx,
+                    &branched_entrypoint_senders,
+                    reingestor,
+                    from_relay,
+                    receiver,
+                )?);
         }
 
         self.executions.insert(
@@ -5857,6 +6218,8 @@ impl Runtime {
                 endpoint_routes,
                 node_tasks,
                 emitter_tasks,
+                generator_tasks,
+                reingestor_tasks,
                 clients: transports,
                 tasks,
             },
@@ -7220,9 +7583,11 @@ impl Runtime {
         let mut lookup_specs = Vec::new();
         let mut emitter_specs = Vec::new();
         let mut reingestor_specs = Vec::new();
-        let mut tasks = Vec::new();
+        let tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
+        let mut generator_tasks = HashMap::new();
+        let mut reingestor_tasks = HashMap::new();
         let branched_specs = branched_node_specs_from_active_graph(&graph);
         let branch_relays = branch_relays_from_branched_specs(&branched_specs);
         let model_index = graph
@@ -7678,16 +8043,23 @@ impl Runtime {
                     output_services,
                 });
             }
-            tasks.push(self.spawn_generator_task(
-                domain,
-                &shutdown_tx,
-                GeneratorTaskSpec {
-                    source_relay: generator.materialized_relay.clone(),
-                    generator,
-                    source_branching,
-                    routes,
-                },
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Generator,
+                identifier: generator.name.clone(),
+            };
+            generator_tasks.insert(
+                entity,
+                self.spawn_generator_task(
+                    domain,
+                    &shutdown_tx,
+                    GeneratorTaskSpec {
+                        source_relay: generator.materialized_relay.clone(),
+                        generator,
+                        source_branching,
+                        routes,
+                    },
+                )?,
+            );
         }
 
         for (emitter, receiver) in emitter_specs {
@@ -7712,14 +8084,21 @@ impl Runtime {
         }
 
         for (reingestor, from_relay, receiver) in reingestor_specs {
-            tasks.push(self.spawn_reingestor_task(
-                domain,
-                &shutdown_tx,
-                &branched_entrypoint_senders,
-                reingestor,
-                from_relay,
-                receiver,
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Reingestor,
+                identifier: reingestor.name.clone(),
+            };
+            reingestor_tasks
+                .entry(entity)
+                .or_insert_with(Vec::new)
+                .push(self.spawn_reingestor_task(
+                    domain,
+                    &shutdown_tx,
+                    &branched_entrypoint_senders,
+                    reingestor,
+                    from_relay,
+                    receiver,
+                )?);
         }
 
         self.executions.insert(
@@ -7764,6 +8143,8 @@ impl Runtime {
                 endpoint_routes,
                 node_tasks,
                 emitter_tasks,
+                generator_tasks,
+                reingestor_tasks,
                 clients: transports,
                 tasks,
             },
@@ -7961,6 +8342,8 @@ impl Runtime {
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
             emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         })
@@ -8009,6 +8392,18 @@ impl Runtime {
             .collect::<Result<Vec<_>, RuntimeError>>()?;
         let task_domain = domain.clone();
         let task_generator = generator.name.clone();
+        let source_gate = self
+            .relay_boundary_fanouts
+            .get(&(domain.clone(), source_relay.clone()))
+            .map(|fanout| fanout.dispatch_gate())
+            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "missing generator source relay gate '{}'",
+                    source_relay.as_str()
+                ),
+            })?;
+        let quiesce_counters = self.node_quiesce_counters(domain, &generator.name);
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.domain_status_changed.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
@@ -8017,12 +8412,60 @@ impl Runtime {
 
         Ok(tokio::spawn(async move {
             let mut activity = DomainActivityGuard::new(generator_activity);
+            let mut quiesce_activity = Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
             let mut next_state_refresh = None::<Timestamp>;
             let mut branch_states =
                 HashMap::<Option<BranchKey>, GeneratorBranchTaskState>::default();
 
             loop {
                 tokio::task::consume_budget().await;
+                if source_gate.is_closed() {
+                    for (route_index, (route, _)) in routes.iter().enumerate() {
+                        tokio::task::consume_budget().await;
+                        let mut pending_groups = Vec::new();
+                        for (branch_key, state) in &mut branch_states {
+                            let route_state = &mut state.routes[route_index];
+                            route_state.next_flush = None;
+                            if !route_state.pending.is_empty() {
+                                pending_groups.push((
+                                    branch_key.clone(),
+                                    std::mem::take(&mut route_state.pending),
+                                ));
+                            }
+                        }
+                        if !pending_groups.is_empty() {
+                            flush_generator_groups(
+                                GeneratorFlushContext {
+                                    runtime: &runtime,
+                                    domain: &task_domain,
+                                    generator: &task_generator,
+                                    output_relay: &route.output.relay,
+                                    output_schema: &route.output_schema,
+                                    output_registry: &route.output_registry,
+                                    output_services: &route.output_services,
+                                    task_events: &task_events,
+                                },
+                                &mut pending_groups,
+                            )
+                            .await;
+                        }
+                    }
+                    quiesce_activity.take();
+                    activity.set_active(false);
+                    tokio::select! {
+                        _ = source_gate.wait_open() => {}
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                    if quiesce_activity.is_none() {
+                        quiesce_activity =
+                            Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
+                    }
+                    continue;
+                }
                 if runtime.domains.get(&task_domain).is_some_and(|state| {
                     matches!(state.status, nervix_models::DomainStatus::Paused)
                 }) {
@@ -8068,6 +8511,7 @@ impl Runtime {
                                 break;
                             }
                         }
+                        _ = source_gate.wait_closed() => {}
                     }
                     continue;
                 }
@@ -8100,6 +8544,7 @@ impl Runtime {
                                 }
                             }
                             _ = sleep(Duration::from_millis(50)) => {}
+                            _ = source_gate.wait_closed() => {}
                         }
                         continue;
                     };
@@ -8121,6 +8566,7 @@ impl Runtime {
                                         }
                                     }
                                     _ = sleep(Duration::from_millis(100)) => {}
+                                    _ = source_gate.wait_closed() => {}
                                 }
                                 continue;
                             }
@@ -8509,6 +8955,7 @@ impl Runtime {
                         }
                     }
                     _ = sleep(sleep_duration) => {}
+                    _ = source_gate.wait_closed() => {}
                 }
             }
         }))
@@ -9361,26 +9808,44 @@ impl Runtime {
         let task_materialized_state = reingestor.materialized_state.clone();
         let task_mode = reingestor.mode;
         let task_error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
+        let quiesce_counters = self.node_quiesce_counters(domain, &reingestor.name);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let mut force_flush_rx = self.force_flush_receiver(domain);
 
         Ok(tokio::spawn(async move {
             let mut input = receiver;
-            let mut input_collection = RuntimeTaskInputCollection::new(input_collect_policy);
+            let mut input_collection = RuntimeTaskInputCollection::with_quiesce_counters(
+                input_collect_policy,
+                quiesce_counters.clone(),
+            );
             let mut compiled_from_where = None;
             loop {
                 tokio::task::consume_budget().await;
-                match Self::recv_runtime_collected_input(
-                    &mut input,
-                    &mut shutdown_rx,
-                    &mut input_collection,
-                    None,
-                )
-                .await
-                {
+                let event = tokio::select! {
+                    event = Self::recv_runtime_collected_input(
+                        &mut input,
+                        &mut shutdown_rx,
+                        &mut input_collection,
+                        None,
+                    ) => event,
+                    changed = force_flush_rx.changed() => {
+                        if changed.is_err() {
+                            BatchedInput::Shutdown
+                        } else {
+                            input_collection
+                                .take_any()
+                                .expect("same-relay input batches must concatenate")
+                                .map(BatchedInput::Batch)
+                                .unwrap_or(BatchedInput::Wake)
+                        }
+                    }
+                };
+                match event {
                     BatchedInput::Shutdown | BatchedInput::Closed => break,
                     BatchedInput::Wake => continue,
                     BatchedInput::Batch(batch) => {
+                        let _work = NodeQuiesceWorkGuard::begin(quiesce_counters.clone());
                         runtime
                             .metrics
                             .observe_global_node_received(NodeBatchObservation {
@@ -9734,6 +10199,15 @@ impl Runtime {
                 "scheduled emitter",
             )
             .await;
+        }
+        for (entity, task) in execution.generator_tasks {
+            Self::await_shutdown_task(task, domain, Some(&entity.identifier), "generator").await;
+        }
+        for (entity, tasks) in execution.reingestor_tasks {
+            for task in tasks {
+                Self::await_shutdown_task(task, domain, Some(&entity.identifier), "reingestor")
+                    .await;
+            }
         }
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
