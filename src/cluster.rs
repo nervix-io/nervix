@@ -33,6 +33,7 @@ const KEY_INTERCONNECT_MODE: &str = "interconnect_mode";
 const KEY_INTERCONNECT_PUBLIC_KEY: &str = "interconnect_public_key";
 const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
+const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
 
 pub struct ClusterHandle {
     chitchat: Arc<tokio::sync::Mutex<Chitchat>>,
@@ -434,6 +435,38 @@ impl ClusterHandle {
             .collect()
     }
 
+    pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        chitchat
+            .self_node_state()
+            .set(KEY_RUNTIME_REVISION_READY, revision.to_string());
+    }
+
+    pub async fn nodes_ready_for_runtime_revision(&self, revision: u64) -> BTreeSet<String> {
+        let chitchat_handle = self.chitchat.clone();
+        let chitchat = chitchat_handle.lock().await;
+        let self_id = chitchat.self_chitchat_id().clone();
+        let mut ready = BTreeSet::new();
+
+        if let Some(state) = chitchat.node_state(&self_id)
+            && runtime_revision_is_ready(state, revision)
+        {
+            ready.insert(self_id.node_id.clone());
+        }
+        for node_id in chitchat.live_nodes() {
+            if *node_id == self_id {
+                continue;
+            }
+            if let Some(state) = chitchat.node_state(node_id)
+                && runtime_revision_is_ready(state, revision)
+            {
+                ready.insert(node_id.node_id.clone());
+            }
+        }
+        ready
+    }
+
     pub async fn set_local_subscription_interest(
         &self,
         domain: &str,
@@ -593,6 +626,13 @@ impl ClusterHandle {
 
 fn subscription_interest_key(domain: &str, relay: &str) -> String {
     format!("{KEY_SUBSCRIPTION_INTEREST_PREFIX}{domain}:{relay}")
+}
+
+fn runtime_revision_is_ready(state: &NodeState, revision: u64) -> bool {
+    state
+        .get(KEY_RUNTIME_REVISION_READY)
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|ready_revision| ready_revision >= revision)
 }
 
 fn join_or_none(items: &[String]) -> String {

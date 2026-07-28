@@ -411,6 +411,19 @@ impl Cluster {
                 .collect::<Vec<_>>();
             self.wait_for_voters("node-1", &voter_refs).await?;
             self.wait_for_consistent_leader_on_all_nodes().await?;
+            self.wait_for_full_interconnect(&expected_nodes).await?;
+        }
+        Ok(())
+    }
+
+    async fn wait_for_full_interconnect(&self, node_ids: &[String]) -> io::Result<()> {
+        for node_id in node_ids {
+            for peer_node_id in node_ids {
+                if node_id != peer_node_id {
+                    self.wait_for_interconnect_status(node_id, peer_node_id, "connected")
+                        .await?;
+                }
+            }
         }
         Ok(())
     }
@@ -580,6 +593,7 @@ impl Cluster {
             let voter_refs = node_ids.iter().map(String::as_str).collect::<Vec<_>>();
             self.wait_for_voters("node-1", &voter_refs).await?;
             self.wait_for_consistent_leader_on_all_nodes().await?;
+            self.wait_for_full_interconnect(&node_ids).await?;
         }
 
         Ok(())

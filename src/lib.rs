@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 #[cfg(all(feature = "testing", not(debug_assertions)))]
 compile_error!(
     "the `testing` feature lowers Argon2 password hashing parameters and must not be compiled \

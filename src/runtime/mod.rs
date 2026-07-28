@@ -269,6 +269,14 @@ pub enum RuntimeError {
     RelayNotInstantiated { domain: String, relay: String },
     #[error("failed to build domain execution for '{domain}': {reason}")]
     BuildDomainExecution { domain: String, reason: String },
+    #[error(
+        "timed out waiting for runtime revision {revision} to become ready on nodes \
+         {pending_nodes:?}"
+    )]
+    RuntimeRevisionReadiness {
+        revision: u64,
+        pending_nodes: Vec<String>,
+    },
     #[error("failed to decode remote relay '{relay}' in domain '{domain}': {reason}")]
     DecodeRemoteRelay {
         domain: String,
@@ -452,6 +460,7 @@ impl ConcreteBranch {
 struct DomainExecution {
     schedule: DomainSchedule,
     passive_only: bool,
+    start_version: u64,
     shutdown: watch::Sender<bool>,
     graph: SharedActiveGraph,
     relay_registries: HashMap<Identifier, RelayRegistry>,
@@ -2392,6 +2401,7 @@ pub struct Runtime {
         Arc<DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>>,
     compiled_domain_udfs: Arc<DashMap<Domain, CompiledDomainUdfs, RandomState>>,
     schedule_apply_lock: Arc<Mutex<()>>,
+    applied_cluster_revision: Arc<AtomicU64>,
     domain_instantiation_errors: Arc<DashMap<Domain, String, RandomState>>,
     domains: Arc<DashMap<Domain, RuntimeDomainState, RandomState>>,
     domain_status_changed: watch::Sender<u64>,
@@ -2797,6 +2807,9 @@ impl ConcreteRelayRuntime {
 }
 
 impl RemoteDispatcher {
+    const DISPATCH_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+    const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
     fn local_node_id(&self) -> Option<String> {
         self.local_node_id.read().clone()
     }
@@ -2835,10 +2848,11 @@ impl RemoteDispatcher {
                 return;
             }
         };
-        let mut live_nodes = self.cluster.live_node_ids().await;
-        live_nodes.sort();
-        live_nodes.dedup();
-        for node_id in live_nodes {
+        let interested_nodes = self
+            .cluster
+            .nodes_with_subscription_interest(domain.as_str(), relay.as_str())
+            .await;
+        for node_id in interested_nodes {
             if node_id == local_node_id || excluded_nodes.contains(&node_id) {
                 continue;
             }
@@ -2873,36 +2887,49 @@ impl RemoteDispatcher {
     }
 
     async fn dispatch(&self, node_id: &str, envelope: Envelope) -> Result<(), String> {
-        let gossip = self.cluster.gossip_state().await;
-        let Some(node) = gossip
-            .live_nodes
-            .into_iter()
-            .find(|node| node.node_id == node_id)
-        else {
-            return Err(format!(
-                "remote node '{}' is not present in gossip membership",
-                node_id
-            ));
-        };
-        let target_addr = node
-            .interconnect_advertise_addr
-            .parse()
-            .map_err(|error| format!("invalid interconnect address for '{}': {error}", node_id))?;
-        let mode = match node.interconnect_mode.as_str() {
-            "https" => InterconnectTransportMode::Tls,
-            _ => InterconnectTransportMode::Plain,
-        };
-        let connection = self
-            .interconnect
-            .connection_for(target_addr, "localhost", mode)
-            .await
-            .map_err(|error| {
-                format!("failed to connect interconnect for '{}': {error}", node_id)
-            })?;
-        connection
-            .send(envelope)
-            .await
-            .map_err(|error| format!("failed to send remote relay payload: {error}"))
+        let deadline = Instant::now() + Self::DISPATCH_TIMEOUT;
+        loop {
+            tokio::task::consume_budget().await;
+            let result = async {
+                let node = self
+                    .cluster
+                    .gossip_state()
+                    .await
+                    .live_nodes
+                    .into_iter()
+                    .find(|node| node.node_id == node_id)
+                    .ok_or_else(|| {
+                        format!("remote node '{node_id}' is not present in gossip membership")
+                    })?;
+                let target_addr = node.interconnect_advertise_addr.parse().map_err(|error| {
+                    format!("invalid interconnect address for '{node_id}': {error}")
+                })?;
+                let mode = match node.interconnect_mode.as_str() {
+                    "https" => InterconnectTransportMode::Tls,
+                    _ => InterconnectTransportMode::Plain,
+                };
+                let connection = self
+                    .interconnect
+                    .connection_for(target_addr, "localhost", mode)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to connect interconnect for '{node_id}': {error}")
+                    })?;
+                connection
+                    .send(envelope.clone())
+                    .await
+                    .map_err(|error| format!("failed to send remote relay payload: {error}"))
+            }
+            .await;
+            let error = match result {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            if Instant::now() >= deadline {
+                return Err(error);
+            }
+            sleep(Self::DISPATCH_RETRY_INTERVAL).await;
+        }
     }
 }
 
@@ -3166,6 +3193,7 @@ impl RelayProcessorNode {
         branch: &mut BranchRuntime,
         incoming_relay: &Identifier,
         batch: RelayRecordBatch,
+        materialized_state: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let batch = self
             .filter_input_batch_with_kind(
@@ -3174,6 +3202,7 @@ impl RelayProcessorNode {
                 incoming_relay,
                 batch,
                 ProcessorInputFilterKind::FromWhere,
+                materialized_state,
             )
             .await?;
         self.filter_input_batch_with_kind(
@@ -3182,6 +3211,7 @@ impl RelayProcessorNode {
             incoming_relay,
             batch,
             ProcessorInputFilterKind::FilterWhere,
+            materialized_state,
         )
         .await
     }
@@ -3316,6 +3346,7 @@ impl RelayProcessorNode {
         incoming_relay: &Identifier,
         batch: RelayRecordBatch,
         kind: ProcessorInputFilterKind,
+        materialized_state: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let Some(filter_where) = (match kind {
             ProcessorInputFilterKind::FromWhere => self.from_where.get(incoming_relay),
@@ -3432,41 +3463,6 @@ impl RelayProcessorNode {
         let Some(program) = program else {
             return Some(batch);
         };
-        let owner_nodes = branch
-            .runtime
-            .executions
-            .get(&branch.domain)
-            .map(|execution| execution.materialized_stream_owner_nodes.clone())
-            .unwrap_or_default();
-        let side_inputs = match branch
-            .runtime
-            .load_materialized_side_inputs(
-                &branch.domain,
-                &batch.key,
-                &program.materialized_interest,
-                &owner_nodes,
-            )
-            .await
-        {
-            Ok(values) => values,
-            Err(error) => {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    self.kind.as_str(),
-                    &self.processor,
-                    &self.error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "{} '{}' failed to load {} side inputs: {}",
-                        self.kind.as_str(),
-                        self.processor.as_str(),
-                        kind.label(),
-                        error
-                    ),
-                );
-                return None;
-            }
-        };
         let plan = match plan_filter_map_messages(
             self.kind.as_str(),
             &self.processor,
@@ -3479,7 +3475,7 @@ impl RelayProcessorNode {
                 .ok()
                 .flatten()
                 .unwrap_or_else(current_timestamp),
-            &side_inputs,
+            materialized_state,
         )
         .await
         {
@@ -3553,7 +3549,7 @@ impl RelayProcessorNode {
                 }
             };
             let Some(batch) = self
-                .filter_input_batch(graph, branch, incoming_relay, batch)
+                .filter_input_batch(graph, branch, incoming_relay, batch, &materialized_values)
                 .await
             else {
                 return;
@@ -3782,6 +3778,7 @@ impl RelayProcessorNode {
                             error_policies: &self.error_policies,
                             input_relays: &self.input_relays,
                             filter_source: ProcessorOutputFilterSource::InputRelays,
+                            resolved_materialized_state: Some(&materialized_values),
                         },
                         output_routes,
                         forwarded,
@@ -4752,6 +4749,7 @@ impl RelayProcessorNode {
                     error_policies: &self.error_policies,
                     input_relays: &self.input_relays,
                     filter_source: ProcessorOutputFilterSource::InputRelays,
+                    resolved_materialized_state: None,
                 },
                 self.operation.output_routes_mut(),
                 now,
@@ -5402,6 +5400,7 @@ impl BranchInstanceTemplate {
         let materializers = self
             .materialized_streams
             .iter()
+            .filter(|relay| !runtime.materialized_relay_is_scheduled(domain, relay))
             .map(|relay| {
                 let placement = runtime.state_placement(
                     domain,
@@ -5507,6 +5506,12 @@ impl BranchRuntime {
                 execution
                     .materialized_stream_specs
                     .keys()
+                    .filter(|relay| {
+                        !execution
+                            .materialized_stream_owner_nodes
+                            .get(*relay)
+                            .is_some_and(Option::is_some)
+                    })
                     .cloned()
                     .collect::<HashSet<_>>()
             })
@@ -5543,6 +5548,12 @@ impl BranchRuntime {
     }
 
     async fn materialize_stream_batch(&mut self, relay: &Identifier, batch: &RelayRecordBatch) {
+        if self
+            .runtime
+            .materialized_relay_is_scheduled(&self.domain, relay)
+        {
+            return;
+        }
         self.reconcile_materializer_membership(relay);
         let Some(state) = self.materializers.get(relay) else {
             return;
@@ -9808,6 +9819,7 @@ async fn flush_branch_reorderer_output(
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
+            resolved_materialized_state: None,
         },
         output_routes,
         batch,
@@ -10835,6 +10847,7 @@ struct ProcessorOutputDispatchContext<'a> {
     error_policies: &'a ErrorPolicies,
     input_relays: &'a [Identifier],
     filter_source: ProcessorOutputFilterSource<'a>,
+    resolved_materialized_state: Option<&'a HashMap<String, RuntimeValue>>,
 }
 
 struct PendingProcessorOutputMessage {
@@ -11047,32 +11060,36 @@ async fn evaluate_processor_output_events(
         .ok()
         .flatten()
         .unwrap_or_else(current_timestamp);
-    let owner_nodes = context
-        .branch
-        .runtime
-        .executions
-        .get(&context.branch.domain)
-        .map(|execution| execution.materialized_stream_owner_nodes.clone())
-        .unwrap_or_default();
-    let side_inputs = context
-        .branch
-        .runtime
-        .load_materialized_side_inputs(
-            &context.branch.domain,
-            &batch.key,
-            &program.materialized_interest,
-            &owner_nodes,
-        )
-        .await
-        .map_err(|error| PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: format!(
-                "{} '{}' failed to load materialized side inputs: {}",
-                context.node_kind,
-                context.processor.as_str(),
-                error
-            ),
-        })?;
+    let side_inputs = if let Some(resolved) = context.resolved_materialized_state {
+        resolved.clone()
+    } else {
+        let owner_nodes = context
+            .branch
+            .runtime
+            .executions
+            .get(&context.branch.domain)
+            .map(|execution| execution.materialized_stream_owner_nodes.clone())
+            .unwrap_or_default();
+        context
+            .branch
+            .runtime
+            .load_materialized_side_inputs(
+                &context.branch.domain,
+                &batch.key,
+                &program.materialized_interest,
+                &owner_nodes,
+            )
+            .await
+            .map_err(|error| PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason: format!(
+                    "{} '{}' failed to load materialized side inputs: {}",
+                    context.node_kind,
+                    context.processor.as_str(),
+                    error
+                ),
+            })?
+    };
     let executed = execute_filter_map_program_on_batch(
         context.node_kind,
         context.processor,
@@ -12521,6 +12538,7 @@ async fn flush_ready_window_processor(
                     error_policies,
                     input_relays: std::slice::from_ref(&output_relay),
                     filter_source: ProcessorOutputFilterSource::OutputRelay,
+                    resolved_materialized_state: None,
                 },
                 output_routes,
                 forwarded,
@@ -15214,6 +15232,7 @@ async fn flush_branch_junction(context: JunctionFlushContext<'_>, forwarded: Rel
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
+            resolved_materialized_state: None,
         },
         output_routes,
         forwarded,
@@ -15620,6 +15639,7 @@ async fn flush_branch_inferencer_output(
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::Inferencer(inferencer_tensors),
+            resolved_materialized_state: None,
         },
         output_routes,
         output_batch,

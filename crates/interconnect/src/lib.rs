@@ -145,11 +145,34 @@ pub enum ControlEnvelope {
     DescribeLookupResponse(DescribeLookupResponse),
     LookupRequest(LookupRequest),
     LookupResponse(LookupResponse),
+    SubscriptionInterestVisibilityRequest(SubscriptionInterestVisibilityRequest),
+    SubscriptionInterestVisibilityResponse(SubscriptionInterestVisibilityResponse),
+    RuntimeErrorEvent(RuntimeErrorEvent),
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionInterestVisibilityRequest {
+    pub correlation_id: u64,
+    pub subscriber_node_id: String,
+    pub domain: Domain,
+    pub relay: Identifier,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionInterestVisibilityResponse {
+    pub correlation_id: u64,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeErrorEvent {
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainClockStart {
     pub domain_id: Domain,
+    pub owner_node_id: String,
     pub wall_started_at: Timestamp,
     pub logical_start: Timestamp,
     pub time_rate: String,
@@ -346,7 +369,13 @@ pub struct DescribeMetricsRequest {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeMetricsResponse {
     pub correlation_id: u64,
-    pub result: Result<Vec<String>, String>,
+    pub result: Result<DescribeMetricsEnvelope, String>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DescribeMetricsEnvelope {
+    pub metrics: Vec<String>,
+    pub state: Vec<String>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -961,86 +990,96 @@ async fn run_connection_loop(
     outbound_key: Option<ConnectionKey>,
     rx: &mut mpsc::Receiver<Envelope>,
     io_stream: BoxedIo,
-    pending: &mut Option<Envelope>,
+    retry_payload: &mut Option<Envelope>,
 ) -> Result<(), TransportError> {
-    let (mut reader, mut writer) = tokio::io::split(io_stream);
-    let mut keepalive = interval(PING_INTERVAL);
-    keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut last_ping_at = Instant::now();
-    let mut pending = pending.take().map(WireEnvelope::Payload);
-    write_wire_envelope(
-        &mut writer,
-        &WireEnvelope::Introduction(inner.identity.signed_introduction()),
-    )
-    .await?;
-    let peer_node_id = read_and_verify_introduction(
-        &mut reader,
-        inner.options.max_frame_bytes,
-        &inner.peer_verifier,
-    )
-    .await?;
-    if let Some(outbound_key) = outbound_key.as_ref() {
-        inner
-            .outbound_state
-            .insert(outbound_key.clone(), ConnectionState::Connected);
-    }
-    register_connected_peer(&inner, &peer_node_id);
+    let mut pending = retry_payload.take().map(WireEnvelope::Payload);
+    let result = async {
+        let (mut reader, mut writer) = tokio::io::split(io_stream);
+        let mut keepalive = interval(PING_INTERVAL);
+        keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut last_ping_at = Instant::now();
+        write_wire_envelope(
+            &mut writer,
+            &WireEnvelope::Introduction(inner.identity.signed_introduction()),
+        )
+        .await?;
+        let peer_node_id = read_and_verify_introduction(
+            &mut reader,
+            inner.options.max_frame_bytes,
+            &inner.peer_verifier,
+        )
+        .await?;
+        if let Some(outbound_key) = outbound_key.as_ref() {
+            inner
+                .outbound_state
+                .insert(outbound_key.clone(), ConnectionState::Connected);
+        }
+        register_connected_peer(&inner, &peer_node_id);
 
-    let result = loop {
-        tokio::task::consume_budget().await;
-        let ping_deadline = last_ping_at + PING_TIMEOUT;
-        tokio::select! {
-            biased;
-            _ = inner.shutdown.cancelled() => break Ok(()),
-            result = read_wire_envelope(&mut reader, inner.options.max_frame_bytes) => {
-                match result? {
-                    WireEnvelope::Introduction(_) => {
-                        break Err(TransportError::InvalidHandshake(
-                            "received duplicate introduction".to_string(),
-                        ));
+        let result = async {
+            loop {
+                tokio::task::consume_budget().await;
+                let ping_deadline = last_ping_at + PING_TIMEOUT;
+                tokio::select! {
+                    biased;
+                    _ = inner.shutdown.cancelled() => break Ok(()),
+                    result = read_wire_envelope(&mut reader, inner.options.max_frame_bytes) => {
+                        match result? {
+                            WireEnvelope::Introduction(_) => {
+                                break Err(TransportError::InvalidHandshake(
+                                    "received duplicate introduction".to_string(),
+                                ));
+                            }
+                            WireEnvelope::Ping => {
+                                last_ping_at = Instant::now();
+                            }
+                            WireEnvelope::Payload(envelope) => {
+                                last_ping_at = Instant::now();
+                                inner
+                                    .incoming_tx
+                                    .send(ReceivedEnvelope {
+                                        peer_addr,
+                                        peer_node_id: peer_node_id.clone(),
+                                        envelope,
+                                        reply: reply_handle.clone(),
+                                    })
+                                    .await
+                                    .map_err(|_| TransportError::ShuttingDown)?;
+                            }
+                        }
                     }
-                    WireEnvelope::Ping => {
-                        last_ping_at = Instant::now();
+                    _ = sleep_until(ping_deadline) => {
+                        break Err(TransportError::Closed(peer_addr));
                     }
-                    WireEnvelope::Payload(envelope) => {
-                        last_ping_at = Instant::now();
-                        inner
-                            .incoming_tx
-                            .send(ReceivedEnvelope {
-                                peer_addr,
-                                peer_node_id: peer_node_id.clone(),
-                                envelope,
-                                reply: reply_handle.clone(),
-                            })
-                            .await
-                            .map_err(|_| TransportError::ShuttingDown)?;
+                    _ = keepalive.tick(), if pending.is_none() => {
+                        pending = Some(WireEnvelope::Ping);
+                    }
+                    maybe_envelope = rx.recv(), if pending.is_none() => {
+                        match maybe_envelope {
+                            Some(envelope) => pending = Some(WireEnvelope::Payload(envelope)),
+                            None => break Ok(()),
+                        }
+                    }
+                    result = async {
+                        let Some(envelope) = pending.as_ref() else {
+                            return Ok(());
+                        };
+                        write_wire_envelope(&mut writer, envelope).await
+                    }, if pending.is_some() => {
+                        result?;
+                        pending = None;
                     }
                 }
-            }
-            _ = sleep_until(ping_deadline) => {
-                break Err(TransportError::Closed(peer_addr));
-            }
-            _ = keepalive.tick(), if pending.is_none() => {
-                pending = Some(WireEnvelope::Ping);
-            }
-            maybe_envelope = rx.recv(), if pending.is_none() => {
-                match maybe_envelope {
-                    Some(envelope) => pending = Some(WireEnvelope::Payload(envelope)),
-                    None => break Ok(()),
-                }
-            }
-            result = async {
-                let Some(envelope) = pending.as_ref() else {
-                    return Ok(());
-                };
-                write_wire_envelope(&mut writer, envelope).await
-            }, if pending.is_some() => {
-                result?;
-                pending = None;
             }
         }
-    };
-    unregister_connected_peer(&inner, &peer_node_id);
+        .await;
+        unregister_connected_peer(&inner, &peer_node_id);
+        result
+    }
+    .await;
+    if let Some(WireEnvelope::Payload(payload)) = pending {
+        *retry_payload = Some(payload);
+    }
     result
 }
 
@@ -2279,6 +2318,70 @@ mod tests {
 
         transport_a.shutdown().await;
         transport_b2.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connection_failure_retains_pending_payload_for_reconnect() {
+        let identity_a = test_identity("node-a");
+        let identity_b = test_identity("node-b");
+        let (incoming_tx, _incoming_rx) = mpsc::channel(1);
+        let inner = Arc::new(TransportInner {
+            mode: TransportMode::Plain,
+            client_config: None,
+            server_config: None,
+            identity: identity_a,
+            peer_verifier: verifier_for(&[&identity_b]),
+            options: TransportOptions::default(),
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            incoming_tx,
+            outbound: DashMap::default(),
+            outbound_state: DashMap::default(),
+            connected_peers: DashMap::default(),
+            outbound_permits: StdArc::new(Semaphore::new(1)),
+            shutdown: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+        });
+        let (client_io, mut peer_io) = tokio::io::duplex(64 * 1024);
+        let peer_task = tokio::spawn(async move {
+            let introduction = read_wire_envelope(&mut peer_io, DEFAULT_MAX_FRAME_BYTES)
+                .await
+                .expect("read client introduction");
+            assert!(matches!(introduction, WireEnvelope::Introduction(_)));
+            write_wire_envelope(
+                &mut peer_io,
+                &WireEnvelope::Introduction(identity_b.signed_introduction()),
+            )
+            .await
+            .expect("write peer introduction");
+        });
+        let peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let (reply_tx, _reply_rx) = mpsc::channel(1);
+        let reply_handle = ConnectionHandle {
+            peer_addr,
+            tx: reply_tx,
+        };
+        let (_send_tx, mut send_rx) = mpsc::channel(1);
+        let expected = Envelope::RelayPayload(dummy_stream_payload("retry"));
+        let mut retry_payload = Some(expected.clone());
+
+        run_connection_loop(
+            inner.clone(),
+            peer_addr,
+            reply_handle,
+            None,
+            &mut send_rx,
+            Box::new(client_io),
+            &mut retry_payload,
+        )
+        .await
+        .expect_err("peer disconnect should fail the connection");
+        peer_task.await.expect("peer task should complete");
+
+        assert_eq!(retry_payload, Some(expected));
+        assert!(
+            inner.connected_peers.is_empty(),
+            "failed connection must unregister its connected peer"
+        );
     }
 
     #[tokio::test]

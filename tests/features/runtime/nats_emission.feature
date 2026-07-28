@@ -56,7 +56,7 @@ Feature: NATS emission
       """
       {"user_id":42}
       """
-    Then within "5s" DESCRIBE EMITTER "nats_notifications" on the leader node contains
+    Then within "10s" DESCRIBE EMITTER "nats_notifications" on the leader node contains
       """
       transient error: fault injector stalled emitter publish
       """

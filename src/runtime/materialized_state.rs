@@ -102,6 +102,44 @@ impl ReplicatedMaterializedRelayState {
             >= self.required_replica_acks
     }
 
+    pub(super) fn apply_snapshot(
+        &self,
+        metrics: &RuntimeMetrics,
+        lsm: u64,
+        payload: &[u8],
+    ) -> Result<(), RuntimePersistenceError> {
+        let (entries, snapshot_metrics) =
+            decode_materialized_stream_snapshot_with_metrics(payload)?;
+        self.entries.clear();
+        for (key, record) in entries {
+            self.entries.insert(key, record);
+        }
+        Self::apply_metrics_snapshot(
+            metrics,
+            &self.placement,
+            &self.physical_node_id,
+            snapshot_metrics,
+        );
+        self.current_lsm.store(lsm, Ordering::SeqCst);
+        self.dirty.store(true, Ordering::SeqCst);
+        self.replication_notify.notify_waiters();
+        Ok(())
+    }
+
+    pub(super) fn latest_snapshot(
+        &self,
+        metrics: &RuntimeMetrics,
+    ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
+        Ok(PersistedRuntimeStateEntry {
+            lsm: self.current_lsm.load(Ordering::SeqCst),
+            schema_fingerprint: self.placement.schema_fingerprint,
+            payload: encode_materialized_stream_snapshot(
+                &self.entries,
+                self.metrics_snapshot(metrics),
+            )?,
+        })
+    }
+
     pub(super) fn metrics_snapshot(&self, metrics: &RuntimeMetrics) -> RuntimeMetricsSnapshot {
         if let Some(branch_key) = self.placement.branch_key.as_ref() {
             metrics.snapshot_branch_target(

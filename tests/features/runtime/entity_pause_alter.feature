@@ -86,6 +86,7 @@ Feature: Entity-pause model alterations
   Scenario Outline: A timed-out entity drain leaves the old junction model active
     Given entity gate deadline is configured as "250ms"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -130,6 +131,10 @@ Feature: Entity-pause model alterations
     And http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
       """
       {"seq":3}
+      """
+    Then within "5s" DESCRIBE EMITTER "blocked_sink" on the leader node contains
+      """
+      transient error: fault injector stalled emitter publish
       """
     When these NSPL commands fail with "timed out draining domain"
       """
