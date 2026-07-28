@@ -65,7 +65,7 @@ class TransformTests(unittest.TestCase):
             "<main>"
             '<h1 id="manual">Manual</h1>'
             '<p><a href="udfs.html#roto-column-operations">Roto operations</a></p>'
-            '<p><a href="./jaq-manual.html#jaq-corelang">JAQ core</a></p>'
+            '<p><a href="./jaq-reference.html#jaq-reference">JAQ reference</a></p>'
             '<p><a href="https://docs.nervix.io/v1/processors.html#junction">Junction</a></p>'
             '<p><a href="https://example.com/spec.html#section">External</a></p>'
             "<pre><code>.foo ⟼ 😀🙂🧑🔬🤔☀️</code></pre>"
@@ -75,7 +75,7 @@ class TransformTests(unittest.TestCase):
         result = transform(print_html, {"Manual"})
 
         self.assertIn('href="#roto-column-operations"', result)
-        self.assertIn('href="#jaq-corelang"', result)
+        self.assertIn('href="#jaq-reference"', result)
         self.assertIn('href="#junction"', result)
         self.assertIn('href="https://example.com/spec.html#section"', result)
         self.assertIn(
@@ -83,6 +83,21 @@ class TransformTests(unittest.TestCase):
             "[U+1F914][U+2600]",
             result,
         )
+
+    def test_adds_bounded_equal_widths_to_pdf_table_columns(self) -> None:
+        print_html = (
+            "<main>"
+            "<table>"
+            "<thead><tr><th>One</th><th>Two</th><th>Three</th><th>Four</th></tr></thead>"
+            "<tbody><tr><td>A</td><td>B</td><td>C</td><td>D</td></tr></tbody>"
+            "</table>"
+            "</main>"
+        )
+
+        result = transform(print_html, {"Manual"})
+
+        self.assertIn("<colgroup>", result)
+        self.assertEqual(result.count('<col style="width: 25.000000%">'), 4)
 
     def test_rejects_html_without_main(self) -> None:
         with self.assertRaises(SystemExit):

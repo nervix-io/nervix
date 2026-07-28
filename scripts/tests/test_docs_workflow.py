@@ -9,6 +9,15 @@ from scripts.publish_docs_alias import update_alias
 
 
 class DocsWorkflowTests(unittest.TestCase):
+    def test_nspl_agent_skill_is_a_top_level_book_section(self) -> None:
+        summary = Path("docs/src/SUMMARY.md").read_text()
+
+        self.assertIn("- [NSPL Agent Skill](./nspl-agent-skill.md)", summary.splitlines())
+        self.assertNotIn(
+            "  - [NSPL Agent Skill](./nspl-agent-skill.md)",
+            summary.splitlines(),
+        )
+
     def test_book_job_installs_locked_python_dependencies_with_uv(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()
         _, build_book = workflow.split("\n  build-book:", maxsplit=1)
@@ -53,11 +62,10 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertIn("texlive-xetex", build_book)
         self.assertIn("just book-pdf", justfile)
         self.assertIn('output_path="docs/book/nervix.pdf"', justfile)
+        self.assertIn("python3 scripts/render_pdf_title.py", justfile)
+        self.assertIn('--version "{{ version }}"', justfile)
+        self.assertIn('--include-before-body="${tmp_title}"', justfile)
         self.assertIn("--pdf-engine=xelatex", justfile)
-        self.assertIn(
-            "--include-before-body=docs/theme/nervix-pdf-title.tex",
-            justfile,
-        )
         self.assertIn(
             "--include-in-header=docs/theme/nervix-pdf-header.tex",
             justfile,
@@ -103,10 +111,28 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertIn("Copyright 2026 Emergentix, Inc.", title_page)
         self.assertIn("FCL-1.0-ALv2", title_page)
         self.assertIn(
+            r"Documentation version: \texttt{@@NERVIX_DOCUMENTATION_VERSION@@}",
+            title_page,
+        )
+        self.assertIn(r"\hyperref[license]", title_page)
+        self.assertNotIn(
+            "https://github.com/nervix-io/nervix/blob/main/LICENSE.md",
+            title_page,
+        )
+        self.assertIn(
             r"\includegraphics[width=1.2in]{docs/theme/nervix-pdf-mark.pdf}",
             title_page,
         )
         self.assertTrue(Path("docs/theme/nervix-pdf-mark.pdf").is_file())
+
+    def test_pdf_chapter_uses_local_license_link(self) -> None:
+        agent_skill = Path("docs/src/nspl-agent-skill.md").read_text()
+
+        self.assertIn("[FCL-1.0-ALv2 license](license.md)", agent_skill)
+        self.assertNotIn(
+            "https://github.com/nervix-io/nervix/blob/main/LICENSE.md",
+            agent_skill,
+        )
 
     def test_pdf_code_blocks_wrap_at_print_width(self) -> None:
         pdf_header = Path("docs/theme/nervix-pdf-header.tex").read_text()

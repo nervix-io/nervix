@@ -227,9 +227,9 @@ Current protobuf codec format:
 
 ## JAQ Transformations
 
-JAQ-backed codecs must declare a JAQ transform. The generated
-[JAQ Manual](jaq-manual.md#jaq-corelang) documents the core language and functions at the exact
-`jaq-core` release Nervix embeds:
+JAQ-backed codecs must declare a JAQ transform. The concise
+[JAQ Reference](jaq-reference.md) links the full upstream manual for the exact `jaq-core` release
+Nervix embeds and summarizes the Nervix-specific boundary:
 
 ```nspl
 CREATE [IF NOT EXISTS] CODEC notification_codec

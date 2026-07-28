@@ -27,7 +27,7 @@ include = [
   "working-message.md",
   "domains-and-time.md",
   "schemas-and-codecs.md",
-  "jaq-manual.md",
+  "jaq-reference.md",
   "resources.md",
   "relay.md",
   "ingestors.md",

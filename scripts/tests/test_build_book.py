@@ -5,8 +5,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from scripts.build_book import (
-    bundle_jaq_manual,
     bundle_roto_reference,
+    render_jaq_reference,
     resolve_package_version,
     rewrite_external_assets,
 )
@@ -51,6 +51,7 @@ Floating point literals need either a `.`, `e` or `E`.
 :::
 
 {class="test-error"}
+  { class = 'test-ignore' }
 ```roto
 let x = 10;
 print(f"x is {x}");
@@ -73,29 +74,6 @@ SAMPLE_ROTO_LICENSE = """Copyright (c) 2022, NLnet Labs. All rights reserved.
 
 Redistribution is permitted under the BSD-3-Clause license.
 """
-
-SAMPLE_JAQ_XHTML = """<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<body>
-  <nav><a href="#corelang">Contents</a></nav>
-  <section id="main">
-    <header><h1 class="title">jaq manual</h1></header>
-    <p>Read the <a href="#corelang">core language</a>.</p>
-    <section id="corelang">
-      <h1>Core language</h1>
-      <div class="Compatibility"><p>This differs from jq.</p></div>
-      <pre><code>.foo</code><a class="run-example" href="https://gedenkt.at/jaq/">Run</a></pre>
-      <p><a href="https://example.com/spec">External specification</a></p>
-    </section>
-  </section>
-</body>
-</html>
-"""
-
-SAMPLE_JAQ_LICENSE = """Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated documentation files.
-"""
-
 
 class RotoReferenceBundleTests(unittest.TestCase):
     def test_resolves_exact_upstream_versions_from_cargo_lock(self) -> None:
@@ -137,6 +115,7 @@ class RotoReferenceBundleTests(unittest.TestCase):
         self.assertNotIn(":::", bundled)
         # MyST code attributes and roles do not leak into rendered prose.
         self.assertNotIn('{class="test-error"}', bundled)
+        self.assertNotIn("{ class = 'test-ignore' }", bundled)
         self.assertNotIn("{roto:ref}", bundled)
         self.assertNotIn("interpreted-text", bundled)
         self.assertNotIn("{doc}", bundled)
@@ -156,23 +135,30 @@ class RotoReferenceBundleTests(unittest.TestCase):
         # The required upstream redistribution notice ships with the generated page.
         self.assertIn(SAMPLE_ROTO_LICENSE, bundled)
 
+    def test_bundle_rejects_unhandled_myst_artifacts(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "unhandled MyST artifact"):
+            bundle_roto_reference(
+                "# Language Reference\n\n{class=unquoted}\n",
+                SAMPLE_ROTO_LICENSE,
+                "0.11.3",
+            )
 
-class JaqManualBundleTests(unittest.TestCase):
-    def test_bundle_extracts_manual_and_namespaces_internal_links(self) -> None:
-        bundled = bundle_jaq_manual(SAMPLE_JAQ_XHTML, SAMPLE_JAQ_LICENSE, "3.1.0")
 
-        self.assertIn("# JAQ Manual", bundled)
-        self.assertIn("v3.1.0", bundled)
-        self.assertIn("MANUAL.xhtml", bundled)
-        self.assertNotIn("<nav>", bundled)
-        self.assertNotIn('<h1 class="title">jaq manual</h1>', bundled)
-        self.assertNotIn('<section id="jaq-corelang">', bundled)
-        self.assertIn('<a href="#jaq-corelang">core language</a>', bundled)
-        self.assertIn('<h2 id="jaq-corelang">Core language</h2>', bundled)
-        self.assertIn("<strong>Compatibility:</strong>", bundled)
-        self.assertNotIn("run-example", bundled)
-        self.assertIn('href="https://example.com/spec"', bundled)
-        self.assertIn(SAMPLE_JAQ_LICENSE, bundled)
+class JaqReferenceTests(unittest.TestCase):
+    def test_reference_links_the_readable_manual_and_exact_release(self) -> None:
+        reference = render_jaq_reference("3.1.0")
+
+        self.assertIn("# JAQ Reference", reference)
+        self.assertIn("`jaq-core` 3.1.0", reference)
+        self.assertIn("https://gedenkt.at/jaq/manual/", reference)
+        self.assertIn("https://github.com/01mf02/jaq/releases/tag/v3.1.0", reference)
+        self.assertNotIn("/releases/download/", reference)
+        self.assertNotIn(".xhtml", reference)
+        self.assertIn("[JAQ transformations](schemas-and-codecs.md#jaq-transformations)", reference)
+        self.assertIn("## Common Filters", reference)
+        self.assertIn(r"| `.items \| map(.value)` | Transform every array element |", reference)
+        self.assertIn(r"| `.items[] \| select(.enabled)` | Select matching elements |", reference)
+        self.assertLess(len(reference.split()), 350)
 
 
 class ExternalAssetRewriteTests(unittest.TestCase):

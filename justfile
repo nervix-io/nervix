@@ -127,7 +127,12 @@ book-pdf version="" output="":
         output_path="docs/book/nervix.pdf"
     fi
     tmp_html="$(mktemp --suffix=.html)"
-    trap 'rm -f "${tmp_html}"' EXIT
+    tmp_title="$(mktemp --suffix=.tex)"
+    trap 'rm -f "${tmp_html}" "${tmp_title}"' EXIT
+    python3 scripts/render_pdf_title.py \
+        --template docs/theme/nervix-pdf-title.tex \
+        --version "{{ version }}" \
+        --output "${tmp_title}"
     python3 scripts/prepare_pdf_html.py \
         --print-html docs/book/print.html \
         --summary docs/src/SUMMARY.md \
@@ -140,7 +145,7 @@ book-pdf version="" output="":
         --top-level-division=chapter \
         --variable=documentclass:report \
         --include-in-header=docs/theme/nervix-pdf-header.tex \
-        --include-before-body=docs/theme/nervix-pdf-title.tex \
+        --include-before-body="${tmp_title}" \
         --variable=graphics \
         --variable=colorlinks \
         --variable=linkcolor:NervixLink \

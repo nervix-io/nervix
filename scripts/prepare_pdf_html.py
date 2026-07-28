@@ -21,6 +21,13 @@ HEADER_ANCHOR = re.compile(r'<a class="header" href="[^"]*">(.*?)</a>', re.S)
 HEADING = re.compile(r"<h([1-6])([^>]*)>(.*?)</h\1>", re.S)
 TAG = re.compile(r"<[^>]+>")
 MAIN = re.compile(r"<main>(.*)</main>", re.S)
+TABLE = re.compile(
+    r"(?P<open><table\b[^>]*>)(?P<body>.*?)(?P<close></table>)",
+    re.I | re.S,
+)
+TABLE_ROW = re.compile(r"<tr\b[^>]*>.*?</tr>", re.I | re.S)
+TABLE_CELL = re.compile(r"<t[hd]\b[^>]*>", re.I)
+TABLE_COLGROUP = re.compile(r"<colgroup\b", re.I)
 HREF = re.compile(
     r"(?P<prefix>\bhref=)(?P<quote>[\"'])(?P<target>[^\"']+)(?P=quote)",
     re.I,
@@ -88,6 +95,29 @@ def substitute_unsupported_pdf_glyphs(main_html: str) -> str:
     return main_html
 
 
+def add_pdf_table_column_widths(main_html: str) -> str:
+    """Give pandoc bounded columns so longtable content wraps at print width."""
+
+    def add_columns(table: re.Match[str]) -> str:
+        body = table.group("body")
+        if TABLE_COLGROUP.search(body):
+            return table.group(0)
+        first_row = TABLE_ROW.search(body)
+        column_count = len(TABLE_CELL.findall(first_row.group(0))) if first_row else 0
+        if column_count == 0:
+            raise SystemExit("PDF source contains a table without any cells")
+        width = 100 / column_count
+        columns = "".join(
+            f'<col style="width: {width:.6f}%">' for _ in range(column_count)
+        )
+        return (
+            f'{table.group("open")}<colgroup>{columns}</colgroup>'
+            f'{body}{table.group("close")}'
+        )
+
+    return TABLE.sub(add_columns, main_html)
+
+
 def transform(print_html: str, titles: set[str]) -> str:
     match = MAIN.search(print_html)
     if not match:
@@ -95,6 +125,7 @@ def transform(print_html: str, titles: set[str]) -> str:
     main = HEADER_ANCHOR.sub(r"\1", match.group(1))
     main = rewrite_pdf_links(main)
     main = substitute_unsupported_pdf_glyphs(main)
+    main = add_pdf_table_column_widths(main)
 
     def demote(heading: re.Match[str]) -> str:
         level = int(heading.group(1))
