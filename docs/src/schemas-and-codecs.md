@@ -179,18 +179,21 @@ CREATE [IF NOT EXISTS] CODEC notification_codec
 `created_at` is the internal schema field name. The matching wire field must be a
 string, and the internal field must be `DATETIME`.
 
-JAQ-native codecs parse a transport payload in a jaq-supported format, run a mandatory JAQ transformation, and then decode the resulting JSON object into the internal schema:
+JAQ-native codecs parse a transport payload in a jaq-supported format and run explicitly directed
+JAQ transformations. An ingestion transformation decodes the resulting JSON object into the
+internal schema:
 
 ```nspl
 CREATE [IF NOT EXISTS] CODEC notification_cbor
   FROM CBOR
   TO SCHEMA notification
-  WITH JAQ TRANSFORMATION '.';
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
 CREATE [IF NOT EXISTS] CODEC notification_xml
   FROM XML
   TO SCHEMA notification
-  WITH JAQ TRANSFORMATION '{user_id: (.c[] | select(.t == "user_id").c[0] | tonumber)}';
+  WITH JAQ TRANSFORMATIONS
+    ON INGESTION '{user_id: (.c[] | select(.t == "user_id").c[0] | tonumber)}';
 ```
 
 Protobuf codecs compile `.proto` files from an uploaded resource, decode or encode the selected message with `prost-reflect`, and use JAQ to translate between the protobuf JSON view and the internal schema:
@@ -202,7 +205,7 @@ CREATE [IF NOT EXISTS] CODEC notification_proto
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
   MESSAGE 'nervix.test.Notification'
   TO SCHEMA notification
-  WITH JAQ TRANSFORMATION '{user_id: .user_id, payload: .payload}';
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id: .user_id, payload: .payload}';
 ```
 
 The resource contains the `.proto` files. `CONFIG` declares compile parameters; `file`/`files` select source files and `include`/`includes` select import roots, all relative to the resource root. If no file is listed, all `.proto` files in the resource are compiled.
@@ -243,7 +246,7 @@ Semantics:
 - no-wire codecs must use `FROM JSON|YAML|TOML|XML|CBOR ... WITH JAQ ...`
 - protobuf codecs must use `FROM PROTOBUF USING RESOURCE ... CONFIG {...} MESSAGE ... WITH JAQ ...`
 - schemaful codecs must use `FROM WIRE JSON|CBOR|AVRO SCHEMA ...` and do not carry JAQ transforms
-- `WITH JAQ TRANSFORMATION '<program>'` is shorthand for an ingestion transform
+- `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order
 - `ON INGESTION` runs after parsing the native/protobuf payload and must yield exactly one JSON object compatible with the internal schema
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 

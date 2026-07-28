@@ -98,7 +98,7 @@ CREATE SCHEMA device_activity (
 CREATE CODEC device_activity_cbor_codec
   FROM CBOR
   TO SCHEMA device_activity
-  WITH JAQ TRANSFORMATION '.'
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.'
   ENCODE ts AS RFC3339;
 
 CREATE SCHEMA edge_activity (
@@ -121,7 +121,7 @@ CREATE CODEC edge_activity_protobuf_codec
   CONFIG {'file' = 'edge_activity.proto', 'include' = '.'}
   MESSAGE 'nervix.examples.datalake.EdgeActivity'
   TO SCHEMA edge_activity
-  WITH JAQ TRANSFORMATION '.'
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.'
   ENCODE ts AS RFC3339;
 
 CREATE SCHEMA auth_activity (

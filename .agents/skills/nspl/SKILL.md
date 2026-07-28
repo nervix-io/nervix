@@ -70,6 +70,8 @@ INGESTOR`, use a complete transport-specific source body after `SET FROM`.
   optional destination.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
+- For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
+  `ON EMITTING`, or both in that order. At least one direction is required.
 - Preserve written operation order in schema, relay, junction, deduplicator, reorderer, emitter, and
   ingestor ALTER
   statements.
