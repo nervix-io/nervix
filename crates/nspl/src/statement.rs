@@ -148,6 +148,8 @@ pub fn statement_parser<'src>()
         crate::reorderer::alter_reorderer_parser().map(Statement::AlterReorderer),
         crate::emitter::alter_emitter_parser().map(Statement::AlterEmitter),
         crate::ingestor::alter_ingestor_parser().map(Statement::AlterIngestor),
+        crate::reingestor::alter_reingestor_parser().map(Statement::AlterReingestor),
+        crate::generator::alter_generator_parser().map(Statement::AlterGenerator),
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
@@ -1154,6 +1156,8 @@ mod tests {
         assert!(suggestions.contains(&"REORDERER".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(suggestions.contains(&"INGESTOR".to_string()));
+        assert!(suggestions.contains(&"REINGESTOR".to_string()));
+        assert!(suggestions.contains(&"GENERATOR".to_string()));
         assert!(suggestions.contains(&"SCHEMA".to_string()));
         assert!(suggestions.contains(&"WIRE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1999,6 +2003,40 @@ mod tests {
         let canonical = alter.to_canonical_nspl().expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::AlterIngestor(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_reingestor() {
+        let parsed = parse_statement(
+            "ALTER REINGESTOR repartition ADD FROM incoming_b WHERE input.active, SET FILTER \
+             WHERE concat(input.tenant, ',') != '', SET DETACHED, REPLACE ROUTE TO outgoing \
+             INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterReingestor(alter) = parsed else {
+            panic!("expected ALTER REINGESTOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterReingestor(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_generator() {
+        let parsed = parse_statement(
+            "ALTER GENERATOR synth SET MATERIALIZED STATE state_v2, SET EACH 250ms, SET \
+             UNBRANCHED, REPLACE ROUTE TO outgoing SET value = relay_state.state_v2.value FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterGenerator(alter) = parsed else {
+            panic!("expected ALTER GENERATOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterGenerator(alter), reparsed);
     }
 
     #[test]

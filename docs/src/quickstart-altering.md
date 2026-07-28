@@ -2,14 +2,16 @@
 
 Nothing built so far required tearing anything down — every step added nodes. `ALTER` statements
 change what already exists: junction logic, relay properties, schemas, ingestor sources, emitter
-sinks. Nervix classifies each validated change and pauses as little as possible — the statement
-result reports the executed level
+sinks, stateful processor behavior, reingestor wiring, and generator cadence or routes. Nervix
+classifies each validated change and pauses as little as possible — the statement result reports
+the executed level
 ([ALTER Lock And Quiesce Classification](control-plane.md#alter-lock-and-quiesce-classification)):
 
 - `DYNAMIC` — hot-applied; nothing pauses (relay capacity, junction filters and route logic,
-  emitter flush policy)
+  deduplicator or reorderer `MAX TIME`, emitter flush policy)
 - `ENTITY_PAUSE` — only the affected node or relay is gated and drained (topology changes,
-  ingestor and emitter reconfiguration, relay materialized state — the `ALTER RELAY` in
+  deduplication keys, reorderer ordering, ingestor, reingestor, generator, and emitter
+  reconfiguration, relay materialized state — the `ALTER RELAY` in
   [Generators](./quickstart-generators.md) ran at this level)
 - `DOMAIN_PAUSE` — domain ingestion stops, in-flight work drains, the new graph is installed
   atomically, and flow resumes (schema and branching changes)
@@ -83,6 +85,10 @@ Two rules worth knowing before you lean on this:
 Ingestors and emitters have their own operation sets —
 [Altering Ingestors](ingestors.md#altering-ingestors) (every ingestor change is entity-pause) and
 [Altering Emitters](emitters.md#altering-emitters) (flush changes are dynamic; sink, client, and
-codec changes are entity-pause).
+codec changes are entity-pause). Processor operations are covered under
+[Altering Deduplicators](processors.md#altering-deduplicators),
+[Altering Reorderers](processors.md#altering-reorderers),
+[Altering Reingestors](processors.md#altering-reingestors), and
+[Altering Generators](processors.md#altering-generators).
 
 Next: run the graph on a logical clock in [Paced Domains](./quickstart-paced-domains.md).

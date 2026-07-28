@@ -128,6 +128,22 @@ ALTER INGESTOR <name>
   SET GENERAL ERROR IGNORE|LOG
   [, ...];
 
+ALTER REINGESTOR <name>
+  ADD|DROP|ALTER FROM ... |
+  SET|DROP COLLECT ... |
+  SET|DROP FILTER WHERE ... |
+  SET ATTACHED | SET DETACHED |
+  ADD|DROP|ALTER MATERIALIZED STATE ... |
+  ADD|DROP|REPLACE ROUTE TO <relay> <construction> BRANCHED BY <branch>|UNBRANCHED ...
+  [, ...];
+
+ALTER GENERATOR <name>
+  SET MATERIALIZED STATE <relay> |
+  SET EACH <duration> |
+  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  ADD|DROP|REPLACE ROUTE ...
+  [, ...];
+
 ALTER SCHEMA <name>
   ADD FIELD <field> <type> [OPTIONAL] [SENSITIVE],
   DROP FIELD <field>,
@@ -146,7 +162,8 @@ ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
 ```
 
 Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER REORDERER`,
-`ALTER EMITTER`, or `ALTER INGESTOR` execute in written order. See
+`ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, or `ALTER GENERATOR` execute in written
+order. See
 [Streams And State](relay.md#altering-relays) for relay operations,
 [Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and

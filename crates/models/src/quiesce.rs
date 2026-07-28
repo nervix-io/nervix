@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, IntoStaticStr};
 
 use crate::{
-    CreateDeduplicator, CreateEmitter, CreateIngestor, CreateJunction, CreateRelay,
-    CreateReorderer, CreateSchema, CreateWireSchemaStmt, EmitSink, Identifier, MessageErrorPolicy,
-    Model, ModelKind, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchemaStmt, EmitSink,
+    Identifier, MessageErrorPolicy, Model, ModelKind, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs,
 };
 
 #[derive(
@@ -91,6 +92,15 @@ pub enum ModelChangeAspect {
     IngestorFilter,
     IngestorRoutes,
     IngestorGeneralError,
+    ReingestorInputs,
+    ReingestorRoutes,
+    ReingestorMode,
+    ReingestorFilter,
+    ReingestorMaterializedState,
+    GeneratorMaterializedState,
+    GeneratorCadence,
+    GeneratorBranching,
+    GeneratorRoutes,
     SchemaDefinition,
     WireSchemaDefinition,
     EntityReplaced,
@@ -136,7 +146,16 @@ impl ModelChangeAspect {
             | Self::IngestorTimestamp
             | Self::IngestorFilter
             | Self::IngestorRoutes
-            | Self::IngestorGeneralError => QuiesceLevel::EntityPause,
+            | Self::IngestorGeneralError
+            | Self::ReingestorInputs
+            | Self::ReingestorRoutes
+            | Self::ReingestorMode
+            | Self::ReingestorFilter
+            | Self::ReingestorMaterializedState
+            | Self::GeneratorMaterializedState
+            | Self::GeneratorCadence
+            | Self::GeneratorBranching
+            | Self::GeneratorRoutes => QuiesceLevel::EntityPause,
             Self::RelaySchema
             | Self::RelayBranching
             | Self::EmitterInput
@@ -218,6 +237,12 @@ impl Model {
             (Self::Ingestor(base), Self::Ingestor(candidate)) => {
                 ingestor_change_aspects(base, candidate)
             }
+            (Self::Reingestor(base), Self::Reingestor(candidate)) => {
+                reingestor_change_aspects(base, candidate)
+            }
+            (Self::Generator(base), Self::Generator(candidate)) => {
+                generator_change_aspects(base, candidate)
+            }
             (Self::Schema(base), Self::Schema(candidate)) => {
                 let CreateSchema {
                     name: base_name,
@@ -283,6 +308,89 @@ impl Model {
             | (Self::WireSchema(_), _) => ModelChangeAspects::replaced(),
         }
     }
+}
+
+fn reingestor_change_aspects(
+    base: &CreateReingestor,
+    candidate: &CreateReingestor,
+) -> ModelChangeAspects {
+    let CreateReingestor {
+        name: base_name,
+        from: base_from,
+        output_routes: base_outputs,
+        mode: base_mode,
+        materialized_state: base_materialized_state,
+        filter_where: base_filter,
+    } = base;
+    let CreateReingestor {
+        name: candidate_name,
+        from: candidate_from,
+        output_routes: candidate_outputs,
+        mode: candidate_mode,
+        materialized_state: candidate_materialized_state,
+        filter_where: candidate_filter,
+    } = candidate;
+
+    if base_name != candidate_name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    if base_from != candidate_from {
+        changes.push(ModelChangeAspect::ReingestorInputs);
+    }
+    if base_outputs != candidate_outputs {
+        changes.push(ModelChangeAspect::ReingestorRoutes);
+    }
+    if base_mode != candidate_mode {
+        changes.push(ModelChangeAspect::ReingestorMode);
+    }
+    if base_filter != candidate_filter {
+        changes.push(ModelChangeAspect::ReingestorFilter);
+    }
+    if base_materialized_state != candidate_materialized_state {
+        changes.push(ModelChangeAspect::ReingestorMaterializedState);
+    }
+    changes
+}
+
+fn generator_change_aspects(
+    base: &CreateGenerator,
+    candidate: &CreateGenerator,
+) -> ModelChangeAspects {
+    let CreateGenerator {
+        name: base_name,
+        materialized_relay: base_materialized_relay,
+        branched_by: base_branching,
+        each: base_each,
+        output_routes: base_outputs,
+    } = base;
+    let CreateGenerator {
+        name: candidate_name,
+        materialized_relay: candidate_materialized_relay,
+        branched_by: candidate_branching,
+        each: candidate_each,
+        output_routes: candidate_outputs,
+    } = candidate;
+
+    if base_name != candidate_name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    if base_materialized_relay != candidate_materialized_relay {
+        changes.push(ModelChangeAspect::GeneratorMaterializedState);
+    }
+    if base_each != candidate_each {
+        changes.push(ModelChangeAspect::GeneratorCadence);
+    }
+    if base_branching != candidate_branching {
+        changes.push(ModelChangeAspect::GeneratorBranching);
+    }
+    if base_outputs != candidate_outputs {
+        changes.push(ModelChangeAspect::GeneratorRoutes);
+    }
+    changes
 }
 
 fn ingestor_change_aspects(
@@ -1043,13 +1151,13 @@ fn wire_schema_change_aspects(
 #[cfg(test)]
 mod tests {
     use crate::{
-        AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateIngestor,
-        CreateJunction, CreateRelay, CreateReorderer, EmitSink, EndpointIngestMode, ErrorPolicies,
-        GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource, InputCollectPolicy,
-        Literal, MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-        MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputFlushPolicy,
-        ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
-        RelayBranching,
+        AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
+        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
+        EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource,
+        IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
+        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+        ModelChangeAspect, ModelKind, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -1133,6 +1241,35 @@ mod tests {
             mode: AckMode::Attached,
             construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),
+        }
+    }
+
+    fn reingestor() -> CreateReingestor {
+        CreateReingestor {
+            name: identifier("repartition"),
+            from: ProcessorInputs::single(identifier("input")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                identifier("output"),
+                "1s".to_string(),
+                Some("1MiB".to_string()),
+            )]),
+            mode: AckMode::Attached,
+            materialized_state: Vec::new(),
+            filter_where: None,
+        }
+    }
+
+    fn generator() -> CreateGenerator {
+        CreateGenerator {
+            name: identifier("synth"),
+            materialized_relay: identifier("state"),
+            branched_by: BranchSelection::unbranched(),
+            each: "1s".to_string(),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                identifier("output"),
+                "1s".to_string(),
+                Some("1MiB".to_string()),
+            )]),
         }
     }
 
@@ -1574,5 +1711,133 @@ mod tests {
                 QuiesceLevel::EntityPause,
             );
         }
+    }
+
+    #[test]
+    fn every_reingestor_aspect_requires_entity_pause() {
+        let base = reingestor();
+        let cases = [
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.from.from.push(identifier("secondary"));
+                    candidate
+                },
+                ModelChangeAspect::ReingestorInputs,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.output_routes.routes[0]
+                        .flush_policy
+                        .as_mut()
+                        .expect("test route has a flush policy")
+                        .flush_each = "2s".to_string();
+                    candidate
+                },
+                ModelChangeAspect::ReingestorRoutes,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.mode = AckMode::Detached;
+                    candidate
+                },
+                ModelChangeAspect::ReingestorMode,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.filter_where =
+                        Some(crate::Expression::Literal(crate::Literal::Bool(true)));
+                    candidate
+                },
+                ModelChangeAspect::ReingestorFilter,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate
+                        .materialized_state
+                        .push(MaterializedStateDependency {
+                            relay: identifier("state"),
+                            policy: MaterializedStatePolicy::RequiredSkip,
+                        });
+                    candidate
+                },
+                ModelChangeAspect::ReingestorMaterializedState,
+            ),
+        ];
+
+        for (candidate, aspect) in cases {
+            assert_single_aspect(
+                Model::Reingestor(base.clone()),
+                Model::Reingestor(candidate),
+                aspect,
+                QuiesceLevel::EntityPause,
+            );
+        }
+        assert!(
+            Model::Reingestor(base.clone())
+                .change_aspects_against(&Model::Reingestor(base))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn every_generator_aspect_requires_entity_pause() {
+        let base = generator();
+        let cases = [
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.materialized_relay = identifier("state_v2");
+                    candidate
+                },
+                ModelChangeAspect::GeneratorMaterializedState,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.each = "2s".to_string();
+                    candidate
+                },
+                ModelChangeAspect::GeneratorCadence,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.branched_by = BranchSelection::branched_by(identifier("tenant"));
+                    candidate
+                },
+                ModelChangeAspect::GeneratorBranching,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.output_routes.routes[0]
+                        .flush_policy
+                        .as_mut()
+                        .expect("test route has a flush policy")
+                        .flush_each = "2s".to_string();
+                    candidate
+                },
+                ModelChangeAspect::GeneratorRoutes,
+            ),
+        ];
+
+        for (candidate, aspect) in cases {
+            assert_single_aspect(
+                Model::Generator(base.clone()),
+                Model::Generator(candidate),
+                aspect,
+                QuiesceLevel::EntityPause,
+            );
+        }
+        assert!(
+            Model::Generator(base.clone())
+                .change_aspects_against(&Model::Generator(base))
+                .is_empty()
+        );
     }
 }

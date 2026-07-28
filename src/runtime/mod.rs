@@ -469,6 +469,8 @@ struct DomainExecution {
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
     node_tasks: HashMap<RegistryEntity, ScheduledNodeTask>,
     emitter_tasks: HashMap<RegistryEntity, ScheduledEmitterTask>,
+    generator_tasks: HashMap<RegistryEntity, JoinHandle<()>>,
+    reingestor_tasks: HashMap<RegistryEntity, Vec<JoinHandle<()>>>,
     clients: HashMap<Identifier, Arc<Model>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -1892,6 +1894,7 @@ struct RuntimeTaskInputBranchCollection {
 }
 
 impl RuntimeTaskInputCollection {
+    #[cfg(test)]
     fn new(policy: Option<RuntimeInputCollectPolicy>) -> Self {
         Self {
             policy,
