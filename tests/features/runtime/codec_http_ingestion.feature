@@ -283,7 +283,7 @@ Feature: HTTP codec ingestion
         CREATE CODEC metrics_codec
         FROM <wire_format>
         TO SCHEMA metrics
-        WITH JAQ TRANSFORMATION '.';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
         CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
         CREATE IF NOT EXISTS BRANCH by_metrics_ingestor SCHEMA device_branch TTL 5m;
         CREATE RELAY metrics_stream SCHEMA metrics BRANCHED BY by_metrics_ingestor;
@@ -336,7 +336,7 @@ Feature: HTTP codec ingestion
         CREATE CODEC notification_codec
         FROM <wire_format>
         TO SCHEMA notification
-        WITH JAQ TRANSFORMATION '.';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;

@@ -44,7 +44,9 @@ CREATE [IF NOT EXISTS] CODEC <name>
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM JSON|YAML|TOML|XML|CBOR
   TO SCHEMA <schema>
-  WITH JAQ TRANSFORMATION '<program>';
+  WITH JAQ TRANSFORMATIONS
+  [ON INGESTION '<program>']
+  [ON EMITTING '<program>'];
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM PROTOBUF
@@ -52,11 +54,16 @@ CREATE [IF NOT EXISTS] CODEC <name>
   CONFIG {'file' = '<path.proto>', 'include' = '.'}
   MESSAGE '<package.Message>'
   TO SCHEMA <schema>
-  WITH JAQ TRANSFORMATION '<program>';
+  WITH JAQ TRANSFORMATIONS
+  [ON INGESTION '<program>']
+  [ON EMITTING '<program>'];
 
 CREATE [IF NOT EXISTS] RELAY <name> SCHEMA <schema> [CAPACITY <n>]
   [WITH MATERIALIZED STATE LAST BY TIMESTAMP];
 ```
+
+JAQ-backed codecs require at least one direction. When both are present, `ON INGESTION` precedes
+`ON EMITTING`.
 
 Core alter statements:
 

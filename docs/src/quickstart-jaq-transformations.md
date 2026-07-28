@@ -23,7 +23,7 @@ BEGIN;
 CREATE CODEC partner_order_codec
   FROM JSON
   TO SCHEMA order_record
-  WITH JAQ TRANSFORMATION '{
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{
     order_id: .order.id,
     customer: .order.customer,
     status: .order.state,
@@ -32,9 +32,8 @@ CREATE CODEC partner_order_codec
   }';
 ```
 
-The singular `WITH JAQ TRANSFORMATION` declares the **ingestion** direction only, so this codec
-decodes but cannot encode. A bidirectional codec spells both programs out:
-`WITH JAQ TRANSFORMATIONS ON INGESTION '...' ON EMITTING '...'`
+The explicit `ON INGESTION` direction means this codec decodes but cannot encode. A bidirectional
+codec adds `ON EMITTING '<program>'` after the ingestion program
 ([JAQ Transformations](schemas-and-codecs.md#jaq-transformations)). `FROM` accepts `JSON`, `YAML`,
 `TOML`, `XML`, and `CBOR`.
 
