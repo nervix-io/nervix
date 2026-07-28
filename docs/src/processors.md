@@ -202,6 +202,34 @@ CREATE DEDUPLICATOR unique_notifications
 Deduplication state is branch-local. Duplicate details are logged at `debug` or `trace`, never at
 `info`.
 
+### Altering Deduplicators
+
+`ALTER DEDUPLICATOR` applies comma-separated operations in written order:
+
+```nspl
+ALTER DEDUPLICATOR unique_notifications
+  SET DEDUPLICATE ON input.tenant, input.external_id,
+  SET MAX TIME 30m,
+  SET FILTER WHERE input.active,
+  REPLACE ROUTE TO unique_events
+    INHERIT ALL
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+```
+
+The deduplicator-specific operations are `SET DEDUPLICATE ON <expr>, ...` and
+`SET MAX TIME <duration>`. It also supports the junction-style input, collection, filter,
+attachment, branching, materialized-state, and route operations described above. A processor must
+retain at least one input and one route. Duplicate materialized dependencies are rejected, and
+drop/replace route operations require a unique target when multiple routes use the same relay.
+
+Changing only `MAX TIME`, filters, per-input `WHERE`, collection, route construction/flush, or a
+same-target message-error policy is dynamic. Changing the deduplication expressions is an
+entity-pause operation: Nervix gates and drains the input relays, stops the old task, purges its
+branch-local and persisted deduplication keyspace, then starts the replacement. Input/route
+topology, attachment, branching, dependencies, and changed error-route targets also use entity
+pause.
+
 ## Reorderer
 
 ```nspl
@@ -218,6 +246,29 @@ CREATE REORDERER ordered_notifications
 
 Ordering buffers and maximum-time release are independent per concrete branch.
 
+### Altering Reorderers
+
+`ALTER REORDERER` uses the same ordered common processor operations, plus `SET BY` and
+`SET MAX TIME`:
+
+```nspl
+ALTER REORDERER ordered_notifications
+  SET BY input.priority, input.occurred_at, input.sequence,
+  SET MAX TIME 10s,
+  SET COLLECT FOR 25ms MAX BATCH SIZE 1MiB,
+  SET ATTACHED;
+```
+
+`SET BY <expr>, ...` replaces the complete ordering expression list. `SET MAX TIME <duration>`
+changes only the maximum holding time. The shared input, filter, route, materialized-state,
+attachment, and branching operations have the same validation and ordering semantics as
+deduplicators and junctions.
+
+`MAX TIME` and the shared expression/configuration-only aspects are dynamic. Changing `BY` uses
+entity pause: the old ordering buffers are force-flushed while the input relays are gated, then the
+node task is replaced with the new ordering program. Structural shared operations also use entity
+pause.
+
 ## Window processor
 
 Windows are set-only. Aggregates appear directly in route `SET`; there is no `AGGREGATE` clause.
@@ -227,8 +278,8 @@ Windows are set-only. Aggregates appear directly in route `SET`; there is no `AG
 CREATE WINDOW PROCESSOR latency_windows
   FROM latencies
   FILTER WHERE input.latency >= 0
-  WIDTH 5m
-  STEP 1m
+  WIDTH 5m DURATION
+  STEP 1m DURATION
   BRANCHED BY by_tenant
   TO latency_summary
     SET count = COUNT(input.latency),
@@ -305,7 +356,7 @@ CREATE CORRELATOR correlate_orders
   CORRELATE WHERE left.order_id = right.order_id
   MATCH EARLIEST
   MAX TIME 5m
-  ON CORRELATION TIMEOUT IGNORE, IGNORE
+  ON CORRELATION TIMEOUT DROP, DROP
   BRANCHED BY by_tenant
   TO paid_orders
     SET order_id = left.order_id,
@@ -342,6 +393,77 @@ preserved. State lookup always uses the incoming branch, never a partially const
 key. The reingestor resolves the outgoing branch before buffering the route, so each concrete
 outgoing branch has an independent flush interval and size boundary. Downstream branch execution
 receives the completed Arrow batch and does not apply a second flush policy.
+
+### Altering Reingestors
+
+`ALTER REINGESTOR` applies the shared input, collection, filter, attachment, materialized-state,
+and route operations in written order:
+
+```nspl
+ALTER REINGESTOR repartition_events
+  ADD FROM priority_events WHERE input.active,
+  SET COLLECT FOR 25ms MAX BATCH SIZE 1MiB,
+  SET FILTER WHERE input.amount > 0,
+  SET DETACHED,
+  REPLACE ROUTE TO by_user_events
+    INHERIT ALL
+    BRANCHED BY by_user
+    SET tenant = message.tenant,
+        user_id = message.user_id
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+```
+
+The input, collection, filter, attachment, and materialized-state forms are the same as for
+junctions. Route add/replace bodies include the reingestor's required per-route `BRANCHED BY ...`
+or `UNBRANCHED` construction. Reingestors do not have a node-wide branching operation.
+
+Every reingestor change uses entity pause because inputs, route construction, attachment, and
+dependency changes affect its relay consumers or branch-entrypoint wiring. Nervix gates both old
+and desired input relays, force-flushes collected input, drains node work, stops only the affected
+reingestor tasks, rebuilds their branch entrypoints, and reconnects their relay consumers. Other
+domain nodes continue to run.
+
+## Generator
+
+Generators run from a materialized relay on a domain-clock cadence. Their routes are set-only:
+
+```nspl
+CREATE GENERATOR synth_notifications
+  USING MATERIALIZED STATE notifications
+  EACH 100ms
+  UNBRANCHED
+  TO generated_notifications
+    SET user_id = relay_state.notifications.user_id,
+        amount = relay_state.notifications.amount
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+```
+
+### Altering Generators
+
+`ALTER GENERATOR` supports `SET MATERIALIZED STATE <relay>`, `SET EACH <duration>`,
+`SET BRANCHED BY <branch>`, `SET UNBRANCHED`, and the ordered `ADD ROUTE`, `DROP ROUTE`, and
+`REPLACE ROUTE` operations:
+
+```nspl
+ALTER GENERATOR synth_notifications
+  SET EACH 250ms,
+  REPLACE ROUTE TO generated_notifications
+    SET user_id = relay_state.notifications.user_id,
+        amount = relay_state.notifications.amount
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+```
+
+Generator route bodies remain set-only and must contain at least one `SET` assignment. Drop and
+replace require a unique target when duplicate target relays exist, and the generator must retain
+at least one route.
+
+Every generator change uses entity pause. Nervix gates its old and desired materialized source
+relays, lets the old timed task force-flush pending route output, waits until that task reports
+quiescent, then replaces only that generator task from the published schedule. The gate has a
+deadline expiry backstop, so a failed control-plane operation cannot leave generation wedged.
 
 ## Message errors
 

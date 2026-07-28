@@ -85,6 +85,30 @@ ALTER JUNCTION <name>
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
 
+ALTER DEDUPLICATOR <name>
+  SET DEDUPLICATE ON <expr> [, <expr> ...] |
+  SET MAX TIME <duration> |
+  ADD|DROP|ALTER FROM ... |
+  SET|DROP COLLECT ... |
+  SET|DROP FILTER WHERE ... |
+  SET ATTACHED | SET DETACHED |
+  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  ADD|DROP|ALTER MATERIALIZED STATE ... |
+  ADD|DROP|REPLACE ROUTE ...
+  [, ...];
+
+ALTER REORDERER <name>
+  SET BY <expr> [, <expr> ...] |
+  SET MAX TIME <duration> |
+  ADD|DROP|ALTER FROM ... |
+  SET|DROP COLLECT ... |
+  SET|DROP FILTER WHERE ... |
+  SET ATTACHED | SET DETACHED |
+  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  ADD|DROP|ALTER MATERIALIZED STATE ... |
+  ADD|DROP|REPLACE ROUTE ...
+  [, ...];
+
 ALTER EMITTER <name>
   SET TO <sink> |
   SET CLIENT <client> |
@@ -104,6 +128,22 @@ ALTER INGESTOR <name>
   SET GENERAL ERROR IGNORE|LOG
   [, ...];
 
+ALTER REINGESTOR <name>
+  ADD|DROP|ALTER FROM ... |
+  SET|DROP COLLECT ... |
+  SET|DROP FILTER WHERE ... |
+  SET ATTACHED | SET DETACHED |
+  ADD|DROP|ALTER MATERIALIZED STATE ... |
+  ADD|DROP|REPLACE ROUTE TO <relay> <construction> BRANCHED BY <branch>|UNBRANCHED ...
+  [, ...];
+
+ALTER GENERATOR <name>
+  SET MATERIALIZED STATE <relay> |
+  SET EACH <duration> |
+  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  ADD|DROP|REPLACE ROUTE ...
+  [, ...];
+
 ALTER SCHEMA <name>
   ADD FIELD <field> <type> [OPTIONAL] [SENSITIVE],
   DROP FIELD <field>,
@@ -121,10 +161,11 @@ ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
   SET STRICT|LOOSE;
 ```
 
-Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER EMITTER`, or `ALTER INGESTOR` execute in
-written order. See
+Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER REORDERER`,
+`ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, or `ALTER GENERATOR` execute in written
+order. See
 [Streams And State](relay.md#altering-relays) for relay operations,
-[Processors](processors.md#altering-junctions) for the full junction operation shapes, and
+[Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
 [Ingestors](ingestors.md#altering-ingestors) for boundary-node operations. See
 [Schemas And Codecs](schemas-and-codecs.md#altering-schemas) for ordered schema changes and atomic

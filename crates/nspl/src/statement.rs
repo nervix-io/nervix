@@ -144,8 +144,12 @@ pub fn statement_parser<'src>()
         crate::schema::alter_wire_schema_parser_any().map(Statement::AlterWireSchema),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
         crate::junction::alter_junction_parser().map(Statement::AlterJunction),
+        crate::deduplicator::alter_deduplicator_parser().map(Statement::AlterDeduplicator),
+        crate::reorderer::alter_reorderer_parser().map(Statement::AlterReorderer),
         crate::emitter::alter_emitter_parser().map(Statement::AlterEmitter),
         crate::ingestor::alter_ingestor_parser().map(Statement::AlterIngestor),
+        crate::reingestor::alter_reingestor_parser().map(Statement::AlterReingestor),
+        crate::generator::alter_generator_parser().map(Statement::AlterGenerator),
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
@@ -1147,8 +1151,13 @@ mod tests {
         let input = "ALTER ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"RELAY".to_string()));
+        assert!(suggestions.contains(&"JUNCTION".to_string()));
+        assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
+        assert!(suggestions.contains(&"REORDERER".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(suggestions.contains(&"INGESTOR".to_string()));
+        assert!(suggestions.contains(&"REINGESTOR".to_string()));
+        assert!(suggestions.contains(&"GENERATOR".to_string()));
         assert!(suggestions.contains(&"SCHEMA".to_string()));
         assert!(suggestions.contains(&"WIRE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1928,6 +1937,40 @@ mod tests {
     }
 
     #[test]
+    fn canonical_roundtrip_alter_deduplicator() {
+        let parsed = parse_statement(
+            "ALTER DEDUPLICATOR dedup_events ADD FROM incoming_b WHERE input.active, SET \
+             DEDUPLICATE ON concat(input.tenant, ','), input.id, SET MAX TIME 20m, ADD ROUTE TO \
+             audit INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterDeduplicator(alter) = parsed else {
+            panic!("expected ALTER DEDUPLICATOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterDeduplicator(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_reorderer() {
+        let parsed = parse_statement(
+            "ALTER REORDERER order_events ADD FROM incoming_b WHERE input.active, SET BY \
+             concat(input.tenant, ','), input.id, SET MAX TIME 20m, ADD ROUTE TO audit INHERIT \
+             ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterReorderer(alter) = parsed else {
+            panic!("expected ALTER REORDERER");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterReorderer(alter), reparsed);
+    }
+
+    #[test]
     fn canonical_roundtrip_alter_emitter() {
         let parsed = parse_statement(
             "ALTER EMITTER event_sink SET TO ZEROMQ sink_b, SET CLIENT sink_c, SET ENCODE USING \
@@ -1960,6 +2003,40 @@ mod tests {
         let canonical = alter.to_canonical_nspl().expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::AlterIngestor(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_reingestor() {
+        let parsed = parse_statement(
+            "ALTER REINGESTOR repartition ADD FROM incoming_b WHERE input.active, SET FILTER \
+             WHERE concat(input.tenant, ',') != '', SET DETACHED, REPLACE ROUTE TO outgoing \
+             INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterReingestor(alter) = parsed else {
+            panic!("expected ALTER REINGESTOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterReingestor(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_generator() {
+        let parsed = parse_statement(
+            "ALTER GENERATOR synth SET MATERIALIZED STATE state_v2, SET EACH 250ms, SET \
+             UNBRANCHED, REPLACE ROUTE TO outgoing SET value = relay_state.state_v2.value FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterGenerator(alter) = parsed else {
+            panic!("expected ALTER GENERATOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterGenerator(alter), reparsed);
     }
 
     #[test]

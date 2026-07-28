@@ -71,7 +71,7 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    actions.
 4. **Graph transaction:** wrap multiple domain-owned server statements in `BEGIN;` and `COMMIT;`.
    A consecutive one-domain model-mutation run is one atomic candidate-graph update, including
-   mixed `CREATE`, schema or relay `ALTER`, and `DROP`.
+   mixed `CREATE`, supported model `ALTER`, and `DROP`.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended.
 
 Within the graph transaction, declare dependencies before consumers:

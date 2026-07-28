@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, IntoStaticStr};
 
 use crate::{
-    CreateEmitter, CreateIngestor, CreateJunction, CreateRelay, CreateSchema, CreateWireSchemaStmt,
-    EmitSink, Identifier, MessageErrorPolicy, Model, ProcessorInputs, ProcessorOutput,
+    CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchemaStmt, EmitSink,
+    Identifier, MessageErrorPolicy, Model, ModelKind, ProcessorInputs, ProcessorOutput,
     ProcessorOutputs,
 };
 
@@ -43,9 +44,9 @@ pub enum DynamicModelUpdate {
         relay: Identifier,
         capacity: usize,
     },
-    Junction {
-        junction: Identifier,
-        config: CreateJunction,
+    Processor {
+        kind: ModelKind,
+        processor: Identifier,
     },
     Emitter {
         emitter: Identifier,
@@ -59,18 +60,22 @@ pub enum ModelChangeAspect {
     RelaySchema,
     RelayBranching,
     RelayMaterializedState,
-    JunctionFilter,
-    JunctionInputWhere,
-    JunctionRouteConstruction,
-    JunctionRouteFlushPolicy,
-    JunctionCollectPolicy,
-    JunctionMessageErrorPolicy,
-    JunctionErrorRouteTargets,
-    JunctionInputs,
-    JunctionRoutes,
-    JunctionMode,
-    JunctionBranching,
-    JunctionMaterializedState,
+    ProcessorFilter,
+    ProcessorInputWhere,
+    ProcessorRouteConstruction,
+    ProcessorRouteFlushPolicy,
+    ProcessorCollectPolicy,
+    ProcessorMessageErrorPolicy,
+    ProcessorErrorRouteTargets,
+    ProcessorInputs,
+    ProcessorRoutes,
+    ProcessorMode,
+    ProcessorBranching,
+    ProcessorMaterializedState,
+    DeduplicatorKeyspace,
+    DeduplicatorMaxTime,
+    ReordererOrdering,
+    ReordererMaxTime,
     EmitterInput,
     EmitterSink,
     EmitterClient,
@@ -87,6 +92,15 @@ pub enum ModelChangeAspect {
     IngestorFilter,
     IngestorRoutes,
     IngestorGeneralError,
+    ReingestorInputs,
+    ReingestorRoutes,
+    ReingestorMode,
+    ReingestorFilter,
+    ReingestorMaterializedState,
+    GeneratorMaterializedState,
+    GeneratorCadence,
+    GeneratorBranching,
+    GeneratorRoutes,
     SchemaDefinition,
     WireSchemaDefinition,
     EntityReplaced,
@@ -98,23 +112,27 @@ impl ModelChangeAspect {
     pub const fn quiesce_level(self) -> QuiesceLevel {
         match self {
             Self::RelayCapacity
-            | Self::JunctionFilter
-            | Self::JunctionInputWhere
-            | Self::JunctionRouteConstruction
-            | Self::JunctionRouteFlushPolicy
-            | Self::JunctionCollectPolicy
-            | Self::JunctionMessageErrorPolicy
+            | Self::ProcessorFilter
+            | Self::ProcessorInputWhere
+            | Self::ProcessorRouteConstruction
+            | Self::ProcessorRouteFlushPolicy
+            | Self::ProcessorCollectPolicy
+            | Self::ProcessorMessageErrorPolicy
+            | Self::DeduplicatorMaxTime
+            | Self::ReordererMaxTime
             | Self::EmitterFlushPolicy
             | Self::EntityReplaced
             | Self::EntityCreated
             | Self::EntityDropped => QuiesceLevel::Dynamic,
             Self::RelayMaterializedState
-            | Self::JunctionErrorRouteTargets
-            | Self::JunctionInputs
-            | Self::JunctionRoutes
-            | Self::JunctionMode
-            | Self::JunctionBranching
-            | Self::JunctionMaterializedState
+            | Self::ProcessorErrorRouteTargets
+            | Self::ProcessorInputs
+            | Self::ProcessorRoutes
+            | Self::ProcessorMode
+            | Self::ProcessorBranching
+            | Self::ProcessorMaterializedState
+            | Self::DeduplicatorKeyspace
+            | Self::ReordererOrdering
             | Self::EmitterSink
             | Self::EmitterClient
             | Self::EmitterCodec
@@ -128,7 +146,16 @@ impl ModelChangeAspect {
             | Self::IngestorTimestamp
             | Self::IngestorFilter
             | Self::IngestorRoutes
-            | Self::IngestorGeneralError => QuiesceLevel::EntityPause,
+            | Self::IngestorGeneralError
+            | Self::ReingestorInputs
+            | Self::ReingestorRoutes
+            | Self::ReingestorMode
+            | Self::ReingestorFilter
+            | Self::ReingestorMaterializedState
+            | Self::GeneratorMaterializedState
+            | Self::GeneratorCadence
+            | Self::GeneratorBranching
+            | Self::GeneratorRoutes => QuiesceLevel::EntityPause,
             Self::RelaySchema
             | Self::RelayBranching
             | Self::EmitterInput
@@ -198,11 +225,23 @@ impl Model {
             (Self::Junction(base), Self::Junction(candidate)) => {
                 junction_change_aspects(base, candidate)
             }
+            (Self::Deduplicator(base), Self::Deduplicator(candidate)) => {
+                deduplicator_change_aspects(base, candidate)
+            }
+            (Self::Reorderer(base), Self::Reorderer(candidate)) => {
+                reorderer_change_aspects(base, candidate)
+            }
             (Self::Emitter(base), Self::Emitter(candidate)) => {
                 emitter_change_aspects(base, candidate)
             }
             (Self::Ingestor(base), Self::Ingestor(candidate)) => {
                 ingestor_change_aspects(base, candidate)
+            }
+            (Self::Reingestor(base), Self::Reingestor(candidate)) => {
+                reingestor_change_aspects(base, candidate)
+            }
+            (Self::Generator(base), Self::Generator(candidate)) => {
+                generator_change_aspects(base, candidate)
             }
             (Self::Schema(base), Self::Schema(candidate)) => {
                 let CreateSchema {
@@ -269,6 +308,89 @@ impl Model {
             | (Self::WireSchema(_), _) => ModelChangeAspects::replaced(),
         }
     }
+}
+
+fn reingestor_change_aspects(
+    base: &CreateReingestor,
+    candidate: &CreateReingestor,
+) -> ModelChangeAspects {
+    let CreateReingestor {
+        name: base_name,
+        from: base_from,
+        output_routes: base_outputs,
+        mode: base_mode,
+        materialized_state: base_materialized_state,
+        filter_where: base_filter,
+    } = base;
+    let CreateReingestor {
+        name: candidate_name,
+        from: candidate_from,
+        output_routes: candidate_outputs,
+        mode: candidate_mode,
+        materialized_state: candidate_materialized_state,
+        filter_where: candidate_filter,
+    } = candidate;
+
+    if base_name != candidate_name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    if base_from != candidate_from {
+        changes.push(ModelChangeAspect::ReingestorInputs);
+    }
+    if base_outputs != candidate_outputs {
+        changes.push(ModelChangeAspect::ReingestorRoutes);
+    }
+    if base_mode != candidate_mode {
+        changes.push(ModelChangeAspect::ReingestorMode);
+    }
+    if base_filter != candidate_filter {
+        changes.push(ModelChangeAspect::ReingestorFilter);
+    }
+    if base_materialized_state != candidate_materialized_state {
+        changes.push(ModelChangeAspect::ReingestorMaterializedState);
+    }
+    changes
+}
+
+fn generator_change_aspects(
+    base: &CreateGenerator,
+    candidate: &CreateGenerator,
+) -> ModelChangeAspects {
+    let CreateGenerator {
+        name: base_name,
+        materialized_relay: base_materialized_relay,
+        branched_by: base_branching,
+        each: base_each,
+        output_routes: base_outputs,
+    } = base;
+    let CreateGenerator {
+        name: candidate_name,
+        materialized_relay: candidate_materialized_relay,
+        branched_by: candidate_branching,
+        each: candidate_each,
+        output_routes: candidate_outputs,
+    } = candidate;
+
+    if base_name != candidate_name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    if base_materialized_relay != candidate_materialized_relay {
+        changes.push(ModelChangeAspect::GeneratorMaterializedState);
+    }
+    if base_each != candidate_each {
+        changes.push(ModelChangeAspect::GeneratorCadence);
+    }
+    if base_branching != candidate_branching {
+        changes.push(ModelChangeAspect::GeneratorBranching);
+    }
+    if base_outputs != candidate_outputs {
+        changes.push(ModelChangeAspect::GeneratorRoutes);
+    }
+    changes
 }
 
 fn ingestor_change_aspects(
@@ -391,41 +513,206 @@ fn junction_change_aspects(
 
     let mut changes = ModelChangeAspects::default();
     let mut has_dynamic_change = false;
-    if base_filter != candidate_filter {
-        changes.push(ModelChangeAspect::JunctionFilter);
-        has_dynamic_change = true;
-    }
-    compare_junction_inputs(
-        base_from,
-        candidate_from,
+    compare_processor_common(
+        ProcessorConfigView {
+            from: base_from,
+            outputs: base_outputs,
+            branching: base_branching,
+            mode: base_mode,
+            filter: base_filter,
+            materialized_state: base_materialized_state,
+        },
+        ProcessorConfigView {
+            from: candidate_from,
+            outputs: candidate_outputs,
+            branching: candidate_branching,
+            mode: candidate_mode,
+            filter: candidate_filter,
+            materialized_state: candidate_materialized_state,
+        },
         &mut changes,
         &mut has_dynamic_change,
     );
-    compare_junction_outputs(
-        base_outputs,
-        candidate_outputs,
-        &mut changes,
-        &mut has_dynamic_change,
-    );
-    if base_branching != candidate_branching {
-        changes.push(ModelChangeAspect::JunctionBranching);
-    }
-    if base_mode != candidate_mode {
-        changes.push(ModelChangeAspect::JunctionMode);
-    }
-    if base_materialized_state != candidate_materialized_state {
-        changes.push(ModelChangeAspect::JunctionMaterializedState);
-    }
     if has_dynamic_change {
-        changes.dynamic_updates.push(DynamicModelUpdate::Junction {
-            junction: candidate_name.clone(),
-            config: candidate.clone(),
+        changes.dynamic_updates.push(DynamicModelUpdate::Processor {
+            kind: ModelKind::Junction,
+            processor: candidate_name.clone(),
         });
     }
     changes
 }
 
-fn compare_junction_inputs(
+fn deduplicator_change_aspects(
+    base: &CreateDeduplicator,
+    candidate: &CreateDeduplicator,
+) -> ModelChangeAspects {
+    let CreateDeduplicator {
+        name: base_name,
+        from: base_from,
+        output_routes: base_outputs,
+        branched_by: base_branching,
+        deduplicate_on: base_deduplicate_on,
+        max_time: base_max_time,
+        mode: base_mode,
+        filter_where: base_filter,
+        materialized_state: base_materialized_state,
+    } = base;
+    let CreateDeduplicator {
+        name: candidate_name,
+        from: candidate_from,
+        output_routes: candidate_outputs,
+        branched_by: candidate_branching,
+        deduplicate_on: candidate_deduplicate_on,
+        max_time: candidate_max_time,
+        mode: candidate_mode,
+        filter_where: candidate_filter,
+        materialized_state: candidate_materialized_state,
+    } = candidate;
+
+    if base_name != candidate_name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    let mut has_dynamic_change = false;
+    compare_processor_common(
+        ProcessorConfigView {
+            from: base_from,
+            outputs: base_outputs,
+            branching: base_branching,
+            mode: base_mode,
+            filter: base_filter,
+            materialized_state: base_materialized_state,
+        },
+        ProcessorConfigView {
+            from: candidate_from,
+            outputs: candidate_outputs,
+            branching: candidate_branching,
+            mode: candidate_mode,
+            filter: candidate_filter,
+            materialized_state: candidate_materialized_state,
+        },
+        &mut changes,
+        &mut has_dynamic_change,
+    );
+    if base_deduplicate_on != candidate_deduplicate_on {
+        changes.push(ModelChangeAspect::DeduplicatorKeyspace);
+    }
+    if base_max_time != candidate_max_time {
+        changes.push(ModelChangeAspect::DeduplicatorMaxTime);
+        has_dynamic_change = true;
+    }
+    if has_dynamic_change {
+        changes.dynamic_updates.push(DynamicModelUpdate::Processor {
+            kind: ModelKind::Deduplicator,
+            processor: candidate_name.clone(),
+        });
+    }
+    changes
+}
+
+fn reorderer_change_aspects(
+    base: &CreateReorderer,
+    candidate: &CreateReorderer,
+) -> ModelChangeAspects {
+    let CreateReorderer {
+        name: base_name,
+        from: base_from,
+        output_routes: base_outputs,
+        branched_by: base_branching,
+        order_by: base_order_by,
+        max_time: base_max_time,
+        mode: base_mode,
+        filter_where: base_filter,
+        materialized_state: base_materialized_state,
+    } = base;
+    let CreateReorderer {
+        name: candidate_name,
+        from: candidate_from,
+        output_routes: candidate_outputs,
+        branched_by: candidate_branching,
+        order_by: candidate_order_by,
+        max_time: candidate_max_time,
+        mode: candidate_mode,
+        filter_where: candidate_filter,
+        materialized_state: candidate_materialized_state,
+    } = candidate;
+
+    if base_name != candidate_name {
+        return ModelChangeAspects::replaced();
+    }
+
+    let mut changes = ModelChangeAspects::default();
+    let mut has_dynamic_change = false;
+    compare_processor_common(
+        ProcessorConfigView {
+            from: base_from,
+            outputs: base_outputs,
+            branching: base_branching,
+            mode: base_mode,
+            filter: base_filter,
+            materialized_state: base_materialized_state,
+        },
+        ProcessorConfigView {
+            from: candidate_from,
+            outputs: candidate_outputs,
+            branching: candidate_branching,
+            mode: candidate_mode,
+            filter: candidate_filter,
+            materialized_state: candidate_materialized_state,
+        },
+        &mut changes,
+        &mut has_dynamic_change,
+    );
+    if base_order_by != candidate_order_by {
+        changes.push(ModelChangeAspect::ReordererOrdering);
+    }
+    if base_max_time != candidate_max_time {
+        changes.push(ModelChangeAspect::ReordererMaxTime);
+        has_dynamic_change = true;
+    }
+    if has_dynamic_change {
+        changes.dynamic_updates.push(DynamicModelUpdate::Processor {
+            kind: ModelKind::Reorderer,
+            processor: candidate_name.clone(),
+        });
+    }
+    changes
+}
+
+struct ProcessorConfigView<'a> {
+    from: &'a ProcessorInputs,
+    outputs: &'a ProcessorOutputs,
+    branching: &'a crate::BranchSelection,
+    mode: &'a crate::AckMode,
+    filter: &'a Option<crate::Expression>,
+    materialized_state: &'a [crate::MaterializedStateDependency],
+}
+
+fn compare_processor_common(
+    base: ProcessorConfigView<'_>,
+    candidate: ProcessorConfigView<'_>,
+    changes: &mut ModelChangeAspects,
+    has_dynamic_change: &mut bool,
+) {
+    if base.filter != candidate.filter {
+        changes.push(ModelChangeAspect::ProcessorFilter);
+        *has_dynamic_change = true;
+    }
+    compare_processor_inputs(base.from, candidate.from, changes, has_dynamic_change);
+    compare_processor_outputs(base.outputs, candidate.outputs, changes, has_dynamic_change);
+    if base.branching != candidate.branching {
+        changes.push(ModelChangeAspect::ProcessorBranching);
+    }
+    if base.mode != candidate.mode {
+        changes.push(ModelChangeAspect::ProcessorMode);
+    }
+    if base.materialized_state != candidate.materialized_state {
+        changes.push(ModelChangeAspect::ProcessorMaterializedState);
+    }
+}
+
+fn compare_processor_inputs(
     base: &ProcessorInputs,
     candidate: &ProcessorInputs,
     changes: &mut ModelChangeAspects,
@@ -443,19 +730,19 @@ fn compare_junction_inputs(
     } = candidate;
 
     if base_relays != candidate_relays {
-        changes.push(ModelChangeAspect::JunctionInputs);
+        changes.push(ModelChangeAspect::ProcessorInputs);
     }
     if base_where != candidate_where {
-        changes.push(ModelChangeAspect::JunctionInputWhere);
+        changes.push(ModelChangeAspect::ProcessorInputWhere);
         *has_dynamic_change = true;
     }
     if base_collect != candidate_collect {
-        changes.push(ModelChangeAspect::JunctionCollectPolicy);
+        changes.push(ModelChangeAspect::ProcessorCollectPolicy);
         *has_dynamic_change = true;
     }
 }
 
-fn compare_junction_outputs(
+fn compare_processor_outputs(
     base: &ProcessorOutputs,
     candidate: &ProcessorOutputs,
     changes: &mut ModelChangeAspects,
@@ -473,16 +760,16 @@ fn compare_junction_outputs(
             .zip(candidate_routes)
             .all(|(base, candidate)| base.relay == candidate.relay);
     if !same_route_shape {
-        changes.push(ModelChangeAspect::JunctionRoutes);
+        changes.push(ModelChangeAspect::ProcessorRoutes);
         return;
     }
     if base_routes != candidate_routes && routes_are_permutation(base_routes, candidate_routes) {
-        changes.push(ModelChangeAspect::JunctionRoutes);
+        changes.push(ModelChangeAspect::ProcessorRoutes);
         return;
     }
 
     if message_error_targets(base_routes) != message_error_targets(candidate_routes) {
-        changes.push(ModelChangeAspect::JunctionErrorRouteTargets);
+        changes.push(ModelChangeAspect::ProcessorErrorRouteTargets);
     }
 
     for (base, candidate) in base_routes.iter().zip(candidate_routes) {
@@ -502,22 +789,22 @@ fn compare_junction_outputs(
         } = candidate;
         debug_assert_eq!(base_relay, candidate_relay);
         if base_branch != candidate_branch {
-            changes.push(ModelChangeAspect::JunctionRoutes);
+            changes.push(ModelChangeAspect::ProcessorRoutes);
         }
         if base_construction != candidate_construction {
-            changes.push(ModelChangeAspect::JunctionRouteConstruction);
+            changes.push(ModelChangeAspect::ProcessorRouteConstruction);
             *has_dynamic_change = true;
         }
         if base_flush != candidate_flush {
-            changes.push(ModelChangeAspect::JunctionRouteFlushPolicy);
+            changes.push(ModelChangeAspect::ProcessorRouteFlushPolicy);
             *has_dynamic_change = true;
         }
         if base_message_error != candidate_message_error
             && !changes
                 .aspects
-                .contains(&ModelChangeAspect::JunctionErrorRouteTargets)
+                .contains(&ModelChangeAspect::ProcessorErrorRouteTargets)
         {
-            changes.push(ModelChangeAspect::JunctionMessageErrorPolicy);
+            changes.push(ModelChangeAspect::ProcessorMessageErrorPolicy);
             *has_dynamic_change = true;
         }
     }
@@ -864,11 +1151,12 @@ fn wire_schema_change_aspects(
 #[cfg(test)]
 mod tests {
     use crate::{
-        AckMode, BranchSelection, CreateEmitter, CreateIngestor, CreateJunction, CreateRelay,
-        EmitSink, EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource,
-        IngestTimestampSource, InputCollectPolicy, MaterializedRelayState,
+        AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
+        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
+        EndpointIngestMode, ErrorPolicies, GeneralErrorPolicy, Identifier, IngestSource,
+        IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
         MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-        ModelChangeAspect, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
+        ModelChangeAspect, ModelKind, OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs,
         ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
     };
 
@@ -902,6 +1190,42 @@ mod tests {
         }
     }
 
+    fn deduplicator() -> CreateDeduplicator {
+        CreateDeduplicator {
+            name: identifier("dedup"),
+            from: ProcessorInputs::single(identifier("input")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                identifier("output"),
+                "1s".to_string(),
+                Some("1MiB".to_string()),
+            )]),
+            branched_by: BranchSelection::unbranched(),
+            deduplicate_on: vec![crate::Expression::Literal(Literal::I64(1))],
+            max_time: "10m".to_string(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }
+    }
+
+    fn reorderer() -> CreateReorderer {
+        CreateReorderer {
+            name: identifier("order"),
+            from: ProcessorInputs::single(identifier("input")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                identifier("output"),
+                "1s".to_string(),
+                Some("1MiB".to_string()),
+            )]),
+            branched_by: BranchSelection::unbranched(),
+            order_by: vec![crate::Expression::Literal(Literal::I64(1))],
+            max_time: "10m".to_string(),
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }
+    }
+
     fn emitter() -> CreateEmitter {
         CreateEmitter {
             name: identifier("emit"),
@@ -917,6 +1241,35 @@ mod tests {
             mode: AckMode::Attached,
             construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),
+        }
+    }
+
+    fn reingestor() -> CreateReingestor {
+        CreateReingestor {
+            name: identifier("repartition"),
+            from: ProcessorInputs::single(identifier("input")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                identifier("output"),
+                "1s".to_string(),
+                Some("1MiB".to_string()),
+            )]),
+            mode: AckMode::Attached,
+            materialized_state: Vec::new(),
+            filter_where: None,
+        }
+    }
+
+    fn generator() -> CreateGenerator {
+        CreateGenerator {
+            name: identifier("synth"),
+            materialized_relay: identifier("state"),
+            branched_by: BranchSelection::unbranched(),
+            each: "1s".to_string(),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::with_flush_policy(
+                identifier("output"),
+                "1s".to_string(),
+                Some("1MiB".to_string()),
+            )]),
         }
     }
 
@@ -1008,7 +1361,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(filter),
-            ModelChangeAspect::JunctionFilter,
+            ModelChangeAspect::ProcessorFilter,
             QuiesceLevel::Dynamic,
         );
 
@@ -1020,7 +1373,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(input_where),
-            ModelChangeAspect::JunctionInputWhere,
+            ModelChangeAspect::ProcessorInputWhere,
             QuiesceLevel::Dynamic,
         );
 
@@ -1032,7 +1385,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(collect),
-            ModelChangeAspect::JunctionCollectPolicy,
+            ModelChangeAspect::ProcessorCollectPolicy,
             QuiesceLevel::Dynamic,
         );
 
@@ -1043,7 +1396,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(construction),
-            ModelChangeAspect::JunctionRouteConstruction,
+            ModelChangeAspect::ProcessorRouteConstruction,
             QuiesceLevel::Dynamic,
         );
 
@@ -1055,7 +1408,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(flush),
-            ModelChangeAspect::JunctionRouteFlushPolicy,
+            ModelChangeAspect::ProcessorRouteFlushPolicy,
             QuiesceLevel::Dynamic,
         );
 
@@ -1064,7 +1417,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base),
             Model::Junction(error_policy),
-            ModelChangeAspect::JunctionMessageErrorPolicy,
+            ModelChangeAspect::ProcessorMessageErrorPolicy,
             QuiesceLevel::Dynamic,
         );
     }
@@ -1078,7 +1431,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(inputs),
-            ModelChangeAspect::JunctionInputs,
+            ModelChangeAspect::ProcessorInputs,
             QuiesceLevel::EntityPause,
         );
 
@@ -1090,7 +1443,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(routes),
-            ModelChangeAspect::JunctionRoutes,
+            ModelChangeAspect::ProcessorRoutes,
             QuiesceLevel::EntityPause,
         );
 
@@ -1104,7 +1457,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(reordered),
             Model::Junction(reordered_candidate),
-            ModelChangeAspect::JunctionRoutes,
+            ModelChangeAspect::ProcessorRoutes,
             QuiesceLevel::EntityPause,
         );
 
@@ -1113,7 +1466,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(mode),
-            ModelChangeAspect::JunctionMode,
+            ModelChangeAspect::ProcessorMode,
             QuiesceLevel::EntityPause,
         );
 
@@ -1122,7 +1475,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(branching),
-            ModelChangeAspect::JunctionBranching,
+            ModelChangeAspect::ProcessorBranching,
             QuiesceLevel::EntityPause,
         );
 
@@ -1136,7 +1489,7 @@ mod tests {
         assert_single_aspect(
             Model::Junction(base.clone()),
             Model::Junction(materialized),
-            ModelChangeAspect::JunctionMaterializedState,
+            ModelChangeAspect::ProcessorMaterializedState,
             QuiesceLevel::EntityPause,
         );
 
@@ -1148,7 +1501,63 @@ mod tests {
         assert_single_aspect(
             Model::Junction(junction()),
             Model::Junction(dlq),
-            ModelChangeAspect::JunctionErrorRouteTargets,
+            ModelChangeAspect::ProcessorErrorRouteTargets,
+            QuiesceLevel::EntityPause,
+        );
+    }
+
+    #[test]
+    fn deduplicator_specific_aspects_have_their_contract_levels() {
+        let base = deduplicator();
+
+        let mut max_time = base.clone();
+        max_time.max_time = "20m".to_string();
+        let changes = Model::Deduplicator(base.clone())
+            .change_aspects_against(&Model::Deduplicator(max_time));
+        assert_eq!(changes.aspects(), &[ModelChangeAspect::DeduplicatorMaxTime]);
+        assert_eq!(changes.quiesce_level(), QuiesceLevel::Dynamic);
+        assert_eq!(
+            changes.dynamic_updates(),
+            &[super::DynamicModelUpdate::Processor {
+                kind: ModelKind::Deduplicator,
+                processor: identifier("dedup"),
+            }]
+        );
+
+        let mut keyspace = base;
+        keyspace.deduplicate_on = vec![crate::Expression::Literal(Literal::I64(2))];
+        assert_single_aspect(
+            Model::Deduplicator(deduplicator()),
+            Model::Deduplicator(keyspace),
+            ModelChangeAspect::DeduplicatorKeyspace,
+            QuiesceLevel::EntityPause,
+        );
+    }
+
+    #[test]
+    fn reorderer_specific_aspects_have_their_contract_levels() {
+        let base = reorderer();
+
+        let mut max_time = base.clone();
+        max_time.max_time = "20m".to_string();
+        let changes =
+            Model::Reorderer(base.clone()).change_aspects_against(&Model::Reorderer(max_time));
+        assert_eq!(changes.aspects(), &[ModelChangeAspect::ReordererMaxTime]);
+        assert_eq!(changes.quiesce_level(), QuiesceLevel::Dynamic);
+        assert_eq!(
+            changes.dynamic_updates(),
+            &[super::DynamicModelUpdate::Processor {
+                kind: ModelKind::Reorderer,
+                processor: identifier("order"),
+            }]
+        );
+
+        let mut ordering = base;
+        ordering.order_by = vec![crate::Expression::Literal(Literal::I64(2))];
+        assert_single_aspect(
+            Model::Reorderer(reorderer()),
+            Model::Reorderer(ordering),
+            ModelChangeAspect::ReordererOrdering,
             QuiesceLevel::EntityPause,
         );
     }
@@ -1302,5 +1711,133 @@ mod tests {
                 QuiesceLevel::EntityPause,
             );
         }
+    }
+
+    #[test]
+    fn every_reingestor_aspect_requires_entity_pause() {
+        let base = reingestor();
+        let cases = [
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.from.from.push(identifier("secondary"));
+                    candidate
+                },
+                ModelChangeAspect::ReingestorInputs,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.output_routes.routes[0]
+                        .flush_policy
+                        .as_mut()
+                        .expect("test route has a flush policy")
+                        .flush_each = "2s".to_string();
+                    candidate
+                },
+                ModelChangeAspect::ReingestorRoutes,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.mode = AckMode::Detached;
+                    candidate
+                },
+                ModelChangeAspect::ReingestorMode,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.filter_where =
+                        Some(crate::Expression::Literal(crate::Literal::Bool(true)));
+                    candidate
+                },
+                ModelChangeAspect::ReingestorFilter,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate
+                        .materialized_state
+                        .push(MaterializedStateDependency {
+                            relay: identifier("state"),
+                            policy: MaterializedStatePolicy::RequiredSkip,
+                        });
+                    candidate
+                },
+                ModelChangeAspect::ReingestorMaterializedState,
+            ),
+        ];
+
+        for (candidate, aspect) in cases {
+            assert_single_aspect(
+                Model::Reingestor(base.clone()),
+                Model::Reingestor(candidate),
+                aspect,
+                QuiesceLevel::EntityPause,
+            );
+        }
+        assert!(
+            Model::Reingestor(base.clone())
+                .change_aspects_against(&Model::Reingestor(base))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn every_generator_aspect_requires_entity_pause() {
+        let base = generator();
+        let cases = [
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.materialized_relay = identifier("state_v2");
+                    candidate
+                },
+                ModelChangeAspect::GeneratorMaterializedState,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.each = "2s".to_string();
+                    candidate
+                },
+                ModelChangeAspect::GeneratorCadence,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.branched_by = BranchSelection::branched_by(identifier("tenant"));
+                    candidate
+                },
+                ModelChangeAspect::GeneratorBranching,
+            ),
+            (
+                {
+                    let mut candidate = base.clone();
+                    candidate.output_routes.routes[0]
+                        .flush_policy
+                        .as_mut()
+                        .expect("test route has a flush policy")
+                        .flush_each = "2s".to_string();
+                    candidate
+                },
+                ModelChangeAspect::GeneratorRoutes,
+            ),
+        ];
+
+        for (candidate, aspect) in cases {
+            assert_single_aspect(
+                Model::Generator(base.clone()),
+                Model::Generator(candidate),
+                aspect,
+                QuiesceLevel::EntityPause,
+            );
+        }
+        assert!(
+            Model::Generator(base.clone())
+                .change_aspects_against(&Model::Generator(base))
+                .is_empty()
+        );
     }
 }

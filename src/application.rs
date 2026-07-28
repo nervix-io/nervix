@@ -7240,6 +7240,32 @@ impl SessionServiceImpl {
                     ));
                     mutations.push(RegistryMutation::AlterJunction(alter));
                 }
+                Statement::AlterDeduplicator(alter) => {
+                    let model_id = alter.deduplicator.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered deduplicator '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterDeduplicator(alter));
+                }
+                Statement::AlterReorderer(alter) => {
+                    let model_id = alter.reorderer.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered reorderer '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterReorderer(alter));
+                }
                 Statement::AlterEmitter(alter) => {
                     let model_id = alter.emitter.clone();
                     applied.push((
@@ -7265,6 +7291,32 @@ impl SessionServiceImpl {
                         ),
                     ));
                     mutations.push(RegistryMutation::AlterIngestor(alter));
+                }
+                Statement::AlterReingestor(alter) => {
+                    let model_id = alter.reingestor.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered reingestor '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterReingestor(alter));
+                }
+                Statement::AlterGenerator(alter) => {
+                    let model_id = alter.generator.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered generator '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterGenerator(alter));
                 }
                 Statement::Drop(drop) => {
                     let model_id = drop.name.clone();
@@ -7628,8 +7680,12 @@ impl SessionServiceImpl {
             | Statement::AlterWireSchema(_)
             | Statement::AlterRelay(_)
             | Statement::AlterJunction(_)
+            | Statement::AlterDeduplicator(_)
+            | Statement::AlterReorderer(_)
             | Statement::AlterEmitter(_)
             | Statement::AlterIngestor(_)
+            | Statement::AlterReingestor(_)
+            | Statement::AlterGenerator(_)
             | Statement::Drop(_) => {
                 unreachable!("model mutations are handled before statement dispatch")
             }

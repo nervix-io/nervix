@@ -2744,6 +2744,201 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
 }
 
 #[tokio::test]
+async fn scheduled_processor_entity_swap_is_not_junction_specific() {
+    let runtime = super::Runtime::default();
+    *runtime.local_node_id.write() = Some("node-1".to_string());
+    let domain = domain("default");
+    let event_schema = identifier("event");
+    let processor = identifier("deduplicate_events");
+    let schedule = DomainSchedule {
+        domain: domain.clone(),
+        nodes: vec![
+            scheduled_model(
+                ModelKind::Schema,
+                event_schema.clone(),
+                nervix_models::Model::Schema(CreateSchema {
+                    name: event_schema.clone(),
+                    fields: vec![SchemaField {
+                        name: identifier("event_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                }),
+            ),
+            scheduled_model(
+                ModelKind::Relay,
+                identifier("events"),
+                nervix_models::Model::Relay(CreateRelay {
+                    name: identifier("events"),
+                    schema: event_schema.clone(),
+                    buffer: 2,
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+            ),
+            scheduled_model(
+                ModelKind::Relay,
+                identifier("unique_events"),
+                nervix_models::Model::Relay(CreateRelay {
+                    name: identifier("unique_events"),
+                    schema: event_schema,
+                    buffer: 2,
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+            ),
+            scheduled_model(
+                ModelKind::Deduplicator,
+                processor.clone(),
+                nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    name: processor.clone(),
+                    from: ProcessorInputs::single(identifier("events")),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                        "unique_events",
+                    )))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    branched_by: BranchSelection::unbranched(),
+                    deduplicate_on: vec![expression("input.event_id")],
+                    max_time: "10m".to_string(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                }),
+            ),
+        ],
+    };
+
+    runtime
+        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule.clone()), true)
+        .await
+        .expect("scheduled deduplicator must build");
+    let entity = crate::registry::RegistryEntity {
+        kind: ModelKind::Deduplicator,
+        identifier: processor.clone(),
+    };
+    assert_eq!(
+        runtime.entity_pause_relays(&domain, std::slice::from_ref(&entity)),
+        vec![identifier("events")],
+        "every scheduled processor swap must gate its input relays"
+    );
+
+    let mut desired = schedule;
+    let nervix_models::Model::Deduplicator(config) = desired
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == ModelKind::Deduplicator)
+        .expect("schedule must contain the processor")
+        .config
+        .as_mut()
+    else {
+        panic!("scheduled processor must contain a deduplicator model");
+    };
+    config.mode = AckMode::Detached;
+
+    runtime
+        .swap_scheduled_nodes(&domain, desired.clone(), &[entity], &[])
+        .await
+        .expect("non-junction scheduled processors must use the shared swap path");
+    let execution = runtime
+        .executions
+        .get(&domain)
+        .expect("domain execution must remain installed");
+    assert_eq!(execution.schedule, desired);
+    assert!(
+        execution
+            .node_tasks
+            .contains_key(&crate::registry::RegistryEntity {
+                kind: ModelKind::Deduplicator,
+                identifier: processor,
+            })
+    );
+}
+
+#[test]
+fn processor_template_refresh_is_not_junction_specific() {
+    let runtime = super::Runtime::default();
+    let domain = domain("default");
+    let input = identifier("events");
+    let output = identifier("unique_events");
+    let processor = identifier("deduplicate_events");
+    let collect_policy = super::RuntimeInputCollectPolicy {
+        interval: Duration::from_secs(1),
+        max_batch_size: Some(1024),
+    };
+    let template = super::RelayProcessorTemplate {
+        kind: ModelKind::Deduplicator,
+        processor: processor.clone(),
+        input_relays: vec![input.clone()],
+        input_collect_policies: [(input.clone(), collect_policy)].into_iter().collect(),
+        error_policies: ErrorPolicies::handled_by_log(),
+        from_where: HashMap::default(),
+        filter_where: None,
+        materialized_state: Vec::new(),
+        operation: super::RelayProcessorOperationTemplate::Deduplicator {
+            output_routes: super::RelayProcessorOutputsTemplate {
+                routes: vec![super::RelayProcessorOutputTemplate {
+                    output_relay: output,
+                    construction: nervix_models::RouteConstruction::default(),
+                    flush_policy: Some(super::RuntimeFlushPolicy::Immediate),
+                    message_error_policy: MessageErrorPolicy::Log,
+                }],
+            },
+            deduplicate_on: vec![expression("input.event_id")],
+            max_time: Duration::from_secs(600),
+        },
+    };
+    let mut node = template
+        .instantiate(&runtime, &domain, &None)
+        .expect("deduplicator template must instantiate");
+
+    let mut desired = template.clone();
+    desired.filter_where = Some(expression("input.event_id > 0"));
+    desired.input_collect_policies.insert(
+        input.clone(),
+        super::RuntimeInputCollectPolicy {
+            interval: Duration::from_secs(2),
+            max_batch_size: None,
+        },
+    );
+    let super::RelayProcessorOperationTemplate::Deduplicator { max_time, .. } =
+        &mut desired.operation
+    else {
+        panic!("test template must remain a deduplicator");
+    };
+    *max_time = Duration::from_secs(30);
+
+    node.apply_node_template(desired)
+        .expect("non-junction dynamic template fields must refresh in place");
+    assert_eq!(node.filter_where, Some(expression("input.event_id > 0")));
+    assert_eq!(
+        node.input_collectors
+            .get(&input)
+            .expect("collector must remain installed")
+            .policy
+            .interval,
+        Duration::from_secs(2)
+    );
+    let super::RelayProcessorOperationNode::Deduplicator { max_time, .. } = &node.operation else {
+        panic!("runtime node must remain a deduplicator");
+    };
+    assert_eq!(*max_time, Duration::from_secs(30));
+
+    let mut incompatible = template;
+    let super::RelayProcessorOperationTemplate::Deduplicator { deduplicate_on, .. } =
+        &mut incompatible.operation
+    else {
+        panic!("test template must remain a deduplicator");
+    };
+    *deduplicate_on = vec![expression("input.other_id")];
+    assert!(
+        node.apply_node_template(incompatible)
+            .expect_err("a keyspace change must not hot-refresh")
+            .contains("state keyspace")
+    );
+}
+
+#[tokio::test]
 async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
     let runtime = super::Runtime::default();
     let domain = domain("default");
@@ -4392,6 +4587,8 @@ async fn remote_stream_payload_touches_expiring_stream_state() {
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
             emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -4469,6 +4666,8 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),
                 emitter_tasks: HashMap::default(),
+                generator_tasks: HashMap::default(),
+                reingestor_tasks: HashMap::default(),
                 clients: HashMap::default(),
                 tasks: Vec::new(),
             },
@@ -4531,6 +4730,8 @@ async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing(
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
             emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -5886,8 +6087,8 @@ fn mqtt_client_builder_requires_addr_and_retry_delay_handles_overflow() {
 }
 
 #[test]
-fn branched_ingestor_specs_capture_downstream_processing_tree() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_capture_downstream_processing_tree() {
+    let specs = super::branched_node_specs_from_models(
         [
             branch_model_tuple("tenant", "orders", &["tenant"]),
             branch_model_tuple("tenant", "projected_orders", &["tenant"]),
@@ -6007,8 +6208,8 @@ fn branched_ingestor_specs_capture_downstream_processing_tree() {
 }
 
 #[test]
-fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_capture_window_processor_as_branch_node() {
+    let specs = super::branched_node_specs_from_models(
         [
             branch_model_tuple("host", "metrics", &["host"]),
             branch_model_tuple("host", "metric_summary", &["host"]),
@@ -6109,8 +6310,8 @@ fn branched_ingestor_specs_capture_window_processor_as_branch_node() {
 }
 
 #[test]
-fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_capture_inferencer_as_branch_node() {
+    let specs = super::branched_node_specs_from_models(
         [
             branch_model_tuple("tenant", "features", &["tenant"]),
             branch_model_tuple("tenant", "scores", &["tenant"]),
@@ -6224,8 +6425,8 @@ fn branched_ingestor_specs_capture_inferencer_as_branch_node() {
 }
 
 #[test]
-fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_capture_reingestor_entrypoint_tree() {
+    let specs = super::branched_node_specs_from_models(
         [
             branch_model_tuple("tenant", "tenant_orders", &["tenant"]),
             (
@@ -6287,8 +6488,8 @@ fn branched_ingestor_specs_capture_reingestor_entrypoint_tree() {
 }
 
 #[test]
-fn branched_ingestor_specs_capture_processor_output_route_tree() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_capture_processor_output_route_tree() {
+    let specs = super::branched_node_specs_from_models(
         [
             branch_model_tuple("tenant", "orders", &["tenant"]),
             branch_model_tuple("tenant", "urgent_orders", &["tenant"]),
@@ -6418,8 +6619,8 @@ fn branched_ingestor_specs_capture_processor_output_route_tree() {
 }
 
 #[test]
-fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_capture_junction_as_single_branch_processor() {
+    let specs = super::branched_node_specs_from_models(
         [
             branch_model_tuple("tenant", "left_stream", &["tenant"]),
             branch_model_tuple("tenant", "right_stream", &["tenant"]),
@@ -6535,8 +6736,8 @@ fn branched_ingestor_specs_capture_junction_as_single_branch_processor() {
 }
 
 #[test]
-fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_capture_single_processor_output_route_tree() {
+    let specs = super::branched_node_specs_from_models(
         [
             branch_model_tuple("tenant", "orders", &["tenant"]),
             branch_model_tuple("tenant", "projected_orders", &["tenant"]),
@@ -6635,8 +6836,8 @@ fn branched_ingestor_specs_capture_single_processor_output_route_tree() {
 }
 
 #[test]
-fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_include_singleton_branch_for_empty_branching() {
+    let specs = super::branched_node_specs_from_models(
         [
             (
                 ModelKind::Ingestor,
@@ -6697,7 +6898,7 @@ fn branched_ingestor_specs_include_singleton_branch_for_empty_branching() {
 
 #[test]
 fn branched_processor_specs_do_not_require_an_entrypoint() {
-    let specs = super::branched_ingestor_specs_from_models(
+    let specs = super::branched_node_specs_from_models(
         [
             (
                 ModelKind::Relay,
@@ -6745,7 +6946,7 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
 
 #[test]
 fn branched_wasm_processor_specs_preserve_global_error_policy() {
-    let specs = super::branched_ingestor_specs_from_models(
+    let specs = super::branched_node_specs_from_models(
         [
             (
                 ModelKind::Relay,
@@ -6791,8 +6992,8 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
 }
 
 #[test]
-fn branched_ingestor_specs_include_reingestor_with_declared_branching() {
-    let specs = super::branched_ingestor_specs_from_models(
+fn branched_node_specs_include_reingestor_with_declared_branching() {
+    let specs = super::branched_node_specs_from_models(
         [
             branch_model_tuple("tenant", "tenant_notifications", &["tenant"]),
             (
@@ -7136,6 +7337,8 @@ async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
             emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
@@ -9325,6 +9528,8 @@ async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_orde
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
             emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         },
