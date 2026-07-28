@@ -278,8 +278,8 @@ Windows are set-only. Aggregates appear directly in route `SET`; there is no `AG
 CREATE WINDOW PROCESSOR latency_windows
   FROM latencies
   FILTER WHERE input.latency >= 0
-  WIDTH 5m
-  STEP 1m
+  WIDTH 5m DURATION
+  STEP 1m DURATION
   BRANCHED BY by_tenant
   TO latency_summary
     SET count = COUNT(input.latency),
@@ -356,7 +356,7 @@ CREATE CORRELATOR correlate_orders
   CORRELATE WHERE left.order_id = right.order_id
   MATCH EARLIEST
   MAX TIME 5m
-  ON CORRELATION TIMEOUT IGNORE, IGNORE
+  ON CORRELATION TIMEOUT DROP, DROP
   BRANCHED BY by_tenant
   TO paid_orders
     SET order_id = left.order_id,

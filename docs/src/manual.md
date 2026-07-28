@@ -1,6 +1,8 @@
 # Manual
 
-This section is the user-facing guide to Nervix.
+This section is the user-facing guide to Nervix. If you are new to Nervix, the
+[Quickstart](./quickstart.md) builds a first graph step by step; this section is the full
+reference behind it.
 
 Nervix is experimental software in active development. It is intended for evaluation, local testing, and design exploration. It is not suitable for real production workloads.
 
