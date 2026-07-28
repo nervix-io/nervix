@@ -4,7 +4,8 @@ So far every payload matched the wire schema field for field. Real feeds rarely 
 sends orders as a nested envelope, a JAQ codec reshapes the payload at the boundary instead of
 declaring a wire schema: the codec parses the native format and runs a
 [jq-style program](schemas-and-codecs.md#jaq-transformations) whose output must be one JSON object
-matching the internal schema.
+matching the internal schema. The complete language and function catalogue is in the version-matched
+[JAQ Manual](jaq-manual.md#jaq-corelang).
 
 Suppose the partner posts this envelope:
 

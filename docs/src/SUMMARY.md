@@ -24,6 +24,7 @@
   - [NSPL Agent Skill](./nspl-agent-skill.md)
   - [Domains And Time](./domains-and-time.md)
   - [Schemas And Codecs](./schemas-and-codecs.md)
+    - [JAQ Manual](./jaq-manual.md)
   - [Resources](./resources.md)
   - [Ingestors](./ingestors.md)
   - [Runtime Nodes](./processors.md)
