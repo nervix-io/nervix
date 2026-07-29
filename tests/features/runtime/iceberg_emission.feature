@@ -121,7 +121,7 @@ Feature: Iceberg emission
         action STRING,
         created_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string,
         created_at string
@@ -210,7 +210,7 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string
       );
@@ -311,7 +311,7 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string
       );
@@ -421,7 +421,7 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string
       );
@@ -511,7 +511,7 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string
       );
@@ -594,7 +594,7 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string
       );
@@ -680,7 +680,7 @@ Feature: Iceberg emission
         user_id I64,
         action STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string
       );

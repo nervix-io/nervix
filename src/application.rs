@@ -7201,18 +7201,44 @@ impl SessionServiceImpl {
                     ));
                     mutations.push(RegistryMutation::AlterSchema(alter));
                 }
-                Statement::AlterWireSchema(alter) => {
-                    let model_id = alter.schema().clone();
+                Statement::AlterWireJsonSchema(alter) => {
+                    let model_id = alter.schema.clone();
                     applied.push((
                         index,
                         model_id.clone(),
                         format!(
-                            "altered wire schema '{}' in domain '{}'",
+                            "altered JSON wire schema '{}' in domain '{}'",
                             model_id.as_str(),
                             domain.as_str()
                         ),
                     ));
-                    mutations.push(RegistryMutation::AlterWireSchema(alter));
+                    mutations.push(RegistryMutation::AlterWireJsonSchema(alter));
+                }
+                Statement::AlterWireCborSchema(alter) => {
+                    let model_id = alter.schema.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered CBOR wire schema '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterWireCborSchema(alter));
+                }
+                Statement::AlterWireAvroSchema(alter) => {
+                    let model_id = alter.schema.clone();
+                    applied.push((
+                        index,
+                        model_id.clone(),
+                        format!(
+                            "altered AVRO wire schema '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        ),
+                    ));
+                    mutations.push(RegistryMutation::AlterWireAvroSchema(alter));
                 }
                 Statement::AlterRelay(alter) => {
                     let model_id = alter.relay.clone();
@@ -7677,7 +7703,9 @@ impl SessionServiceImpl {
             }
             Statement::Create(_)
             | Statement::AlterSchema(_)
-            | Statement::AlterWireSchema(_)
+            | Statement::AlterWireJsonSchema(_)
+            | Statement::AlterWireCborSchema(_)
+            | Statement::AlterWireAvroSchema(_)
             | Statement::AlterRelay(_)
             | Statement::AlterJunction(_)
             | Statement::AlterDeduplicator(_)
@@ -16647,7 +16675,7 @@ mod tests {
         let mut subscriptions = SessionSubscriptions::new();
         let commands = [
             "CREATE SCHEMA notification ( user_id I64 );",
-            "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
+            "CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );",
             "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
              notification;",
             "CREATE RELAY notifications SCHEMA notification UNBRANCHED;",
@@ -16822,7 +16850,7 @@ mod tests {
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
             "CREATE SCHEMA notification ( user_id I64 );",
-            "CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );",
+            "CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );",
             "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
              notification;",
             "CREATE RELAY notifications_a SCHEMA notification UNBRANCHED;",
@@ -16993,7 +17021,7 @@ mod tests {
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
             "CREATE SCHEMA transaction ( transaction_id STRING, amount I64 );",
-            "CREATE STRICT WIRE JSON SCHEMA transaction_wire ( transaction_id string, amount \
+            "CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT ( transaction_id string, amount \
              integer );",
             "CREATE CODEC transaction_codec FROM WIRE JSON SCHEMA transaction_wire TO SCHEMA \
              transaction;",

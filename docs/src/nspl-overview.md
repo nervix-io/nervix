@@ -22,9 +22,9 @@ Core create statements:
 CREATE [IF NOT EXISTS] USER <name> WITH PASSWORD '<password>';
 
 CREATE [IF NOT EXISTS] SCHEMA <name> (<field> <type> [OPTIONAL], ...);
-CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE JSON SCHEMA <name> (<field> <json_type> [OPTIONAL], ...);
-CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE CBOR SCHEMA <name> (<field> <cbor_type> [OPTIONAL], ...);
-CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE AVRO SCHEMA <name> (<field> <avro_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] WIRE JSON SCHEMA <name> MODE STRICT|LOOSE (<field> <json_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] WIRE CBOR SCHEMA <name> MODE STRICT|LOOSE (<field> <cbor_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] WIRE AVRO SCHEMA <name> MODE STRICT|LOOSE (<field> <avro_type> [OPTIONAL], ...);
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM WIRE JSON SCHEMA <wire_schema>
@@ -160,12 +160,12 @@ ALTER SCHEMA <name>
   ALTER FIELD <field> SET|DROP SENSITIVE;
 
 ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
+  MODE STRICT|LOOSE,
   ADD FIELD <field> <wire_type> [OPTIONAL],
   DROP FIELD <field>,
   RENAME FIELD <field> TO <field>,
   ALTER FIELD <field> SET TYPE <wire_type>,
-  ALTER FIELD <field> SET|DROP OPTIONAL,
-  SET STRICT|LOOSE;
+  ALTER FIELD <field> SET|DROP OPTIONAL;
 ```
 
 Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER REORDERER`,
@@ -541,6 +541,9 @@ CORDON NODE <node_id>;
 UNCORDON NODE <node_id>;
 DRAIN NODE <node_id>;
 ```
+
+For a wire schema, `<kind>` is the exact multi-word kind: `WIRE JSON SCHEMA`, `WIRE CBOR SCHEMA`,
+or `WIRE AVRO SCHEMA`. The same exact kind is required by `DROP`.
 
 General notes:
 

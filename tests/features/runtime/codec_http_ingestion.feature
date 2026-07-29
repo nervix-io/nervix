@@ -12,7 +12,7 @@ Feature: HTTP codec ingestion
         tenant STRING,
         user_id I64
       );
-        CREATE STRICT WIRE <wire_format> SCHEMA notification_wire (
+        CREATE WIRE <wire_format> SCHEMA notification_wire MODE STRICT (
         tenant <tenant_wire_type>,
         user_id <user_id_wire_type>
       );
@@ -73,7 +73,7 @@ Feature: HTTP codec ingestion
         cpu_last_64 <cpu_type>,
         labels <labels_type> OPTIONAL
       );
-        CREATE STRICT WIRE <wire_format> SCHEMA metrics_wire (
+        CREATE WIRE <wire_format> SCHEMA metrics_wire MODE STRICT (
         device STRING,
         cpu_last_64 ARRAY,
         labels ARRAY OPTIONAL
@@ -133,7 +133,7 @@ Feature: HTTP codec ingestion
         matrix <matrix_type>,
         samples <samples_type>
       );
-      CREATE STRICT WIRE JSON SCHEMA shaped_metrics_wire (
+      CREATE WIRE JSON SCHEMA shaped_metrics_wire MODE STRICT (
         device STRING,
         matrix ARRAY,
         samples ARRAY
@@ -187,12 +187,12 @@ Feature: HTTP codec ingestion
         user_id I64
       );
 
-      CREATE STRICT WIRE <wire_format> SCHEMA strict_notification_wire (
+      CREATE WIRE <wire_format> SCHEMA strict_notification_wire MODE STRICT (
         tenant <tenant_wire_type>,
         user_id <user_id_wire_type>
       );
 
-      CREATE LOOSE WIRE <wire_format> SCHEMA loose_notification_wire (
+      CREATE WIRE <wire_format> SCHEMA loose_notification_wire MODE LOOSE (
         tenant <tenant_wire_type>,
         user_id <user_id_wire_type>
       );

@@ -18,7 +18,7 @@ Feature: Kafka emission
         active BOOL
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         amount integer,
         raw string,
@@ -35,7 +35,7 @@ Feature: Kafka emission
         normalized STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA emitted_notification_wire (
+      CREATE WIRE JSON SCHEMA emitted_notification_wire MODE STRICT (
         tenant string,
         amount integer,
         normalized string
@@ -126,7 +126,7 @@ Feature: Kafka emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec

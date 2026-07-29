@@ -14,7 +14,7 @@ Feature: Sensitive data
         action STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         secret string,
         action string
@@ -88,7 +88,7 @@ Feature: Sensitive data
         action STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         secret string,
         action string
@@ -206,7 +206,7 @@ Feature: Sensitive data
         action STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         secret string,
         action string

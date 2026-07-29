@@ -11,17 +11,17 @@ use nervix_models::{
     CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
     CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateReingestor, CreateRelay,
     CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
-    EndpointIngestMode, EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy,
-    IcebergCatalog, IcebergStorageBackend, Identifier, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, IngestSource, IngestTimestampSource,
-    InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-    MaterializedRelayState, MessageErrorPolicy, Model, MongoDbConflictAction, MqttIngestMode,
-    MqttQos, MqttSession, MySqlConflictAction, NameError, NatsIngestMode, OutputFlushPolicy,
-    ParseAsType, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
-    SchemaField, SignalingProtocolOnConnect, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink, EndpointIngestMode,
+    EndpointType, ErrorPolicies, Expression, GeneralErrorPolicy, IcebergCatalog,
+    IcebergStorageBackend, Identifier, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, IngestSource, IngestTimestampSource, InputCollectPolicy, JsonType,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy,
+    Model, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+    NameError, NatsIngestMode, OutputFlushPolicy, ParseAsType, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
+    RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, SchemaField,
+    SignalingProtocolOnConnect, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
     VhostTlsResource, WebsocketsIngestMode, WindowBound, WireSchemaField, WireSchemaStrictness,
     ZeroMqIngestMode,
 };
@@ -30,7 +30,9 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum StoredModelVersioned {
     Schema(StoredCreateSchema),
-    WireSchema(StoredCreateWireSchemaStmt),
+    WireJsonSchema(StoredCreateWireSchema<StoredJsonType>),
+    WireCborSchema(StoredCreateWireSchema<StoredJsonType>),
+    WireAvroSchema(StoredCreateWireSchema<StoredAvroType>),
     Codec(StoredCreateCodec),
     TransportKafka(StoredCreateClientKafka),
     TransportPulsar(StoredCreateClientPulsar),
@@ -122,13 +124,6 @@ pub struct StoredSchemaField {
     pub ty: StoredParseAsType,
     pub optional: bool,
     pub sensitive: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub enum StoredCreateWireSchemaStmt {
-    Json(StoredCreateWireSchema<StoredJsonType>),
-    Cbor(StoredCreateWireSchema<StoredJsonType>),
-    Avro(StoredCreateWireSchema<StoredAvroType>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -1135,7 +1130,9 @@ impl From<Model> for StoredModelVersioned {
     fn from(value: Model) -> Self {
         match value {
             Model::Schema(v) => Self::Schema(v.into()),
-            Model::WireSchema(v) => Self::WireSchema(v.into()),
+            Model::WireJsonSchema(v) => Self::WireJsonSchema(v.into()),
+            Model::WireCborSchema(v) => Self::WireCborSchema(v.into()),
+            Model::WireAvroSchema(v) => Self::WireAvroSchema(v.into()),
             Model::Codec(v) => Self::Codec(v.into()),
             Model::ClientKafka(v) => Self::TransportKafka(v.into()),
             Model::ClientPulsar(v) => Self::TransportPulsar(v.into()),
@@ -1195,7 +1192,15 @@ impl TryFrom<StoredModelVersioned> for Model {
     fn try_from(value: StoredModelVersioned) -> Result<Self, Self::Error> {
         match value {
             StoredModelVersioned::Schema(v) => Ok(Model::Schema(convert_stored(v)?)),
-            StoredModelVersioned::WireSchema(v) => Ok(Model::WireSchema(convert_stored(v)?)),
+            StoredModelVersioned::WireJsonSchema(v) => {
+                Ok(Model::WireJsonSchema(convert_stored(v)?))
+            }
+            StoredModelVersioned::WireCborSchema(v) => {
+                Ok(Model::WireCborSchema(convert_stored(v)?))
+            }
+            StoredModelVersioned::WireAvroSchema(v) => {
+                Ok(Model::WireAvroSchema(convert_stored(v)?))
+            }
             StoredModelVersioned::Codec(v) => Ok(Model::Codec(convert_stored(v)?)),
             StoredModelVersioned::TransportKafka(v) => Ok(Model::ClientKafka(convert_stored(v)?)),
             StoredModelVersioned::TransportPulsar(v) => Ok(Model::ClientPulsar(convert_stored(v)?)),
@@ -1403,28 +1408,6 @@ impl TryFrom<StoredSchemaField> for SchemaField {
             optional: value.optional,
             sensitive: value.sensitive,
         })
-    }
-}
-
-impl From<CreateWireSchemaStmt> for StoredCreateWireSchemaStmt {
-    fn from(value: CreateWireSchemaStmt) -> Self {
-        match value {
-            CreateWireSchemaStmt::Json(v) => Self::Json(v.into()),
-            CreateWireSchemaStmt::Cbor(v) => Self::Cbor(v.into()),
-            CreateWireSchemaStmt::Avro(v) => Self::Avro(v.into()),
-        }
-    }
-}
-
-impl TryFrom<StoredCreateWireSchemaStmt> for CreateWireSchemaStmt {
-    type Error = Report<NameError>;
-
-    fn try_from(value: StoredCreateWireSchemaStmt) -> Result<Self, Self::Error> {
-        match value {
-            StoredCreateWireSchemaStmt::Json(v) => Ok(Self::Json(v.try_into()?)),
-            StoredCreateWireSchemaStmt::Cbor(v) => Ok(Self::Cbor(v.try_into()?)),
-            StoredCreateWireSchemaStmt::Avro(v) => Ok(Self::Avro(v.try_into()?)),
-        }
     }
 }
 
@@ -4404,7 +4387,7 @@ mod tests {
                     sensitive: false,
                 }],
             }),
-            Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+            Model::WireJsonSchema(CreateWireSchema {
                 name: identifier("events_json"),
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
@@ -4412,7 +4395,7 @@ mod tests {
                     ty: JsonType::Integer,
                     optional: false,
                 }],
-            })),
+            }),
             Model::ClientHttp(CreateClientHttp {
                 name: identifier("http_client"),
                 mount: None,
@@ -4596,7 +4579,7 @@ mod tests {
                     },
                 ],
             }),
-            Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+            Model::WireJsonSchema(CreateWireSchema {
                 name: identifier("events_json"),
                 strictness: Default::default(),
                 fields: vec![
@@ -4611,7 +4594,7 @@ mod tests {
                         optional: true,
                     },
                 ],
-            })),
+            }),
         ];
 
         for model in models {

@@ -6,8 +6,9 @@ use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, Into
 use thiserror::Error;
 
 use crate::{
-    AlterSchema, AlterWireSchemaStmt, CreateSchema, CreateUdf, CreateWireSchemaStmt, Domain,
-    Identifier, ParseAsType, Timestamp,
+    AlterSchema, AlterWireSchema, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,
+    CreateJsonWireSchema, CreateSchema, CreateUdf, Domain, Identifier, JsonType, ParseAsType,
+    Timestamp,
 };
 
 pub type DomainId = Domain;
@@ -22,7 +23,9 @@ pub enum Statement {
     StopDomain(StopDomain),
     Create(CreateStatement<Box<Model>>),
     AlterSchema(AlterSchema),
-    AlterWireSchema(AlterWireSchemaStmt),
+    AlterWireJsonSchema(AlterWireSchema<JsonType>),
+    AlterWireCborSchema(AlterWireSchema<CborType>),
+    AlterWireAvroSchema(AlterWireSchema<AvroType>),
     AlterRelay(AlterRelay),
     AlterJunction(AlterJunction),
     AlterDeduplicator(AlterDeduplicator),
@@ -62,7 +65,9 @@ impl Statement {
         match self {
             Self::Create(_)
             | Self::AlterSchema(_)
-            | Self::AlterWireSchema(_)
+            | Self::AlterWireJsonSchema(_)
+            | Self::AlterWireCborSchema(_)
+            | Self::AlterWireAvroSchema(_)
             | Self::AlterRelay(_)
             | Self::AlterJunction(_)
             | Self::AlterDeduplicator(_)
@@ -176,8 +181,12 @@ impl<T> DerefMut for CreateStatement<T> {
 pub enum ModelKind {
     #[strum(props(completion_label = "ref:schema"))]
     Schema,
-    #[strum(props(completion_label = "ref:wire_schema"))]
-    WireSchema,
+    #[strum(props(completion_label = "ref:wire_json_schema"))]
+    WireJsonSchema,
+    #[strum(props(completion_label = "ref:wire_cbor_schema"))]
+    WireCborSchema,
+    #[strum(props(completion_label = "ref:wire_avro_schema"))]
+    WireAvroSchema,
     #[strum(props(completion_label = "ref:codec"))]
     Codec,
     #[strum(props(completion_label = "ref:client"))]
@@ -497,7 +506,9 @@ pub enum SubscriptionLiteral {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
     Schema(CreateSchema),
-    WireSchema(CreateWireSchemaStmt),
+    WireJsonSchema(CreateJsonWireSchema),
+    WireCborSchema(CreateCborWireSchema),
+    WireAvroSchema(CreateAvroWireSchema),
     Codec(CreateCodec),
     ClientKafka(CreateClientKafka),
     ClientPulsar(CreateClientPulsar),
@@ -544,7 +555,9 @@ impl Model {
     pub fn kind(&self) -> ModelKind {
         match self {
             Self::Schema(_) => ModelKind::Schema,
-            Self::WireSchema(_) => ModelKind::WireSchema,
+            Self::WireJsonSchema(_) => ModelKind::WireJsonSchema,
+            Self::WireCborSchema(_) => ModelKind::WireCborSchema,
+            Self::WireAvroSchema(_) => ModelKind::WireAvroSchema,
             Self::Codec(_) => ModelKind::Codec,
             Self::ClientKafka(_)
             | Self::ClientPulsar(_)
@@ -591,11 +604,9 @@ impl Model {
     pub fn identifier(&self) -> &Identifier {
         match self {
             Self::Schema(v) => &v.name,
-            Self::WireSchema(v) => match v {
-                CreateWireSchemaStmt::Json(v) => &v.name,
-                CreateWireSchemaStmt::Cbor(v) => &v.name,
-                CreateWireSchemaStmt::Avro(v) => &v.name,
-            },
+            Self::WireJsonSchema(v) => &v.name,
+            Self::WireCborSchema(v) => &v.name,
+            Self::WireAvroSchema(v) => &v.name,
             Self::Codec(v) => &v.name,
             Self::ClientKafka(v) => &v.name,
             Self::ClientPulsar(v) => &v.name,
@@ -662,7 +673,9 @@ impl Model {
             Self::ClientAzureBlob(_) => Some("AZURE_BLOB"),
             Self::ClientIcebergRest(_) => Some("ICEBERG_REST"),
             Self::Schema(_)
-            | Self::WireSchema(_)
+            | Self::WireJsonSchema(_)
+            | Self::WireCborSchema(_)
+            | Self::WireAvroSchema(_)
             | Self::Codec(_)
             | Self::Vhost(_)
             | Self::Branch(_)
@@ -732,6 +745,15 @@ pub enum CodecWireFormat {
 }
 
 impl CodecWireFormat {
+    pub const fn wire_schema_kind(&self) -> Option<ModelKind> {
+        match self {
+            Self::Json => Some(ModelKind::WireJsonSchema),
+            Self::Cbor => Some(ModelKind::WireCborSchema),
+            Self::Avro => Some(ModelKind::WireAvroSchema),
+            Self::JaqNative { .. } | Self::Protobuf(_) => None,
+        }
+    }
+
     pub fn supports_decoding(&self) -> bool {
         match self {
             Self::Json | Self::Cbor | Self::Avro => true,
@@ -3591,7 +3613,21 @@ mod tests {
     fn model_kind_completion_labels_roundtrip() {
         for (kind, label, keyword) in [
             (ModelKind::Schema, "ref:schema", "schema"),
-            (ModelKind::WireSchema, "ref:wire_schema", "wire_schema"),
+            (
+                ModelKind::WireJsonSchema,
+                "ref:wire_json_schema",
+                "wire_json_schema",
+            ),
+            (
+                ModelKind::WireCborSchema,
+                "ref:wire_cbor_schema",
+                "wire_cbor_schema",
+            ),
+            (
+                ModelKind::WireAvroSchema,
+                "ref:wire_avro_schema",
+                "wire_avro_schema",
+            ),
             (ModelKind::Codec, "ref:codec", "codec"),
             (ModelKind::Client, "ref:client", "client"),
             (ModelKind::Vhost, "ref:vhost", "vhost"),

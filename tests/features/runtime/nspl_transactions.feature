@@ -98,7 +98,7 @@ Feature: NSPL transactions
       CREATE SCHEMA transaction_event (
         value STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA transaction_event_wire (
+      CREATE WIRE JSON SCHEMA transaction_event_wire MODE STRICT (
         value string
       );
       CREATE CODEC transaction_event_codec
@@ -128,11 +128,64 @@ Feature: NSPL transactions
       """
     When these NSPL commands are executed on the leader node
       """
-      SHOW CREATE WIRE SCHEMA transaction_event_wire;
+      SHOW CREATE WIRE JSON SCHEMA transaction_event_wire;
       """
     Then the last command output contains
       """
-      CREATE STRICT WIRE JSON SCHEMA transaction_event_wire (value NUMBER);
+      CREATE WIRE JSON SCHEMA transaction_event_wire MODE STRICT (value NUMBER);
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @wire_schema_mode_alter
+  Scenario Outline: Exact-format ALTER keeps same-name schema kinds independent
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA transaction_event_wire (
+        value STRING
+      );
+      CREATE WIRE JSON SCHEMA transaction_event_wire MODE STRICT (
+        value string
+      );
+      CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (
+        value string
+      );
+      CREATE CODEC transaction_json_codec
+        FROM WIRE JSON SCHEMA transaction_event_wire
+        TO SCHEMA transaction_event_wire;
+      CREATE CODEC transaction_cbor_codec
+        FROM WIRE CBOR SCHEMA transaction_event_wire
+        TO SCHEMA transaction_event_wire;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER WIRE JSON SCHEMA transaction_event_wire MODE LOOSE;
+      SHOW CREATE SCHEMA transaction_event_wire;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA transaction_event_wire (value STRING);
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE WIRE JSON SCHEMA transaction_event_wire;
+      """
+    Then the last command output contains
+      """
+      CREATE WIRE JSON SCHEMA transaction_event_wire MODE LOOSE (value STRING);
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE WIRE CBOR SCHEMA transaction_event_wire;
+      """
+    Then the last command output contains
+      """
+      CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (value STRING);
       """
 
     Examples:

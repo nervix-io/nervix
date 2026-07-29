@@ -25,7 +25,7 @@ CREATE SCHEMA order_tiered (
   tier STRING
 );
 
-CREATE STRICT WIRE JSON SCHEMA order_tiered_wire (
+CREATE WIRE JSON SCHEMA order_tiered_wire MODE STRICT (
   order_id string,
   customer string,
   status string,

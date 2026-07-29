@@ -8,7 +8,7 @@ use crate::{
         current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref,
         ingestor_ref, into_parse_error, junction_ref, kw, lex_input, node_id, reingestor_ref,
         relay_ref, reorderer_ref, schema_ref, suggestions_from_errors, tok, udf_ref, vhost_ref,
-        wire_schema_ref,
+        wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -22,10 +22,27 @@ pub fn drop_parser<'src>()
                 name,
             }),
         kw(Identifier::Wire)
+            .ignore_then(kw(Identifier::Json))
             .ignore_then(kw(Identifier::Schema))
-            .ignore_then(wire_schema_ref())
+            .ignore_then(wire_json_schema_ref())
             .map(|name| DropModel {
-                kind: ModelKind::WireSchema,
+                kind: ModelKind::WireJsonSchema,
+                name,
+            }),
+        kw(Identifier::Wire)
+            .ignore_then(kw(Identifier::Cbor))
+            .ignore_then(kw(Identifier::Schema))
+            .ignore_then(wire_cbor_schema_ref())
+            .map(|name| DropModel {
+                kind: ModelKind::WireCborSchema,
+                name,
+            }),
+        kw(Identifier::Wire)
+            .ignore_then(kw(Identifier::Avro))
+            .ignore_then(kw(Identifier::Schema))
+            .ignore_then(wire_avro_schema_ref())
+            .map(|name| DropModel {
+                kind: ModelKind::WireAvroSchema,
                 name,
             }),
         kw(Identifier::Codec)
@@ -182,6 +199,30 @@ mod tests {
         let parsed = parse_drop_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.kind, ModelKind::Schema);
         assert_eq!(parsed.name.as_str(), "event_schema");
+    }
+
+    #[test]
+    fn parses_exact_wire_schema_kind_and_rejects_generic_kind() {
+        let parsed =
+            parse_drop("DROP WIRE CBOR SCHEMA event_schema;").expect("parse should succeed");
+        assert_eq!(parsed.kind, ModelKind::WireCborSchema);
+        assert_eq!(parsed.name.as_str(), "event_schema");
+
+        assert!(parse_drop("DROP WIRE SCHEMA event_schema;").is_err());
+    }
+
+    #[test]
+    fn completes_exact_wire_schema_kind() {
+        let input = "DROP WIRE ";
+        let suggestions = suggest_drop(input, input.len());
+        for format in ["JSON", "CBOR", "AVRO"] {
+            assert!(suggestions.contains(&format.to_string()));
+        }
+        assert!(!suggestions.contains(&"SCHEMA".to_string()));
+
+        let input = "DROP WIRE CBOR ";
+        let suggestions = suggest_drop(input, input.len());
+        assert_eq!(suggestions, vec!["SCHEMA".to_string()]);
     }
 
     #[test]

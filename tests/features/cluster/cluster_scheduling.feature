@@ -27,7 +27,7 @@ Feature: Cluster scheduling
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( id integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA event_branch ( id I64 );
       CREATE BRANCH by_event SCHEMA event_branch TTL 5m;
@@ -118,7 +118,7 @@ Feature: Cluster scheduling
         user_id I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
 
@@ -185,7 +185,7 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -247,7 +247,7 @@ Feature: Cluster scheduling
         level STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         id integer,
         level string
       );
@@ -352,7 +352,7 @@ Feature: Cluster scheduling
         level STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         id integer,
         level string
       );
@@ -483,7 +483,7 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -557,7 +557,7 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -622,7 +622,7 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -750,7 +750,7 @@ Feature: Cluster scheduling
         level STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         id integer,
         level string
       );

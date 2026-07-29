@@ -21,7 +21,7 @@ Feature: Processor output routing
         divisor I64,
         attempted_result I64 OPTIONAL
       );
-      CREATE STRICT WIRE JSON SCHEMA routed_event_wire (
+      CREATE WIRE JSON SCHEMA routed_event_wire MODE STRICT (
         id string,
         divisor integer,
         result integer OPTIONAL
@@ -97,7 +97,7 @@ Feature: Processor output routing
         id STRING,
         route STRING OPTIONAL
       );
-      CREATE STRICT WIRE JSON SCHEMA routed_event_wire (
+      CREATE WIRE JSON SCHEMA routed_event_wire MODE STRICT (
         id string,
         route string OPTIONAL
       );
@@ -176,7 +176,7 @@ Feature: Processor output routing
       normalized STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA event_wire (
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         id string,
         active boolean,
         level string,
@@ -264,7 +264,7 @@ Feature: Processor output routing
         id STRING,
         amount I64
       );
-      CREATE STRICT WIRE JSON SCHEMA source_event_wire (
+      CREATE WIRE JSON SCHEMA source_event_wire MODE STRICT (
         id string
       );
       CREATE CODEC source_event_codec
@@ -351,7 +351,7 @@ Feature: Processor output routing
         level STRING,
         urgent BOOL
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         id string,
         active boolean,
         level string,
@@ -481,7 +481,7 @@ Feature: Processor output routing
         amount I64,
         normalized STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         user_id integer,
         active boolean,
@@ -575,7 +575,7 @@ Feature: Processor output routing
         active BOOL,
         severity STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         id string,
         active boolean,
         level string,

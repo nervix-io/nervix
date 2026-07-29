@@ -79,6 +79,11 @@ while generator route bodies remain set-only.
   statements.
   Include every dependent wire, internal, codec, and node mutation required for the candidate graph
   to validate in the same transaction.
+- Treat JSON, CBOR, and AVRO wire schemas as distinct entity kinds. Their names may coincide, so
+  every create, alter, show, drop, and codec reference must include the exact format.
+- Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
+  STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
+  the same format-qualified ALTER form owns field evolution.
 - Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only
   when the body needs the domain clock or randomness. Roto UDFs are trusted native code; keep
   untrusted custom processing in WASM.

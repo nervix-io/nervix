@@ -20,7 +20,7 @@ Feature: Route-local value construction
         normalized STRING,
         note STRING OPTIONAL
       );
-      CREATE STRICT WIRE JSON SCHEMA source_event_wire (
+      CREATE WIRE JSON SCHEMA source_event_wire MODE STRICT (
         id string,
         amount integer,
         raw string,
@@ -99,7 +99,7 @@ Feature: Route-local value construction
         source_route STRING OPTIONAL,
         operation STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA header_calculation_wire (
+      CREATE WIRE JSON SCHEMA header_calculation_wire MODE STRICT (
         id string,
         numerator integer,
         denominator integer
@@ -168,7 +168,7 @@ Feature: Route-local value construction
         message_digest STRING,
         attempted_result I64 OPTIONAL
       );
-      CREATE STRICT WIRE JSON SCHEMA calculation_wire (
+      CREATE WIRE JSON SCHEMA calculation_wire MODE STRICT (
         id string,
         numerator integer,
         denominator integer

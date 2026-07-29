@@ -18,7 +18,7 @@ Feature: Inferencer resources
       CREATE SCHEMA scored (
         score <score_type>
       );
-      CREATE STRICT WIRE JSON SCHEMA features_wire (
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         tenant string,
         vector array
       );
@@ -84,7 +84,7 @@ Feature: Inferencer resources
       CREATE SCHEMA scored (
         score <score_type>
       );
-      CREATE STRICT WIRE JSON SCHEMA features_wire (
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         tenant string,
         vector array
       );
@@ -278,7 +278,7 @@ Feature: Inferencer resources
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       CREATE SCHEMA matrices ( matrix <matrix_type> );
       CREATE SCHEMA transformed_matrices ( transformed <matrix_type> );
-      CREATE STRICT WIRE JSON SCHEMA matrices_wire ( matrix array );
+      CREATE WIRE JSON SCHEMA matrices_wire MODE STRICT ( matrix array );
       CREATE CODEC matrices_codec FROM WIRE JSON SCHEMA matrices_wire TO SCHEMA matrices;
       CREATE RELAY matrices SCHEMA matrices UNBRANCHED;
       CREATE RELAY transformed_matrices SCHEMA transformed_matrices UNBRANCHED;
@@ -337,7 +337,7 @@ Feature: Inferencer resources
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       CREATE SCHEMA sequences ( features <sequence_type>, mask <sequence_type> );
       CREATE SCHEMA scored_sequences ( scores <sequence_type> );
-      CREATE STRICT WIRE JSON SCHEMA sequences_wire ( features array, mask array );
+      CREATE WIRE JSON SCHEMA sequences_wire MODE STRICT ( features array, mask array );
       CREATE CODEC sequences_codec FROM WIRE JSON SCHEMA sequences_wire TO SCHEMA sequences;
       CREATE RELAY sequences SCHEMA sequences UNBRANCHED;
       CREATE RELAY scored_sequences SCHEMA scored_sequences UNBRANCHED;
@@ -396,7 +396,7 @@ Feature: Inferencer resources
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       CREATE SCHEMA sequences ( features <sequence_type>, mask <sequence_type> );
       CREATE SCHEMA scored_sequences ( scores <sequence_type> );
-      CREATE STRICT WIRE JSON SCHEMA sequences_wire ( features array, mask array );
+      CREATE WIRE JSON SCHEMA sequences_wire MODE STRICT ( features array, mask array );
       CREATE CODEC sequences_codec FROM WIRE JSON SCHEMA sequences_wire TO SCHEMA sequences;
       CREATE RELAY sequences SCHEMA sequences UNBRANCHED;
       CREATE RELAY scored_sequences SCHEMA scored_sequences UNBRANCHED;
@@ -466,7 +466,7 @@ Feature: Inferencer resources
       CREATE SCHEMA features ( vector <input_field_type> );
       CREATE SCHEMA scored ( score <output_field_type> );
       CREATE SCHEMA audited ( model_score <output_field_type> );
-      CREATE STRICT WIRE JSON SCHEMA features_wire ( vector array );
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( vector array );
       CREATE CODEC features_codec FROM WIRE JSON SCHEMA features_wire TO SCHEMA features;
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
@@ -547,7 +547,7 @@ Feature: Inferencer resources
         mask <input_field_type>
       );
       CREATE SCHEMA scored ( scores <output_field_type> );
-      CREATE STRICT WIRE JSON SCHEMA features_wire (
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         features array,
         mask array
       );
@@ -623,7 +623,7 @@ Feature: Inferencer resources
         mask <input_field_type>
       );
       CREATE SCHEMA scored ( scores <output_field_type> );
-      CREATE STRICT WIRE JSON SCHEMA features_wire (
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         tenant string,
         features array,
         mask array

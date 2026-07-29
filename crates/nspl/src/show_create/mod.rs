@@ -8,7 +8,8 @@ use crate::{
         current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref,
         inferencer_ref, ingestor_ref, into_parse_error, junction_ref, kw, kw_phrase2, lex_input,
         lookup_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggestions_from_errors,
-        tok, udf_ref, vhost_ref, window_processor_ref, wire_schema_ref,
+        tok, udf_ref, vhost_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
+        wire_json_schema_ref,
     },
 };
 
@@ -22,10 +23,27 @@ pub fn show_create_parser<'src>()
                 name,
             }),
         kw(Identifier::Wire)
+            .ignore_then(kw(Identifier::Json))
             .ignore_then(kw(Identifier::Schema))
-            .ignore_then(wire_schema_ref())
+            .ignore_then(wire_json_schema_ref())
             .map(|name| ShowCreate {
-                kind: ModelKind::WireSchema,
+                kind: ModelKind::WireJsonSchema,
+                name,
+            }),
+        kw(Identifier::Wire)
+            .ignore_then(kw(Identifier::Cbor))
+            .ignore_then(kw(Identifier::Schema))
+            .ignore_then(wire_cbor_schema_ref())
+            .map(|name| ShowCreate {
+                kind: ModelKind::WireCborSchema,
+                name,
+            }),
+        kw(Identifier::Wire)
+            .ignore_then(kw(Identifier::Avro))
+            .ignore_then(kw(Identifier::Schema))
+            .ignore_then(wire_avro_schema_ref())
+            .map(|name| ShowCreate {
+                kind: ModelKind::WireAvroSchema,
                 name,
             }),
         kw(Identifier::Codec)
@@ -264,6 +282,30 @@ mod tests {
         let parsed = parse_show_create_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.kind, ModelKind::Lookup);
         assert_eq!(parsed.name.as_str(), "zip_codes");
+    }
+
+    #[test]
+    fn parses_exact_wire_schema_kind_and_rejects_generic_kind() {
+        let parsed = parse_show_create("SHOW CREATE WIRE JSON SCHEMA payload;")
+            .expect("parse should succeed");
+        assert_eq!(parsed.kind, ModelKind::WireJsonSchema);
+        assert_eq!(parsed.name.as_str(), "payload");
+
+        assert!(parse_show_create("SHOW CREATE WIRE SCHEMA payload;").is_err());
+    }
+
+    #[test]
+    fn completes_exact_wire_schema_kind() {
+        let input = "SHOW CREATE WIRE ";
+        let suggestions = suggest_show_create(input, input.len());
+        for format in ["JSON", "CBOR", "AVRO"] {
+            assert!(suggestions.contains(&format.to_string()));
+        }
+        assert!(!suggestions.contains(&"SCHEMA".to_string()));
+
+        let input = "SHOW CREATE WIRE JSON ";
+        let suggestions = suggest_show_create(input, input.len());
+        assert_eq!(suggestions, vec!["SCHEMA".to_string()]);
     }
 
     #[test]

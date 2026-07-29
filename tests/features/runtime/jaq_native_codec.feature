@@ -91,7 +91,7 @@ Feature: JAQ native codec
         user_id I64,
         payload STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         payload string
       );

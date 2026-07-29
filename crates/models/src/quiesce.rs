@@ -3,7 +3,7 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchemaStmt, EmitSink,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
     Identifier, MessageErrorPolicy, Model, ModelKind, ProcessorInputs, ProcessorOutput,
     ProcessorOutputs,
 };
@@ -261,7 +261,11 @@ impl Model {
                     ModelChangeAspects::replaced()
                 }
             }
-            (Self::WireSchema(base), Self::WireSchema(candidate)) => {
+            (Self::WireJsonSchema(base), Self::WireJsonSchema(candidate))
+            | (Self::WireCborSchema(base), Self::WireCborSchema(candidate)) => {
+                wire_schema_change_aspects(base, candidate)
+            }
+            (Self::WireAvroSchema(base), Self::WireAvroSchema(candidate)) => {
                 wire_schema_change_aspects(base, candidate)
             }
             (Self::Codec(_), _)
@@ -305,7 +309,9 @@ impl Model {
             | (Self::Relay(_), _)
             | (Self::Junction(_), _)
             | (Self::Schema(_), _)
-            | (Self::WireSchema(_), _) => ModelChangeAspects::replaced(),
+            | (Self::WireJsonSchema(_), _)
+            | (Self::WireCborSchema(_), _)
+            | (Self::WireAvroSchema(_), _) => ModelChangeAspects::replaced(),
         }
     }
 }
@@ -1124,21 +1130,11 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
     }
 }
 
-fn wire_schema_change_aspects(
-    base: &CreateWireSchemaStmt,
-    candidate: &CreateWireSchemaStmt,
+fn wire_schema_change_aspects<T>(
+    base: &CreateWireSchema<T>,
+    candidate: &CreateWireSchema<T>,
 ) -> ModelChangeAspects {
-    let base_name = match base {
-        CreateWireSchemaStmt::Json(base) => &base.name,
-        CreateWireSchemaStmt::Cbor(base) => &base.name,
-        CreateWireSchemaStmt::Avro(base) => &base.name,
-    };
-    let candidate_name = match candidate {
-        CreateWireSchemaStmt::Json(candidate) => &candidate.name,
-        CreateWireSchemaStmt::Cbor(candidate) => &candidate.name,
-        CreateWireSchemaStmt::Avro(candidate) => &candidate.name,
-    };
-    if base_name == candidate_name {
+    if base.name == candidate.name {
         ModelChangeAspects {
             aspects: vec![ModelChangeAspect::WireSchemaDefinition],
             dynamic_updates: Vec::new(),

@@ -29,7 +29,7 @@ CREATE SCHEMA notification (
   payload STRING OPTIONAL
 );
 
-CREATE STRICT WIRE JSON SCHEMA notification_wire (
+CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
   user_id integer,
   created_at string,
   payload string OPTIONAL

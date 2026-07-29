@@ -10,7 +10,11 @@ mod statement;
 mod timestamp;
 mod udf;
 
-pub use canonical::{CanonicalNsplError, expression_to_nspl};
+pub use canonical::{
+    CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
+    alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
+    expression_to_nspl,
+};
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
     ExternalValue, FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField,
@@ -33,9 +37,9 @@ pub use resource::{
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
-    AlterWireSchemaStmt, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,
-    CreateJsonWireSchema, CreateSchema, CreateWireSchema, CreateWireSchemaStmt, JsonType,
-    ParseAsType, SchemaField, WireSchemaField, WireSchemaFormat, WireSchemaStrictness,
+    AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema,
+    CreateSchema, CreateWireSchema, JsonType, ParseAsType, SchemaField, WireSchemaDefinition,
+    WireSchemaField, WireSchemaStrictness,
 };
 pub use statement::{
     AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterEmitter,

@@ -11,7 +11,7 @@ Feature: HTTP ingestor domain pacing
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -66,7 +66,7 @@ Feature: HTTP ingestor domain pacing
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -126,7 +126,7 @@ Feature: HTTP ingestor domain pacing
         user_id I64,
         occurred_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         occurred_at string
       );
@@ -184,7 +184,7 @@ Feature: HTTP ingestor domain pacing
         user_id I64,
         occurred_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         occurred_at string
       );

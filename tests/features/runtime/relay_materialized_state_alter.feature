@@ -11,7 +11,7 @@ Feature: Altering relay materialized state
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( tenant string, seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
@@ -74,7 +74,7 @@ Feature: Altering relay materialized state
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
