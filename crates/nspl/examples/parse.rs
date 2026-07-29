@@ -130,12 +130,12 @@ fn main() -> ExitCode {
     );
     println!(
         "  CREATE CODEC <name> FROM JSON|YAML|TOML|XML|CBOR TO SCHEMA <schema> WITH JAQ \
-         TRANSFORMATION '...' [;]"
+         TRANSFORMATIONS ON INGESTION|EMITTING '...' [;]"
     );
     println!(
         "  CREATE CODEC <name> FROM PROTOBUF USING RESOURCE <resource> [VERSION <n>] CONFIG \
          {{'file' = '<path.proto>', 'include' = '.'}} MESSAGE '<package.Message>' TO SCHEMA \
-         <schema> WITH JAQ TRANSFORMATION '...' [;]"
+         <schema> WITH JAQ TRANSFORMATIONS ON INGESTION|EMITTING '...' [;]"
     );
     println!("  CREATE RELAY <name> SCHEMA <schema> [CAPACITY <n>] [;]");
     println!(

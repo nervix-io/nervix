@@ -9,6 +9,7 @@ mutants.out
 .venv
 docs/book
 docs/src/roto-language-reference.md
+docs/src/jaq-reference.md
 __pycache__
 /tls/
 .nervix-deps

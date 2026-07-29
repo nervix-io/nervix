@@ -14,7 +14,6 @@ create-missing = false
 additional-css = ["theme/nervix.css"]
 default-theme = "navy"
 edit-url-template = "https://github.com/nervix-io/nervix/edit/main/docs/{path}"
-favicon-svg = "theme/nervix-mark.svg"
 git-repository-url = "https://github.com/nervix-io/nervix"
 preferred-dark-theme = "navy"
 
@@ -28,6 +27,7 @@ include = [
   "working-message.md",
   "domains-and-time.md",
   "schemas-and-codecs.md",
+  "jaq-reference.md",
   "resources.md",
   "relay.md",
   "ingestors.md",
