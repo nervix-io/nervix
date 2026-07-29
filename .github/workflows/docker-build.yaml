@@ -34,7 +34,7 @@ jobs:
   build-arch:
     name: build-${{ matrix.image }}-${{ matrix.arch }}
     needs: meta
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 80
     strategy:
       fail-fast: false
@@ -44,11 +44,13 @@ jobs:
             version: trixie
             platform: linux/amd64
             arch: amd64
+            runner: blacksmith-4vcpu-ubuntu-2404
             llvm: "22"
           - image: debian
             version: trixie
             platform: linux/arm64
             arch: arm64
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
             llvm: "22"
           # - image: alpine
           #   version: "3.23"
