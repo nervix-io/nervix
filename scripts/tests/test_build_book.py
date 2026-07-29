@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
+from unittest.mock import patch
 
 from scripts.build_book import (
+    MDBOOK_VERSION,
     bundle_roto_reference,
     resolve_roto_version,
     roto_bundle_is_current,
+    verify_mdbook_version,
 )
 
 
@@ -54,6 +58,10 @@ x is 10
 Constants are [declared by the runtime](#add-constants). See also [context
 variables](#lang_context) for details, and the
 [Roto repository](https://github.com/NLnetLabs/roto) for sources.
+
+If you're using Roto as a binary or with the [generated
+CLI](generate_cli), run the tests with the `test` subcommand. Nervix documents
+the catalog in [User-Defined Functions](udfs.md).
 """
 
 
@@ -92,6 +100,11 @@ class RotoReferenceBundleTests(unittest.TestCase):
         self.assertNotIn("(#add-constants)", bundled)
         self.assertNotIn("(#lang_context)", bundled)
         self.assertIn("[Roto repository](https://github.com/NLnetLabs/roto)", bundled)
+        # cross-page MyST references name Roto pages Nervix does not bundle, so
+        # they are unwrapped too; relative links to bundled chapters survive
+        self.assertIn("with the generated\nCLI, run the tests", bundled)
+        self.assertNotIn("(generate_cli)", bundled)
+        self.assertIn("[User-Defined Functions](udfs.md)", bundled)
 
     def test_bundle_currency_is_detected_by_version_marker(self) -> None:
         bundled = bundle_roto_reference(SAMPLE_UPSTREAM, "0.11.3")
@@ -99,6 +112,34 @@ class RotoReferenceBundleTests(unittest.TestCase):
         self.assertTrue(roto_bundle_is_current(bundled, "0.11.3"))
         self.assertFalse(roto_bundle_is_current(bundled, "0.11.4"))
         self.assertFalse(roto_bundle_is_current("# Roto Language Reference\n", "0.11.3"))
+
+
+class MdbookVersionTests(unittest.TestCase):
+    def completed(self, stdout: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["mdbook", "--version"], 0, stdout=stdout, stderr="")
+
+    def test_pinned_version_is_accepted(self) -> None:
+        with patch(
+            "scripts.build_book.subprocess.run",
+            return_value=self.completed(f"mdbook v{MDBOOK_VERSION}\n"),
+        ):
+            verify_mdbook_version()
+
+    def test_other_version_is_rejected_by_name(self) -> None:
+        with patch(
+            "scripts.build_book.subprocess.run",
+            return_value=self.completed("mdbook v0.4.40\n"),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                verify_mdbook_version()
+
+        self.assertIn(MDBOOK_VERSION, str(raised.exception))
+        self.assertIn("0.4.40", str(raised.exception))
+
+    def test_missing_mdbook_is_reported(self) -> None:
+        with patch("scripts.build_book.subprocess.run", side_effect=FileNotFoundError("mdbook")):
+            with self.assertRaises(SystemExit):
+                verify_mdbook_version()
 
 
 if __name__ == "__main__":

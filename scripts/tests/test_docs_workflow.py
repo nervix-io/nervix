@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from scripts.build_book import MDBOOK_VERSION
 from scripts.publish_docs_alias import update_alias
 
 
@@ -67,6 +68,16 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertIn("--toc-depth=2", justfile)
         self.assertIn("--variable=geometry:margin=0.8in", justfile)
         self.assertIn("--variable=linestretch:1.08", justfile)
+
+    def test_ci_installs_the_mdbook_version_pinned_in_the_build_script(self) -> None:
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        _, build_book = workflow.split("\n  build-book:", maxsplit=1)
+
+        # The pin lives in build_book.py alone; CI resolves it instead of
+        # repeating a literal that could drift from local builds.
+        self.assertIn("from scripts.build_book import MDBOOK_VERSION", build_book)
+        self.assertIn("mdbook-version: ${{ steps.mdbook.outputs.version }}", build_book)
+        self.assertNotIn(f'mdbook-version: "{MDBOOK_VERSION}"', build_book)
 
     def test_docs_ci_handles_pushes_without_pull_request_context(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()

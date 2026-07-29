@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import urllib.request
@@ -17,19 +18,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT / "docs"
 OUTPUT_DIR = DOCS_DIR / "book"
+# The rendered theme and the PDF's in-document links both depend on this exact
+# release, so local builds and CI must agree on it. CI reads this constant.
+MDBOOK_VERSION = "0.5.3"
 ROTO_UPSTREAM_PATH = "docs/source/reference/language_reference.md"
 ROTO_REFERENCE_OUTPUT = DOCS_DIR / "src" / "roto-language-reference.md"
 ROTO_ANCHOR_LINE = re.compile(r"^\([A-Za-z0-9_]+\)=\s*$")
 ROTO_FENCE_OPEN = re.compile(r"^:{3,}\{(\w+)\}\s*$")
 ROTO_FENCE_CLOSE = re.compile(r"^:{3,}\s*$")
-ROTO_IN_PAGE_LINK = re.compile(r"\[([^][]+)\]\(#[A-Za-z0-9_-]+\)")
-GOOGLE_FONTS_CSS = (
-    "https://fonts.googleapis.com/css2"
-    "?family=Open+Sans:ital,wght@0,300;0,400;0,600;0,700;0,800;1,300;1,400;1,600;1,700;1,800"
-    "&family=Source+Code+Pro:wght@500&display=swap"
-)
-FONT_AWESOME_CSS = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css"
-NERVIX_LOGO_SVG = "theme/nervix-mark.svg"
+# Upstream MyST cross-references, either in-page (`](#anchor)`) or to a Roto
+# documentation page Nervix does not bundle (`](generate_cli)`). Both resolve to
+# nothing here, so the link text is kept and the target dropped. Relative links
+# such as `](udfs.md)` and absolute URLs are left alone.
+ROTO_UNRESOLVED_LINK = re.compile(r"\[([^][]+)\]\((?:#[A-Za-z0-9_-]+|[A-Za-z0-9_]+)\)")
 
 
 def render_title(version: str) -> str:
@@ -77,7 +78,7 @@ def bundle_roto_reference(upstream_text: str, version: str) -> str:
             lines.append(f"> {line}".rstrip())
         else:
             lines.append(line)
-    body = ROTO_IN_PAGE_LINK.sub(r"\1", "\n".join(lines))
+    body = ROTO_UNRESOLVED_LINK.sub(r"\1", "\n".join(lines))
     body = body.replace("# Language Reference", "# Roto Language Reference", 1)
 
     provenance = (
@@ -109,31 +110,25 @@ def ensure_roto_language_reference() -> None:
     ROTO_REFERENCE_OUTPUT.write_text(bundle_roto_reference(upstream_text, version), encoding="utf-8")
 
 
-def rewrite_external_assets(book_dir: Path) -> None:
-    html_files = list(book_dir.rglob("*.html"))
-    for html_file in html_files:
-        content = html_file.read_text(encoding="utf-8")
-        content = content.replace(
-            '<link rel="icon" href="favicon.svg">',
-            f'<link rel="icon" href="{NERVIX_LOGO_SVG}">',
-        )
-        content = content.replace(
-            '<link rel="shortcut icon" href="favicon.png">',
-            f'<link rel="shortcut icon" href="{NERVIX_LOGO_SVG}">',
-        )
-        content = content.replace(
-            '<link rel="stylesheet" href="FontAwesome/css/font-awesome.css">',
-            f'<link rel="stylesheet" href="{FONT_AWESOME_CSS}">',
-        )
-        content = content.replace(
-            '<link rel="stylesheet" href="fonts/fonts.css">',
-            f'<link rel="stylesheet" href="{GOOGLE_FONTS_CSS}">',
-        )
-        html_file.write_text(content, encoding="utf-8")
+def verify_mdbook_version() -> None:
+    try:
+        reported = subprocess.run(
+            ["mdbook", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except OSError as error:
+        raise SystemExit(f"mdBook {MDBOOK_VERSION} is required but could not be run: {error}")
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"mdbook --version failed: {error}")
 
-    for bundled_dir in (book_dir / "fonts", book_dir / "FontAwesome"):
-        if bundled_dir.exists():
-            shutil.rmtree(bundled_dir)
+    installed = reported.strip().removeprefix("mdbook").strip().removeprefix("v")
+    if installed != MDBOOK_VERSION:
+        raise SystemExit(
+            f"mdBook {MDBOOK_VERSION} is required, found {installed or 'nothing'}. "
+            "The rendered theme and the PDF's in-document links depend on this exact release."
+        )
 
 
 def copy_theme_assets(source_theme_dir: Path, book_dir: Path) -> None:
@@ -144,6 +139,24 @@ def copy_theme_assets(source_theme_dir: Path, book_dir: Path) -> None:
     for source_file in source_theme_dir.iterdir():
         if source_file.is_file():
             shutil.copy2(source_file, output_theme_dir / source_file.name)
+
+
+def run_mdbook(rendered_dir: Path, build_env: dict[str, str]) -> None:
+    # mdBook reports a rejected renderer configuration on stderr and still exits
+    # zero, which silently renders the book with default settings. Treat any
+    # logged error as fatal so a bad `book.toml` cannot ship.
+    result = subprocess.run(
+        ["mdbook", "build", str(DOCS_DIR), "--dest-dir", str(rendered_dir)],
+        check=True,
+        cwd=ROOT,
+        env=build_env,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    sys.stderr.write(result.stderr)
+    errors = [line for line in result.stderr.splitlines() if line.strip().startswith("ERROR")]
+    if errors:
+        raise SystemExit("mdBook reported errors while building the book:\n" + "\n".join(errors))
 
 
 def verify_publication(publication_dir: Path) -> None:
@@ -172,6 +185,7 @@ def main() -> int:
     if args.version == "":
         raise SystemExit("--version must be non-empty")
 
+    verify_mdbook_version()
     ensure_roto_language_reference()
 
     with tempfile.TemporaryDirectory(prefix="nervix-book-") as tmp_dir:
@@ -181,18 +195,12 @@ def main() -> int:
         build_env["MDBOOK_BOOK__TITLE"] = json.dumps(render_title(args.version))
         build_env["MDBOOK_OUTPUT__LLMS__VERSION"] = json.dumps(args.version)
 
-        subprocess.run(
-            ["mdbook", "build", str(DOCS_DIR), "--dest-dir", str(rendered_dir)],
-            check=True,
-            cwd=ROOT,
-            env=build_env,
-        )
+        run_mdbook(rendered_dir, build_env)
 
         html_dir = rendered_dir / "html"
         markdown_dir = rendered_dir / "markdown"
         llms_path = rendered_dir / "llms" / "llms.txt"
         copy_theme_assets(DOCS_DIR / "theme", html_dir)
-        rewrite_external_assets(html_dir)
         shutil.copytree(html_dir, publication_dir)
         shutil.copytree(markdown_dir, publication_dir / "markdown")
         shutil.copy2(llms_path, publication_dir / "llms.txt")

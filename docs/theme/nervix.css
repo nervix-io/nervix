@@ -84,12 +84,12 @@ body::before {
     mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.94), rgba(0, 0, 0, 0.68));
 }
 
-#body-container {
+#mdbook-body-container {
     position: relative;
     padding-block-start: 36px;
 }
 
-#body-container::before {
+#mdbook-body-container::before {
     position: fixed;
     inset-block-start: 0;
     inset-inline: 0;
@@ -117,12 +117,12 @@ body::before {
     padding-inline: var(--page-padding);
 }
 
-#menu-bar-hover-placeholder,
-#menu-bar {
+#mdbook-menu-bar-hover-placeholder,
+#mdbook-menu-bar {
     margin-inline: calc(0px - var(--page-padding));
 }
 
-#menu-bar {
+#mdbook-menu-bar {
     min-height: var(--menu-bar-height);
     padding-inline: clamp(1rem, 5vw, 7rem);
     border-block-end: 1px solid rgba(40, 78, 142, 0.36);
@@ -130,14 +130,14 @@ body::before {
     backdrop-filter: blur(18px);
 }
 
-#menu-bar.sticky,
-#menu-bar-hover-placeholder:hover + #menu-bar,
-#menu-bar:hover,
-html.sidebar-visible #menu-bar {
+#mdbook-menu-bar.sticky,
+#mdbook-menu-bar-hover-placeholder:hover + #mdbook-menu-bar,
+#mdbook-menu-bar:hover,
+html.sidebar-visible #mdbook-menu-bar {
     top: 36px !important;
 }
 
-#menu-bar.bordered {
+#mdbook-menu-bar.bordered {
     border-block-end-color: rgba(52, 104, 190, 0.42);
 }
 
@@ -155,28 +155,30 @@ html.sidebar-visible #menu-bar {
     height: 3.2rem;
     margin-inline-end: 1.1rem;
     vertical-align: -0.82rem;
-    background: url("nervix-mark.svg") center / contain no-repeat;
+    /* The Nervix mark, doubling as mdBook's favicon override. */
+    background: url("favicon.svg") center / contain no-repeat;
     filter: drop-shadow(0 0 14px rgba(23, 201, 239, 0.28));
     content: "";
 }
 
-#menu-bar i,
-#menu-bar .icon-button {
+/* mdBook renders menu-bar icons as inline `.fa-svg` spans that inherit color. */
+#mdbook-menu-bar .fa-svg,
+#mdbook-menu-bar .icon-button {
     color: #94a3cf;
 }
 
-#menu-bar i:hover,
-#menu-bar .icon-button:hover {
+#mdbook-menu-bar .fa-svg:hover,
+#mdbook-menu-bar .icon-button:hover {
     color: #ffffff;
 }
 
-.right-buttons a:last-child i,
-#search-toggle,
-#theme-toggle {
+.right-buttons a:last-child .fa-svg,
+#mdbook-search-toggle,
+#mdbook-theme-toggle {
     color: var(--nervix-cyan);
 }
 
-#sidebar {
+#mdbook-sidebar {
     top: 36px;
     border-inline-end: 1px solid rgba(48, 78, 156, 0.38);
     background:
@@ -201,9 +203,11 @@ html.sidebar-visible #menu-bar {
     margin-block: 0.1rem;
 }
 
+/* `.chapter-link-wrapper` is a flex row holding the link and the fold chevron,
+   so the link grows instead of being sized against the wrapper. */
 .chapter li a {
     box-sizing: border-box;
-    width: 100%;
+    flex: 1;
     padding: 0.2rem 0.72rem;
     border-radius: 6px;
     color: #aebbe1;
@@ -302,7 +306,7 @@ html.sidebar-visible #menu-bar {
 
 .content a:link,
 .content a:visited,
-#searchresults a {
+#mdbook-searchresults a {
     color: var(--nervix-cyan);
     font-weight: 700;
 }
@@ -349,13 +353,13 @@ table td {
     padding: 0.9rem 1.2rem;
 }
 
-#search-wrapper {
+#mdbook-search-wrapper {
     border-block-end: 1px solid rgba(52, 104, 190, 0.28);
     background: rgba(5, 9, 19, 0.85);
     backdrop-filter: blur(16px);
 }
 
-#searchbar {
+#mdbook-searchbar {
     border-radius: 8px;
 }
 
@@ -374,13 +378,13 @@ table td {
         --menu-bar-height: 58px;
     }
 
-    #body-container::before {
+    #mdbook-body-container::before {
         padding-inline: 1rem;
         font-size: 1.08rem;
         text-align: center;
     }
 
-    #menu-bar {
+    #mdbook-menu-bar {
         padding-inline: 0.75rem;
     }
 
@@ -411,11 +415,11 @@ table td {
 }
 
 @media print {
-    #body-container {
+    #mdbook-body-container {
         padding-block-start: 0;
     }
 
-    #body-container::before,
+    #mdbook-body-container::before,
     body::before,
     .content main::before,
     .menu-title::before {
