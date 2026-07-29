@@ -41,6 +41,10 @@ Graph metric series use these labels:
 - `reason`: branch eviction reason, either `lru` or `ttl`
 - `le`: Prometheus histogram bucket boundary
 
+For a single-input emitter, sent metrics retain that input relay as `stream`. A multi-input
+emitter's received metrics identify the actual source relay, while its sent metrics aggregate the
+shared sink pipeline with `stream="-"` because one flush may contain work from several sources.
+
 `DESCRIBE` output uses the same concepts but renders `physical_node_id` as `physical_node` for readability.
 
 Example Prometheus series:

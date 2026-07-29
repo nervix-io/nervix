@@ -263,27 +263,33 @@ impl Runtime {
         deps: ExecutionBuildDeps<'_>,
         emitter: &CreateEmitter,
     ) -> Result<EmitterTaskDeps, RuntimeError> {
-        let Some(input_schema) = deps.relay_schemas.get(&emitter.from_relay).cloned() else {
+        let Some(input_relay) = emitter.from.first() else {
+            return Err(RuntimeError::BuildDomainExecution {
+                domain: deps.domain.as_str().to_string(),
+                reason: format!("emitter '{}' has no input relay", emitter.name.as_str()),
+            });
+        };
+        let Some(input_schema) = deps.relay_schemas.get(input_relay).cloned() else {
             return Err(RuntimeError::BuildDomainExecution {
                 domain: deps.domain.as_str().to_string(),
                 reason: format!(
                     "missing emitter input relay schema '{}'",
-                    emitter.from_relay.as_str()
+                    input_relay.as_str()
+                ),
+            });
+        };
+        let Some(input_branching) = deps.relay_branchings.get(input_relay).cloned() else {
+            return Err(RuntimeError::BuildDomainExecution {
+                domain: deps.domain.as_str().to_string(),
+                reason: format!(
+                    "missing emitter input relay branching '{}'",
+                    input_relay.as_str()
                 ),
             });
         };
         Ok(EmitterTaskDeps {
             input_schema,
-            input_branching: deps
-                .relay_branchings
-                .get(&emitter.from_relay)
-                .cloned()
-                .unwrap_or_default(),
-            input_branching_schema: deps
-                .relay_branching_schemas
-                .get(&emitter.from_relay)
-                .cloned()
-                .flatten(),
+            input_branching,
             materialized_relay_specs: deps.materialized_relay_specs.clone(),
             materialized_relay_owner_nodes: deps.materialized_relay_owner_nodes.clone(),
             lookups: deps.lookups.clone(),
@@ -416,7 +422,7 @@ impl Runtime {
         Self::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
     }
 
-    fn entity_pause_relays_for_schedule(
+    pub(in crate::runtime) fn entity_pause_relays_for_schedule(
         schedule: &DomainSchedule,
         affected_entities: &[RegistryEntity],
     ) -> Vec<Identifier> {
@@ -436,7 +442,7 @@ impl Runtime {
                     .iter()
                     .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
                     .and_then(|node| match node.config.as_ref() {
-                        Model::Emitter(emitter) => Some(vec![emitter.from_relay.clone()]),
+                        Model::Emitter(emitter) => Some(emitter.from.from.clone()),
                         Model::Reingestor(reingestor) => Some(reingestor.from.from.clone()),
                         Model::Generator(generator) => {
                             Some(vec![generator.materialized_relay.clone()])
@@ -3558,8 +3564,11 @@ impl Runtime {
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Emitter(model) => {
-                schemas.input = Some(relay_schema(&model.from_relay)?);
-                current_branch_relay = Some(model.from_relay.clone());
+                let input = model.from.first().ok_or_else(|| {
+                    format!("emitter '{}' has no input relay", model.name.as_str())
+                })?;
+                schemas.input = Some(relay_schema(input)?);
+                current_branch_relay = Some(input.clone());
                 schemas.partial_output = model
                     .encode_using_codec
                     .as_ref()
@@ -4827,32 +4836,45 @@ impl Runtime {
                             reason: "domain execution disappeared during emitter swap".to_string(),
                         }
                     })?;
-                    if had_old_task
-                        && let Some(services) =
-                            execution.relay_services.get(&old_emitter.from_relay)
-                    {
-                        services.remove_local_runtime_consumer(old_emitter.mode);
+                    if had_old_task {
+                        for input_relay in old_emitter.from.relays() {
+                            if let Some(services) = execution.relay_services.get(input_relay) {
+                                services.remove_local_runtime_consumer(old_emitter.mode);
+                            }
+                        }
                     }
                     if !executes_locally {
                         None
                     } else {
-                        let receiver = execution
-                            .relay_services
-                            .get(&desired_emitter.from_relay)
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing relay services for swapped emitter input '{}'",
-                                    desired_emitter.from_relay.as_str()
-                                ),
-                            })?
-                            .add_local_runtime_consumer(desired_emitter.mode);
+                        let inputs = desired_emitter
+                            .from
+                            .relays()
+                            .iter()
+                            .map(|input_relay| {
+                                execution
+                                    .relay_services
+                                    .get(input_relay)
+                                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                        domain: domain.as_str().to_string(),
+                                        reason: format!(
+                                            "missing relay services for swapped emitter input '{}'",
+                                            input_relay.as_str()
+                                        ),
+                                    })
+                                    .map(|services| {
+                                        (
+                                            input_relay.clone(),
+                                            services
+                                                .add_local_runtime_consumer(desired_emitter.mode),
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, RuntimeError>>()?;
                         let deps = self.emitter_task_deps(
                             ExecutionBuildDeps {
                                 domain,
                                 relay_schemas: &execution.relay_schemas,
                                 relay_branchings: &execution.relay_branchings,
-                                relay_branching_schemas: &execution.relay_branching_schemas,
                                 materialized_relay_specs: &execution.materialized_stream_specs,
                                 materialized_relay_owner_nodes: &execution
                                     .materialized_stream_owner_nodes,
@@ -4865,11 +4887,11 @@ impl Runtime {
                             execution.codecs.clone(),
                             execution.clients.clone(),
                             deps,
-                            receiver,
+                            inputs,
                         ))
                     }
                 };
-                if let Some((shutdown, codecs, clients, deps, receiver)) = spawn {
+                if let Some((shutdown, codecs, clients, deps, inputs)) = spawn {
                     let task = self.spawn_emitter_task(
                         EmitterTaskBuildDeps {
                             domain,
@@ -4879,7 +4901,7 @@ impl Runtime {
                             deps,
                         },
                         desired_emitter,
-                        receiver,
+                        inputs,
                     )?;
                     self.executions
                         .get_mut(domain)
@@ -5419,7 +5441,7 @@ impl Runtime {
         Ok(())
     }
 
-    fn remote_runtime_consumers_for_schedule(
+    pub(in crate::runtime) fn remote_runtime_consumers_for_schedule(
         schedule: &DomainSchedule,
         local_node_id: &str,
     ) -> HashMap<Identifier, Vec<RemoteRuntimeConsumer>> {
@@ -5457,12 +5479,14 @@ impl Runtime {
             };
             match node.config.as_ref() {
                 Model::Emitter(emitter) => {
-                    push_remote_runtime_consumer(
-                        consumers.entry(emitter.from_relay.clone()).or_default(),
-                        target_node,
-                        &emitter.from_relay,
-                        emitter.mode,
-                    );
+                    for relay in emitter.from.relays() {
+                        push_remote_runtime_consumer(
+                            consumers.entry(relay.clone()).or_default(),
+                            target_node,
+                            relay,
+                            emitter.mode,
+                        );
+                    }
                 }
                 Model::Reingestor(reingestor) => {
                     for relay in reingestor.from.relays() {
@@ -6170,25 +6194,33 @@ impl Runtime {
                     lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
                 }
                 Model::Emitter(emitter) => {
-                    let Some(relay) = relay_builders.get_mut(&emitter.from_relay) else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing emitter input relay '{}'",
-                                emitter.from_relay.as_str()
-                            ),
-                        });
-                    };
+                    let mut inputs = Vec::with_capacity(emitter.from.relays().len());
+                    for input_relay in emitter.from.relays() {
+                        let Some(relay) = relay_builders.get_mut(input_relay) else {
+                            return Err(RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing emitter input relay '{}'",
+                                    input_relay.as_str()
+                                ),
+                            });
+                        };
+                        if node.executes_on(local_node_id) {
+                            inputs.push((
+                                input_relay.clone(),
+                                relay.runtime_consumer_fan_in_for_mode(emitter.mode),
+                            ));
+                        } else if let Some(assigned_node) = node.execution_node() {
+                            push_remote_runtime_consumer(
+                                &mut relay.remote_runtime_consumers,
+                                assigned_node,
+                                input_relay,
+                                emitter.mode,
+                            );
+                        }
+                    }
                     if node.executes_on(local_node_id) {
-                        let receiver = relay.runtime_consumer_fan_in_for_mode(emitter.mode);
-                        emitter_specs.push((emitter.clone(), receiver));
-                    } else if let Some(assigned_node) = node.execution_node() {
-                        push_remote_runtime_consumer(
-                            &mut relay.remote_runtime_consumers,
-                            assigned_node,
-                            &emitter.from_relay,
-                            emitter.mode,
-                        );
+                        emitter_specs.push((emitter.clone(), inputs));
                     }
                 }
                 Model::Reingestor(reingestor) => {
@@ -6522,7 +6554,6 @@ impl Runtime {
             domain,
             relay_schemas: &relay_schemas,
             relay_branchings: &relay_branchings,
-            relay_branching_schemas: &relay_branching_schemas,
             materialized_relay_specs: &materialized_stream_specs,
             materialized_relay_owner_nodes: &materialized_stream_owner_nodes,
             lookups: &lookup_runtimes,
@@ -6585,7 +6616,7 @@ impl Runtime {
             ));
         }
 
-        for (emitter, receiver) in emitter_specs {
+        for (emitter, inputs) in emitter_specs {
             let entity = RegistryEntity {
                 kind: ModelKind::Emitter,
                 identifier: emitter.name.clone(),
@@ -6601,7 +6632,7 @@ impl Runtime {
                         deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
                     },
                     emitter,
-                    receiver,
+                    inputs,
                 )?,
             );
         }
@@ -8438,17 +8469,23 @@ impl Runtime {
                     generator_specs.push((generator.clone(), source_branching, routes));
                 }
                 Model::Emitter(emitter) => {
-                    let Some(relay) = relay_builders.get_mut(&emitter.from_relay) else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing emitter input relay '{}'",
-                                emitter.from_relay.as_str()
-                            ),
-                        });
-                    };
-                    let receiver = relay.runtime_consumer_fan_in_for_mode(emitter.mode);
-                    emitter_specs.push((emitter.clone(), receiver));
+                    let mut inputs = Vec::with_capacity(emitter.from.relays().len());
+                    for input_relay in emitter.from.relays() {
+                        let Some(relay) = relay_builders.get_mut(input_relay) else {
+                            return Err(RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing emitter input relay '{}'",
+                                    input_relay.as_str()
+                                ),
+                            });
+                        };
+                        inputs.push((
+                            input_relay.clone(),
+                            relay.runtime_consumer_fan_in_for_mode(emitter.mode),
+                        ));
+                    }
+                    emitter_specs.push((emitter.clone(), inputs));
                 }
                 Model::Reingestor(reingestor) => {
                     for from_relay in reingestor.from.relays() {
@@ -8585,7 +8622,6 @@ impl Runtime {
             domain,
             relay_schemas: &relay_schemas,
             relay_branchings: &relay_branchings,
-            relay_branching_schemas: &relay_branching_schemas,
             materialized_relay_specs: &materialized_stream_specs,
             materialized_relay_owner_nodes: &materialized_stream_owner_nodes,
             lookups: &lookup_runtimes,
@@ -8636,7 +8672,7 @@ impl Runtime {
             );
         }
 
-        for (emitter, receiver) in emitter_specs {
+        for (emitter, inputs) in emitter_specs {
             let entity = RegistryEntity {
                 kind: ModelKind::Emitter,
                 identifier: emitter.name.clone(),
@@ -8652,7 +8688,7 @@ impl Runtime {
                         deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
                     },
                     emitter,
-                    receiver,
+                    inputs,
                 )?,
             );
         }
@@ -10507,9 +10543,9 @@ impl Runtime {
         &self,
         build: EmitterTaskBuildDeps<'_>,
         emitter: CreateEmitter,
-        receiver: RelayRuntimeFanIn,
+        inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
     ) -> Result<ScheduledEmitterTask, RuntimeError> {
-        emitters::EmitterTask::spawn(self, build, emitter, receiver)
+        emitters::EmitterTask::spawn(self, build, emitter, inputs)
     }
 
     fn spawn_materializer_task(

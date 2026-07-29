@@ -2511,22 +2511,45 @@ impl DomainState {
                     )?;
                 }
                 Model::Emitter(emitter) => {
-                    ensure_input_collect_policy(
-                        domain,
-                        identifier,
-                        emitter.collect_policy.as_ref(),
+                    let input_schemas = processor_input_schemas(
+                        ModelValidationContext {
+                            domain,
+                            identifier,
+                            models,
+                        },
+                        &indices,
+                        &mut graph,
+                        source,
+                        &emitter.from,
                         "emitter input",
                     )?;
-                    let input = expect_kind(
+                    let producer_schema = input_schemas
+                        .first()
+                        .map(|(_relay, schema)| *schema)
+                        .expect("validated emitter inputs must not be empty");
+                    for (relay, schema) in &input_schemas {
+                        if schema.name != producer_schema.name {
+                            return Err(Report::new(RegistryError::InvalidModel {
+                                domain: domain.as_str().to_string(),
+                                identifier: identifier.as_str().to_string(),
+                                reason: format!(
+                                    "emitter input relay '{}' declares schema '{}', but all \
+                                     emitter inputs must declare schema '{}'",
+                                    relay.as_str(),
+                                    schema.name.as_str(),
+                                    producer_schema.name.as_str(),
+                                ),
+                            }));
+                        }
+                    }
+                    validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
                         models,
-                        &indices,
-                        &emitter.from_relay,
-                        ModelKind::Relay,
+                        &input_schemas,
+                        None,
+                        &emitter.from.r#where,
                     )?;
-                    graph.add_edge(input, source, EdgeKind::RequiredBy);
-                    graph.add_edge(input, source, EdgeKind::SendsTo);
 
                     if let Some(codec_name) = &emitter.encode_using_codec {
                         let codec = expect_kind(
@@ -2605,8 +2628,6 @@ impl DomainState {
                         graph.add_edge(catalog_client, source, EdgeKind::RequiredBy);
                     }
 
-                    let producer_schema =
-                        schema_for_ack_model(domain, identifier, models, &emitter.from_relay)?;
                     let output_schema = if let Some(codec_name) = &emitter.encode_using_codec {
                         schema_for_codec_model(domain, identifier, models, codec_name)?
                     } else {
@@ -3169,7 +3190,11 @@ impl ActiveNode {
             self.kind.as_str().to_ascii_uppercase(),
             self.identifier.as_str(),
             "sent",
-            Some(emitter.from_relay.as_str().to_string()),
+            if emitter.from.relays().len() == 1 {
+                emitter.from.first().map(|relay| relay.as_str().to_string())
+            } else {
+                None
+            },
         ))
     }
 
@@ -4674,25 +4699,28 @@ fn validate_model_message_error_policies(
             )
         }
         Model::Emitter(node) => {
-            let input = schema_for_ack_model(domain, identifier, models, &node.from_relay)?;
             let partial_output = node
                 .encode_using_codec
                 .as_ref()
                 .map(|codec| schema_for_codec_model(domain, identifier, models, codec))
                 .transpose()?;
-            let branch = relay_declared_branch(domain, identifier, models, &node.from_relay)?;
-            validate_message_error_policy(
-                domain,
-                identifier,
-                models,
-                &node.error_policies.message,
-                MessageErrorSchemas {
-                    input: Some(input),
-                    partial_output,
-                    ..MessageErrorSchemas::default()
-                },
-                branch,
-            )
+            for input_relay in node.from.relays() {
+                let input = schema_for_ack_model(domain, identifier, models, input_relay)?;
+                let branch = relay_declared_branch(domain, identifier, models, input_relay)?;
+                validate_message_error_policy(
+                    domain,
+                    identifier,
+                    models,
+                    &node.error_policies.message,
+                    MessageErrorSchemas {
+                        input: Some(input),
+                        partial_output,
+                        ..MessageErrorSchemas::default()
+                    },
+                    branch,
+                )?;
+            }
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -5230,6 +5258,7 @@ fn visit_model_expressions(model: &Model, visitor: &mut impl FnMut(&Expression))
             visit_outputs(&model.output_routes, visitor);
         }
         Model::Emitter(model) => {
+            visit_inputs(&model.from, visitor);
             for assignment in &model.construction.assignments {
                 visitor(&assignment.value);
             }
@@ -8450,16 +8479,18 @@ fn validate_processing_branch_selections(
                 check.matches_outputs(&junction.branched_by, &junction.output_routes)?;
             }
             Model::Emitter(emitter) => {
-                for dependency in &emitter.materialized_state {
-                    ensure_relays_have_same_branch(
-                        domain,
-                        &key.identifier,
-                        "emitter materialized state",
-                        &emitter.from_relay,
-                        &dependency.relay,
-                        indices,
-                        graph,
-                    )?;
+                for input_relay in emitter.from.relays() {
+                    for dependency in &emitter.materialized_state {
+                        ensure_relays_have_same_branch(
+                            domain,
+                            &key.identifier,
+                            "emitter materialized state",
+                            input_relay,
+                            &dependency.relay,
+                            indices,
+                            graph,
+                        )?;
+                    }
                 }
             }
             _ => {}
@@ -10154,8 +10185,7 @@ mod tests {
     fn emitter(name: &str, from_relay: &str, codec: &str, client: &str) -> Model {
         Model::Emitter(CreateEmitter {
             name: Identifier::parse(name).expect("valid identifier"),
-            from_relay: Identifier::parse(from_relay).expect("valid identifier"),
-            collect_policy: None,
+            from: ProcessorInputs::single(Identifier::parse(from_relay).expect("valid identifier")),
             encode_using_codec: Some(Identifier::parse(codec).expect("valid identifier")),
             sink: EmitSink::Kafka {
                 client: Identifier::parse(client).expect("valid identifier"),
@@ -10188,8 +10218,7 @@ mod tests {
         };
         let mut emitter = CreateEmitter {
             name: identifier("emit"),
-            from_relay: identifier("events"),
-            collect_policy: None,
+            from: ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("events_codec")),
             sink: EmitSink::ZeroMq {
                 client: identifier("zeromq_main"),
@@ -12443,6 +12472,172 @@ mod tests {
             format!("{error:#}").contains(
                 "codec 'event_codec' cannot be used for encoding because it does not declare an \
                  ON EMITTING transformation"
+            ),
+            "unexpected error: {error:#}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn emitter_accepts_same_schema_inputs_from_different_named_branches() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        emitter.from = ProcessorInputs::new(
+            vec![identifier("source_a"), identifier("source_b")],
+            vec![
+                nervix_models::ProcessorInputWhere {
+                    relay: identifier("source_a"),
+                    where_clause: nervix_nspl::parse_expression("input.value = 'one'")
+                        .expect("valid source filter"),
+                },
+                nervix_models::ProcessorInputWhere {
+                    relay: identifier("source_b"),
+                    where_clause: nervix_nspl::parse_expression("input.value = 'two'")
+                        .expect("valid source filter"),
+                },
+            ],
+        );
+
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                    client_model("broker_out"),
+                    relay_branched_by("source_a", "event_schema", "branch_a"),
+                    relay_branched_by("source_b", "event_schema", "branch_b"),
+                    branch_schema("value_branch", &["value"]),
+                    branch("branch_a", "value_branch"),
+                    branch("branch_b", "value_branch"),
+                    Model::Emitter(emitter),
+                ],
+            )
+            .expect("emitters may consume different named branches of one declared schema");
+
+        let dataflow = registry
+            .active_graph(&domain)
+            .expect("graph should be installed")
+            .to_dataflow_graph(domain.as_str());
+        let edges = dataflow
+            .edges
+            .iter()
+            .map(|edge| (edge.source.as_str(), edge.target.as_str()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(edges.contains(&("relay:source_a", "emitter:emit")));
+        assert!(edges.contains(&("relay:source_b", "emitter:emit")));
+        let sink_edge = dataflow
+            .edges
+            .iter()
+            .find(|edge| edge.target == "client_sink:broker_out")
+            .expect("emitter sink edge must exist");
+        assert_eq!(
+            sink_edge
+                .metric
+                .as_ref()
+                .expect("emitter sink edge must carry a metric")
+                .relay,
+            None,
+            "multi-input sent metrics must aggregate without a misleading relay label"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn emitter_rejects_inputs_with_different_declared_schema_names() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        emitter.from = ProcessorInputs::new(
+            vec![identifier("source_a"), identifier("source_b")],
+            Vec::new(),
+        );
+
+        let error = registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    schema("same_shape_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                    client_model("broker_out"),
+                    relay("source_a", "event_schema"),
+                    relay("source_b", "same_shape_schema"),
+                    Model::Emitter(emitter),
+                ],
+            )
+            .expect_err("emitter inputs must use the same declared schema");
+
+        assert!(
+            format!("{error:#}").contains(
+                "input relay 'source_b' declares schema 'same_shape_schema', but all emitter \
+                 inputs must declare schema 'event_schema'"
+            ),
+            "unexpected error: {error:#}"
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn emitter_materialized_state_must_match_every_input_branch() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "source_a", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        emitter.from = ProcessorInputs::new(
+            vec![identifier("source_a"), identifier("source_b")],
+            Vec::new(),
+        );
+        emitter.materialized_state = vec![nervix_models::MaterializedStateDependency {
+            relay: identifier("profiles"),
+            policy: nervix_models::MaterializedStatePolicy::RequiredSkip,
+        }];
+        let Model::Relay(mut profiles) = relay_branched_by("profiles", "event_schema", "branch_a")
+        else {
+            unreachable!("relay helper must build a relay model")
+        };
+        profiles.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+
+        let error = registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event_schema"),
+                    wire_schema("event_wire"),
+                    codec("event_codec", "event_schema"),
+                    client_model("broker_out"),
+                    relay_branched_by("source_a", "event_schema", "branch_a"),
+                    relay_branched_by("source_b", "event_schema", "branch_b"),
+                    Model::Relay(profiles),
+                    branch_schema("value_branch", &["value"]),
+                    branch("branch_a", "value_branch"),
+                    branch("branch_b", "value_branch"),
+                    Model::Emitter(emitter),
+                ],
+            )
+            .expect_err("materialized state must match every emitter input branch");
+
+        assert!(
+            format!("{error:#}").contains(
+                "emitter materialized state requires relay 'source_b' and materialized relay \
+                 'profiles' to use the same exact branch"
             ),
             "unexpected error: {error:#}"
         );
@@ -15348,6 +15543,13 @@ mod tests {
                 ("emitter:emit_events", "client_sink:broker"),
             ])
         );
+        let sink_metric = dataflow_graph
+            .edges
+            .iter()
+            .find(|edge| edge.target == "client_sink:broker")
+            .and_then(|edge| edge.metric.as_ref())
+            .expect("single-input emitter sink edge must carry a metric");
+        assert_eq!(sink_metric.relay.as_deref(), Some("raw_events"));
 
         let _ = fs::remove_dir_all(path);
     }

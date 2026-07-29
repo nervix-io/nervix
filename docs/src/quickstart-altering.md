@@ -85,7 +85,8 @@ Two rules worth knowing before you lean on this:
 Ingestors and emitters have their own operation sets —
 [Altering Ingestors](ingestors.md#altering-ingestors) (every ingestor change is entity-pause) and
 [Altering Emitters](emitters.md#altering-emitters) (flush changes are dynamic; sink, client, and
-codec changes are entity-pause). Processor operations are covered under
+codec changes are entity-pause; source-list membership changes are domain-pause). Processor
+operations are covered under
 [Altering Deduplicators](processors.md#altering-deduplicators),
 [Altering Reorderers](processors.md#altering-reorderers),
 [Altering Reingestors](processors.md#altering-reingestors), and

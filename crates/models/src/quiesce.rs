@@ -77,6 +77,7 @@ pub enum ModelChangeAspect {
     ReordererOrdering,
     ReordererMaxTime,
     EmitterInput,
+    EmitterInputWhere,
     EmitterSink,
     EmitterClient,
     EmitterCodec,
@@ -136,6 +137,7 @@ impl ModelChangeAspect {
             | Self::EmitterSink
             | Self::EmitterClient
             | Self::EmitterCodec
+            | Self::EmitterInputWhere
             | Self::EmitterCollectPolicy
             | Self::EmitterMode
             | Self::EmitterConstruction
@@ -850,8 +852,7 @@ fn message_error_targets(routes: &[ProcessorOutput]) -> Vec<&Identifier> {
 fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> ModelChangeAspects {
     let CreateEmitter {
         name: base_name,
-        from_relay: base_from_relay,
-        collect_policy: base_collect_policy,
+        from: base_from,
         encode_using_codec: base_codec,
         sink: base_sink,
         flush_each: base_flush_each,
@@ -863,8 +864,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     } = base;
     let CreateEmitter {
         name: candidate_name,
-        from_relay: candidate_from_relay,
-        collect_policy: candidate_collect_policy,
+        from: candidate_from,
         encode_using_codec: candidate_codec,
         sink: candidate_sink,
         flush_each: candidate_flush_each,
@@ -880,8 +880,11 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     }
 
     let mut changes = ModelChangeAspects::default();
-    if base_from_relay != candidate_from_relay {
+    if base_from.from != candidate_from.from {
         changes.push(ModelChangeAspect::EmitterInput);
+    }
+    if base_from.r#where != candidate_from.r#where {
+        changes.push(ModelChangeAspect::EmitterInputWhere);
     }
     if base_sink.client() != candidate_sink.client() {
         changes.push(ModelChangeAspect::EmitterClient);
@@ -892,7 +895,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_codec != candidate_codec {
         changes.push(ModelChangeAspect::EmitterCodec);
     }
-    if base_collect_policy != candidate_collect_policy {
+    if base_from.collect_policy != candidate_from.collect_policy {
         changes.push(ModelChangeAspect::EmitterCollectPolicy);
     }
     if base_mode != candidate_mode {
@@ -1225,8 +1228,7 @@ mod tests {
     fn emitter() -> CreateEmitter {
         CreateEmitter {
             name: identifier("emit"),
-            from_relay: identifier("events"),
-            collect_policy: None,
+            from: ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("event_codec")),
             sink: EmitSink::ZeroMq {
                 client: identifier("sink"),
@@ -1607,7 +1609,7 @@ mod tests {
         );
 
         let mut collect = base.clone();
-        collect.collect_policy = Some(InputCollectPolicy {
+        collect.from.collect_policy = Some(InputCollectPolicy {
             collect_for: "10ms".to_string(),
             max_batch_size: Some("1MiB".to_string()),
         });
@@ -1615,6 +1617,18 @@ mod tests {
             Model::Emitter(base.clone()),
             Model::Emitter(collect),
             ModelChangeAspect::EmitterCollectPolicy,
+            QuiesceLevel::EntityPause,
+        );
+
+        let mut source_where = base.clone();
+        source_where.from.r#where = vec![ProcessorInputWhere {
+            relay: identifier("events"),
+            where_clause: crate::Expression::Literal(Literal::Bool(true)),
+        }];
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(source_where),
+            ModelChangeAspect::EmitterInputWhere,
             QuiesceLevel::EntityPause,
         );
 
@@ -1628,7 +1642,7 @@ mod tests {
         );
 
         let mut source = base;
-        source.from_relay = identifier("other_events");
+        source.from.from = vec![identifier("other_events")];
         assert_single_aspect(
             Model::Emitter(emitter()),
             Model::Emitter(source),
