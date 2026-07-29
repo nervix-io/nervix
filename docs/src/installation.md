@@ -5,6 +5,8 @@ method for your environment:
 
 - [Cargo Install From GitHub](installation-cargo.md) builds and installs `nervix-server` and
   `nervix-cli` for local or non-Kubernetes use.
+- [Docker](installation-docker.md) runs a three-node cluster with Docker commands or Docker
+  Compose.
 - [Kubernetes Operator](installation-kubernetes.md) installs the operator with Helm and manages
   persistent Nervix clusters through `NervixCluster` resources.
 

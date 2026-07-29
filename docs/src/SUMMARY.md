@@ -19,6 +19,7 @@
   - [Paced Domains](./quickstart-paced-domains.md)
 - [Installation](./installation.md)
   - [Cargo Install From GitHub](./installation-cargo.md)
+  - [Docker](./installation-docker.md)
   - [Kubernetes Operator](./installation-kubernetes.md)
 - [NSPL Agent Skill](./nspl-agent-skill.md)
 - [Manual](./manual.md)
