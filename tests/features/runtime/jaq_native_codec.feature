@@ -1,4 +1,23 @@
 Feature: JAQ native codec
+  Scenario: JAQ codecs reject a transformation without an explicit direction
+    Given a 1 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands fail
+      """
+      CREATE SCHEMA notification (
+        user_id I64,
+        payload STRING
+      );
+
+      CREATE CODEC notification_codec
+        FROM JSON
+        TO SCHEMA notification
+        WITH JAQ TRANSFORMATION '.';
+      """
+
   Scenario Outline: HTTP endpoint ingestor decodes JAQ native payload formats
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -15,7 +34,7 @@ Feature: JAQ native codec
         CREATE CODEC notification_codec
         FROM <format>
         TO SCHEMA notification
-        WITH JAQ TRANSFORMATION '<transformation>';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '<transformation>';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
@@ -199,7 +218,7 @@ Feature: JAQ native codec
       CREATE CODEC json_notification_codec
         FROM JSON
         TO SCHEMA notification
-        WITH JAQ TRANSFORMATION '.';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 

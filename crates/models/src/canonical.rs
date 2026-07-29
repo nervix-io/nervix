@@ -3349,6 +3349,25 @@ mod tests {
              INGESTION '.payload' ON EMITTING '{payload: .}';"
         );
 
+        let ingestion_codec = CreateCodec {
+            name: identifier("orders_ingestion"),
+            wire_format: CodecWireFormat::JaqNative {
+                format: CodecJaqFormat::Json,
+                transformations: CodecJaqTransformations {
+                    on_ingestion: Some(".payload".to_string()),
+                    on_emitting: None,
+                },
+            },
+            wire_schema: None,
+            schema: identifier("orders"),
+            encoding_rules: Vec::new(),
+        };
+        assert_eq!(
+            ingestion_codec.to_canonical_nspl().expect("must render"),
+            "CREATE CODEC orders_ingestion FROM JSON TO SCHEMA orders WITH JAQ TRANSFORMATIONS ON \
+             INGESTION '.payload';"
+        );
+
         let cbor_codec = CreateCodec {
             name: identifier("orders_cbor"),
             wire_format: CodecWireFormat::JaqNative {

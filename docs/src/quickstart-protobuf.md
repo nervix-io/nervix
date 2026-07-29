@@ -56,7 +56,7 @@ CREATE CODEC order_protobuf_codec
   CONFIG {'file' = 'order_event.proto', 'include' = '.'}
   MESSAGE 'quickstart.OrderEvent'
   TO SCHEMA order_record
-  WITH JAQ TRANSFORMATION '.';
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
 CREATE RELAY proto_orders SCHEMA order_record UNBRANCHED;
 
@@ -75,8 +75,8 @@ CREATE INGESTOR proto_order_source
 COMMIT;
 ```
 
-Like the singular JAQ form, this codec is decode-only; encoding to protobuf requires an
-`ON EMITTING` program. A `DATETIME` field would ride in a proto `string` plus
+Because it declares only `ON INGESTION`, this codec is decode-only; encoding to protobuf requires
+an `ON EMITTING` program. A `DATETIME` field would ride in a proto `string` plus
 `ENCODE <field> AS RFC3339` on the codec ([Codecs](schemas-and-codecs.md#codecs)).
 
 ## Send A Binary Order

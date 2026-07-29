@@ -33,7 +33,7 @@ Feature: Protobuf codec
         CONFIG {'file' = 'notification.proto', 'include' = '.'}
         MESSAGE 'nervix.test.Notification'
         TO SCHEMA notification
-        WITH JAQ TRANSFORMATION '{user_id: .user_id, payload: .payload}';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id: .user_id, payload: .payload}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;

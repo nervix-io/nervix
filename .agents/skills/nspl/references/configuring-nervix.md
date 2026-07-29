@@ -116,7 +116,9 @@ relay. Do not use them to scan across branches.
   AVRO wire schemas are separate entity kinds even when their names coincide. Every wire schema
   declares `MODE STRICT|LOOSE` after its name, and a mode-only change uses `ALTER WIRE <format>
   SCHEMA <wire_schema> MODE STRICT|LOOSE`.
-- Every codec explicitly handles any wire/internal datetime or shape difference.
+- Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
+  codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
+  order.
 - Every relay declares a schema and explicit branch selection.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
 - Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
