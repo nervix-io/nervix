@@ -11,7 +11,7 @@ Feature: Model alteration quiesce classification
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA alter_event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA alter_event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA alter_event_wire MODE STRICT ( seq integer );
       CREATE CODEC alter_event_codec
         FROM WIRE JSON SCHEMA alter_event_wire
         TO SCHEMA alter_event;

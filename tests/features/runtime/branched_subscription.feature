@@ -13,7 +13,7 @@ Feature: Branched session subscriptions
         user_id I64,
         tenant STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         tenant string
       );
@@ -82,7 +82,7 @@ Feature: Branched session subscriptions
         raw STRING,
         normalized STRING OPTIONAL
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         tenant string,
         active boolean,

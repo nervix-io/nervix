@@ -49,7 +49,7 @@ Wire schemas are either `STRICT` or `LOOSE`. Strict wire schemas reject payload 
 JSON wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] STRICT WIRE JSON SCHEMA notification_wire (
+CREATE [IF NOT EXISTS] WIRE JSON SCHEMA notification_wire MODE STRICT (
   user_id integer,
   created_at string,
   payload string OPTIONAL
@@ -59,7 +59,7 @@ CREATE [IF NOT EXISTS] STRICT WIRE JSON SCHEMA notification_wire (
 CBOR wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] LOOSE WIRE CBOR SCHEMA notification_wire (
+CREATE [IF NOT EXISTS] WIRE CBOR SCHEMA notification_wire MODE LOOSE (
   user_id integer,
   created_at string,
   payload string OPTIONAL
@@ -69,7 +69,7 @@ CREATE [IF NOT EXISTS] LOOSE WIRE CBOR SCHEMA notification_wire (
 AVRO wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] STRICT WIRE AVRO SCHEMA notification_wire (
+CREATE [IF NOT EXISTS] WIRE AVRO SCHEMA notification_wire MODE STRICT (
   user_id LONG,
   created_at STRING,
   payload STRING OPTIONAL
@@ -114,14 +114,19 @@ Wire schema operations are:
 - `RENAME FIELD <field> TO <field>`
 - `ALTER FIELD <field> SET TYPE <wire_type>`
 - `ALTER FIELD <field> SET OPTIONAL` and `ALTER FIELD <field> DROP OPTIONAL`
-- `SET STRICT` and `SET LOOSE`
 
-The format is required and must match the stored schema:
+JSON, CBOR, and AVRO wire schemas are separate entity kinds. They may use the same name without
+colliding, and the exact format is required for every ALTER:
 
 ```nspl
 ALTER WIRE JSON SCHEMA notification_wire
-  ADD FIELD note string OPTIONAL,
-  SET LOOSE;
+  ADD FIELD note string OPTIONAL;
+```
+
+Mode changes use that same exact entity kind:
+
+```nspl
+ALTER WIRE JSON SCHEMA notification_wire MODE LOOSE;
 ```
 
 Use one explicit transaction when a type or shape change requires coordinated updates. Model
@@ -143,7 +148,10 @@ COMMIT;
 ```
 
 If any operation or dependent model fails validation, none of the mutations are persisted.
-`SHOW CREATE SCHEMA` and `SHOW CREATE WIRE SCHEMA` render the resulting canonical definitions.
+`SHOW CREATE SCHEMA` and exact wire forms such as
+`SHOW CREATE WIRE JSON SCHEMA notification_wire` render the resulting canonical definitions.
+Dropping a wire schema is exact-format too, for example
+`DROP WIRE JSON SCHEMA notification_wire`.
 
 On a running domain, a schema ALTER is applied through an automatic quiesce cycle: Nervix validates
 first, stops new ingestion and generators, force-flushes buffered output, drains in-flight work,

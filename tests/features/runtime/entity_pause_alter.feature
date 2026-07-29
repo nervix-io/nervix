@@ -12,7 +12,7 @@ Feature: Entity-pause model alterations
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE SCHEMA routed_event ( tenant STRING, seq I64, route STRING );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( tenant string, seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
@@ -96,7 +96,7 @@ Feature: Entity-pause model alterations
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;

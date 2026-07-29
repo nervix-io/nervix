@@ -14,7 +14,7 @@ Feature: Prometheus ingestion
         value F64,
         timestamp STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA sample_wire (
+        CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (
         source string,
         value number,
         timestamp string
@@ -72,7 +72,7 @@ Feature: Prometheus ingestion
         value F64,
         timestamp STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA sample_wire (
+        CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (
         source string,
         value number,
         timestamp string
@@ -136,7 +136,7 @@ Feature: Prometheus ingestion
         value F64,
         timestamp STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA sample_wire (
+        CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (
         source string,
         value number,
         timestamp string

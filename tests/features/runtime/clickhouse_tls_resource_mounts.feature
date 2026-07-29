@@ -24,7 +24,7 @@ Feature: ClickHouse TLS resource mounts
         user_id I64,
         action STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         action string
       );

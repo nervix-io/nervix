@@ -52,7 +52,7 @@ Feature: Altering junctions
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
@@ -118,7 +118,7 @@ Feature: Altering junctions
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;

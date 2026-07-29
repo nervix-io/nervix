@@ -112,7 +112,10 @@ relay. Do not use them to scan across branches.
 ## Correctness checks
 
 - Every referenced name is declared in the active domain before use.
-- Every schema and wire schema is non-empty; types and optionality match exactly.
+- Every schema and wire schema is non-empty; types and optionality match exactly. JSON, CBOR, and
+  AVRO wire schemas are separate entity kinds even when their names coincide. Every wire schema
+  declares `MODE STRICT|LOOSE` after its name, and a mode-only change uses `ALTER WIRE <format>
+  SCHEMA <wire_schema> MODE STRICT|LOOSE`.
 - Every codec explicitly handles any wire/internal datetime or shape difference.
 - Every relay declares a schema and explicit branch selection.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.

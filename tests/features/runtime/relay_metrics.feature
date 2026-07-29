@@ -13,7 +13,7 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         occurred_at string
       );
@@ -142,7 +142,7 @@ Feature: Relay metrics
         user_id I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
 
@@ -215,7 +215,7 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         occurred_at string
       );
@@ -289,7 +289,7 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         occurred_at string
       );

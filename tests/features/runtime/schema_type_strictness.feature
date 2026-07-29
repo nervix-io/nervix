@@ -5,7 +5,7 @@ Feature: Schema type strictness
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( tenant STRING );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( tenant string );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA tenant_branch ( tenant U32 );
       CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_branch TTL 5m;
@@ -34,12 +34,12 @@ Feature: Schema type strictness
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA orders ( created_at DATETIME );
-      CREATE STRICT WIRE JSON SCHEMA orders_wire ( created_at string );
+      CREATE WIRE JSON SCHEMA orders_wire MODE STRICT ( created_at string );
       CREATE CODEC orders_codec FROM WIRE JSON SCHEMA orders_wire TO SCHEMA orders;
       """
     When these NSPL commands are executed
       """
-      CREATE STRICT WIRE JSON SCHEMA orders_wire_encoded ( created_at string );
+      CREATE WIRE JSON SCHEMA orders_wire_encoded MODE STRICT ( created_at string );
       CREATE CODEC orders_codec_encoded
         FROM WIRE JSON SCHEMA orders_wire_encoded
         TO SCHEMA orders
@@ -47,7 +47,7 @@ Feature: Schema type strictness
       """
     When these NSPL commands fail with "json field 'created_at' type mismatch"
       """
-      CREATE STRICT WIRE JSON SCHEMA orders_wire_invalid ( created_at number );
+      CREATE WIRE JSON SCHEMA orders_wire_invalid MODE STRICT ( created_at number );
       CREATE CODEC orders_codec_invalid
         FROM WIRE JSON SCHEMA orders_wire_invalid
         TO SCHEMA orders

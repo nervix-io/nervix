@@ -15,7 +15,7 @@ Feature: Explicit branches
         message STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         message string
       );

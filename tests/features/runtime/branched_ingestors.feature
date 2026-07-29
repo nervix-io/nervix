@@ -24,7 +24,7 @@ Feature: Ingestor branch consistency
         user_id I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         user_id integer
       );
@@ -97,7 +97,7 @@ Feature: Ingestor branch consistency
         user_id I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         user_id integer
       );

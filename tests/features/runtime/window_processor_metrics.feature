@@ -17,7 +17,7 @@ Feature: Window processor metrics
         tenant STRING,
         sample_count I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );

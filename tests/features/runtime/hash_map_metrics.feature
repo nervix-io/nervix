@@ -29,7 +29,7 @@ Feature: Hash map metrics
         city STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA zip_code_entry_wire (
+      CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT (
         zip string,
         city string
       );

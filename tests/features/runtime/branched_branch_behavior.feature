@@ -15,7 +15,7 @@ Feature: Branched branch behavior
         body STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         user_id integer,
         body string
@@ -82,7 +82,7 @@ Feature: Branched branch behavior
         transaction_id STRING,
         amount I64
       );
-        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         tenant string,
         transaction_id string,
         amount integer
@@ -167,7 +167,7 @@ Feature: Branched branch behavior
         tenant STRING,
         sample_count I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency number
       );
@@ -242,7 +242,7 @@ Feature: Branched branch behavior
         tenant STRING,
         source STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         source string
       );
@@ -326,7 +326,7 @@ Feature: Branched branch behavior
         tenant STRING,
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         user_id integer
       );

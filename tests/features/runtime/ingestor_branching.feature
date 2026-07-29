@@ -5,7 +5,7 @@ Feature: Ingestor branching
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;

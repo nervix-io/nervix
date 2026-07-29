@@ -14,7 +14,7 @@ Feature: Optional fields
         amount I64 OPTIONAL,
         raw STRING OPTIONAL
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
@@ -82,7 +82,7 @@ Feature: Optional fields
         amount I64 OPTIONAL,
         raw STRING OPTIONAL
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
@@ -150,7 +150,7 @@ Feature: Optional fields
         amount I64 OPTIONAL,
         raw STRING OPTIONAL
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
@@ -217,7 +217,7 @@ Feature: Optional fields
         amount I64 OPTIONAL,
         raw STRING OPTIONAL
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         active boolean OPTIONAL,
         amount integer OPTIONAL,
