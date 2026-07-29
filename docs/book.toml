@@ -2,7 +2,6 @@
 authors = ["Nervix Contributors"]
 description = "User manual and architecture reference for Nervix."
 language = "en"
-#multilingual = false
 src = "src"
 title = "The Nervix Book"
 

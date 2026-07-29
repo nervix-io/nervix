@@ -5,6 +5,10 @@ anchors, and applies the chapter hierarchy from SUMMARY.md to the page H1s.
 With pandoc's ``--top-level-division=chapter`` and the ``report`` document
 class, top-level H1s become ``\\chapter`` headings that start on a fresh page,
 while nested book chapters render as sections.
+
+Every link is then checked: a reader of the PDF must never be sent to the
+website for a page the PDF itself contains, so the only targets left standing
+are external URLs and fragments that resolve inside the document.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import html
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 SUMMARY_CHAPTER = re.compile(
     r"^(?P<indent>\s*)- \[(?P<title>[^\]]+)\]\((?P<path>[^)]+)\)\s*$"
@@ -33,6 +37,8 @@ HREF = re.compile(
     r"(?P<prefix>\bhref=)(?P<quote>[\"'])(?P<target>[^\"']+)(?P=quote)",
     re.I,
 )
+ELEMENT_ID = re.compile(r'\bid="([^"]+)"')
+EXTERNAL_URL = re.compile(r"^(?:https?|mailto):", re.I)
 PDF_GLYPH_SUBSTITUTIONS = {
     "⟼": "=&gt;",
     "☀️": "[U+2600]",
@@ -78,6 +84,30 @@ def rewrite_pdf_links(main_html: str) -> str:
         )
 
     return HREF.sub(rewrite, main_html)
+
+
+def fragment_target(href: str) -> str:
+    return unquote(html.unescape(href).removeprefix("#"))
+
+
+def verify_links(main_html: str) -> None:
+    """Reject links that would leave the document or land nowhere."""
+    targets = [link.group("target") for link in HREF.finditer(main_html)]
+    offsite = sorted(
+        {href for href in targets if not href.startswith("#") and not EXTERNAL_URL.match(href)}
+    )
+    if offsite:
+        raise SystemExit(
+            "the PDF must link within itself, but these targets point outside the document: "
+            + ", ".join(offsite)
+        )
+
+    known_ids = {fragment_target(f"#{value}") for value in ELEMENT_ID.findall(main_html)}
+    dangling = sorted(
+        {href for href in targets if href.startswith("#") and fragment_target(href) not in known_ids}
+    )
+    if dangling:
+        raise SystemExit("the PDF contains links to missing anchors: " + ", ".join(dangling))
 
 
 def substitute_unsupported_pdf_glyphs(main_html: str) -> str:
@@ -143,6 +173,7 @@ def transform(
             f"print.html contains {chapter_index} H1 chapters, "
             f"but SUMMARY.md contains {len(hierarchy)}"
         )
+    verify_links(main)
     return (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"></head>'
         f"<body><main>{main}</main></body></html>"

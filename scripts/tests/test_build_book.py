@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from scripts.build_book import (
+    MDBOOK_VERSION,
     bundle_roto_reference,
     render_jaq_reference,
+    remove_generated_edit_links,
     resolve_package_version,
     rewrite_external_assets,
+    run_mdbook,
+    stage_book,
+    verify_mdbook_version,
 )
 
 
@@ -68,6 +75,10 @@ variables](#lang_context) for details, and the
 The boolean type is {roto:ref}`bool`.
 Optional values are described by `lang_optionals`{.interpreted-text role="ref"}.
 See {doc}`std/index`.
+
+If you're using Roto as a binary or with the [generated
+CLI](generate_cli), run the tests with the `test` subcommand. Nervix documents
+the catalog in [User-Defined Functions](udfs.md).
 """
 
 SAMPLE_ROTO_LICENSE = """Copyright (c) 2022, NLnet Labs. All rights reserved.
@@ -132,6 +143,11 @@ class RotoReferenceBundleTests(unittest.TestCase):
         self.assertNotIn("(#add-constants)", bundled)
         self.assertNotIn("(#lang_context)", bundled)
         self.assertIn("[Roto repository](https://github.com/NLnetLabs/roto)", bundled)
+        # cross-page MyST references name Roto pages Nervix does not bundle, so
+        # they are unwrapped too; relative links to bundled chapters survive
+        self.assertIn("with the generated\nCLI, run the tests", bundled)
+        self.assertNotIn("(generate_cli)", bundled)
+        self.assertIn("[User-Defined Functions](udfs.md)", bundled)
         # The required upstream redistribution notice ships with the generated page.
         self.assertIn(SAMPLE_ROTO_LICENSE, bundled)
 
@@ -166,13 +182,11 @@ class ExternalAssetRewriteTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             book = Path(tmp)
             (book / "fonts").mkdir()
-            (book / "FontAwesome").mkdir()
             page = book / "index.html"
             page.write_text(
                 '<link rel="icon" href="favicon-de23e50b.svg">\n'
                 '<link rel="shortcut icon" href="favicon-8114d1fc.png">\n'
-                '<link rel="stylesheet" href="fonts/fonts-9644e21d.css">\n'
-                '<link rel="stylesheet" href="FontAwesome/css/font-awesome-a1b2c3.css">\n',
+                '<link rel="stylesheet" href="fonts/fonts-9644e21d.css">\n',
                 encoding="utf-8",
             )
 
@@ -181,9 +195,113 @@ class ExternalAssetRewriteTests(unittest.TestCase):
             rewritten = page.read_text(encoding="utf-8")
             self.assertIn('href="theme/nervix-mark.svg"', rewritten)
             self.assertIn("fonts.googleapis.com", rewritten)
-            self.assertIn("cdnjs.cloudflare.com", rewritten)
             self.assertFalse((book / "fonts").exists())
-            self.assertFalse((book / "FontAwesome").exists())
+
+    def test_a_link_that_stops_matching_fails_the_build(self) -> None:
+        # The bundled fonts directory is deleted, so a rewrite that silently
+        # matches nothing would publish a dead stylesheet reference.
+        with TemporaryDirectory() as tmp:
+            book = Path(tmp)
+            (book / "fonts").mkdir()
+            (book / "index.html").write_text(
+                '<link rel="icon" href="favicon-de23e50b.svg">\n'
+                '<link rel="shortcut icon" href="favicon-8114d1fc.png">\n'
+                '<link rel="stylesheet" href="fonts/fonts.2024.css">\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                rewrite_external_assets(book)
+
+            self.assertIn("fonts/fonts", str(raised.exception))
+            # the build stops before the bundled directory is removed
+            self.assertTrue((book / "fonts").exists())
+
+
+class BookStagingTests(unittest.TestCase):
+    def test_staged_source_keeps_the_src_name_that_edit_links_render(self) -> None:
+        # mdBook renders `edit-url-template`'s `{path}` as the configured source
+        # directory joined with the chapter path, so staging under any other
+        # name would publish "Suggest an edit" links into a build directory.
+        with TemporaryDirectory() as tmp:
+            staged = Path(tmp) / "book"
+            with patch("scripts.build_book.generate_upstream_references") as generate:
+                stage_book(staged)
+
+            self.assertTrue((staged / "src" / "introduction.md").is_file())
+            self.assertTrue((staged / "book.toml").is_file())
+            self.assertTrue((staged / "theme" / "nervix.css").is_file())
+            generate.assert_called_once_with(staged / "src")
+
+    def test_generated_chapters_lose_their_edit_link(self) -> None:
+        with TemporaryDirectory() as tmp:
+            book = Path(tmp)
+            edit_link = (
+                '<a href="https://github.com/nervix-io/nervix/edit/main/docs/src/x.md"'
+                ' title="Suggest an edit" rel="edit">\n  <span>icon</span>\n</a>\n'
+            )
+            for name in ("roto-language-reference", "jaq-reference", "udfs"):
+                (book / f"{name}.html").write_text(
+                    f"<nav>{edit_link}</nav><p>{name}</p>", encoding="utf-8"
+                )
+
+            remove_generated_edit_links(book)
+
+            self.assertNotIn("Suggest an edit", (book / "roto-language-reference.html").read_text())
+            self.assertNotIn("Suggest an edit", (book / "jaq-reference.html").read_text())
+            # authored chapters keep theirs
+            self.assertIn("Suggest an edit", (book / "udfs.html").read_text())
+
+    def test_missing_generated_chapter_is_an_error(self) -> None:
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                remove_generated_edit_links(Path(tmp))
+
+
+class MdbookVersionTests(unittest.TestCase):
+    def completed(self, stdout: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["mdbook", "--version"], 0, stdout=stdout, stderr="")
+
+    def test_pinned_version_is_accepted(self) -> None:
+        with patch(
+            "scripts.build_book.subprocess.run",
+            return_value=self.completed(f"mdbook v{MDBOOK_VERSION}\n"),
+        ):
+            verify_mdbook_version()
+
+    def test_other_version_is_rejected_by_name(self) -> None:
+        with patch(
+            "scripts.build_book.subprocess.run",
+            return_value=self.completed("mdbook v0.4.40\n"),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                verify_mdbook_version()
+
+        self.assertIn(MDBOOK_VERSION, str(raised.exception))
+        self.assertIn("0.4.40", str(raised.exception))
+
+    def test_missing_mdbook_is_reported(self) -> None:
+        with patch("scripts.build_book.subprocess.run", side_effect=FileNotFoundError("mdbook")):
+            with self.assertRaises(SystemExit):
+                verify_mdbook_version()
+
+
+class MdbookBuildTests(unittest.TestCase):
+    def test_logged_renderer_errors_fail_the_build(self) -> None:
+        # mdBook exits zero after rejecting `[output.html]`, which would
+        # otherwise publish a book rendered with default settings.
+        rejected = subprocess.CompletedProcess(
+            ["mdbook", "build"],
+            0,
+            stdout="",
+            stderr=" ERROR Failed to deserialize `output.html`\n",
+        )
+        with patch("scripts.build_book.subprocess.run", return_value=rejected):
+            with patch("scripts.build_book.sys.stderr"):
+                with self.assertRaises(SystemExit) as raised:
+                    run_mdbook(Path("/nonexistent/book"), Path("/nonexistent/out"), {})
+
+        self.assertIn("output.html", str(raised.exception))
 
 
 if __name__ == "__main__":
