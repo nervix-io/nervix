@@ -4,11 +4,11 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.prepare_pdf_html import top_level_titles, transform
+from scripts.prepare_pdf_html import chapter_hierarchy, transform
 
 
-class TopLevelTitlesTests(unittest.TestCase):
-    def test_reads_h1_of_zero_indent_chapters_only(self) -> None:
+class ChapterHierarchyTests(unittest.TestCase):
+    def test_reads_hierarchy_of_every_chapter(self) -> None:
         with TemporaryDirectory() as tmp:
             src = Path(tmp)
             (src / "SUMMARY.md").write_text(
@@ -19,22 +19,40 @@ class TopLevelTitlesTests(unittest.TestCase):
                 "  - [Nested](./nested.md)\n",
                 encoding="utf-8",
             )
-            (src / "introduction.md").write_text("# Introduction\n", encoding="utf-8")
-            (src / "manual.md").write_text("# Manual Title\n", encoding="utf-8")
-            (src / "nested.md").write_text("# Nested\n", encoding="utf-8")
-            titles = top_level_titles(src / "SUMMARY.md", src)
-        self.assertEqual(titles, {"Introduction", "Manual Title"})
+            hierarchy = chapter_hierarchy(src / "SUMMARY.md")
+        self.assertEqual(hierarchy, [True, True, False])
 
-    def test_rejects_top_level_chapter_without_h1(self) -> None:
+    def test_rejects_summary_without_top_level_chapter(self) -> None:
         with TemporaryDirectory() as tmp:
             src = Path(tmp)
-            (src / "SUMMARY.md").write_text("- [Broken](./broken.md)\n", encoding="utf-8")
-            (src / "broken.md").write_text("no heading\n", encoding="utf-8")
+            (src / "SUMMARY.md").write_text(
+                "  - [Nested](./nested.md)\n",
+                encoding="utf-8",
+            )
             with self.assertRaises(SystemExit):
-                top_level_titles(src / "SUMMARY.md", src)
+                chapter_hierarchy(src / "SUMMARY.md")
 
 
 class TransformTests(unittest.TestCase):
+    def test_demotes_nested_h1_when_title_matches_later_top_level_chapter(
+        self,
+    ) -> None:
+        print_html = (
+            "<main>"
+            '<h1 id="quickstart">Quickstart</h1>'
+            '<h1 id="installation">Installation</h1>'
+            '<h1 id="running">Running Nervix</h1>'
+            '<h1 id="installation-1">Installation</h1>'
+            '<h1 id="cargo">Cargo Install From GitHub</h1>'
+            "</main>"
+        )
+        result = transform(
+            print_html,
+            [True, False, False, True, False],
+        )
+        self.assertIn('<h2 id="installation">Installation</h2>', result)
+        self.assertIn('<h1 id="installation-1">Installation</h1>', result)
+
     def test_keeps_top_level_h1_and_demotes_everything_else(self) -> None:
         print_html = (
             "<html><body><main>"
@@ -44,20 +62,23 @@ class TransformTests(unittest.TestCase):
             '<h6 id="deep">Deep</h6>'
             "</main></body></html>"
         )
-        result = transform(print_html, {"Quickstart"})
+        result = transform(
+            print_html,
+            [True, False],
+        )
         self.assertIn('<h1 id="quickstart">Quickstart</h1>', result)
         self.assertIn('<h2 id="running">Running Nervix</h2>', result)
         self.assertIn('<h3 id="server">Start The Server</h3>', result)
         self.assertIn('<h6 id="deep">Deep</h6>', result)
         self.assertNotIn('class="header"', result)
 
-    def test_matches_titles_through_inline_markup_and_entities(self) -> None:
+    def test_preserves_inline_markup_and_entities(self) -> None:
         print_html = (
             "<main>"
             '<h1 id="a">Schemas <code>&amp;</code>  Codecs</h1>'
             "</main>"
         )
-        result = transform(print_html, {"Schemas & Codecs"})
+        result = transform(print_html, [True])
         self.assertIn('<h1 id="a">', result)
 
     def test_rewrites_book_links_to_pdf_destinations(self) -> None:
@@ -72,7 +93,7 @@ class TransformTests(unittest.TestCase):
             "</main>"
         )
 
-        result = transform(print_html, {"Manual"})
+        result = transform(print_html, [True])
 
         self.assertIn('href="#roto-column-operations"', result)
         self.assertIn('href="#jaq-reference"', result)
@@ -87,6 +108,7 @@ class TransformTests(unittest.TestCase):
     def test_adds_bounded_equal_widths_to_pdf_table_columns(self) -> None:
         print_html = (
             "<main>"
+            '<h1 id="manual">Manual</h1>'
             "<table>"
             "<thead><tr><th>One</th><th>Two</th><th>Three</th><th>Four</th></tr></thead>"
             "<tbody><tr><td>A</td><td>B</td><td>C</td><td>D</td></tr></tbody>"
@@ -94,14 +116,17 @@ class TransformTests(unittest.TestCase):
             "</main>"
         )
 
-        result = transform(print_html, {"Manual"})
+        result = transform(print_html, [True])
 
         self.assertIn("<colgroup>", result)
         self.assertEqual(result.count('<col style="width: 25.000000%">'), 4)
 
     def test_rejects_html_without_main(self) -> None:
         with self.assertRaises(SystemExit):
-            transform("<html><body>no main</body></html>", {"Quickstart"})
+            transform(
+                "<html><body>no main</body></html>",
+                [True],
+            )
 
 
 if __name__ == "__main__":
