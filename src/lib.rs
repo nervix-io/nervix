@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 #[cfg(all(feature = "testing", not(debug_assertions)))]
 compile_error!(
     "the `testing` feature lowers Argon2 password hashing parameters and must not be compiled \
@@ -15,3 +17,5 @@ pub mod runtime_ack;
 pub mod runtime_schema;
 
 pub use nervix_proto as proto;
+#[cfg(feature = "testing")]
+pub use registry::SchedulerMode;

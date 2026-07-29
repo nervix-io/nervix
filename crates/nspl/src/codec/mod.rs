@@ -9,7 +9,8 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, codec_name, current_word_prefix, field_ref,
         if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref, schema_ref,
-        string_lit, suggestions_from_errors, tok, u64_value, wire_schema_ref,
+        string_lit, suggestions_from_errors, tok, u64_value, wire_avro_schema_ref,
+        wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -69,15 +70,8 @@ pub fn create_codec_parser<'src>()
         choice((ingestion_transformations, emitting_transformations)).boxed();
     let jaq_transformations = kw(Identifier::With)
         .ignore_then(kw(Identifier::Jaq))
-        .ignore_then(choice((
-            kw(Identifier::Transformation)
-                .ignore_then(string_lit())
-                .map(|on_ingestion| CodecJaqTransformations {
-                    on_ingestion: Some(on_ingestion),
-                    on_emitting: None,
-                }),
-            kw(Identifier::Transformations).ignore_then(directed_jaq_transformations),
-        )))
+        .ignore_then(kw(Identifier::Transformations))
+        .ignore_then(directed_jaq_transformations)
         .boxed();
 
     let encoding_rule = field_ref()
@@ -99,15 +93,15 @@ pub fn create_codec_parser<'src>()
 
     let json_wire = kw(Identifier::Json)
         .ignore_then(kw(Identifier::Schema))
-        .ignore_then(wire_schema_ref())
+        .ignore_then(wire_json_schema_ref())
         .map(|wire_schema| (CodecWireFormat::Json, Some(wire_schema)));
     let cbor_wire = kw(Identifier::Cbor)
         .ignore_then(kw(Identifier::Schema))
-        .ignore_then(wire_schema_ref())
+        .ignore_then(wire_cbor_schema_ref())
         .map(|wire_schema| (CodecWireFormat::Cbor, Some(wire_schema)));
     let avro_wire = kw(Identifier::Avro)
         .ignore_then(kw(Identifier::Schema))
-        .ignore_then(wire_schema_ref())
+        .ignore_then(wire_avro_schema_ref())
         .map(|wire_schema| (CodecWireFormat::Avro, Some(wire_schema)));
     let schemaful_codec = kw(Identifier::Wire)
         .ignore_then(choice((json_wire, cbor_wire, avro_wire)))
@@ -304,10 +298,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_create_jaq_native_codec_with_shorthand_ingestion_transformation() {
+    fn parses_create_jaq_native_codec_with_ingestion_transformation() {
         let tokens = to_tokens(
             "CREATE CODEC notification_codec FROM YAML TO SCHEMA notification_schema WITH JAQ \
-             TRANSFORMATION \".payload\";",
+             TRANSFORMATIONS ON INGESTION \".payload\";",
         );
         let parsed = parse_create_codec_tokens(&tokens).expect("parse should succeed");
 
@@ -321,6 +315,34 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn parses_create_jaq_native_codec_with_emitting_transformation() {
+        let tokens = to_tokens(
+            "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+             TRANSFORMATIONS ON EMITTING \"{payload: .}\";",
+        );
+        let parsed = parse_create_codec_tokens(&tokens).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.wire_format,
+            CodecWireFormat::JaqNative {
+                format: CodecJaqFormat::Json,
+                transformations: CodecJaqTransformations {
+                    on_ingestion: None,
+                    on_emitting: Some("{payload: .}".to_string()),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_create_jaq_native_codec_with_implicit_ingestion_transformation() {
+        let input = "CREATE CODEC notification_codec FROM YAML TO SCHEMA notification_schema WITH \
+                     JAQ TRANSFORMATION \".payload\";";
+
+        assert!(parse_create_codec(input).is_err());
     }
 
     #[test]
@@ -427,7 +449,7 @@ mod tests {
     fn parses_create_cbor_jaq_native_codec() {
         let tokens = to_tokens(
             "CREATE CODEC notification_codec FROM CBOR TO SCHEMA notification_schema WITH JAQ \
-             TRANSFORMATION \".payload\";",
+             TRANSFORMATIONS ON INGESTION \".payload\";",
         );
         let parsed = parse_create_codec_tokens(&tokens).expect("parse should succeed");
 
@@ -464,7 +486,7 @@ mod tests {
     fn rejects_protobuf_codec_without_config_clause() {
         let input = "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle \
                      MESSAGE \"nervix.test.Notification\" TO SCHEMA notification_schema WITH JAQ \
-                     TRANSFORMATION \".\";";
+                     TRANSFORMATIONS ON INGESTION \".\";";
 
         assert!(parse_create_codec(input).is_err());
     }
@@ -488,7 +510,8 @@ mod tests {
     #[test]
     fn rejects_schemaful_codec_with_jaq_transformation() {
         let input = "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO \
-                     SCHEMA notification_schema WITH JAQ TRANSFORMATION \".payload\";";
+                     SCHEMA notification_schema WITH JAQ TRANSFORMATIONS ON INGESTION \
+                     \".payload\";";
 
         assert!(parse_create_codec(input).is_err());
     }
@@ -551,5 +574,36 @@ mod tests {
 
         assert!(suggestions.contains(&"ON".to_string()));
         assert!(!suggestions.contains(&"TO".to_string()));
+    }
+
+    #[test]
+    fn suggests_both_directions_after_with_jaq_transformations_on() {
+        let input = "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH \
+                     JAQ TRANSFORMATIONS ON ";
+        let suggestions = suggest_create_codec(input, input.len());
+
+        assert!(suggestions.contains(&"INGESTION".to_string()));
+        assert!(suggestions.contains(&"EMITTING".to_string()));
+        assert!(!suggestions.contains(&"TRANSFORMATIONS".to_string()));
+    }
+
+    #[test]
+    fn suggests_only_emitting_as_second_jaq_transformation_direction() {
+        let input = "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH \
+                     JAQ TRANSFORMATIONS ON INGESTION \".\" ON ";
+        let suggestions = suggest_create_codec(input, input.len());
+
+        assert!(suggestions.contains(&"EMITTING".to_string()));
+        assert!(!suggestions.contains(&"INGESTION".to_string()));
+    }
+
+    #[test]
+    fn suggests_only_explicit_transformations_after_with_jaq() {
+        let input =
+            "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH JAQ ";
+        let suggestions = suggest_create_codec(input, input.len());
+
+        assert!(suggestions.contains(&"TRANSFORMATIONS".to_string()));
+        assert!(!suggestions.contains(&"TRANSFORMATION".to_string()));
     }
 }

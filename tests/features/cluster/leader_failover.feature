@@ -17,7 +17,8 @@ Feature: Cluster leader failover
 
   Scenario Outline: Dead scheduled node primary failover promotes a live replica
     Given Kafka is running
-    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
     When these NSPL commands are executed through the client on node "node-1"
@@ -49,20 +50,20 @@ Feature: Cluster leader failover
       CREATE SCHEMA scored (
         score <score_type>
       );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         tenant string,
         level string
       );
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         transaction_id string,
         amount integer
       );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
-      CREATE STRICT WIRE JSON SCHEMA features_wire (
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         tenant string,
         vector array
       );
@@ -201,7 +202,8 @@ Feature: Cluster leader failover
 
   Scenario Outline: Dead scheduled node primary failover falls back to another live node without a replica
     Given Kafka is running
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
     When these NSPL commands are executed through the client on node "node-1"
@@ -233,20 +235,20 @@ Feature: Cluster leader failover
       CREATE SCHEMA scored (
         score <score_type>
       );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         tenant string,
         level string
       );
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         transaction_id string,
         amount integer
       );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
-      CREATE STRICT WIRE JSON SCHEMA features_wire (
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         tenant string,
         vector array
       );

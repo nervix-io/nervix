@@ -33,7 +33,7 @@ CREATE SCHEMA binance_ws_event (
 CREATE CODEC binance_ws_event_codec
   FROM JSON
   TO SCHEMA binance_ws_event
-  WITH JAQ TRANSFORMATION '{
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{
     event_type: .e,
     event_time: .E,
     symbol: .s,

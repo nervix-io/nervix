@@ -13,7 +13,7 @@ Feature: ZeroMQ emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -90,7 +90,7 @@ Feature: ZeroMQ emission
         user_id I64,
         source STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         source string
       );

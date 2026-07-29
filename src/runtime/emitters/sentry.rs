@@ -150,23 +150,14 @@ mod tests {
             serde_json::from_slice(lines.next().expect("envelope header")).expect("valid header");
         let item_header: serde_json::Value =
             serde_json::from_slice(lines.next().expect("item header")).expect("valid item header");
-        let event: serde_json::Value =
-            serde_json::from_slice(lines.next().expect("event payload")).expect("valid event");
+        let event_bytes = lines.next().expect("event payload");
+        let event: serde_json::Value = serde_json::from_slice(event_bytes).expect("valid event");
 
         assert_eq!(header["event_id"], event["event_id"]);
         assert_eq!(item_header["type"], "event");
-        assert_eq!(item_header["length"], envelope_event_bytes(&event).len());
+        assert_eq!(item_header["length"], event_bytes.len());
         assert_eq!(event["platform"], "other");
         assert!(event.get("timestamp").is_some());
         assert_eq!(event["future"]["nested"], true);
-    }
-
-    fn envelope_event_bytes(event: &serde_json::Value) -> Vec<u8> {
-        serde_json::to_vec(
-            event
-                .as_object()
-                .expect("encoded Sentry event must be an object"),
-        )
-        .expect("event should serialize")
     }
 }

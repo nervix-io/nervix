@@ -8,7 +8,9 @@ At a high level, Nervix has two major halves:
 The graph itself is built out of persisted NSPL models:
 
 - `SCHEMA`
-- `WIRE SCHEMA`
+- `WIRE JSON SCHEMA`
+- `WIRE CBOR SCHEMA`
+- `WIRE AVRO SCHEMA`
 - `CODEC`
 - `RESOURCE`
 - `RELAY`

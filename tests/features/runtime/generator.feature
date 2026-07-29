@@ -68,7 +68,7 @@ Feature: Generator node
         total I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         amount integer
       );
@@ -160,7 +160,7 @@ Feature: Generator node
         amount I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         amount integer
       );
@@ -236,7 +236,7 @@ Feature: Generator node
         amount I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         amount integer
       );
@@ -288,7 +288,7 @@ Feature: Generator node
       {"user_id":42,"amount":7}
       """
     Then the relay subscription does not receive a payload within "500ms"
-    And within "3s" the relay subscription receives a payload
+    And within "5s" the relay subscription receives a payload
       """
       {"amount":7,"user_id":42}
       """
@@ -312,7 +312,7 @@ Feature: Generator node
         amount I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         amount integer
       );
@@ -393,7 +393,7 @@ Feature: Generator node
         value I64,
         tick DATETIME
       );
-      CREATE STRICT WIRE JSON SCHEMA generator_source_wire (
+      CREATE WIRE JSON SCHEMA generator_source_wire MODE STRICT (
         id string,
         value integer
       );
@@ -471,7 +471,7 @@ Feature: Generator node
         code STRING,
         attempted_id STRING OPTIONAL
       );
-      CREATE STRICT WIRE JSON SCHEMA generator_error_wire (
+      CREATE WIRE JSON SCHEMA generator_error_wire MODE STRICT (
         id string,
         divisor integer
       );

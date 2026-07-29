@@ -49,7 +49,7 @@ Wire schemas are either `STRICT` or `LOOSE`. Strict wire schemas reject payload 
 JSON wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] STRICT WIRE JSON SCHEMA notification_wire (
+CREATE [IF NOT EXISTS] WIRE JSON SCHEMA notification_wire MODE STRICT (
   user_id integer,
   created_at string,
   payload string OPTIONAL
@@ -59,7 +59,7 @@ CREATE [IF NOT EXISTS] STRICT WIRE JSON SCHEMA notification_wire (
 CBOR wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] LOOSE WIRE CBOR SCHEMA notification_wire (
+CREATE [IF NOT EXISTS] WIRE CBOR SCHEMA notification_wire MODE LOOSE (
   user_id integer,
   created_at string,
   payload string OPTIONAL
@@ -69,7 +69,7 @@ CREATE [IF NOT EXISTS] LOOSE WIRE CBOR SCHEMA notification_wire (
 AVRO wire schema:
 
 ```nspl
-CREATE [IF NOT EXISTS] STRICT WIRE AVRO SCHEMA notification_wire (
+CREATE [IF NOT EXISTS] WIRE AVRO SCHEMA notification_wire MODE STRICT (
   user_id LONG,
   created_at STRING,
   payload STRING OPTIONAL
@@ -114,14 +114,19 @@ Wire schema operations are:
 - `RENAME FIELD <field> TO <field>`
 - `ALTER FIELD <field> SET TYPE <wire_type>`
 - `ALTER FIELD <field> SET OPTIONAL` and `ALTER FIELD <field> DROP OPTIONAL`
-- `SET STRICT` and `SET LOOSE`
 
-The format is required and must match the stored schema:
+JSON, CBOR, and AVRO wire schemas are separate entity kinds. They may use the same name without
+colliding, and the exact format is required for every ALTER:
 
 ```nspl
 ALTER WIRE JSON SCHEMA notification_wire
-  ADD FIELD note string OPTIONAL,
-  SET LOOSE;
+  ADD FIELD note string OPTIONAL;
+```
+
+Mode changes use that same exact entity kind:
+
+```nspl
+ALTER WIRE JSON SCHEMA notification_wire MODE LOOSE;
 ```
 
 Use one explicit transaction when a type or shape change requires coordinated updates. Model
@@ -143,7 +148,10 @@ COMMIT;
 ```
 
 If any operation or dependent model fails validation, none of the mutations are persisted.
-`SHOW CREATE SCHEMA` and `SHOW CREATE WIRE SCHEMA` render the resulting canonical definitions.
+`SHOW CREATE SCHEMA` and exact wire forms such as
+`SHOW CREATE WIRE JSON SCHEMA notification_wire` render the resulting canonical definitions.
+Dropping a wire schema is exact-format too, for example
+`DROP WIRE JSON SCHEMA notification_wire`.
 
 On a running domain, a schema ALTER is applied through an automatic quiesce cycle: Nervix validates
 first, stops new ingestion and generators, force-flushes buffered output, drains in-flight work,
@@ -179,18 +187,21 @@ CREATE [IF NOT EXISTS] CODEC notification_codec
 `created_at` is the internal schema field name. The matching wire field must be a
 string, and the internal field must be `DATETIME`.
 
-JAQ-native codecs parse a transport payload in a jaq-supported format, run a mandatory JAQ transformation, and then decode the resulting JSON object into the internal schema:
+JAQ-native codecs parse a transport payload in a jaq-supported format and run explicitly directed
+JAQ transformations. An ingestion transformation decodes the resulting JSON object into the
+internal schema:
 
 ```nspl
 CREATE [IF NOT EXISTS] CODEC notification_cbor
   FROM CBOR
   TO SCHEMA notification
-  WITH JAQ TRANSFORMATION '.';
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.';
 
 CREATE [IF NOT EXISTS] CODEC notification_xml
   FROM XML
   TO SCHEMA notification
-  WITH JAQ TRANSFORMATION '{user_id: (.c[] | select(.t == "user_id").c[0] | tonumber)}';
+  WITH JAQ TRANSFORMATIONS
+    ON INGESTION '{user_id: (.c[] | select(.t == "user_id").c[0] | tonumber)}';
 ```
 
 Protobuf codecs compile `.proto` files from an uploaded resource, decode or encode the selected message with `prost-reflect`, and use JAQ to translate between the protobuf JSON view and the internal schema:
@@ -202,7 +213,7 @@ CREATE [IF NOT EXISTS] CODEC notification_proto
   CONFIG {'file' = 'notification.proto', 'include' = '.'}
   MESSAGE 'nervix.test.Notification'
   TO SCHEMA notification
-  WITH JAQ TRANSFORMATION '{user_id: .user_id, payload: .payload}';
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id: .user_id, payload: .payload}';
 ```
 
 The resource contains the `.proto` files. `CONFIG` declares compile parameters; `file`/`files` select source files and `include`/`includes` select import roots, all relative to the resource root. If no file is listed, all `.proto` files in the resource are compiled.
@@ -227,7 +238,9 @@ Current protobuf codec format:
 
 ## JAQ Transformations
 
-JAQ-backed codecs must declare a JAQ transform:
+JAQ-backed codecs must declare a JAQ transform. The concise
+[JAQ Reference](jaq-reference.md) links the full upstream manual for the exact `jaq-core` release
+Nervix embeds and summarizes the Nervix-specific boundary:
 
 ```nspl
 CREATE [IF NOT EXISTS] CODEC notification_codec
@@ -243,7 +256,7 @@ Semantics:
 - no-wire codecs must use `FROM JSON|YAML|TOML|XML|CBOR ... WITH JAQ ...`
 - protobuf codecs must use `FROM PROTOBUF USING RESOURCE ... CONFIG {...} MESSAGE ... WITH JAQ ...`
 - schemaful codecs must use `FROM WIRE JSON|CBOR|AVRO SCHEMA ...` and do not carry JAQ transforms
-- `WITH JAQ TRANSFORMATION '<program>'` is shorthand for an ingestion transform
+- `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order
 - `ON INGESTION` runs after parsing the native/protobuf payload and must yield exactly one JSON object compatible with the internal schema
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 

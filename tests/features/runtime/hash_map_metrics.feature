@@ -29,7 +29,7 @@ Feature: Hash map metrics
         city STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA zip_code_entry_wire (
+      CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT (
         zip string,
         city string
       );
@@ -63,19 +63,20 @@ Feature: Hash map metrics
       """
       hash map: zip_codes_by_zip
       """
+    And the last command output owner is saved as placeholder "hash_map_metrics_owner"
     And the last command output contains
       """
       metrics:
       """
     And the last command output contains
       """
-      messages_total received relay=- physical_node=node-1 total=2
+      messages_total received relay=- physical_node={{hash_map_metrics_owner}} total=2
       """
     And the last command output contains
       """
       wall_rate_per_sec=
       """
-    And the last command output metric "messages_total" "received" relay "-" physical node "node-1" has values
+    And the last command output metric "messages_total" "received" relay "-" physical node "{{hash_map_metrics_owner}}" has values
       """
       total=2
       """
@@ -83,10 +84,10 @@ Feature: Hash map metrics
       """
       batches_total received relay=-
       """
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target_kind="LOOKUP"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="zip_codes_by_zip"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'direction="received"'
-    And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 2
+    And node "{{hash_map_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target_kind="LOOKUP"'
+    And node "{{hash_map_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target="zip_codes_by_zip"'
+    And node "{{hash_map_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'direction="received"'
+    And node "{{hash_map_metrics_owner}}" observability metric "nervix_messages_total" with labels eventually equals 2
       """
       target_kind="LOOKUP"
       target="zip_codes_by_zip"

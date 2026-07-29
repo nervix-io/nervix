@@ -20,7 +20,7 @@ CREATE SCHEMA payment_record (
   amount I64
 );
 
-CREATE STRICT WIRE JSON SCHEMA payment_wire (
+CREATE WIRE JSON SCHEMA payment_wire MODE STRICT (
   order_id string,
   payment_id string,
   amount integer

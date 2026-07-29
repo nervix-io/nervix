@@ -8,7 +8,6 @@ mutants.out
 .wrangler
 .venv
 docs/book
-docs/src/roto-language-reference.md
 __pycache__
 /tls/
 .nervix-deps

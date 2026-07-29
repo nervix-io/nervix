@@ -14,7 +14,7 @@ Feature: Altering schemas on a running domain
         seq I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA running_event_wire (
+      CREATE WIRE JSON SCHEMA running_event_wire MODE STRICT (
         seq integer
       );
 
@@ -112,7 +112,7 @@ Feature: Altering schemas on a running domain
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA timeout_event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA timeout_event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA timeout_event_wire MODE STRICT ( seq integer );
       CREATE CODEC timeout_event_codec
         FROM WIRE JSON SCHEMA timeout_event_wire
         TO SCHEMA timeout_event;
@@ -199,7 +199,7 @@ Feature: Altering schemas on a running domain
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA mutable_event ( tenant STRING, seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA mutable_event_wire (
+      CREATE WIRE JSON SCHEMA mutable_event_wire MODE STRICT (
         tenant string,
         seq integer
       );
@@ -208,7 +208,7 @@ Feature: Altering schemas on a running domain
         TO SCHEMA mutable_event;
 
       CREATE SCHEMA stable_event ( tenant STRING, seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA stable_event_wire (
+      CREATE WIRE JSON SCHEMA stable_event_wire MODE STRICT (
         tenant string,
         seq integer
       );

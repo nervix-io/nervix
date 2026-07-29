@@ -78,8 +78,15 @@ pub fn statement_parser<'src>()
             .map(|create| Statement::Create(create.map_body(Model::Ingestor).map_body(Box::new))),
         crate::relay::create_relay_parser()
             .map(|create| Statement::Create(create.map_body(Model::Relay).map_body(Box::new))),
-        crate::schema::create_wire_schema_parser_any()
-            .map(|create| Statement::Create(create.map_body(Model::WireSchema).map_body(Box::new))),
+        crate::schema::create_json_wire_schema_parser().map(|create| {
+            Statement::Create(create.map_body(Model::WireJsonSchema).map_body(Box::new))
+        }),
+        crate::schema::create_cbor_wire_schema_parser().map(|create| {
+            Statement::Create(create.map_body(Model::WireCborSchema).map_body(Box::new))
+        }),
+        crate::schema::create_avro_wire_schema_parser().map(|create| {
+            Statement::Create(create.map_body(Model::WireAvroSchema).map_body(Box::new))
+        }),
         crate::schema::create_schema_parser()
             .map(|create| Statement::Create(create.map_body(Model::Schema).map_body(Box::new))),
     );
@@ -141,11 +148,15 @@ pub fn statement_parser<'src>()
     );
     let administration = boxed_choice!(
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),
-        crate::schema::alter_wire_schema_parser_any().map(Statement::AlterWireSchema),
+        crate::schema::alter_wire_schema_parser_any(),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
         crate::junction::alter_junction_parser().map(Statement::AlterJunction),
+        crate::deduplicator::alter_deduplicator_parser().map(Statement::AlterDeduplicator),
+        crate::reorderer::alter_reorderer_parser().map(Statement::AlterReorderer),
         crate::emitter::alter_emitter_parser().map(Statement::AlterEmitter),
         crate::ingestor::alter_ingestor_parser().map(Statement::AlterIngestor),
+        crate::reingestor::alter_reingestor_parser().map(Statement::AlterReingestor),
+        crate::generator::alter_generator_parser().map(Statement::AlterGenerator),
         crate::node_control::cordon_node_parser().map(Statement::CordonNode),
         crate::node_control::uncordon_node_parser().map(Statement::UncordonNode),
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
@@ -226,15 +237,14 @@ mod tests {
         CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
         CreateClientSqs, CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter,
         CreateEndpoint, CreateGenerator, CreateIngestor, CreateJunction, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateWireSchema, CreateWireSchemaStmt, DescribeRelay, DrainNode,
-        DropModel, DropNode, EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies,
-        GeneralErrorPolicy, Identifier as ModelIdentifier, IngestSource, JsonType,
-        KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Model, ModelKind, MqttIngestMode,
-        MqttQos, MqttSession, NatsIngestMode, OutputBranch, ParseAsType, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
-        RedisPubSubIngestMode, RetryPolicy, SchemaField, SignalingProtocolOnConnect, SqsIngestMode,
-        Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode, WireSchemaField,
-        ZeroMqIngestMode,
+        CreateSignalingProtocol, CreateWireSchema, DescribeRelay, DrainNode, DropModel, DropNode,
+        EmitSink, EndpointIngestMode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
+        Identifier as ModelIdentifier, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, Model, ModelKind, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode,
+        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, SchemaField,
+        SignalingProtocolOnConnect, SqsIngestMode, Statement, SubscriptionBinding,
+        SubscriptionLiteral, UncordonNode, WireSchemaField, ZeroMqIngestMode,
     };
 
     use super::*;
@@ -415,11 +425,11 @@ mod tests {
                             optional: g.bool(),
                         });
                     }
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: g.ident(),
                         strictness: Default::default(),
                         fields,
-                    }))
+                    })
                 } else {
                     let mut fields = Vec::with_capacity(field_count);
                     for _ in 0..field_count {
@@ -443,11 +453,11 @@ mod tests {
                             optional: g.bool(),
                         });
                     }
-                    Model::WireSchema(CreateWireSchemaStmt::Avro(CreateWireSchema {
+                    Model::WireAvroSchema(CreateWireSchema {
                         name: g.ident(),
                         strictness: Default::default(),
                         fields,
-                    }))
+                    })
                 }
             }
             2 => Model::Codec(CreateCodec {
@@ -1147,8 +1157,13 @@ mod tests {
         let input = "ALTER ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"RELAY".to_string()));
+        assert!(suggestions.contains(&"JUNCTION".to_string()));
+        assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
+        assert!(suggestions.contains(&"REORDERER".to_string()));
         assert!(suggestions.contains(&"EMITTER".to_string()));
         assert!(suggestions.contains(&"INGESTOR".to_string()));
+        assert!(suggestions.contains(&"REINGESTOR".to_string()));
+        assert!(suggestions.contains(&"GENERATOR".to_string()));
         assert!(suggestions.contains(&"SCHEMA".to_string()));
         assert!(suggestions.contains(&"WIRE".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -1844,7 +1859,7 @@ mod tests {
     #[test]
     fn canonical_roundtrip_wire_schema() {
         let input = r#"
-            CREATE STRICT WIRE JSON SCHEMA notification_wire (
+            CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
                 user_id integer,
                 created_at string,
                 payload object
@@ -1881,16 +1896,32 @@ mod tests {
     fn canonical_roundtrip_alter_wire_schema() {
         let parsed = parse_statement(
             "ALTER WIRE AVRO SCHEMA payload ADD FIELD note STRING OPTIONAL, ALTER FIELD id SET \
-             TYPE LONG, ALTER FIELD note DROP OPTIONAL, SET LOOSE;",
+             TYPE LONG, ALTER FIELD note DROP OPTIONAL;",
         )
         .expect("parse should succeed");
-        let Statement::AlterWireSchema(alter) = parsed else {
+        let Statement::AlterWireAvroSchema(alter) = parsed else {
             panic!("expected ALTER WIRE SCHEMA");
         };
 
-        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let canonical = nervix_models::alter_avro_wire_schema_to_canonical_nspl(&alter)
+            .expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
-        assert_eq!(Statement::AlterWireSchema(alter), reparsed);
+        assert_eq!(Statement::AlterWireAvroSchema(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_wire_schema_mode() {
+        let parsed = parse_statement("ALTER WIRE JSON SCHEMA payload MODE LOOSE;")
+            .expect("parse should succeed");
+        let Statement::AlterWireJsonSchema(alter) = parsed else {
+            panic!("expected wire-schema mode ALTER");
+        };
+
+        let canonical = nervix_models::alter_json_wire_schema_to_canonical_nspl(&alter)
+            .expect("must render canonical");
+        assert_eq!(canonical, "ALTER WIRE JSON SCHEMA payload MODE LOOSE;");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterWireJsonSchema(alter), reparsed);
     }
 
     #[test]
@@ -1928,6 +1959,40 @@ mod tests {
     }
 
     #[test]
+    fn canonical_roundtrip_alter_deduplicator() {
+        let parsed = parse_statement(
+            "ALTER DEDUPLICATOR dedup_events ADD FROM incoming_b WHERE input.active, SET \
+             DEDUPLICATE ON concat(input.tenant, ','), input.id, SET MAX TIME 20m, ADD ROUTE TO \
+             audit INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterDeduplicator(alter) = parsed else {
+            panic!("expected ALTER DEDUPLICATOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterDeduplicator(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_reorderer() {
+        let parsed = parse_statement(
+            "ALTER REORDERER order_events ADD FROM incoming_b WHERE input.active, SET BY \
+             concat(input.tenant, ','), input.id, SET MAX TIME 20m, ADD ROUTE TO audit INHERIT \
+             ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterReorderer(alter) = parsed else {
+            panic!("expected ALTER REORDERER");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterReorderer(alter), reparsed);
+    }
+
+    #[test]
     fn canonical_roundtrip_alter_emitter() {
         let parsed = parse_statement(
             "ALTER EMITTER event_sink SET TO ZEROMQ sink_b, SET CLIENT sink_c, SET ENCODE USING \
@@ -1960,6 +2025,40 @@ mod tests {
         let canonical = alter.to_canonical_nspl().expect("must render canonical");
         let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
         assert_eq!(Statement::AlterIngestor(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_reingestor() {
+        let parsed = parse_statement(
+            "ALTER REINGESTOR repartition ADD FROM incoming_b WHERE input.active, SET FILTER \
+             WHERE concat(input.tenant, ',') != '', SET DETACHED, REPLACE ROUTE TO outgoing \
+             INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterReingestor(alter) = parsed else {
+            panic!("expected ALTER REINGESTOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterReingestor(alter), reparsed);
+    }
+
+    #[test]
+    fn canonical_roundtrip_alter_generator() {
+        let parsed = parse_statement(
+            "ALTER GENERATOR synth SET MATERIALIZED STATE state_v2, SET EACH 250ms, SET \
+             UNBRANCHED, REPLACE ROUTE TO outgoing SET value = relay_state.state_v2.value FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("parse should succeed");
+        let Statement::AlterGenerator(alter) = parsed else {
+            panic!("expected ALTER GENERATOR");
+        };
+
+        let canonical = alter.to_canonical_nspl().expect("must render canonical");
+        let reparsed = parse_statement(&canonical).expect("canonical parse should succeed");
+        assert_eq!(Statement::AlterGenerator(alter), reparsed);
     }
 
     #[test]

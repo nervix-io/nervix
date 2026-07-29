@@ -52,12 +52,16 @@ request can mix those phases.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, schema, wire-schema,
-relay, junction, emitter, or ingestor `ALTER`, and `DROP` for one domain in the same transaction;
+relay, junction, deduplicator, reorderer, emitter, ingestor, reingestor, or generator `ALTER`, and
+`DROP` for one domain in the same transaction;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
 changes pause the domain; structural junction, emitter sink/client/codec/collect/mode, ingestor,
-and relay materialized-state changes gate and drain only affected entities. In `ALTER INGESTOR`,
-use a complete transport-specific source body after `SET FROM`.
+and relay materialized-state changes gate and drain only affected entities. Deduplicator key and
+reorderer ordering changes also use entity pause; their `MAX TIME` changes are dynamic. In `ALTER
+INGESTOR`, use a complete transport-specific source body after `SET FROM`. Every reingestor and
+generator ALTER uses entity pause; reingestor route bodies retain their per-route branch selection,
+while generator route bodies remain set-only.
 
 ## Preserve NSPL semantics
 
@@ -68,10 +72,18 @@ use a complete transport-specific source body after `SET FROM`.
   optional destination.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
-- Preserve written operation order in schema, relay, junction, emitter, and ingestor ALTER
+- For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
+  `ON EMITTING`, or both in that order. At least one direction is required.
+- Preserve written operation order in schema, relay, junction, deduplicator, reorderer, emitter,
+  ingestor, reingestor, and generator ALTER
   statements.
   Include every dependent wire, internal, codec, and node mutation required for the candidate graph
   to validate in the same transaction.
+- Treat JSON, CBOR, and AVRO wire schemas as distinct entity kinds. Their names may coincide, so
+  every create, alter, show, drop, and codec reference must include the exact format.
+- Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
+  STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
+  the same format-qualified ALTER form owns field evolution.
 - Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only
   when the body needs the domain clock or randomness. Roto UDFs are trusted native code; keep
   untrusted custom processing in WASM.

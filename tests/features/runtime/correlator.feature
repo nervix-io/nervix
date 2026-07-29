@@ -29,12 +29,12 @@ Feature: Relay correlation
         tenant STRING,
         audit_name STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA left_profile_wire (
+        CREATE WIRE JSON SCHEMA left_profile_wire MODE STRICT (
         tenant string,
         first_name string,
         marker integer
       );
-        CREATE STRICT WIRE JSON SCHEMA right_profile_wire (
+        CREATE WIRE JSON SCHEMA right_profile_wire MODE STRICT (
         tenant string,
         first_name string,
         surname string

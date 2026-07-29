@@ -10,7 +10,7 @@ Feature: Dynamically applying junction ALTER operations
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
@@ -73,7 +73,7 @@ Feature: Dynamically applying junction ALTER operations
       """
       CREATE SCHEMA input_event ( seq I64 );
       CREATE SCHEMA output_event ( seq I64, label STRING );
-      CREATE STRICT WIRE JSON SCHEMA input_event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA input_event_wire MODE STRICT ( seq integer );
       CREATE CODEC input_event_codec FROM WIRE JSON SCHEMA input_event_wire TO SCHEMA input_event;
       CREATE RELAY incoming SCHEMA input_event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA output_event UNBRANCHED;
@@ -133,7 +133,7 @@ Feature: Dynamically applying junction ALTER operations
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;

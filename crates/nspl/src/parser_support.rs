@@ -5,10 +5,11 @@ use chumsky::{
     prelude::*,
 };
 use nervix_models::{
-    AckMode, AssignmentTargetScope, BranchSelection, Domain, Expression, GeneralErrorPolicy,
-    Identifier as ModelIdentifier, InputCollectPolicy, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, OutputBranch, OutputFlushPolicy,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RouteConstruction,
+    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchSelection, Domain, Expression,
+    GeneralErrorPolicy, Identifier as ModelIdentifier, InputCollectPolicy,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, OutputBranch,
+    OutputFlushPolicy, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    RouteConstruction,
 };
 use sorted_vec::SortedSet;
 
@@ -304,9 +305,19 @@ pub fn schema_name<'src>()
     parse_identifier("schema_name")
 }
 
-pub fn wire_schema_ref<'src>()
+pub fn wire_json_schema_ref<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wire_schema")
+    parse_identifier("ref:wire_json_schema")
+}
+
+pub fn wire_cbor_schema_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:wire_cbor_schema")
+}
+
+pub fn wire_avro_schema_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:wire_avro_schema")
 }
 
 pub fn wire_schema_name<'src>()
@@ -756,6 +767,44 @@ pub fn alter_flushed_route_body<'src>()
         .boxed()
 }
 
+pub fn alter_generator_route_body<'src>()
+-> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::To)
+        .ignore_then(relay_ref())
+        .then(alter_route_construction().try_map(|construction, span| {
+            if construction.assignments.is_empty() {
+                Err(Rich::custom(
+                    span,
+                    "output route must contain SET assignments and may contain WHERE",
+                ))
+            } else if construction.inherit.is_some() || !construction.invocations.is_empty() {
+                Err(Rich::custom(
+                    span,
+                    "set-only output route may contain SET assignments and WHERE only",
+                ))
+            } else {
+                Ok(construction)
+            }
+        }))
+        .then(flush_each())
+        .then(alter_message_error_policy())
+        .map(
+            |(((relay, construction), (flush_each, max_batch_size)), message_error_policy)| {
+                ProcessorOutput {
+                    relay,
+                    construction,
+                    flush_policy: Some(OutputFlushPolicy {
+                        flush_each,
+                        max_batch_size,
+                    }),
+                    message_error_policy,
+                    branch: None,
+                }
+            },
+        )
+        .boxed()
+}
+
 pub fn alter_ingestor_route_body<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
@@ -782,6 +831,134 @@ pub fn alter_ingestor_route_body<'src>()
             },
         )
         .boxed()
+}
+
+pub fn alter_processor_operation<'src>()
+-> impl Parser<'src, &'src [Token], AlterProcessorOperation, extra::Err<ParseError<'src>>> + Clone {
+    alter_processor_operation_with_routes(alter_flushed_route_body(), true)
+}
+
+pub fn alter_reingestor_operation<'src>()
+-> impl Parser<'src, &'src [Token], AlterProcessorOperation, extra::Err<ParseError<'src>>> + Clone {
+    alter_processor_operation_with_routes(alter_ingestor_route_body(), false)
+}
+
+fn alter_processor_operation_with_routes<'src, P>(
+    route_body: P,
+    supports_node_branching: bool,
+) -> impl Parser<'src, &'src [Token], AlterProcessorOperation, extra::Err<ParseError<'src>>> + Clone
+where
+    P: Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    let add_from = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .then(where_expression(alter_op_separator()).or_not())
+        .map(|(relay, where_clause)| AlterProcessorOperation::AddFrom {
+            relay,
+            where_clause,
+        });
+    let drop_from = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterProcessorOperation::DropFrom { relay });
+    let alter_from = kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .then(choice((
+            kw(Identifier::Set)
+                .ignore_then(where_expression(alter_op_separator()))
+                .map(Some),
+            kw(Identifier::Drop)
+                .ignore_then(kw(Identifier::Where))
+                .to(None),
+        )))
+        .map(|(relay, where_clause)| match where_clause {
+            Some(where_clause) => AlterProcessorOperation::AlterFromSetWhere {
+                relay,
+                where_clause,
+            },
+            None => AlterProcessorOperation::AlterFromDropWhere { relay },
+        });
+    let set_collect = kw(Identifier::Set)
+        .ignore_then(collect_for())
+        .map(|policy| AlterProcessorOperation::SetCollect { policy });
+    let drop_collect = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Collect))
+        .to(AlterProcessorOperation::DropCollect);
+    let set_filter = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Filter))
+        .ignore_then(where_expression(alter_op_separator()))
+        .map(|where_clause| AlterProcessorOperation::SetFilterWhere { where_clause });
+    let drop_filter = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Filter))
+        .ignore_then(kw(Identifier::Where))
+        .to(AlterProcessorOperation::DropFilterWhere);
+    let set_mode = kw(Identifier::Set)
+        .ignore_then(ack_mode())
+        .map(|mode| AlterProcessorOperation::SetMode { mode });
+    let set_branching = kw(Identifier::Set)
+        .ignore_then(branch_selection())
+        .map(|branching| AlterProcessorOperation::SetBranching { branching });
+    let add_materialized = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .then(materialized_state_policy())
+        .map(
+            |(relay, policy)| AlterProcessorOperation::AddMaterializedState {
+                dependency: MaterializedStateDependency { relay, policy },
+            },
+        );
+    let drop_materialized = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterProcessorOperation::DropMaterializedState { relay });
+    let alter_materialized = kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::Materialized))
+        .ignore_then(kw(Identifier::State))
+        .ignore_then(relay_ref())
+        .then_ignore(kw(Identifier::Set))
+        .then(materialized_state_policy())
+        .map(|(relay, policy)| AlterProcessorOperation::AlterMaterializedState { relay, policy });
+    let add_route = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(route_body.clone())
+        .map(|route| AlterProcessorOperation::AddRoute { route });
+    let drop_route = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterProcessorOperation::DropRoute { relay });
+    let replace_route = kw(Identifier::Replace)
+        .ignore_then(kw(Identifier::Route))
+        .ignore_then(route_body)
+        .map(|route| AlterProcessorOperation::ReplaceRoute { route });
+
+    let common = choice((
+        add_from,
+        drop_from,
+        alter_from,
+        set_collect,
+        drop_collect,
+        set_filter,
+        drop_filter,
+        set_mode,
+        add_materialized,
+        drop_materialized,
+        alter_materialized,
+        add_route,
+        drop_route,
+        replace_route,
+    ))
+    .boxed();
+
+    if supports_node_branching {
+        choice((common, set_branching)).boxed()
+    } else {
+        common
+    }
 }
 
 pub fn general_error_policy<'src>()
@@ -978,6 +1155,27 @@ where
             crate::parse_expression(&source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
+        .boxed()
+}
+
+pub fn alter_expression_list<'src, P>(
+    boundary: P,
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], Vec<Expression>, extra::Err<ParseError<'src>>> + Clone
+where
+    P: Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    any()
+        .and_is(boundary.not())
+        .filter(|token: &Token| !matches!(token, Token::Semicolon))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .try_map(|tokens, span| {
+            crate::parse_expression_list(&render_vm_program_tokens(&tokens))
+                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
+        })
+        .labelled(label)
         .boxed()
 }
 

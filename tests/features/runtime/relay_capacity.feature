@@ -13,7 +13,7 @@ Feature: Relay capacity
         seq I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         seq integer
       );
@@ -50,7 +50,7 @@ Feature: Relay capacity
         seq I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         seq integer
       );
@@ -150,7 +150,7 @@ Feature: Relay capacity
         seq I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         seq integer
       );
 

@@ -18,7 +18,7 @@ Feature: Relay junction
         source STRING,
         lane STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         source string,
         raw string
@@ -120,7 +120,7 @@ Feature: Relay junction
         tenant STRING,
         source STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         source string
       );
@@ -214,7 +214,7 @@ Feature: Relay junction
         user_id I64,
         source STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         source string
       );

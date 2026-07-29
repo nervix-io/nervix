@@ -14,7 +14,7 @@ Feature: Materialized relay state
         user_id I64,
         source STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         user_id integer,
         source string
@@ -127,7 +127,7 @@ Feature: Materialized relay state
         user_id I64,
         amount I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         amount integer
       );
@@ -205,7 +205,7 @@ Feature: Materialized relay state
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -272,7 +272,7 @@ Feature: Materialized relay state
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec

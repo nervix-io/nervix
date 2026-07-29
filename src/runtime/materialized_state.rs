@@ -68,14 +68,7 @@ impl ReplicatedMaterializedRelayState {
             for (key, record) in snapshot_entries {
                 entries.insert(key, record);
             }
-            metrics.apply_branch_target_snapshot(
-                placement.concrete_branch_key(),
-                &placement.domain,
-                ModelKind::Relay,
-                &placement.identifier,
-                &physical_node_id,
-                snapshot_metrics,
-            );
+            Self::apply_metrics_snapshot(metrics, &placement, &physical_node_id, snapshot_metrics);
         }
         Ok(Self {
             placement,
@@ -109,14 +102,87 @@ impl ReplicatedMaterializedRelayState {
             >= self.required_replica_acks
     }
 
-    pub(super) fn metrics_snapshot(&self, metrics: &RuntimeMetrics) -> RuntimeMetricsSnapshot {
-        metrics.snapshot_branch_target(
-            self.placement.concrete_branch_key(),
-            &self.placement.domain,
-            ModelKind::Relay,
-            &self.placement.identifier,
+    pub(super) fn apply_snapshot(
+        &self,
+        metrics: &RuntimeMetrics,
+        lsm: u64,
+        payload: &[u8],
+    ) -> Result<(), RuntimePersistenceError> {
+        let (entries, snapshot_metrics) =
+            decode_materialized_stream_snapshot_with_metrics(payload)?;
+        self.entries.clear();
+        for (key, record) in entries {
+            self.entries.insert(key, record);
+        }
+        Self::apply_metrics_snapshot(
+            metrics,
+            &self.placement,
             &self.physical_node_id,
-        )
+            snapshot_metrics,
+        );
+        self.current_lsm.store(lsm, Ordering::SeqCst);
+        self.dirty.store(true, Ordering::SeqCst);
+        self.replication_notify.notify_waiters();
+        Ok(())
+    }
+
+    pub(super) fn latest_snapshot(
+        &self,
+        metrics: &RuntimeMetrics,
+    ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
+        Ok(PersistedRuntimeStateEntry {
+            lsm: self.current_lsm.load(Ordering::SeqCst),
+            schema_fingerprint: self.placement.schema_fingerprint,
+            payload: encode_materialized_stream_snapshot(
+                &self.entries,
+                self.metrics_snapshot(metrics),
+            )?,
+        })
+    }
+
+    pub(super) fn metrics_snapshot(&self, metrics: &RuntimeMetrics) -> RuntimeMetricsSnapshot {
+        if let Some(branch_key) = self.placement.branch_key.as_ref() {
+            metrics.snapshot_branch_target(
+                branch_key.as_str(),
+                &self.placement.domain,
+                ModelKind::Relay,
+                &self.placement.identifier,
+                &self.physical_node_id,
+            )
+        } else {
+            metrics.snapshot_global_target(
+                &self.placement.domain,
+                ModelKind::Relay,
+                &self.placement.identifier,
+                &self.physical_node_id,
+            )
+        }
+    }
+
+    fn apply_metrics_snapshot(
+        metrics: &RuntimeMetrics,
+        placement: &RuntimeStatePlacement,
+        physical_node_id: &str,
+        snapshot: RuntimeMetricsSnapshot,
+    ) {
+        if let Some(branch_key) = placement.branch_key.as_ref() {
+            metrics.apply_branch_target_snapshot(
+                branch_key.as_str(),
+                &placement.domain,
+                ModelKind::Relay,
+                &placement.identifier,
+                physical_node_id,
+                snapshot,
+            );
+        } else {
+            metrics.apply_global_target_snapshot(
+                &placement.domain,
+                ModelKind::Relay,
+                &placement.identifier,
+                physical_node_id,
+                snapshot,
+            );
+        }
     }
 
     pub(super) fn update_last_by_timestamp(
@@ -238,4 +304,84 @@ fn snapshot_key_sort(key: &Option<Vec<RemoteRuntimeField>>) -> String {
         .map(|field| field.name.as_str())
         .collect::<Vec<_>>()
         .join("\0")
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::{Domain, Identifier, ModelKind};
+
+    use super::*;
+    use crate::runtime_schema::RuntimeValue;
+
+    #[test]
+    fn unbranched_materialized_state_snapshots_and_restores_global_metrics() {
+        let domain = Domain::parse("default").expect("valid domain");
+        let relay = Identifier::parse("notifications").expect("valid relay");
+        let placement = RuntimeStatePlacement {
+            domain,
+            state: super::super::RuntimeStateKind::MaterializedRelay,
+            kind: ModelKind::Materializer,
+            identifier: relay,
+            schema_fingerprint: [0; 32],
+            branch_key: None,
+        };
+        let metrics = RuntimeMetrics::default();
+        metrics.observe_global_stream_received(
+            &placement.domain,
+            &placement.identifier,
+            Some("node-1"),
+            1,
+            64,
+            None,
+        );
+        let state = ReplicatedMaterializedRelayState::new(
+            placement.clone(),
+            None,
+            "node-1".to_string(),
+            Vec::new(),
+            0,
+            &metrics,
+            None,
+        )
+        .expect("unbranched materialized state should build");
+        let record = RuntimeRecord::from_fields([(
+            "value".to_string(),
+            RuntimeValue::String("ready".to_string()),
+        )]);
+
+        let (lsm, payload) = state
+            .update_last_by_timestamp(&metrics, &None, &record)
+            .expect("unbranched materialized state should snapshot")
+            .expect("the first record should update state");
+        let restored_metrics = RuntimeMetrics::default();
+        let restored = ReplicatedMaterializedRelayState::new(
+            placement,
+            None,
+            "node-1".to_string(),
+            Vec::new(),
+            0,
+            &restored_metrics,
+            Some(PersistedRuntimeStateEntry {
+                lsm,
+                schema_fingerprint: [0; 32],
+                payload,
+            }),
+        )
+        .expect("unbranched materialized state should restore");
+
+        assert_eq!(
+            restored
+                .entries
+                .get(&None)
+                .expect("restored record should exist")
+                .fields
+                .len(),
+            1
+        );
+        assert!(restored_metrics.has_global_target_measurements(
+            &restored.placement.domain,
+            ModelKind::Relay,
+            &restored.placement.identifier,
+        ));
+    }
 }

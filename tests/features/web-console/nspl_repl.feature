@@ -260,7 +260,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
@@ -294,7 +294,7 @@ Feature: Web console NSPL REPL
       CREATE UNPACED DOMAIN {{domain}}_empty;
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
@@ -313,7 +313,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
@@ -359,12 +359,12 @@ Feature: Web console NSPL REPL
         operation STRING,
         tenant STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA left_profile_wire (
+      CREATE WIRE JSON SCHEMA left_profile_wire MODE STRICT (
         tenant string,
         first_name string,
         marker integer
       );
-      CREATE STRICT WIRE JSON SCHEMA right_profile_wire (
+      CREATE WIRE JSON SCHEMA right_profile_wire MODE STRICT (
         tenant string,
         first_name string,
         surname string
@@ -434,7 +434,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
@@ -472,7 +472,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -516,7 +516,7 @@ Feature: Web console NSPL REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( tenant string, user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
@@ -578,7 +578,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -629,7 +629,7 @@ Feature: Web console NSPL REPL
         rust_keep BOOL,
         go_keep BOOL
       );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         value integer,
         rust_keep boolean,
         go_keep boolean
@@ -746,7 +746,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
@@ -779,7 +779,7 @@ Feature: Web console NSPL REPL
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE fraud_model;
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/ingest' };
       CREATE VHOST edge api.example.com;
@@ -811,7 +811,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire ( user_id integer );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
@@ -834,7 +834,7 @@ Feature: Web console NSPL REPL
         event_type STRING,
         value STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA activity_wire (
+      CREATE WIRE JSON SCHEMA activity_wire MODE STRICT (
         tenant_id string,
         device_id string,
         event_type string,
@@ -1007,7 +1007,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA telemetry ( site STRING, value STRING );
-      CREATE STRICT WIRE JSON SCHEMA telemetry_wire ( site string, value string );
+      CREATE WIRE JSON SCHEMA telemetry_wire MODE STRICT ( site string, value string );
       CREATE CODEC telemetry_codec FROM WIRE JSON SCHEMA telemetry_wire TO SCHEMA telemetry;
       CREATE IF NOT EXISTS SCHEMA site_branch ( site STRING );
       CREATE IF NOT EXISTS BRANCH by_primary_telemetry SCHEMA site_branch TTL 5m;
@@ -1051,7 +1051,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value STRING );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( value string );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value string );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
@@ -1083,7 +1083,7 @@ Feature: Web console NSPL REPL
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       CREATE SCHEMA event ( value STRING );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( value string );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value string );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY raw_events SCHEMA event UNBRANCHED;
       CREATE RELAY filtered_events SCHEMA event UNBRANCHED;
@@ -1114,7 +1114,7 @@ Feature: Web console NSPL REPL
         tenant STRING,
         user_id I64
       );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         user_id integer
       );
@@ -1185,7 +1185,7 @@ Feature: Web console NSPL REPL
         value F64,
         warn_high F64
       );
-      CREATE STRICT WIRE JSON SCHEMA telemetry_wire (
+      CREATE WIRE JSON SCHEMA telemetry_wire MODE STRICT (
         site string,
         device_id string,
         battery_pct number,
@@ -1285,7 +1285,7 @@ Feature: Web console NSPL REPL
       CREATE SCHEMA notification (
         user_id I64
       );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
@@ -1362,7 +1362,7 @@ Feature: Web console NSPL REPL
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA txn ( value STRING );
-      CREATE STRICT WIRE JSON SCHEMA txn_wire ( value string );
+      CREATE WIRE JSON SCHEMA txn_wire MODE STRICT ( value string );
       CREATE CODEC txn_codec FROM WIRE JSON SCHEMA txn_wire TO SCHEMA txn;
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );
       CREATE IF NOT EXISTS SCHEMA value_branch ( value STRING );

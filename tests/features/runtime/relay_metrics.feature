@@ -13,7 +13,7 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         occurred_at string
       );
@@ -142,7 +142,7 @@ Feature: Relay metrics
         user_id I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
 
@@ -203,6 +203,7 @@ Feature: Relay metrics
 
   Scenario: Relay edge metrics are preserved when the owning node is drained
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -214,7 +215,7 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         occurred_at string
       );
@@ -288,7 +289,7 @@ Feature: Relay metrics
         user_id I64,
         occurred_at DATETIME
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         occurred_at string
       );

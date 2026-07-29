@@ -41,18 +41,18 @@ use nervix_models::{
     CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis, CreateClientS3,
     CreateClientSentry, CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor,
-    CreateRelay, CreateSignalingProtocol, CreateUdf, CreateWireSchemaStmt, Domain, DomainConfig,
-    DomainPace, DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies,
-    FieldPath, GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
-    Identifier, InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping,
-    IngestSource, IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    CreateRelay, CreateSignalingProtocol, CreateUdf, Domain, DomainConfig, DomainPace,
+    DomainSchedule, DomainState, DomainTick, EmitSink, EndpointType, ErrorPolicies, FieldPath,
+    GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, Identifier,
+    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
     MessageErrorPolicy, Model, ModelKind, MongoDbConflictAction, MongoDbValueMapping,
     MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
     PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
     RabbitMqIngestMode, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
     RemoteRuntimeField, ResourceVersionStatus, RetryPolicy, RouteConstruction, ScheduledNode,
-    SqsIngestMode, StructuredMessageError, Timestamp,
+    SqsIngestMode, StructuredMessageError, Timestamp, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -169,11 +169,10 @@ use message_error_delivery::{
 #[cfg(test)]
 use planning::resolve_concrete_branch;
 use planning::{
-    assignments_contain_udf, branched_ingestor_specs_from_active_graph,
-    branched_ingestor_specs_from_models, branched_ingestor_specs_from_scheduled_nodes,
-    format_branched_by, materialize_ingestor_route_template, materialize_output,
-    materialize_processor_instance_template, parse_input_collect_policy,
-    processor_input_where_by_relay, resolve_concrete_branch_from_assignments,
+    assignments_contain_udf, branched_node_specs_from_active_graph,
+    branched_node_specs_from_models, branched_node_specs_from_scheduled_nodes, format_branched_by,
+    materialize_ingestor_route_template, materialize_processor_instance_template,
+    processor_template_for_graph_node, resolve_concrete_branch_from_assignments,
 };
 use processors::{
     BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
@@ -269,6 +268,14 @@ pub enum RuntimeError {
     RelayNotInstantiated { domain: String, relay: String },
     #[error("failed to build domain execution for '{domain}': {reason}")]
     BuildDomainExecution { domain: String, reason: String },
+    #[error(
+        "timed out waiting for runtime revision {revision} to become ready on nodes \
+         {pending_nodes:?}"
+    )]
+    RuntimeRevisionReadiness {
+        revision: u64,
+        pending_nodes: Vec<String>,
+    },
     #[error("failed to decode remote relay '{relay}' in domain '{domain}': {reason}")]
     DecodeRemoteRelay {
         domain: String,
@@ -452,6 +459,7 @@ impl ConcreteBranch {
 struct DomainExecution {
     schedule: DomainSchedule,
     passive_only: bool,
+    start_version: u64,
     shutdown: watch::Sender<bool>,
     graph: SharedActiveGraph,
     relay_registries: HashMap<Identifier, RelayRegistry>,
@@ -470,6 +478,8 @@ struct DomainExecution {
     endpoint_routes: HashMap<Identifier, EndpointRoute>,
     node_tasks: HashMap<RegistryEntity, ScheduledNodeTask>,
     emitter_tasks: HashMap<RegistryEntity, ScheduledEmitterTask>,
+    generator_tasks: HashMap<RegistryEntity, JoinHandle<()>>,
+    reingestor_tasks: HashMap<RegistryEntity, Vec<JoinHandle<()>>>,
     clients: HashMap<Identifier, Arc<Model>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -1893,6 +1903,7 @@ struct RuntimeTaskInputBranchCollection {
 }
 
 impl RuntimeTaskInputCollection {
+    #[cfg(test)]
     fn new(policy: Option<RuntimeInputCollectPolicy>) -> Self {
         Self {
             policy,
@@ -2392,6 +2403,7 @@ pub struct Runtime {
         Arc<DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>>,
     compiled_domain_udfs: Arc<DashMap<Domain, CompiledDomainUdfs, RandomState>>,
     schedule_apply_lock: Arc<Mutex<()>>,
+    applied_cluster_revision: Arc<AtomicU64>,
     domain_instantiation_errors: Arc<DashMap<Domain, String, RandomState>>,
     domains: Arc<DashMap<Domain, RuntimeDomainState, RandomState>>,
     domain_status_changed: watch::Sender<u64>,
@@ -2797,6 +2809,9 @@ impl ConcreteRelayRuntime {
 }
 
 impl RemoteDispatcher {
+    const DISPATCH_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+    const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
     fn local_node_id(&self) -> Option<String> {
         self.local_node_id.read().clone()
     }
@@ -2835,10 +2850,11 @@ impl RemoteDispatcher {
                 return;
             }
         };
-        let mut live_nodes = self.cluster.live_node_ids().await;
-        live_nodes.sort();
-        live_nodes.dedup();
-        for node_id in live_nodes {
+        let interested_nodes = self
+            .cluster
+            .nodes_with_subscription_interest(domain.as_str(), relay.as_str())
+            .await;
+        for node_id in interested_nodes {
             if node_id == local_node_id || excluded_nodes.contains(&node_id) {
                 continue;
             }
@@ -2873,36 +2889,49 @@ impl RemoteDispatcher {
     }
 
     async fn dispatch(&self, node_id: &str, envelope: Envelope) -> Result<(), String> {
-        let gossip = self.cluster.gossip_state().await;
-        let Some(node) = gossip
-            .live_nodes
-            .into_iter()
-            .find(|node| node.node_id == node_id)
-        else {
-            return Err(format!(
-                "remote node '{}' is not present in gossip membership",
-                node_id
-            ));
-        };
-        let target_addr = node
-            .interconnect_advertise_addr
-            .parse()
-            .map_err(|error| format!("invalid interconnect address for '{}': {error}", node_id))?;
-        let mode = match node.interconnect_mode.as_str() {
-            "https" => InterconnectTransportMode::Tls,
-            _ => InterconnectTransportMode::Plain,
-        };
-        let connection = self
-            .interconnect
-            .connection_for(target_addr, "localhost", mode)
-            .await
-            .map_err(|error| {
-                format!("failed to connect interconnect for '{}': {error}", node_id)
-            })?;
-        connection
-            .send(envelope)
-            .await
-            .map_err(|error| format!("failed to send remote relay payload: {error}"))
+        let deadline = Instant::now() + Self::DISPATCH_TIMEOUT;
+        loop {
+            tokio::task::consume_budget().await;
+            let result = async {
+                let node = self
+                    .cluster
+                    .gossip_state()
+                    .await
+                    .live_nodes
+                    .into_iter()
+                    .find(|node| node.node_id == node_id)
+                    .ok_or_else(|| {
+                        format!("remote node '{node_id}' is not present in gossip membership")
+                    })?;
+                let target_addr = node.interconnect_advertise_addr.parse().map_err(|error| {
+                    format!("invalid interconnect address for '{node_id}': {error}")
+                })?;
+                let mode = match node.interconnect_mode.as_str() {
+                    "https" => InterconnectTransportMode::Tls,
+                    _ => InterconnectTransportMode::Plain,
+                };
+                let connection = self
+                    .interconnect
+                    .connection_for(target_addr, "localhost", mode)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to connect interconnect for '{node_id}': {error}")
+                    })?;
+                connection
+                    .send(envelope.clone())
+                    .await
+                    .map_err(|error| format!("failed to send remote relay payload: {error}"))
+            }
+            .await;
+            let error = match result {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            if Instant::now() >= deadline {
+                return Err(error);
+            }
+            sleep(Self::DISPATCH_RETRY_INTERVAL).await;
+        }
     }
 }
 
@@ -2978,6 +3007,236 @@ impl ProcessorInputFilterKind {
     }
 }
 
+impl RelayProcessorOutputsNode {
+    fn matches_template(&self, template: &RelayProcessorOutputsTemplate) -> bool {
+        self.routes.len() == template.routes.len()
+            && self
+                .routes
+                .iter()
+                .zip(&template.routes)
+                .all(|(runtime, desired)| {
+                    runtime.relay == desired.output_relay
+                        && runtime.construction == desired.construction
+                        && runtime.flush_policy == desired.flush_policy
+                        && runtime.message_error_policy == desired.message_error_policy
+                })
+    }
+
+    fn apply_template(&mut self, template: &RelayProcessorOutputsTemplate) -> Result<bool, String> {
+        if self.routes.len() != template.routes.len()
+            || self
+                .routes
+                .iter()
+                .zip(&template.routes)
+                .any(|(runtime, desired)| runtime.relay != desired.output_relay)
+        {
+            return Err("dynamic processor update changed its route topology".to_string());
+        }
+
+        let mut changed = false;
+        for (runtime, desired) in self.routes.iter_mut().zip(&template.routes) {
+            let program_changed = runtime.construction != desired.construction
+                || runtime.message_error_policy != desired.message_error_policy;
+            changed |= program_changed || runtime.flush_policy != desired.flush_policy;
+            if program_changed {
+                runtime.compiled_program = None;
+            }
+            runtime.construction = desired.construction.clone();
+            runtime.flush_policy = desired.flush_policy;
+            runtime.message_error_policy = desired.message_error_policy.clone();
+        }
+        Ok(changed)
+    }
+}
+
+impl RelayProcessorOperationNode {
+    fn apply_template(&mut self, template: &RelayProcessorOperationTemplate) -> Result<(), String> {
+        match (self, template) {
+            (
+                Self::Deduplicator {
+                    output_routes,
+                    deduplicate_on,
+                    max_time,
+                    ..
+                },
+                RelayProcessorOperationTemplate::Deduplicator {
+                    output_routes: desired_outputs,
+                    deduplicate_on: desired_deduplicate_on,
+                    max_time: desired_max_time,
+                },
+            ) => {
+                if deduplicate_on != desired_deduplicate_on {
+                    return Err(
+                        "dynamic deduplicator update changed its state keyspace".to_string()
+                    );
+                }
+                output_routes.apply_template(desired_outputs)?;
+                *max_time = *desired_max_time;
+                Ok(())
+            }
+            (
+                Self::WindowProcessor {
+                    output_routes,
+                    width_messages,
+                    step_messages,
+                    width_duration,
+                    step_duration,
+                    aggregate,
+                    ..
+                },
+                RelayProcessorOperationTemplate::WindowProcessor {
+                    output_routes: desired_outputs,
+                    width_messages: desired_width_messages,
+                    step_messages: desired_step_messages,
+                    width_duration: desired_width_duration,
+                    step_duration: desired_step_duration,
+                    aggregate: desired_aggregate,
+                    ..
+                },
+            ) => {
+                if width_messages != desired_width_messages
+                    || step_messages != desired_step_messages
+                    || width_duration != desired_width_duration
+                    || step_duration != desired_step_duration
+                    || aggregate != desired_aggregate
+                {
+                    return Err(
+                        "dynamic window processor update changed its state shape".to_string()
+                    );
+                }
+                output_routes.apply_template(desired_outputs)?;
+                Ok(())
+            }
+            (
+                Self::Reorderer {
+                    output_routes,
+                    order_by,
+                    max_time,
+                    ..
+                },
+                RelayProcessorOperationTemplate::Reorderer {
+                    output_routes: desired_outputs,
+                    order_by: desired_order_by,
+                    max_time: desired_max_time,
+                },
+            ) => {
+                if order_by != desired_order_by {
+                    return Err("dynamic reorderer update changed its ordering key".to_string());
+                }
+                output_routes.apply_template(desired_outputs)?;
+                *max_time = *desired_max_time;
+                Ok(())
+            }
+            (
+                Self::Correlator {
+                    output_routes,
+                    left_relays,
+                    right_relays,
+                    correlate_where,
+                    match_policy,
+                    max_time,
+                    timeout_policy,
+                    compiled_where_program,
+                    compiled_output_programs,
+                    ..
+                },
+                RelayProcessorOperationTemplate::Correlator {
+                    output_routes: desired_outputs,
+                    left_relays: desired_left_relays,
+                    right_relays: desired_right_relays,
+                    correlate_where: desired_correlate_where,
+                    match_policy: desired_match_policy,
+                    max_time: desired_max_time,
+                    timeout_policy: desired_timeout_policy,
+                },
+            ) => {
+                if left_relays != desired_left_relays || right_relays != desired_right_relays {
+                    return Err("dynamic correlator update changed its input sides".to_string());
+                }
+                if timeout_policy != desired_timeout_policy {
+                    return Err("dynamic correlator update changed its timeout wiring".to_string());
+                }
+                if correlate_where != desired_correlate_where {
+                    *compiled_where_program = None;
+                }
+                if output_routes.apply_template(desired_outputs)? {
+                    for program in compiled_output_programs {
+                        *program = None;
+                    }
+                }
+                *correlate_where = desired_correlate_where.clone();
+                *match_policy = *desired_match_policy;
+                *max_time = *desired_max_time;
+                Ok(())
+            }
+            (
+                Self::Junction { output_routes },
+                RelayProcessorOperationTemplate::Junction {
+                    output_routes: desired_outputs,
+                },
+            ) => output_routes.apply_template(desired_outputs).map(|_| ()),
+            (
+                Self::Inferencer {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    inputs,
+                    output_schema,
+                    ..
+                },
+                RelayProcessorOperationTemplate::Inferencer {
+                    output_routes: desired_outputs,
+                    resource: desired_resource,
+                    resource_version: desired_resource_version,
+                    file: desired_file,
+                    inputs: desired_inputs,
+                    output_schema: desired_output_schema,
+                },
+            ) => {
+                if resource != desired_resource
+                    || resource_version != desired_resource_version
+                    || file != desired_file
+                    || inputs != desired_inputs
+                    || output_schema != desired_output_schema
+                {
+                    return Err(
+                        "dynamic inferencer update changed its inference session".to_string()
+                    );
+                }
+                output_routes.apply_template(desired_outputs)?;
+                Ok(())
+            }
+            (
+                Self::WasmProcessor {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    ..
+                },
+                RelayProcessorOperationTemplate::WasmProcessor {
+                    output_routes: desired_outputs,
+                    resource: desired_resource,
+                    resource_version: desired_resource_version,
+                    file: desired_file,
+                    ..
+                },
+            ) if resource == desired_resource
+                && resource_version == desired_resource_version
+                && file == desired_file
+                && output_routes.matches_template(desired_outputs) =>
+            {
+                Ok(())
+            }
+            (Self::WasmProcessor { .. }, RelayProcessorOperationTemplate::WasmProcessor { .. }) => {
+                Err("WASM processors do not support dynamic configuration refresh".to_string())
+            }
+            _ => Err("dynamic processor update changed its operation kind".to_string()),
+        }
+    }
+}
+
 impl RelayProcessorNode {
     fn source_filter_scope(&self, incoming_relay: &Identifier) -> RuntimeFilterScope {
         match &self.operation {
@@ -3018,7 +3277,7 @@ impl RelayProcessorNode {
             .await
     }
 
-    fn refresh(&mut self, graph: Option<StdArc<ActiveGraph>>) {
+    fn refresh(&mut self, runtime: &Runtime, domain: &Domain, graph: Option<StdArc<ActiveGraph>>) {
         let changed = match (&self.last_graph, &graph) {
             (Some(previous), Some(current)) => !StdArc::ptr_eq(previous, current),
             (None, None) => false,
@@ -3042,23 +3301,31 @@ impl RelayProcessorNode {
         };
 
         if requires_reinitialization {
-            let refreshed_model = graph
+            let result = graph
                 .as_ref()
-                .and_then(|graph| graph.node(self.kind, &self.processor))
-                .map(|node| node.config.as_ref().clone());
-            let result = match refreshed_model.as_ref() {
-                Some(Model::Junction(config)) => self.reapply_dynamic_junction_config(config),
-                Some(_) => Err(format!(
-                    "{} '{}' does not support dynamic configuration refresh",
-                    self.kind.as_str(),
-                    self.processor.as_str()
-                )),
-                None => Err(format!(
-                    "{} '{}' is absent from the refreshed graph",
-                    self.kind.as_str(),
-                    self.processor.as_str()
-                )),
-            };
+                .ok_or_else(|| {
+                    format!(
+                        "{} '{}' is absent from the refreshed graph",
+                        self.kind.as_str(),
+                        self.processor.as_str()
+                    )
+                })
+                .and_then(|graph| {
+                    let execution = runtime.executions.get(domain).ok_or_else(|| {
+                        format!(
+                            "domain '{}' has no execution for processor refresh",
+                            domain.as_str()
+                        )
+                    })?;
+                    processor_template_for_graph_node(
+                        graph,
+                        self.kind,
+                        &self.processor,
+                        &execution.relay_schemas,
+                        Some(&execution.udfs),
+                    )
+                })
+                .and_then(|template| self.apply_node_template(template));
             if let Err(error) = result {
                 warn!(
                     kind = self.kind.as_str(),
@@ -3073,90 +3340,52 @@ impl RelayProcessorNode {
         self.last_graph = graph;
     }
 
-    fn reapply_dynamic_junction_config(
-        &mut self,
-        config: &nervix_models::CreateJunction,
-    ) -> Result<(), String> {
-        if self.kind != ModelKind::Junction || self.processor != config.name {
-            return Err("dynamic junction update targets a different processor".to_string());
+    fn apply_node_template(&mut self, template: RelayProcessorTemplate) -> Result<(), String> {
+        if self.kind != template.kind || self.processor != template.processor {
+            return Err(format!(
+                "processor template targets {} '{}', not {} '{}'",
+                template.kind.as_str(),
+                template.processor.as_str(),
+                self.kind.as_str(),
+                self.processor.as_str()
+            ));
         }
-        if self.input_relays != config.from.from {
-            return Err("dynamic junction update changed its input topology".to_string());
+        if self.input_relays != template.input_relays {
+            return Err(format!(
+                "dynamic {} update changed processor input topology",
+                self.kind.as_str()
+            ));
         }
+        if self.materialized_state != template.materialized_state {
+            return Err(format!(
+                "dynamic {} update changed materialized-state dependencies",
+                self.kind.as_str()
+            ));
+        }
+        self.operation.apply_template(&template.operation)?;
 
-        let collect_policy = config
-            .from
-            .collect_policy
-            .as_ref()
-            .map(|policy| parse_input_collect_policy(self.kind.as_str(), &self.processor, policy))
-            .transpose()?;
         let mut previous_collectors = std::mem::take(&mut self.input_collectors);
-        self.input_collectors = match collect_policy {
-            Some(policy) => self
-                .input_relays
-                .iter()
-                .cloned()
-                .map(|relay| {
-                    let mut collector = previous_collectors
-                        .remove(&relay)
-                        .unwrap_or_else(|| RuntimeInputCollector::new(policy));
-                    collector.policy = policy;
-                    (relay, collector)
-                })
-                .collect(),
-            None => HashMap::default(),
-        };
+        self.input_collectors = template
+            .input_collect_policies
+            .into_iter()
+            .map(|(relay, policy)| {
+                let mut collector = previous_collectors
+                    .remove(&relay)
+                    .unwrap_or_else(|| RuntimeInputCollector::new(policy));
+                collector.policy = policy;
+                (relay, collector)
+            })
+            .collect();
 
-        if self.from_where != processor_input_where_by_relay(&config.from.r#where) {
-            self.from_where = processor_input_where_by_relay(&config.from.r#where);
+        if self.from_where != template.from_where {
+            self.from_where = template.from_where;
             self.compiled_from_where.clear();
         }
-        if self.filter_where != config.filter_where {
-            self.filter_where = config.filter_where.clone();
+        if self.filter_where != template.filter_where {
+            self.filter_where = template.filter_where;
             self.compiled_filter_where.clear();
         }
-
-        let RelayProcessorOperationNode::Junction { output_routes } = &mut self.operation else {
-            return Err(
-                "dynamic junction update found a non-junction runtime operation".to_string(),
-            );
-        };
-        if output_routes.routes.len() != config.output_routes.routes.len()
-            || output_routes
-                .routes
-                .iter()
-                .zip(&config.output_routes.routes)
-                .any(|(runtime, desired)| runtime.relay != desired.relay)
-        {
-            return Err("dynamic junction update changed its route topology".to_string());
-        }
-        for (runtime, desired) in output_routes
-            .routes
-            .iter_mut()
-            .zip(&config.output_routes.routes)
-        {
-            let template = materialize_output(&BranchedProcessorOutputSpec {
-                relay: desired.relay.clone(),
-                construction: desired.construction.clone(),
-                flush_each: desired
-                    .flush_policy
-                    .as_ref()
-                    .map(|policy| policy.flush_each.clone()),
-                max_batch_size: desired
-                    .flush_policy
-                    .as_ref()
-                    .and_then(|policy| policy.max_batch_size.clone()),
-                message_error_policy: desired.message_error_policy.clone(),
-            })?;
-            if runtime.construction != template.construction
-                || runtime.message_error_policy != template.message_error_policy
-            {
-                runtime.compiled_program = None;
-            }
-            runtime.construction = template.construction;
-            runtime.flush_policy = template.flush_policy;
-            runtime.message_error_policy = template.message_error_policy;
-        }
+        self.error_policies = template.error_policies;
         Ok(())
     }
 
@@ -3166,6 +3395,7 @@ impl RelayProcessorNode {
         branch: &mut BranchRuntime,
         incoming_relay: &Identifier,
         batch: RelayRecordBatch,
+        materialized_state: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let batch = self
             .filter_input_batch_with_kind(
@@ -3174,6 +3404,7 @@ impl RelayProcessorNode {
                 incoming_relay,
                 batch,
                 ProcessorInputFilterKind::FromWhere,
+                materialized_state,
             )
             .await?;
         self.filter_input_batch_with_kind(
@@ -3182,6 +3413,7 @@ impl RelayProcessorNode {
             incoming_relay,
             batch,
             ProcessorInputFilterKind::FilterWhere,
+            materialized_state,
         )
         .await
     }
@@ -3316,6 +3548,7 @@ impl RelayProcessorNode {
         incoming_relay: &Identifier,
         batch: RelayRecordBatch,
         kind: ProcessorInputFilterKind,
+        materialized_state: &HashMap<String, RuntimeValue>,
     ) -> Option<RelayRecordBatch> {
         let Some(filter_where) = (match kind {
             ProcessorInputFilterKind::FromWhere => self.from_where.get(incoming_relay),
@@ -3432,41 +3665,6 @@ impl RelayProcessorNode {
         let Some(program) = program else {
             return Some(batch);
         };
-        let owner_nodes = branch
-            .runtime
-            .executions
-            .get(&branch.domain)
-            .map(|execution| execution.materialized_stream_owner_nodes.clone())
-            .unwrap_or_default();
-        let side_inputs = match branch
-            .runtime
-            .load_materialized_side_inputs(
-                &branch.domain,
-                &batch.key,
-                &program.materialized_interest,
-                &owner_nodes,
-            )
-            .await
-        {
-            Ok(values) => values,
-            Err(error) => {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    self.kind.as_str(),
-                    &self.processor,
-                    &self.error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "{} '{}' failed to load {} side inputs: {}",
-                        self.kind.as_str(),
-                        self.processor.as_str(),
-                        kind.label(),
-                        error
-                    ),
-                );
-                return None;
-            }
-        };
         let plan = match plan_filter_map_messages(
             self.kind.as_str(),
             &self.processor,
@@ -3479,7 +3677,7 @@ impl RelayProcessorNode {
                 .ok()
                 .flatten()
                 .unwrap_or_else(current_timestamp),
-            &side_inputs,
+            materialized_state,
         )
         .await
         {
@@ -3519,7 +3717,7 @@ impl RelayProcessorNode {
         Box::pin(async move {
             let current = graph.load_full();
             let current = current.as_ref().map(StdArc::clone);
-            self.refresh(current);
+            self.refresh(&branch.runtime, &branch.domain, current);
             let materialized_values = match self
                 .resolve_materialized_dependencies(branch, &batch.key)
                 .await
@@ -3553,7 +3751,7 @@ impl RelayProcessorNode {
                 }
             };
             let Some(batch) = self
-                .filter_input_batch(graph, branch, incoming_relay, batch)
+                .filter_input_batch(graph, branch, incoming_relay, batch, &materialized_values)
                 .await
             else {
                 return;
@@ -3782,6 +3980,7 @@ impl RelayProcessorNode {
                             error_policies: &self.error_policies,
                             input_relays: &self.input_relays,
                             filter_source: ProcessorOutputFilterSource::InputRelays,
+                            resolved_materialized_state: Some(&materialized_values),
                         },
                         output_routes,
                         forwarded,
@@ -4752,6 +4951,7 @@ impl RelayProcessorNode {
                     error_policies: &self.error_policies,
                     input_relays: &self.input_relays,
                     filter_source: ProcessorOutputFilterSource::InputRelays,
+                    resolved_materialized_state: None,
                 },
                 self.operation.output_routes_mut(),
                 now,
@@ -5402,6 +5602,7 @@ impl BranchInstanceTemplate {
         let materializers = self
             .materialized_streams
             .iter()
+            .filter(|relay| !runtime.materialized_relay_is_scheduled(domain, relay))
             .map(|relay| {
                 let placement = runtime.state_placement(
                     domain,
@@ -5507,6 +5708,12 @@ impl BranchRuntime {
                 execution
                     .materialized_stream_specs
                     .keys()
+                    .filter(|relay| {
+                        !execution
+                            .materialized_stream_owner_nodes
+                            .get(*relay)
+                            .is_some_and(Option::is_some)
+                    })
                     .cloned()
                     .collect::<HashSet<_>>()
             })
@@ -5543,6 +5750,12 @@ impl BranchRuntime {
     }
 
     async fn materialize_stream_batch(&mut self, relay: &Identifier, batch: &RelayRecordBatch) {
+        if self
+            .runtime
+            .materialized_relay_is_scheduled(&self.domain, relay)
+        {
+            return;
+        }
         self.reconcile_materializer_membership(relay);
         let Some(state) = self.materializers.get(relay) else {
             return;
@@ -5881,7 +6094,11 @@ impl BranchRuntime {
             };
             processor.flush_all_collected_inputs(graph, self).await;
             let current = graph.load_full();
-            processor.refresh(current.as_ref().map(StdArc::clone));
+            processor.refresh(
+                &self.runtime,
+                &self.domain,
+                current.as_ref().map(StdArc::clone),
+            );
             for output in &mut processor.operation.output_routes_mut().routes {
                 if !output.pending.is_empty() {
                     output.force_flush_at(now);
@@ -9808,6 +10025,7 @@ async fn flush_branch_reorderer_output(
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
+            resolved_materialized_state: None,
         },
         output_routes,
         batch,
@@ -10835,6 +11053,7 @@ struct ProcessorOutputDispatchContext<'a> {
     error_policies: &'a ErrorPolicies,
     input_relays: &'a [Identifier],
     filter_source: ProcessorOutputFilterSource<'a>,
+    resolved_materialized_state: Option<&'a HashMap<String, RuntimeValue>>,
 }
 
 struct PendingProcessorOutputMessage {
@@ -11047,32 +11266,36 @@ async fn evaluate_processor_output_events(
         .ok()
         .flatten()
         .unwrap_or_else(current_timestamp);
-    let owner_nodes = context
-        .branch
-        .runtime
-        .executions
-        .get(&context.branch.domain)
-        .map(|execution| execution.materialized_stream_owner_nodes.clone())
-        .unwrap_or_default();
-    let side_inputs = context
-        .branch
-        .runtime
-        .load_materialized_side_inputs(
-            &context.branch.domain,
-            &batch.key,
-            &program.materialized_interest,
-            &owner_nodes,
-        )
-        .await
-        .map_err(|error| PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: format!(
-                "{} '{}' failed to load materialized side inputs: {}",
-                context.node_kind,
-                context.processor.as_str(),
-                error
-            ),
-        })?;
+    let side_inputs = if let Some(resolved) = context.resolved_materialized_state {
+        resolved.clone()
+    } else {
+        let owner_nodes = context
+            .branch
+            .runtime
+            .executions
+            .get(&context.branch.domain)
+            .map(|execution| execution.materialized_stream_owner_nodes.clone())
+            .unwrap_or_default();
+        context
+            .branch
+            .runtime
+            .load_materialized_side_inputs(
+                &context.branch.domain,
+                &batch.key,
+                &program.materialized_interest,
+                &owner_nodes,
+            )
+            .await
+            .map_err(|error| PlannedGeneralError {
+                acks: batch.acks.clone(),
+                reason: format!(
+                    "{} '{}' failed to load materialized side inputs: {}",
+                    context.node_kind,
+                    context.processor.as_str(),
+                    error
+                ),
+            })?
+    };
     let executed = execute_filter_map_program_on_batch(
         context.node_kind,
         context.processor,
@@ -12521,6 +12744,7 @@ async fn flush_ready_window_processor(
                     error_policies,
                     input_relays: std::slice::from_ref(&output_relay),
                     filter_source: ProcessorOutputFilterSource::OutputRelay,
+                    resolved_materialized_state: None,
                 },
                 output_routes,
                 forwarded,
@@ -15214,6 +15438,7 @@ async fn flush_branch_junction(context: JunctionFlushContext<'_>, forwarded: Rel
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::InputRelays,
+            resolved_materialized_state: None,
         },
         output_routes,
         forwarded,
@@ -15620,6 +15845,7 @@ async fn flush_branch_inferencer_output(
             error_policies,
             input_relays,
             filter_source: ProcessorOutputFilterSource::Inferencer(inferencer_tensors),
+            resolved_materialized_state: None,
         },
         output_routes,
         output_batch,
@@ -17966,7 +18192,7 @@ pub(crate) fn scheduled_branched_stream_owner_nodes(
     schedule: &DomainSchedule,
     relay: &Identifier,
 ) -> Vec<String> {
-    let specs = branched_ingestor_specs_from_models(
+    let specs = branched_node_specs_from_models(
         schedule
             .nodes
             .iter()

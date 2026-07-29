@@ -14,16 +14,17 @@ use nervix_dataflow_graph::{
     DataflowNodeKind, DataflowSchemaField,
 };
 use nervix_models::{
-    AlterEmitter, AlterIngestor, AlterJunction, AlterRelay, AlterSchema, AlterWireSchemaStmt,
-    Assignment, AssignmentTarget, AvroType, BranchSelection, CodecEncoding, CodecEncodingRule,
+    AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterReingestor,
+    AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema, Assignment, AssignmentTarget,
+    AvroType, BranchSelection, CborType, ClusterSchedule, CodecEncoding, CodecEncodingRule,
     CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateCodec, CreateCorrelator,
     CreateDeduplicator, CreateGenerator, CreateInferencer, CreateIngestor, CreateLookup,
     CreateMaterializer, CreateSchema, CreateSignalingProtocol, CreateWindowProcessor,
-    CreateWireSchemaStmt, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
+    CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, EndpointType, Expression,
     Identifier, IngestSource, IngestTimestampSource, JsonType, MaterializedStateDependency,
     MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, OutputBranch,
     ParseAsType, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RouteConstruction, ScheduledNode,
-    SchemaField,
+    SchemaField, WireSchemaDefinition,
 };
 use nervix_nspl::{
     vm_program::{
@@ -373,6 +374,100 @@ impl Registry {
             .collect())
     }
 
+    pub fn synchronize_cluster_schedule(
+        &self,
+        schedule: &ClusterSchedule,
+    ) -> Result<(), Report<RegistryError>> {
+        let desired_domains = schedule
+            .domains
+            .iter()
+            .map(|domain| domain.domain.clone())
+            .collect::<HashSet<_>>();
+        for domain_schedule in &schedule.domains {
+            let models = domain_schedule
+                .nodes
+                .iter()
+                .filter_map(|node| {
+                    if let Model::Materializer(_) = node.config.as_ref() {
+                        return None;
+                    }
+                    Some((
+                        RegistryKey::new(node.kind, node.identifier.clone()),
+                        node.config.as_ref().clone(),
+                    ))
+                })
+                .collect::<HashMap<_, _>>();
+            self.synchronize_domain_models(&domain_schedule.domain, models)?;
+        }
+        let stale_domains = self
+            .state
+            .read()
+            .domains
+            .keys()
+            .filter(|domain| !desired_domains.contains(*domain))
+            .cloned()
+            .collect::<Vec<_>>();
+        for domain in stale_domains {
+            self.synchronize_domain_models(&domain, HashMap::new())?;
+        }
+        Ok(())
+    }
+
+    fn synchronize_domain_models(
+        &self,
+        domain: &Domain,
+        models: HashMap<RegistryKey, Model>,
+    ) -> Result<(), Report<RegistryError>> {
+        let _commit_guard = self.commit_lock.lock();
+        let current_models = self
+            .storage
+            .list_models(domain)
+            .change_context(RegistryError::LoadStoredModels)?
+            .into_iter()
+            .map(|record| (record.key, record.model))
+            .collect::<HashMap<_, _>>();
+        if current_models == models {
+            return Ok(());
+        }
+
+        let domain_state = self.build_domain_state(domain, &models)?;
+        let models_to_persist = models
+            .iter()
+            .filter_map(|(key, model)| match current_models.get(key) {
+                None => Some((key.clone(), RegistryPersistMutation::Create(model.clone()))),
+                Some(current) if current != model => {
+                    Some((key.clone(), RegistryPersistMutation::Replace(model.clone())))
+                }
+                Some(_) => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let drops = current_models
+            .keys()
+            .filter(|key| !models.contains_key(*key))
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.storage
+            .commit_batch(domain, &models_to_persist, &drops)
+            .change_context(RegistryError::PersistBatch)?;
+
+        let current = self.state.read();
+        let mut domains = current.domains.clone();
+        if domain_state.graph.node_count() == 0 {
+            domains.remove(domain);
+        } else {
+            domains.insert(domain.clone(), domain_state);
+        }
+        drop(current);
+        *self.state.write() = Arc::new(RegistryState { domains });
+
+        info!(
+            domain = domain.as_str(),
+            model_count = models.len(),
+            "synchronized registry models from consensus schedule"
+        );
+        Ok(())
+    }
+
     #[cfg(test)]
     fn apply_mutations(
         &self,
@@ -477,34 +572,81 @@ impl Registry {
                         })
                     })?;
                 }
-                RegistryMutation::AlterWireSchema(alter) => {
-                    let schema_name = alter.schema();
-                    let key = RegistryKey::new(ModelKind::WireSchema, schema_name.clone());
+                RegistryMutation::AlterWireJsonSchema(alter) => {
+                    let key = RegistryKey::new(ModelKind::WireJsonSchema, alter.schema.clone());
                     info!(
                         domain = domain.as_str(),
-                        model = schema_name.as_str(),
-                        kind = ModelKind::WireSchema.as_str(),
-                        "staging wire schema alter from batch"
+                        model = alter.schema.as_str(),
+                        kind = ModelKind::WireJsonSchema.as_str(),
+                        "staging JSON wire schema alter from batch"
                     );
 
                     let Some(model) = candidate.get_mut(&key) else {
                         return Err(Report::new(RegistryError::NotFound {
                             domain: domain.as_str().to_string(),
-                            identifier: schema_name.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
                         }));
                     };
-                    let Model::WireSchema(schema) = model else {
+                    let Model::WireJsonSchema(schema) = model else {
                         return Err(Report::new(RegistryError::InvalidModelKind {
                             domain: domain.as_str().to_string(),
-                            identifier: schema_name.as_str().to_string(),
-                            expected_kind: ModelKind::WireSchema.as_str(),
+                            identifier: alter.schema.as_str().to_string(),
+                            expected_kind: ModelKind::WireJsonSchema.as_str(),
                             actual_kind: model.kind().as_str(),
                         }));
                     };
                     schema.apply_alter(alter).map_err(|error| {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
-                            identifier: schema_name.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
+                RegistryMutation::AlterWireCborSchema(alter) => {
+                    let key = RegistryKey::new(ModelKind::WireCborSchema, alter.schema.clone());
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                        }));
+                    };
+                    let Model::WireCborSchema(schema) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                            expected_kind: ModelKind::WireCborSchema.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    schema.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
+                RegistryMutation::AlterWireAvroSchema(alter) => {
+                    let key = RegistryKey::new(ModelKind::WireAvroSchema, alter.schema.clone());
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                        }));
+                    };
+                    let Model::WireAvroSchema(schema) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
+                            expected_kind: ModelKind::WireAvroSchema.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    schema.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.schema.as_str().to_string(),
                             reason: error.to_string(),
                         })
                     })?;
@@ -572,6 +714,68 @@ impl Registry {
                         })
                     })?;
                 }
+                RegistryMutation::AlterDeduplicator(alter) => {
+                    let key = RegistryKey::new(ModelKind::Deduplicator, alter.deduplicator.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.deduplicator.as_str(),
+                        kind = ModelKind::Deduplicator.as_str(),
+                        "staging deduplicator alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.deduplicator.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Deduplicator(deduplicator) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.deduplicator.as_str().to_string(),
+                            expected_kind: ModelKind::Deduplicator.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    deduplicator.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.deduplicator.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
+                RegistryMutation::AlterReorderer(alter) => {
+                    let key = RegistryKey::new(ModelKind::Reorderer, alter.reorderer.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.reorderer.as_str(),
+                        kind = ModelKind::Reorderer.as_str(),
+                        "staging reorderer alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reorderer.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Reorderer(reorderer) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reorderer.as_str().to_string(),
+                            expected_kind: ModelKind::Reorderer.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    reorderer.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reorderer.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
                 RegistryMutation::AlterEmitter(alter) => {
                     let key = RegistryKey::new(ModelKind::Emitter, alter.emitter.clone());
                     info!(
@@ -630,6 +834,68 @@ impl Registry {
                         Report::new(RegistryError::InvalidModel {
                             domain: domain.as_str().to_string(),
                             identifier: alter.ingestor.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
+                RegistryMutation::AlterReingestor(alter) => {
+                    let key = RegistryKey::new(ModelKind::Reingestor, alter.reingestor.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.reingestor.as_str(),
+                        kind = ModelKind::Reingestor.as_str(),
+                        "staging reingestor alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reingestor.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Reingestor(reingestor) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reingestor.as_str().to_string(),
+                            expected_kind: ModelKind::Reingestor.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    reingestor.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.reingestor.as_str().to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                }
+                RegistryMutation::AlterGenerator(alter) => {
+                    let key = RegistryKey::new(ModelKind::Generator, alter.generator.clone());
+                    info!(
+                        domain = domain.as_str(),
+                        model = alter.generator.as_str(),
+                        kind = ModelKind::Generator.as_str(),
+                        "staging generator alter from batch"
+                    );
+
+                    let Some(model) = candidate.get_mut(&key) else {
+                        return Err(Report::new(RegistryError::NotFound {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.generator.as_str().to_string(),
+                        }));
+                    };
+                    let Model::Generator(generator) = model else {
+                        return Err(Report::new(RegistryError::InvalidModelKind {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.generator.as_str().to_string(),
+                            expected_kind: ModelKind::Generator.as_str(),
+                            actual_kind: model.kind().as_str(),
+                        }));
+                    };
+                    generator.apply_alter(alter).map_err(|error| {
+                        Report::new(RegistryError::InvalidModel {
+                            domain: domain.as_str().to_string(),
+                            identifier: alter.generator.as_str().to_string(),
                             reason: error.to_string(),
                         })
                     })?;
@@ -970,11 +1236,17 @@ fn classify_quiesce(
 pub enum RegistryMutation {
     Create(Box<Model>),
     AlterSchema(AlterSchema),
-    AlterWireSchema(AlterWireSchemaStmt),
+    AlterWireJsonSchema(AlterWireSchema<JsonType>),
+    AlterWireCborSchema(AlterWireSchema<CborType>),
+    AlterWireAvroSchema(AlterWireSchema<AvroType>),
     AlterRelay(AlterRelay),
     AlterJunction(AlterJunction),
+    AlterDeduplicator(AlterDeduplicator),
+    AlterReorderer(AlterReorderer),
     AlterEmitter(AlterEmitter),
     AlterIngestor(AlterIngestor),
+    AlterReingestor(AlterReingestor),
+    AlterGenerator(AlterGenerator),
     Drop(DropModel),
 }
 
@@ -1170,7 +1442,10 @@ impl DomainState {
                     graph.add_edge(branch_schema, source, EdgeKind::RequiredBy);
                     validate_branch_model(domain, identifier, models, branch)?;
                 }
-                Model::WireSchema(schema) => {
+                Model::WireJsonSchema(schema) | Model::WireCborSchema(schema) => {
+                    ensure_wire_schema_has_fields(domain, identifier, schema)?;
+                }
+                Model::WireAvroSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
                 }
                 Model::ClientKafka(_)
@@ -1439,7 +1714,14 @@ impl DomainState {
                             models,
                             &indices,
                             wire_schema_identifier,
-                            ModelKind::WireSchema,
+                            codec.wire_format.wire_schema_kind().ok_or_else(|| {
+                                Report::new(RegistryError::InvalidModel {
+                                    domain: domain.as_str().to_string(),
+                                    identifier: identifier.as_str().to_string(),
+                                    reason: "codec wire format cannot reference a wire schema"
+                                        .to_string(),
+                                })
+                            })?,
                         )?;
                         graph.add_edge(wire_schema, source, EdgeKind::RequiredBy);
                     }
@@ -1459,14 +1741,20 @@ impl DomainState {
                         .wire_schema
                         .as_ref()
                         .map(|wire_schema| {
-                            expect_wire_schema_model(domain, identifier, models, wire_schema)
+                            expect_wire_schema_model(
+                                domain,
+                                identifier,
+                                models,
+                                &codec.wire_format,
+                                wire_schema,
+                            )
                         })
                         .transpose()?;
                     ensure_codec_schema_compatibility(
                         domain,
                         identifier,
                         &codec.wire_format,
-                        wire_schema_model,
+                        wire_schema_model.as_ref(),
                         schema_model,
                         &codec.encoding_rules,
                     )?;
@@ -2383,6 +2671,14 @@ pub struct ActiveGraph {
     indices: HashMap<RegistryKey, NodeIndex>,
 }
 
+#[cfg(feature = "testing")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerMode {
+    #[default]
+    Sticky,
+    Random,
+}
+
 impl ActiveGraph {
     pub fn from_scheduled_models(schedule: &DomainSchedule) -> Result<Self, Report<RegistryError>> {
         let models = schedule
@@ -2484,7 +2780,11 @@ impl ActiveGraph {
                 .graph
                 .node_weight(index)
                 .expect("visited graph node must exist");
-            if let Model::Schema(_) | Model::WireSchema(_) = node.config.as_ref() {
+            if let Model::Schema(_)
+            | Model::WireJsonSchema(_)
+            | Model::WireCborSchema(_)
+            | Model::WireAvroSchema(_) = node.config.as_ref()
+            {
                 schemas.push((
                     node.kind,
                     node.identifier.clone(),
@@ -2531,7 +2831,48 @@ impl ActiveGraph {
         cluster_nodes: &[String],
         replica_count: usize,
     ) -> DomainSchedule {
+        #[cfg(feature = "testing")]
+        {
+            self.schedule_for_domain_inner(
+                domain,
+                cluster_nodes,
+                replica_count,
+                SchedulerMode::Sticky,
+            )
+        }
+        #[cfg(not(feature = "testing"))]
+        {
+            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count)
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn schedule_for_domain_with_mode(
+        &self,
+        domain: &Domain,
+        cluster_nodes: &[String],
+        replica_count: usize,
+        scheduler_mode: SchedulerMode,
+    ) -> DomainSchedule {
+        self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, scheduler_mode)
+    }
+
+    fn schedule_for_domain_inner(
+        &self,
+        domain: &Domain,
+        cluster_nodes: &[String],
+        replica_count: usize,
+        #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
+    ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
+        #[cfg(feature = "testing")]
+        let random_schedule_seed = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"nervix/test-random-scheduler/domain");
+            hasher.update(&[0]);
+            hasher.update(domain.as_str().as_bytes());
+            *hasher.finalize().as_bytes()
+        };
         let mut next_assignment = 0usize;
         let mut node_load = HashMap::<String, usize>::new();
         let mut assigned_by_key = HashMap::<RegistryKey, Vec<String>>::new();
@@ -2576,6 +2917,10 @@ impl ActiveGraph {
                         node_load: &node_load,
                         next_assignment: &mut next_assignment,
                         replica_count,
+                        #[cfg(feature = "testing")]
+                        scheduler_mode,
+                        #[cfg(feature = "testing")]
+                        random_schedule_seed,
                     };
                     let assigned_nodes =
                         assignment_for_model(&mut assignment_planner, index, node.config.as_ref());
@@ -3186,22 +3531,12 @@ fn ensure_schema_has_fields<T>(
     Ok(())
 }
 
-fn ensure_wire_schema_has_fields(
+fn ensure_wire_schema_has_fields<T>(
     domain: &Domain,
     identifier: &Identifier,
-    schema: &CreateWireSchemaStmt,
+    schema: &CreateWireSchema<T>,
 ) -> Result<(), Report<RegistryError>> {
-    match schema {
-        CreateWireSchemaStmt::Json(schema) => {
-            ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
-        }
-        CreateWireSchemaStmt::Cbor(schema) => {
-            ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
-        }
-        CreateWireSchemaStmt::Avro(schema) => {
-            ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
-        }
-    }
+    ensure_schema_has_fields(domain, identifier, &schema.fields, "wire schema")
 }
 
 fn ensure_signaling_protocol_is_valid(
@@ -3794,9 +4129,31 @@ struct AssignmentPlanner<'a> {
     node_load: &'a HashMap<String, usize>,
     next_assignment: &'a mut usize,
     replica_count: usize,
+    #[cfg(feature = "testing")]
+    scheduler_mode: SchedulerMode,
+    #[cfg(feature = "testing")]
+    random_schedule_seed: [u8; 32],
 }
 
 impl AssignmentPlanner<'_> {
+    #[cfg(feature = "testing")]
+    fn random_schedule_seed_for(&self, index: NodeIndex) -> u64 {
+        let node = self
+            .graph
+            .node_weight(index)
+            .expect("scheduled graph node must exist");
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nervix/test-random-scheduler/model");
+        hasher.update(&[0]);
+        hasher.update(&self.random_schedule_seed);
+        hasher.update(node.kind.as_str().as_bytes());
+        hasher.update(&[0]);
+        hasher.update(node.identifier.as_str().as_bytes());
+        let mut seed = [0; 8];
+        seed.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+        u64::from_le_bytes(seed)
+    }
+
     fn for_model(&mut self, index: NodeIndex, model: &Model) -> Vec<String> {
         if self.cluster_nodes.is_empty() {
             return Vec::new();
@@ -3820,6 +4177,15 @@ impl AssignmentPlanner<'_> {
             | Model::WindowProcessor(_)
             | Model::WasmProcessor(_)
             | Model::Emitter(_) => {
+                #[cfg(feature = "testing")]
+                if let SchedulerMode::Random = self.scheduler_mode {
+                    let mut nodes = self.cluster_nodes.to_vec();
+                    fastrand::Rng::with_seed(self.random_schedule_seed_for(index))
+                        .shuffle(&mut nodes);
+                    nodes.truncate(self.replica_count.saturating_add(1));
+                    return nodes;
+                }
+
                 let preferred_order =
                     locality_affinity_scores(self.graph, index, self.assigned_by_key);
                 let mut ordered_nodes = self
@@ -4998,21 +5364,40 @@ fn expect_wire_schema_model<'a>(
     domain: &Domain,
     identifier: &Identifier,
     models: &'a HashMap<RegistryKey, Model>,
+    wire_format: &CodecWireFormat,
     referenced: &Identifier,
-) -> Result<&'a CreateWireSchemaStmt, Report<RegistryError>> {
-    match models.get(&RegistryKey::new(ModelKind::WireSchema, referenced.clone())) {
-        Some(Model::WireSchema(schema)) => Ok(schema),
-        Some(model) => Err(Report::new(RegistryError::InvalidReferenceKind {
+) -> Result<WireSchemaDefinition, Report<RegistryError>> {
+    let Some(kind) = wire_format.wire_schema_kind() else {
+        return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::WireSchema.as_str(),
+            reason: "codec wire format cannot reference a wire schema".to_string(),
+        }));
+    };
+    match (
+        kind,
+        models.get(&RegistryKey::new(kind, referenced.clone())),
+    ) {
+        (ModelKind::WireJsonSchema, Some(Model::WireJsonSchema(schema))) => {
+            Ok(WireSchemaDefinition::Json(schema.clone()))
+        }
+        (ModelKind::WireCborSchema, Some(Model::WireCborSchema(schema))) => {
+            Ok(WireSchemaDefinition::Cbor(schema.clone()))
+        }
+        (ModelKind::WireAvroSchema, Some(Model::WireAvroSchema(schema))) => {
+            Ok(WireSchemaDefinition::Avro(schema.clone()))
+        }
+        (_, Some(model)) => Err(Report::new(RegistryError::InvalidReferenceKind {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            expected_kind: kind.as_str(),
             reference: referenced.as_str().to_string(),
             actual_kind: model.kind().as_str(),
         })),
-        None => Err(Report::new(RegistryError::MissingReference {
+        (_, None) => Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::WireSchema.as_str(),
+            expected_kind: kind.as_str(),
             reference: referenced.as_str().to_string(),
         })),
     }
@@ -8498,14 +8883,14 @@ fn ensure_codec_schema_compatibility(
     domain: &Domain,
     identifier: &Identifier,
     wire_format: &CodecWireFormat,
-    wire_schema: Option<&CreateWireSchemaStmt>,
+    wire_schema: Option<&WireSchemaDefinition>,
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
 ) -> Result<(), Report<RegistryError>> {
     let rfc3339_fields =
         ensure_supported_codec_encoding_rules(domain, identifier, schema, encoding_rules)?;
     match (wire_format, wire_schema) {
-        (CodecWireFormat::Json, Some(CreateWireSchemaStmt::Json(json))) => {
+        (CodecWireFormat::Json, Some(WireSchemaDefinition::Json(json))) => {
             ensure_wire_field_set_matches(
                 domain,
                 identifier,
@@ -8524,7 +8909,7 @@ fn ensure_codec_schema_compatibility(
                 &rfc3339_fields,
             )
         }
-        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Cbor(cbor))) => {
+        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Cbor(cbor))) => {
             ensure_wire_field_set_matches(
                 domain,
                 identifier,
@@ -8543,7 +8928,7 @@ fn ensure_codec_schema_compatibility(
                 &rfc3339_fields,
             )
         }
-        (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Avro(avro))) => {
+        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Avro(avro))) => {
             ensure_wire_field_set_matches(
                 domain,
                 identifier,
@@ -8583,7 +8968,7 @@ fn ensure_codec_schema_compatibility(
                 "JAQ-native codec must declare a JAQ transformation".to_string()
             },
         })),
-        (CodecWireFormat::Json, Some(CreateWireSchemaStmt::Avro(_))) => {
+        (CodecWireFormat::Json, Some(WireSchemaDefinition::Avro(_))) => {
             Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -8591,7 +8976,7 @@ fn ensure_codec_schema_compatibility(
                     .to_string(),
             }))
         }
-        (CodecWireFormat::Json, Some(CreateWireSchemaStmt::Cbor(_))) => {
+        (CodecWireFormat::Json, Some(WireSchemaDefinition::Cbor(_))) => {
             Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -8599,7 +8984,7 @@ fn ensure_codec_schema_compatibility(
                     .to_string(),
             }))
         }
-        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Json(_))) => {
+        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Json(_))) => {
             Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -8607,7 +8992,7 @@ fn ensure_codec_schema_compatibility(
                     .to_string(),
             }))
         }
-        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Avro(_))) => {
+        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Avro(_))) => {
             Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -8615,7 +9000,7 @@ fn ensure_codec_schema_compatibility(
                     .to_string(),
             }))
         }
-        (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Json(_))) => {
+        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Json(_))) => {
             Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -8623,7 +9008,7 @@ fn ensure_codec_schema_compatibility(
                     .to_string(),
             }))
         }
-        (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Cbor(_))) => {
+        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Cbor(_))) => {
             Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -8981,24 +9366,36 @@ fn runtime_changes_for_domain(
     let changed_schemas = current_models
         .iter()
         .filter_map(|(key, current)| {
-            matches!(key.kind, ModelKind::Schema | ModelKind::WireSchema)
-                .then(|| {
-                    candidate_models
-                        .get(key)
-                        .filter(|candidate| *candidate != current)
-                })
-                .flatten()
-                .map(|_| key.clone())
+            matches!(
+                key.kind,
+                ModelKind::Schema
+                    | ModelKind::WireJsonSchema
+                    | ModelKind::WireCborSchema
+                    | ModelKind::WireAvroSchema
+            )
+            .then(|| {
+                candidate_models
+                    .get(key)
+                    .filter(|candidate| *candidate != current)
+            })
+            .flatten()
+            .map(|_| key.clone())
         })
         .chain(candidate_models.iter().filter_map(|(key, candidate)| {
-            matches!(key.kind, ModelKind::Schema | ModelKind::WireSchema)
-                .then(|| {
-                    current_models
-                        .get(key)
-                        .filter(|current| *current != candidate)
-                })
-                .flatten()
-                .map(|_| key.clone())
+            matches!(
+                key.kind,
+                ModelKind::Schema
+                    | ModelKind::WireJsonSchema
+                    | ModelKind::WireCborSchema
+                    | ModelKind::WireAvroSchema
+            )
+            .then(|| {
+                current_models
+                    .get(key)
+                    .filter(|current| *current != candidate)
+            })
+            .flatten()
+            .map(|_| key.clone())
         }))
         .collect::<HashSet<_>>();
     let directly_replaced_or_dropped = current_models
@@ -9133,22 +9530,24 @@ mod tests {
     use nervix_models::{
         AckMode, AlterEmitter, AlterJunction, AlterJunctionOperation, AlterRelay,
         AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
-        AlterWireSchemaOperation, AlterWireSchemaStmt, Assignment, AssignmentTarget,
-        AssignmentTargetScope, BranchSelection, ClientConfigEntry, CodecEncoding,
-        CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-        CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-        CreateBranch, CreateClientHttp, CreateClientKafka, CreateCodec, CreateCorrelator,
-        CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
-        CreateReingestor, CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, Domain, DomainSchedule,
-        DropModel, EmitSink, ErrorPolicies, Expression, FieldReference, FieldScope,
-        GeneralErrorPolicy, Identifier, IngestSource, IngestTimestampSource, Inheritance,
-        InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
-        MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MqttIngestMode, MqttQos,
-        MqttSession, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        QuiesceLevel, RelayBranching, ScheduledNode, SchemaField, WindowBound, WireSchemaField,
+        AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope,
+        BranchSelection, ClientConfigEntry, ClusterSchedule, CodecEncoding, CodecEncodingRule,
+        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
+        CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
+        CreateClientHttp, CreateClientKafka, CreateCodec, CreateCorrelator, CreateDeduplicator,
+        CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction, CreateReingestor,
+        CreateRelay, CreateSchema, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
+        CreateWireSchema, Domain, DomainSchedule, DropModel, EmitSink, ErrorPolicies, Expression,
+        FieldReference, FieldScope, GeneralErrorPolicy, Identifier, IngestSource,
+        IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
+        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, Model,
+        ModelKind, MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
+        ScheduledNode, SchemaField, WindowBound, WireSchemaField,
     };
 
+    #[cfg(feature = "testing")]
+    use super::SchedulerMode;
     use super::{ModelStorage, Registry, RegistryError, RegistryMutation, RuntimeChange};
 
     fn temp_db_path() -> PathBuf {
@@ -9323,7 +9722,7 @@ mod tests {
     }
 
     fn wire_schema(name: &str) -> Model {
-        Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+        Model::WireJsonSchema(CreateWireSchema {
             name: Identifier::parse(name).expect("valid identifier"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -9331,11 +9730,11 @@ mod tests {
                 ty: JsonType::String,
                 optional: false,
             }],
-        }))
+        })
     }
 
     fn json_wire_schema_with_type(name: &str, field_type: JsonType) -> Model {
-        Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+        Model::WireJsonSchema(CreateWireSchema {
             name: identifier(name),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -9343,11 +9742,11 @@ mod tests {
                 ty: field_type,
                 optional: false,
             }],
-        }))
+        })
     }
 
     fn avro_wire_schema_with_type(name: &str, field_type: nervix_models::AvroType) -> Model {
-        Model::WireSchema(CreateWireSchemaStmt::Avro(CreateWireSchema {
+        Model::WireAvroSchema(CreateWireSchema {
             name: identifier(name),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -9355,7 +9754,7 @@ mod tests {
                 ty: field_type,
                 optional: false,
             }],
-        }))
+        })
     }
 
     fn client_model(name: &str) -> Model {
@@ -10084,6 +10483,61 @@ mod tests {
         assert_eq!(loaded, model);
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn synchronized_domain_schedule_persists_models_for_restart() {
+        let source_path = temp_db_path();
+        let source = Registry::open(&source_path).expect("source registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+        let mut models = full_graph_batch();
+        let Model::Relay(notifications) = models
+            .iter_mut()
+            .find(|model| {
+                model.kind() == ModelKind::Relay && model.identifier().as_str() == "notifications"
+            })
+            .expect("notifications relay should exist")
+        else {
+            panic!("notifications model should be a relay");
+        };
+        notifications.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+        source
+            .apply_batch(&domain, models)
+            .expect("source graph should be valid");
+        let schedule = source
+            .active_graph(&domain)
+            .expect("source graph should exist")
+            .schedule_for_domain(&domain, &["node-1".to_string()], 0);
+        assert!(
+            schedule
+                .nodes
+                .iter()
+                .any(|node| node.kind == ModelKind::Materializer),
+            "fixture schedule must include its synthetic materializer"
+        );
+
+        let replica_path = temp_db_path();
+        {
+            let replica = Registry::open(&replica_path).expect("replica registry should open");
+            replica
+                .synchronize_cluster_schedule(&ClusterSchedule {
+                    domains: vec![schedule],
+                })
+                .expect("schedule models should synchronize");
+        }
+
+        let reopened = Registry::open(&replica_path).expect("replica registry should reopen");
+        assert_eq!(
+            reopened
+                .get(&domain, ModelKind::Ingestor, &identifier("ing"))
+                .expect("replica model read should succeed"),
+            source
+                .get(&domain, ModelKind::Ingestor, &identifier("ing"))
+                .expect("source model read should succeed")
+        );
+
+        let _ = fs::remove_dir_all(source_path);
+        let _ = fs::remove_dir_all(replica_path);
     }
 
     #[test]
@@ -11030,13 +11484,11 @@ mod tests {
 
         let result = registry.apply_batch(
             &wire_schema_domain,
-            vec![Model::WireSchema(CreateWireSchemaStmt::Json(
-                CreateWireSchema {
-                    name: identifier("empty_wire"),
-                    strictness: Default::default(),
-                    fields: Vec::<WireSchemaField<JsonType>>::new(),
-                },
-            ))],
+            vec![Model::WireJsonSchema(CreateWireSchema {
+                name: identifier("empty_wire"),
+                strictness: Default::default(),
+                fields: Vec::<WireSchemaField<JsonType>>::new(),
+            })],
         );
         assert!(matches!(
             result
@@ -11127,6 +11579,88 @@ mod tests {
 
         assert_eq!(processor_node, ingestor_node);
         assert_eq!(emitter_node, processor_node);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn random_test_schedule_is_stable_for_unchanged_inputs() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+
+        registry
+            .apply_batch(&domain, full_graph_batch())
+            .expect("batch should succeed");
+
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let cluster_nodes = [
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ];
+        let expected =
+            graph.schedule_for_domain_with_mode(&domain, &cluster_nodes, 0, SchedulerMode::Random);
+        for _ in 0..32 {
+            assert_eq!(
+                graph.schedule_for_domain_with_mode(
+                    &domain,
+                    &cluster_nodes,
+                    0,
+                    SchedulerMode::Random,
+                ),
+                expected,
+                "periodic reconciliation must not move an unchanged random schedule"
+            );
+        }
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn random_test_schedule_ignores_upstream_locality_across_domains() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = Domain::parse("default").expect("valid domain");
+
+        registry
+            .apply_batch(&domain, full_graph_batch())
+            .expect("batch should succeed");
+
+        let graph = registry
+            .active_graph(&domain)
+            .expect("graph should be installed");
+        let cluster_nodes = [
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ];
+        let observed_cross_node_path = (0..32).any(|suffix| {
+            let scheduled_domain =
+                Domain::parse(&format!("test_{suffix}")).expect("valid test domain");
+            let schedule = graph.schedule_for_domain_with_mode(
+                &scheduled_domain,
+                &cluster_nodes,
+                0,
+                SchedulerMode::Random,
+            );
+            let ingestor =
+                scheduled_node(&schedule, ModelKind::Ingestor, "ing").assigned_single_node();
+            let processor = scheduled_node(&schedule, ModelKind::Deduplicator, "p99_proc")
+                .assigned_single_node();
+            let emitter =
+                scheduled_node(&schedule, ModelKind::Emitter, "emit").assigned_single_node();
+            ingestor != processor || processor != emitter
+        });
+
+        assert!(
+            observed_cross_node_path,
+            "independent random assignments should split paths across test domains"
+        );
 
         let _ = fs::remove_dir_all(path);
     }
@@ -11330,7 +11864,7 @@ mod tests {
                         },
                     ],
                 }),
-                Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                Model::WireJsonSchema(CreateWireSchema {
                     name: Identifier::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![
@@ -11345,7 +11879,7 @@ mod tests {
                             optional: false,
                         },
                     ],
-                })),
+                }),
                 codec("event_codec", "event_schema"),
                 client_model("broker"),
                 relay("notifications", "event_schema"),
@@ -11431,7 +11965,7 @@ mod tests {
                             },
                         ],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -11451,7 +11985,7 @@ mod tests {
                                 optional: false,
                             },
                         ],
-                    })),
+                    }),
                     codec("event_codec", "event_schema"),
                     client_model("broker"),
                     relay_branched_by_relay_branch("notifications", "transformed_schema"),
@@ -11519,7 +12053,7 @@ mod tests {
                         sensitive: false,
                     }],
                 }),
-                Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                Model::WireJsonSchema(CreateWireSchema {
                     name: Identifier::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![WireSchemaField {
@@ -11527,7 +12061,7 @@ mod tests {
                         ty: JsonType::Integer,
                         optional: false,
                     }],
-                })),
+                }),
                 codec("event_codec", "event_schema"),
                 client_model("broker"),
                 relay("notifications", "transformed_schema"),
@@ -11597,7 +12131,7 @@ mod tests {
                         },
                     ],
                 }),
-                Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                Model::WireJsonSchema(CreateWireSchema {
                     name: Identifier::parse("event_wire").expect("valid identifier"),
                     strictness: Default::default(),
                     fields: vec![
@@ -11612,7 +12146,7 @@ mod tests {
                             optional: false,
                         },
                     ],
-                })),
+                }),
                 codec("event_codec", "event_schema"),
                 client_model("broker"),
                 relay("notifications", "event_schema"),
@@ -12327,7 +12861,7 @@ mod tests {
                             sensitive: false,
                         }],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![WireSchemaField {
@@ -12335,7 +12869,7 @@ mod tests {
                             ty: JsonType::String,
                             optional: true,
                         }],
-                    })),
+                    }),
                     codec("event_codec", "event_schema"),
                 ],
             )
@@ -13081,7 +13615,7 @@ mod tests {
                             },
                         ],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -13101,7 +13635,7 @@ mod tests {
                                 optional: false,
                             },
                         ],
-                    })),
+                    }),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
                     client_model("broker_in_2"),
@@ -13384,7 +13918,7 @@ mod tests {
                             },
                         ],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -13404,7 +13938,7 @@ mod tests {
                                 optional: false,
                             },
                         ],
-                    })),
+                    }),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
                     relay_branched_by_relay_branch("notifications", "event_schema"),
@@ -13486,7 +14020,7 @@ mod tests {
                             },
                         ],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -13506,7 +14040,7 @@ mod tests {
                                 optional: false,
                             },
                         ],
-                    })),
+                    }),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
                     relay_branched_by(
@@ -13625,7 +14159,7 @@ mod tests {
                             },
                         ],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -13640,7 +14174,7 @@ mod tests {
                                 optional: false,
                             },
                         ],
-                    })),
+                    }),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
                     relay_branched_by_relay_branch("notifications", "event_schema"),
@@ -13761,7 +14295,7 @@ mod tests {
                             },
                         ],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -13777,7 +14311,7 @@ mod tests {
                                 optional: false,
                             },
                         ],
-                    })),
+                    }),
                     codec("event_codec", "notification"),
                     client_model("broker_in"),
                     relay_branched_by_relay_branch("notifications", "notification"),
@@ -13888,7 +14422,7 @@ mod tests {
                             },
                         ],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -13908,7 +14442,7 @@ mod tests {
                                 optional: false,
                             },
                         ],
-                    })),
+                    }),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
                     relay_branched_by_relay_branch("notifications", "event_schema"),
@@ -14128,7 +14662,7 @@ mod tests {
                             },
                         ],
                     }),
-                    Model::WireSchema(CreateWireSchemaStmt::Json(CreateWireSchema {
+                    Model::WireJsonSchema(CreateWireSchema {
                         name: Identifier::parse("event_wire").expect("valid identifier"),
                         strictness: Default::default(),
                         fields: vec![
@@ -14148,7 +14682,7 @@ mod tests {
                                 optional: false,
                             },
                         ],
-                    })),
+                    }),
                     codec("event_codec", "event_schema"),
                     client_model("broker_in"),
                     client_model("broker_in_2"),
@@ -14334,7 +14868,7 @@ mod tests {
                             },
                         }],
                     }),
-                    RegistryMutation::AlterWireSchema(AlterWireSchemaStmt::Json(AlterWireSchema {
+                    RegistryMutation::AlterWireJsonSchema(AlterWireSchema {
                         schema: identifier("event_wire"),
                         operations: vec![AlterWireSchemaOperation::AddField {
                             field: WireSchemaField {
@@ -14343,7 +14877,7 @@ mod tests {
                                 optional: true,
                             },
                         }],
-                    })),
+                    }),
                 ],
             )
             .expect("planning should succeed");
@@ -14412,7 +14946,7 @@ mod tests {
                             },
                         }],
                     }),
-                    RegistryMutation::AlterWireSchema(AlterWireSchemaStmt::Json(AlterWireSchema {
+                    RegistryMutation::AlterWireJsonSchema(AlterWireSchema {
                         schema: identifier("event_wire"),
                         operations: vec![AlterWireSchemaOperation::AddField {
                             field: WireSchemaField {
@@ -14421,7 +14955,7 @@ mod tests {
                                 optional: true,
                             },
                         }],
-                    })),
+                    }),
                 ],
             )
             .expect("planning should succeed");

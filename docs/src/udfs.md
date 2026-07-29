@@ -1,7 +1,7 @@
 # User-Defined Functions
 
 NSPL user-defined functions (UDFs) are domain-owned functions written in
-[Roto](https://roto.docs.nlnetlabs.nl/) and invoked anywhere
+[Roto](roto-language-reference.md) and invoked anywhere
 an ordinary expression function can be used. They execute in process over Arrow columns: one UDF
 invocation receives a complete batch, and column methods perform vectorized work without
 serializing rows.
@@ -17,9 +17,9 @@ blocking worker pool, including small Arrow batches and UDFs used while construc
 so native UDF work does not occupy an asynchronous runtime worker.
 
 The Roto language itself — syntax, types, functions, and `test` blocks — is covered by the
-bundled [Roto Language Reference](roto-language-reference.md), taken from the upstream
-[Roto documentation](https://roto.docs.nlnetlabs.nl/) at the exact Roto release Nervix embeds
-for `ROTO_0_11`; the language is developed at [NLnetLabs/roto](https://github.com/NLnetLabs/roto).
+generated [Roto Language Reference](roto-language-reference.md), downloaded from upstream at the
+exact Roto release Nervix embeds for `ROTO_0_11`; the language is developed at
+[NLnetLabs/roto](https://github.com/NLnetLabs/roto).
 The column types and operations available inside a UDF body are the Nervix-provided catalog
 described on this page, not part of the Roto standard library.
 

@@ -1,9 +1,11 @@
 use std::fmt::{Display, Formatter};
 
 use crate::{
-    AlterEmitter, AlterEmitterOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
-    AlterJunctionOperation, AlterRelay, AlterRelayOperation, AlterSchema, AlterSchemaOperation,
-    AlterWireSchema, AlterWireSchemaOperation, AlterWireSchemaStmt, AssignmentTargetScope,
+    AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
+    AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
+    AlterJunctionOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
+    AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
+    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
     AvroType, AzureBlobConfigEntry, BinaryOperator, BranchEviction, BranchSelection,
     ClickHouseConfigEntry, ClickHouseValueMapping, CodecEncoding, CodecEncodingRule,
     CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
@@ -15,20 +17,20 @@ use crate::{
     CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator,
     CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreateMaterializer,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol,
-    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema,
-    CreateWireSchemaStmt, EmitSink, EndpointIngestMode, EndpointType, Expression, FieldScope,
-    GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, Identifier,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction,
-    MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction,
-    NatsConfigEntry, NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
-    PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry,
-    RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode, RelayBranching, RetryPolicy,
-    RouteConstruction, S3ConfigEntry, SchemaField, SentryConfigEntry, SqsConfigEntry,
-    SqsIngestMode, UnaryOperator, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
+    CreateUdf, CreateVhost, CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, EmitSink,
+    EndpointIngestMode, EndpointType, Expression, FieldScope, GcsConfigEntry, GeneralErrorPolicy,
+    HttpConfigEntry, IcebergCatalog, Identifier, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
+    Inheritance, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+    Literal, MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
+    MessageErrorPolicy, Model, MongoDbConfigEntry, MongoDbConflictAction, MqttConfigEntry,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, NatsConfigEntry,
+    NatsIngestMode, OutputBranch, ParseAsType, PostgresConfigEntry, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusConfigEntry,
+    PulsarConfigEntry, PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
+    RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, S3ConfigEntry,
+    SchemaField, SentryConfigEntry, SqsConfigEntry, SqsIngestMode, UnaryOperator,
+    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaDefinition,
     WireSchemaField, ZeroMqConfigEntry, ZeroMqIngestMode,
 };
 
@@ -328,7 +330,9 @@ impl Model {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         match self {
             Self::Schema(schema) => schema.to_canonical_nspl(),
-            Self::WireSchema(schema) => schema.to_canonical_nspl(),
+            Self::WireJsonSchema(schema) => wire_schema_to_nspl("JSON", schema),
+            Self::WireCborSchema(schema) => wire_schema_to_nspl("CBOR", schema),
+            Self::WireAvroSchema(schema) => wire_schema_to_nspl("AVRO", schema),
             Self::Codec(codec) => codec.to_canonical_nspl(),
             Self::ClientKafka(client) => client.to_canonical_nspl(),
             Self::ClientPulsar(client) => client.to_canonical_nspl(),
@@ -491,6 +495,66 @@ impl AlterJunction {
     }
 }
 
+impl AlterDeduplicator {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_deduplicator_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER DEDUPLICATOR {} {operations};",
+            self.deduplicator.as_str()
+        ))
+    }
+}
+
+impl AlterReorderer {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_reorderer_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER REORDERER {} {operations};",
+            self.reorderer.as_str()
+        ))
+    }
+}
+
+impl AlterReingestor {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_processor_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER REINGESTOR {} {operations};",
+            self.reingestor.as_str()
+        ))
+    }
+}
+
+impl AlterGenerator {
+    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(alter_generator_operation_to_nspl)
+            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .join(", ");
+        Ok(format!(
+            "ALTER GENERATOR {} {operations};",
+            self.generator.as_str()
+        ))
+    }
+}
+
 impl AlterEmitter {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         let operations = self
@@ -521,7 +585,7 @@ impl AlterIngestor {
     }
 }
 
-impl CreateWireSchemaStmt {
+impl WireSchemaDefinition {
     pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
         match self {
             Self::Json(schema) => wire_schema_to_nspl("JSON", schema),
@@ -531,14 +595,22 @@ impl CreateWireSchemaStmt {
     }
 }
 
-impl AlterWireSchemaStmt {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
-        match self {
-            Self::Json(alter) => alter_wire_schema_to_nspl("JSON", alter),
-            Self::Cbor(alter) => alter_wire_schema_to_nspl("CBOR", alter),
-            Self::Avro(alter) => alter_wire_schema_to_nspl("AVRO", alter),
-        }
-    }
+pub fn alter_json_wire_schema_to_canonical_nspl(
+    alter: &AlterWireSchema<JsonType>,
+) -> Result<String, CanonicalNsplError> {
+    alter_wire_schema_to_nspl("JSON", alter)
+}
+
+pub fn alter_cbor_wire_schema_to_canonical_nspl(
+    alter: &AlterWireSchema<JsonType>,
+) -> Result<String, CanonicalNsplError> {
+    alter_wire_schema_to_nspl("CBOR", alter)
+}
+
+pub fn alter_avro_wire_schema_to_canonical_nspl(
+    alter: &AlterWireSchema<AvroType>,
+) -> Result<String, CanonicalNsplError> {
+    alter_wire_schema_to_nspl("AVRO", alter)
 }
 
 impl CreateClientKafka {
@@ -1741,6 +1813,137 @@ fn alter_junction_operation_to_nspl(
     }
 }
 
+fn alter_deduplicator_operation_to_nspl(
+    operation: &AlterDeduplicatorOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterDeduplicatorOperation::Processor(operation) => {
+            alter_processor_operation_to_nspl(operation)
+        }
+        AlterDeduplicatorOperation::SetDeduplicateOn { expressions } => Ok(format!(
+            "SET DEDUPLICATE ON {}",
+            expressions
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        AlterDeduplicatorOperation::SetMaxTime { max_time } => {
+            Ok(format!("SET MAX TIME {max_time}"))
+        }
+    }
+}
+
+fn alter_reorderer_operation_to_nspl(
+    operation: &AlterReordererOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterReordererOperation::Processor(operation) => {
+            alter_processor_operation_to_nspl(operation)
+        }
+        AlterReordererOperation::SetOrderBy { expressions } => Ok(format!(
+            "SET BY {}",
+            expressions
+                .iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        AlterReordererOperation::SetMaxTime { max_time } => Ok(format!("SET MAX TIME {max_time}")),
+    }
+}
+
+fn alter_generator_operation_to_nspl(
+    operation: &AlterGeneratorOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterGeneratorOperation::SetMaterializedState { relay } => {
+            Ok(format!("SET MATERIALIZED STATE {}", relay.as_str()))
+        }
+        AlterGeneratorOperation::SetEach { each } => Ok(format!("SET EACH {each}")),
+        AlterGeneratorOperation::SetBranching { branching } => {
+            Ok(format!("SET {}", branch_selection_to_nspl(branching)))
+        }
+        AlterGeneratorOperation::AddRoute { route } => {
+            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+        }
+        AlterGeneratorOperation::DropRoute { relay } => {
+            Ok(format!("DROP ROUTE TO {}", relay.as_str()))
+        }
+        AlterGeneratorOperation::ReplaceRoute { route } => Ok(format!(
+            "REPLACE ROUTE {}",
+            processor_output_to_nspl(route)?
+        )),
+    }
+}
+
+fn alter_processor_operation_to_nspl(
+    operation: &AlterProcessorOperation,
+) -> Result<String, CanonicalNsplError> {
+    match operation {
+        AlterProcessorOperation::AddFrom {
+            relay,
+            where_clause,
+        } => Ok(format!(
+            "ADD FROM {}{}",
+            relay.as_str(),
+            where_clause
+                .as_ref()
+                .map(|expression| Ok(format!(" WHERE {}", expression_to_nspl(expression)?)))
+                .transpose()?
+                .unwrap_or_default()
+        )),
+        AlterProcessorOperation::DropFrom { relay } => Ok(format!("DROP FROM {}", relay.as_str())),
+        AlterProcessorOperation::AlterFromSetWhere {
+            relay,
+            where_clause,
+        } => Ok(format!(
+            "ALTER FROM {} SET WHERE {}",
+            relay.as_str(),
+            expression_to_nspl(where_clause)?
+        )),
+        AlterProcessorOperation::AlterFromDropWhere { relay } => {
+            Ok(format!("ALTER FROM {} DROP WHERE", relay.as_str()))
+        }
+        AlterProcessorOperation::SetCollect { policy } => {
+            Ok(format!("SET {}", collect_policy_to_nspl(policy)))
+        }
+        AlterProcessorOperation::DropCollect => Ok("DROP COLLECT".to_string()),
+        AlterProcessorOperation::SetFilterWhere { where_clause } => Ok(format!(
+            "SET FILTER WHERE {}",
+            expression_to_nspl(where_clause)?
+        )),
+        AlterProcessorOperation::DropFilterWhere => Ok("DROP FILTER WHERE".to_string()),
+        AlterProcessorOperation::SetMode { mode } => Ok(format!("SET {}", mode.as_ref())),
+        AlterProcessorOperation::SetBranching { branching } => {
+            Ok(format!("SET {}", branch_selection_to_nspl(branching)))
+        }
+        AlterProcessorOperation::AddMaterializedState { dependency } => Ok(format!(
+            "ADD MATERIALIZED STATE {} {}",
+            dependency.relay.as_str(),
+            materialized_state_policy_to_nspl(&dependency.policy)?
+        )),
+        AlterProcessorOperation::DropMaterializedState { relay } => {
+            Ok(format!("DROP MATERIALIZED STATE {}", relay.as_str()))
+        }
+        AlterProcessorOperation::AlterMaterializedState { relay, policy } => Ok(format!(
+            "ALTER MATERIALIZED STATE {} SET {}",
+            relay.as_str(),
+            materialized_state_policy_to_nspl(policy)?
+        )),
+        AlterProcessorOperation::AddRoute { route } => {
+            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+        }
+        AlterProcessorOperation::DropRoute { relay } => {
+            Ok(format!("DROP ROUTE TO {}", relay.as_str()))
+        }
+        AlterProcessorOperation::ReplaceRoute { route } => Ok(format!(
+            "REPLACE ROUTE {}",
+            processor_output_to_nspl(route)?
+        )),
+    }
+}
+
 fn alter_emitter_operation_to_nspl(
     operation: &AlterEmitterOperation,
 ) -> Result<String, CanonicalNsplError> {
@@ -1869,9 +2072,9 @@ where
         .join(", ");
 
     Ok(format!(
-        "CREATE {} WIRE {format_kw} SCHEMA {} ({});",
-        schema.strictness.as_ref(),
+        "CREATE WIRE {format_kw} SCHEMA {} MODE {} ({});",
         schema.name.as_str(),
+        schema.strictness.as_ref(),
         fields
     ))
 }
@@ -1902,6 +2105,7 @@ where
     T: NativeTypeToNspl,
 {
     match operation {
+        AlterWireSchemaOperation::SetMode { mode } => Ok(format!("MODE {}", mode.as_ref())),
         AlterWireSchemaOperation::AddField { field } => {
             Ok(format!("ADD FIELD {}", wire_schema_field_to_nspl(field)?))
         }
@@ -1923,9 +2127,6 @@ where
             field.as_str(),
             if *optional { "SET" } else { "DROP" }
         )),
-        AlterWireSchemaOperation::SetStrictness { strictness } => {
-            Ok(format!("SET {}", strictness.as_ref()))
-        }
     }
 }
 
@@ -2617,16 +2818,16 @@ mod tests {
         CreateClientSqs, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
         CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
         CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf,
-        CreateVhost, CreateWindowProcessor, CreateWireSchema, CreateWireSchemaStmt, EmitSink,
-        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope,
-        GeneralErrorPolicy, HttpConfigEntry, Identifier, IngestSource, InputCollectPolicy,
-        JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy,
-        Model, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-        MySqlConflictAction, MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType,
-        PostgresConflictAction, PostgresValueMapping, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode,
-        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
-        SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound,
+        CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink, EndpointIngestMode,
+        EndpointType, ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry,
+        Identifier, IngestSource, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
+        KafkaOffsetMode, Literal, MessageErrorPolicy, Model, MongoDbConflictAction,
+        MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+        MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType, PostgresConflictAction,
+        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
+        RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry, SqsIngestMode, UdfArgument,
+        UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound, WireSchemaDefinition,
         WireSchemaField, ZeroMqIngestMode,
     };
 
@@ -2709,7 +2910,7 @@ mod tests {
 
     #[test]
     fn renders_wire_schema_canonical() {
-        let schema = CreateWireSchemaStmt::Avro(CreateWireSchema {
+        let schema = WireSchemaDefinition::Avro(CreateWireSchema {
             name: identifier("latency"),
             strictness: Default::default(),
             fields: vec![
@@ -2729,7 +2930,7 @@ mod tests {
         let nspl = schema.to_canonical_nspl().expect("must render");
         assert_eq!(
             nspl,
-            "CREATE STRICT WIRE AVRO SCHEMA latency (p99 DOUBLE, created_at STRING);"
+            "CREATE WIRE AVRO SCHEMA latency MODE STRICT (p99 DOUBLE, created_at STRING);"
         );
     }
 
@@ -2834,7 +3035,7 @@ mod tests {
 
     #[test]
     fn renders_json_wire_schema_canonical() {
-        let schema = CreateWireSchemaStmt::Json(CreateWireSchema {
+        let schema = WireSchemaDefinition::Json(CreateWireSchema {
             name: identifier("payload"),
             strictness: Default::default(),
             fields: vec![
@@ -2853,13 +3054,13 @@ mod tests {
 
         assert_eq!(
             schema.to_canonical_nspl().expect("must render"),
-            "CREATE STRICT WIRE JSON SCHEMA payload (items ARRAY, active BOOLEAN);"
+            "CREATE WIRE JSON SCHEMA payload MODE STRICT (items ARRAY, active BOOLEAN);"
         );
     }
 
     #[test]
     fn renders_loose_cbor_wire_schema_canonical() {
-        let schema = CreateWireSchemaStmt::Cbor(CreateWireSchema {
+        let schema = WireSchemaDefinition::Cbor(CreateWireSchema {
             name: identifier("payload"),
             strictness: crate::WireSchemaStrictness::Loose,
             fields: vec![WireSchemaField {
@@ -2871,7 +3072,7 @@ mod tests {
 
         assert_eq!(
             schema.to_canonical_nspl().expect("must render"),
-            "CREATE LOOSE WIRE CBOR SCHEMA payload (active BOOLEAN);"
+            "CREATE WIRE CBOR SCHEMA payload MODE LOOSE (active BOOLEAN);"
         );
     }
 
@@ -2886,7 +3087,7 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let wire = CreateWireSchemaStmt::Json(CreateWireSchema {
+        let wire = WireSchemaDefinition::Json(CreateWireSchema {
             name: identifier("payload"),
             strictness: Default::default(),
             fields: vec![WireSchemaField {
@@ -2902,7 +3103,7 @@ mod tests {
         );
         assert_eq!(
             wire.to_canonical_nspl().expect("must render"),
-            "CREATE STRICT WIRE JSON SCHEMA payload (active BOOLEAN OPTIONAL);"
+            "CREATE WIRE JSON SCHEMA payload MODE STRICT (active BOOLEAN OPTIONAL);"
         );
     }
 
@@ -3146,6 +3347,25 @@ mod tests {
             codec_with_jaq.to_canonical_nspl().expect("must render"),
             "CREATE CODEC orders_codec FROM JSON TO SCHEMA orders WITH JAQ TRANSFORMATIONS ON \
              INGESTION '.payload' ON EMITTING '{payload: .}';"
+        );
+
+        let ingestion_codec = CreateCodec {
+            name: identifier("orders_ingestion"),
+            wire_format: CodecWireFormat::JaqNative {
+                format: CodecJaqFormat::Json,
+                transformations: CodecJaqTransformations {
+                    on_ingestion: Some(".payload".to_string()),
+                    on_emitting: None,
+                },
+            },
+            wire_schema: None,
+            schema: identifier("orders"),
+            encoding_rules: Vec::new(),
+        };
+        assert_eq!(
+            ingestion_codec.to_canonical_nspl().expect("must render"),
+            "CREATE CODEC orders_ingestion FROM JSON TO SCHEMA orders WITH JAQ TRANSFORMATIONS ON \
+             INGESTION '.payload';"
         );
 
         let cbor_codec = CreateCodec {

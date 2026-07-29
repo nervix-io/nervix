@@ -22,9 +22,9 @@ Core create statements:
 CREATE [IF NOT EXISTS] USER <name> WITH PASSWORD '<password>';
 
 CREATE [IF NOT EXISTS] SCHEMA <name> (<field> <type> [OPTIONAL], ...);
-CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE JSON SCHEMA <name> (<field> <json_type> [OPTIONAL], ...);
-CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE CBOR SCHEMA <name> (<field> <cbor_type> [OPTIONAL], ...);
-CREATE [IF NOT EXISTS] STRICT|LOOSE WIRE AVRO SCHEMA <name> (<field> <avro_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] WIRE JSON SCHEMA <name> MODE STRICT|LOOSE (<field> <json_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] WIRE CBOR SCHEMA <name> MODE STRICT|LOOSE (<field> <cbor_type> [OPTIONAL], ...);
+CREATE [IF NOT EXISTS] WIRE AVRO SCHEMA <name> MODE STRICT|LOOSE (<field> <avro_type> [OPTIONAL], ...);
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM WIRE JSON SCHEMA <wire_schema>
@@ -44,7 +44,9 @@ CREATE [IF NOT EXISTS] CODEC <name>
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM JSON|YAML|TOML|XML|CBOR
   TO SCHEMA <schema>
-  WITH JAQ TRANSFORMATION '<program>';
+  WITH JAQ TRANSFORMATIONS
+  [ON INGESTION '<program>']
+  [ON EMITTING '<program>'];
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM PROTOBUF
@@ -52,11 +54,16 @@ CREATE [IF NOT EXISTS] CODEC <name>
   CONFIG {'file' = '<path.proto>', 'include' = '.'}
   MESSAGE '<package.Message>'
   TO SCHEMA <schema>
-  WITH JAQ TRANSFORMATION '<program>';
+  WITH JAQ TRANSFORMATIONS
+  [ON INGESTION '<program>']
+  [ON EMITTING '<program>'];
 
 CREATE [IF NOT EXISTS] RELAY <name> SCHEMA <schema> [CAPACITY <n>]
   [WITH MATERIALIZED STATE LAST BY TIMESTAMP];
 ```
+
+JAQ-backed codecs require at least one direction. When both are present, `ON INGESTION` precedes
+`ON EMITTING`.
 
 Core alter statements:
 
@@ -85,6 +92,30 @@ ALTER JUNCTION <name>
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
 
+ALTER DEDUPLICATOR <name>
+  SET DEDUPLICATE ON <expr> [, <expr> ...] |
+  SET MAX TIME <duration> |
+  ADD|DROP|ALTER FROM ... |
+  SET|DROP COLLECT ... |
+  SET|DROP FILTER WHERE ... |
+  SET ATTACHED | SET DETACHED |
+  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  ADD|DROP|ALTER MATERIALIZED STATE ... |
+  ADD|DROP|REPLACE ROUTE ...
+  [, ...];
+
+ALTER REORDERER <name>
+  SET BY <expr> [, <expr> ...] |
+  SET MAX TIME <duration> |
+  ADD|DROP|ALTER FROM ... |
+  SET|DROP COLLECT ... |
+  SET|DROP FILTER WHERE ... |
+  SET ATTACHED | SET DETACHED |
+  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  ADD|DROP|ALTER MATERIALIZED STATE ... |
+  ADD|DROP|REPLACE ROUTE ...
+  [, ...];
+
 ALTER EMITTER <name>
   SET TO <sink> |
   SET CLIENT <client> |
@@ -104,6 +135,22 @@ ALTER INGESTOR <name>
   SET GENERAL ERROR IGNORE|LOG
   [, ...];
 
+ALTER REINGESTOR <name>
+  ADD|DROP|ALTER FROM ... |
+  SET|DROP COLLECT ... |
+  SET|DROP FILTER WHERE ... |
+  SET ATTACHED | SET DETACHED |
+  ADD|DROP|ALTER MATERIALIZED STATE ... |
+  ADD|DROP|REPLACE ROUTE TO <relay> <construction> BRANCHED BY <branch>|UNBRANCHED ...
+  [, ...];
+
+ALTER GENERATOR <name>
+  SET MATERIALIZED STATE <relay> |
+  SET EACH <duration> |
+  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  ADD|DROP|REPLACE ROUTE ...
+  [, ...];
+
 ALTER SCHEMA <name>
   ADD FIELD <field> <type> [OPTIONAL] [SENSITIVE],
   DROP FIELD <field>,
@@ -113,18 +160,19 @@ ALTER SCHEMA <name>
   ALTER FIELD <field> SET|DROP SENSITIVE;
 
 ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
+  MODE STRICT|LOOSE,
   ADD FIELD <field> <wire_type> [OPTIONAL],
   DROP FIELD <field>,
   RENAME FIELD <field> TO <field>,
   ALTER FIELD <field> SET TYPE <wire_type>,
-  ALTER FIELD <field> SET|DROP OPTIONAL,
-  SET STRICT|LOOSE;
+  ALTER FIELD <field> SET|DROP OPTIONAL;
 ```
 
-Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER EMITTER`, or `ALTER INGESTOR` execute in
-written order. See
+Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER REORDERER`,
+`ALTER EMITTER`, `ALTER INGESTOR`, `ALTER REINGESTOR`, or `ALTER GENERATOR` execute in written
+order. See
 [Streams And State](relay.md#altering-relays) for relay operations,
-[Processors](processors.md#altering-junctions) for the full junction operation shapes, and
+[Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
 [Ingestors](ingestors.md#altering-ingestors) for boundary-node operations. See
 [Schemas And Codecs](schemas-and-codecs.md#altering-schemas) for ordered schema changes and atomic
@@ -493,6 +541,9 @@ CORDON NODE <node_id>;
 UNCORDON NODE <node_id>;
 DRAIN NODE <node_id>;
 ```
+
+For a wire schema, `<kind>` is the exact multi-word kind: `WIRE JSON SCHEMA`, `WIRE CBOR SCHEMA`,
+or `WIRE AVRO SCHEMA`. The same exact kind is required by `DROP`.
 
 General notes:
 

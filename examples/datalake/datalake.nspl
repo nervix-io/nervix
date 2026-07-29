@@ -59,7 +59,7 @@ CREATE SCHEMA edge_site (
   edge_lon F64
 );
 
-CREATE STRICT WIRE JSON SCHEMA edge_site_wire (
+CREATE WIRE JSON SCHEMA edge_site_wire MODE STRICT (
   edge_id string,
   edge_name string,
   region string,
@@ -98,7 +98,7 @@ CREATE SCHEMA device_activity (
 CREATE CODEC device_activity_cbor_codec
   FROM CBOR
   TO SCHEMA device_activity
-  WITH JAQ TRANSFORMATION '.'
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.'
   ENCODE ts AS RFC3339;
 
 CREATE SCHEMA edge_activity (
@@ -121,7 +121,7 @@ CREATE CODEC edge_activity_protobuf_codec
   CONFIG {'file' = 'edge_activity.proto', 'include' = '.'}
   MESSAGE 'nervix.examples.datalake.EdgeActivity'
   TO SCHEMA edge_activity
-  WITH JAQ TRANSFORMATION '.'
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.'
   ENCODE ts AS RFC3339;
 
 CREATE SCHEMA auth_activity (
@@ -140,7 +140,7 @@ CREATE SCHEMA auth_activity (
   seq I64
 );
 
-CREATE STRICT WIRE JSON SCHEMA auth_activity_wire (
+CREATE WIRE JSON SCHEMA auth_activity_wire MODE STRICT (
   source string,
   event_id string,
   tenant_id string,
@@ -377,7 +377,7 @@ CREATE SCHEMA security_event (
   source_event_id STRING
 );
 
-CREATE STRICT WIRE JSON SCHEMA security_event_wire (
+CREATE WIRE JSON SCHEMA security_event_wire MODE STRICT (
   event_id string,
   tenant_id string,
   device_id string,
@@ -414,7 +414,7 @@ CREATE SCHEMA distance_alert (
   edge_lon F64 OPTIONAL
 );
 
-CREATE STRICT WIRE JSON SCHEMA distance_alert_wire (
+CREATE WIRE JSON SCHEMA distance_alert_wire MODE STRICT (
   alert_id string,
   alert_type string,
   tenant_id string,

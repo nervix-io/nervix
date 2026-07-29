@@ -123,7 +123,6 @@ pub enum Identifier {
     Last,
     Tls,
     Jaq,
-    Transformation,
     Transformations,
     Ingestion,
     Emitting,

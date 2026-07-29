@@ -20,7 +20,7 @@ Feature: Window processor runtime behavior
         last_latency I64,
         total_latency I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -127,7 +127,7 @@ Feature: Window processor runtime behavior
         total_latency I64,
         latency_p50 F64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -211,6 +211,7 @@ Feature: Window processor runtime behavior
 
   Scenario Outline: Window processor restores branch-local state after cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -227,7 +228,7 @@ Feature: Window processor runtime behavior
         sample_count I64,
         total_latency I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -263,6 +264,7 @@ Feature: Window processor runtime behavior
       """
       {"tenant":"acme","latency":10}
       """
+    And within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "metrics" across physical nodes totals 1
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed on the leader node
@@ -312,7 +314,7 @@ Feature: Window processor runtime behavior
         latency_p50 F64,
         latency_p90 F64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -437,7 +439,7 @@ Feature: Window processor runtime behavior
         sample_count I64,
         total_latency I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -550,7 +552,7 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency_p0 F64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -627,7 +629,7 @@ Feature: Window processor runtime behavior
         tenant STRING,
         latency_p0 F64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -704,7 +706,7 @@ Feature: Window processor runtime behavior
         sample_count I64,
         total_latency I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -776,7 +778,7 @@ Feature: Window processor runtime behavior
         sample_count I64,
         total_latency I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -873,7 +875,7 @@ Feature: Window processor runtime behavior
         tenant STRING,
         high_window_count I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
@@ -976,11 +978,11 @@ Feature: Window processor runtime behavior
         tenant STRING,
         sample_count I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_summary_wire (
+        CREATE WIRE JSON SCHEMA metric_summary_wire MODE STRICT (
         tenant string,
         sample_count integer
       );
@@ -1064,11 +1066,11 @@ Feature: Window processor runtime behavior
         tenant STRING,
         sample_count I64
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_wire (
+        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
-        CREATE STRICT WIRE JSON SCHEMA metric_summary_wire (
+        CREATE WIRE JSON SCHEMA metric_summary_wire MODE STRICT (
         tenant string,
         sample_count integer
       );

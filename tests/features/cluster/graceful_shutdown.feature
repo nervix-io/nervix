@@ -12,6 +12,7 @@ Feature: Graceful shutdown
   Scenario: Graceful shutdown drain timeout bounds full cluster termination
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "1ms"
+    And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -22,7 +23,7 @@ Feature: Graceful shutdown
         amount I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         transaction_id string,
         amount integer
       );

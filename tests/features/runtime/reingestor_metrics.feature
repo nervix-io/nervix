@@ -13,7 +13,7 @@ Feature: Reingestor metrics
         tenant STRING,
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         user_id integer
       );
@@ -79,6 +79,7 @@ Feature: Reingestor metrics
       """
       reingestor: reingestor_metrics_node
       """
+    And the last command output owner is saved as placeholder "reingestor_metrics_owner"
     And the last command output contains
       """
       from: notifications
@@ -93,30 +94,30 @@ Feature: Reingestor metrics
       """
     And the last command output contains
       """
-      messages_total received relay=notifications physical_node=node-1 total=2
+      messages_total received relay=notifications physical_node={{reingestor_metrics_owner}} total=2
       """
     And the last command output contains
       """
-      messages_total sent relay=tenant_notifications physical_node=node-1 total=2
+      messages_total sent relay=tenant_notifications physical_node={{reingestor_metrics_owner}} total=2
       """
-    And the last command output metric "messages_total" "received" relay "notifications" physical node "node-1" has values
-      """
-      total=2
-      """
-    And the last command output metric "messages_total" "sent" relay "tenant_notifications" physical node "node-1" has values
+    And the last command output metric "messages_total" "received" relay "notifications" physical node "{{reingestor_metrics_owner}}" has values
       """
       total=2
       """
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target_kind="REINGESTOR"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="reingestor_metrics_node"'
-    And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 2
+    And the last command output metric "messages_total" "sent" relay "tenant_notifications" physical node "{{reingestor_metrics_owner}}" has values
+      """
+      total=2
+      """
+    And node "{{reingestor_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target_kind="REINGESTOR"'
+    And node "{{reingestor_metrics_owner}}" observability path "/metrics" eventually responds with 200 and contains 'target="reingestor_metrics_node"'
+    And node "{{reingestor_metrics_owner}}" observability metric "nervix_messages_total" with labels eventually equals 2
       """
       target_kind="REINGESTOR"
       target="reingestor_metrics_node"
       direction="received"
       relay="notifications"
       """
-    And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 2
+    And node "{{reingestor_metrics_owner}}" observability metric "nervix_messages_total" with labels eventually equals 2
       """
       target_kind="REINGESTOR"
       target="reingestor_metrics_node"

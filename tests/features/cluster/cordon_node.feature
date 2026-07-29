@@ -2,7 +2,8 @@ Feature: Cordon node
 
   Scenario: A cordoned node is excluded from new scheduling decisions
     Given Kafka is running
-    Given a 3 node nervix cluster is started
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
     When these NSPL commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
@@ -20,7 +21,7 @@ Feature: Cordon node
         user_id I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
 
@@ -54,7 +55,8 @@ Feature: Cordon node
       """
 
   Scenario: An uncordoned node is visible as schedulable again
-    Given a 3 node nervix cluster is started
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
     When these NSPL commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;

@@ -14,7 +14,7 @@ Feature: Sentry emission
         level STRING,
         environment STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA error_event_wire (
+      CREATE WIRE JSON SCHEMA error_event_wire MODE STRICT (
         message string,
         level string,
         environment string

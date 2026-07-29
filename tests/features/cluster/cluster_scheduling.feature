@@ -17,6 +17,62 @@ Feature: Cluster scheduling
       | 1            |
       | 3            |
 
+  @random_scheduler
+  Scenario: The default three-node test scheduler executes a graph across node boundaries
+    Given a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( id I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA event_branch ( id I64 );
+      CREATE BRANCH by_event SCHEMA event_branch TTL 5m;
+      CREATE RELAY stage_0 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_1 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_2 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_3 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_4 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_5 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_6 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_7 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_8 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_9 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_10 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_11 SCHEMA event BRANCHED BY by_event;
+      CREATE RELAY stage_12 SCHEMA event BRANCHED BY by_event;
+      CREATE VHOST edge random-scheduler-{{test_id}}.example.com;
+      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR event_ingestor FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR hop_1 FROM stage_0 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_1 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_2 FROM stage_1 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_2 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_3 FROM stage_2 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_3 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_4 FROM stage_3 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_4 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_5 FROM stage_4 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_5 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_6 FROM stage_5 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_6 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_7 FROM stage_6 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_7 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_8 FROM stage_7 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_8 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_9 FROM stage_8 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_9 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_10 FROM stage_9 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_10 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_11 FROM stage_10 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_11 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR hop_12 FROM stage_11 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_12 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION final_stage TO stage_12;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status schedules nodes on at least 2 distinct owners
+    When http payload is posted to node "node-1" with host "random-scheduler-{{test_id}}.example.com" path "/events"
+      """
+      {"id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      "id":42
+      """
+
   Scenario: Followers reject non-subscription NSPL commands
     Given a 2 node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -62,7 +118,7 @@ Feature: Cluster scheduling
         user_id I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
 
@@ -129,7 +185,7 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -191,7 +247,7 @@ Feature: Cluster scheduling
         level STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         id integer,
         level string
       );
@@ -274,7 +330,8 @@ Feature: Cluster scheduling
 
   Scenario: Deduplicator executes on its scheduled owner separate from its upstream ingestor
     Given Kafka is running
-    Given a 3 node nervix cluster is started
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -295,7 +352,7 @@ Feature: Cluster scheduling
         level STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         id integer,
         level string
       );
@@ -426,7 +483,7 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -500,7 +557,7 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -545,7 +602,8 @@ Feature: Cluster scheduling
 
   Scenario: Attached ACK stays alive across explicitly placed remote nodes
     Given Kafka is running
-    Given a 3 node nervix cluster is started
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -564,7 +622,7 @@ Feature: Cluster scheduling
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -670,7 +728,8 @@ Feature: Cluster scheduling
 
   Scenario: Deduplicator schedule movement resumes processing on the new owner
     Given Kafka is running
-    Given a 3 node nervix cluster is started
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -691,7 +750,7 @@ Feature: Cluster scheduling
         level STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         id integer,
         level string
       );

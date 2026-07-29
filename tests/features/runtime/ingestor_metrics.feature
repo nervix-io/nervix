@@ -12,7 +12,7 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -158,7 +158,7 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -236,7 +236,7 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
           user_id integer
         );
         CREATE CODEC notification_codec
@@ -264,8 +264,9 @@ Feature: Ingestor metrics
         START;
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "immediate_source" as "status: running"
+    And the last command output owner is saved as placeholder "immediate_source_owner"
     When 100 JSON messages with user id 42 are rapidly published to "MQTT" input "immediate_notifications_{{test_id}}"
-    Then within "10s" node "node-1" eventually reports describe ingestor "immediate_source" as "messages_total sent relay=notifications physical_node=node-1 total=100"
+    Then within "10s" node "node-1" eventually reports describe ingestor "immediate_source" as "messages_total sent relay=notifications physical_node={{immediate_source_owner}} total=100"
     And the last command output metric "batches_total" "sent" relay "notifications" on any physical node has numeric values
       """
       total<100
@@ -288,7 +289,7 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -346,7 +347,8 @@ Feature: Ingestor metrics
 
   Scenario: DESCRIBE INGESTOR from a non-owner node reports owner metrics after restart
     Given Redis is running
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -357,7 +359,7 @@ Feature: Ingestor metrics
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -386,6 +388,7 @@ Feature: Ingestor metrics
         SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "ingestor" "remote_owner_metrics_source" is saved as placeholder "ingestor_owner"
+    And within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_source" as "owner: {{ingestor_owner}}"
     And Redis channel "remote_owner_notifications_{{test_id}}" eventually has 1 subscribers
     When 2 JSON messages with user id 42 are rapidly published to "REDIS" input "remote_owner_notifications_{{test_id}}"
     Then within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_source" as "messages_total sent relay=notifications physical_node={{ingestor_owner}} total=2"

@@ -10,7 +10,7 @@ Feature: Altering ingestors
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE CODEC event_codec_v2 FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
@@ -68,7 +68,7 @@ Feature: Altering ingestors
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-swap.example.com;

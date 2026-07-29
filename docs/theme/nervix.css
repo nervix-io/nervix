@@ -155,8 +155,7 @@ html.sidebar-visible #mdbook-menu-bar {
     height: 3.2rem;
     margin-inline-end: 1.1rem;
     vertical-align: -0.82rem;
-    /* The Nervix mark, doubling as mdBook's favicon override. */
-    background: url("favicon.svg") center / contain no-repeat;
+    background: url("nervix-mark.svg") center / contain no-repeat;
     filter: drop-shadow(0 0 14px rgba(23, 201, 239, 0.28));
     content: "";
 }

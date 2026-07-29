@@ -2,6 +2,7 @@ Feature: Drain node
 
   Scenario: Draining a primary promotes a live replica
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When these NSPL commands are executed through the client on node "node-1"
       """
@@ -12,7 +13,7 @@ Feature: Drain node
         amount I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         transaction_id string,
         amount integer
       );
@@ -71,7 +72,8 @@ Feature: Drain node
 
   Scenario: Draining a node cordons it and moves scheduled graph nodes away
     Given Kafka is running
-    Given a 3 node nervix cluster is started
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
     When these NSPL commands are executed through the client on node "node-1"
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -80,7 +82,7 @@ Feature: Drain node
         user_id I64
       );
 
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
 

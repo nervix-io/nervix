@@ -12,7 +12,7 @@ Feature: Entity-pause model alterations
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE SCHEMA routed_event ( tenant STRING, seq I64, route STRING );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( tenant string, seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
@@ -86,6 +86,7 @@ Feature: Entity-pause model alterations
   Scenario Outline: A timed-out entity drain leaves the old junction model active
     Given entity gate deadline is configured as "250ms"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -95,7 +96,7 @@ Feature: Entity-pause model alterations
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
-      CREATE STRICT WIRE JSON SCHEMA event_wire ( seq integer );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED CAPACITY 1;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED CAPACITY 1;
@@ -130,6 +131,10 @@ Feature: Entity-pause model alterations
     And http payload is posted to node "node-1" with host "http-{{test_id}}-entity-timeout.example.com" path "/events"
       """
       {"seq":3}
+      """
+    Then within "5s" DESCRIBE EMITTER "blocked_sink" on the leader node contains
+      """
+      transient error: fault injector stalled emitter publish
       """
     When these NSPL commands fail with "timed out draining domain"
       """

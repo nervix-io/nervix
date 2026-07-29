@@ -37,7 +37,7 @@ CREATE SCHEMA order_event (
   occurred_at DATETIME
 );
 
-CREATE STRICT WIRE JSON SCHEMA order_event_wire (
+CREATE WIRE JSON SCHEMA order_event_wire MODE STRICT (
   order_id string,
   amount integer,
   occurred_at string

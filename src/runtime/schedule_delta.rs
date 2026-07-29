@@ -37,12 +37,17 @@ impl ScheduleDelta {
             let level = aspects.quiesce_level();
             let emitter_schema_fingerprint_may_change =
                 desired_node.kind == ModelKind::Emitter && level == QuiesceLevel::EntityPause;
+            let model_derived_residue_may_change = matches!(
+                desired_node.kind,
+                ModelKind::Reingestor | ModelKind::Generator
+            ) && level == QuiesceLevel::EntityPause;
             let ingestor_schedule_residue_may_change =
                 desired_node.kind == ModelKind::Ingestor && level == QuiesceLevel::EntityPause;
             if !Self::same_schedule_residue(
                 existing_node,
                 desired_node,
                 emitter_schema_fingerprint_may_change,
+                model_derived_residue_may_change,
                 ingestor_schedule_residue_may_change,
             ) {
                 return Self::Rebuild;
@@ -90,6 +95,7 @@ impl ScheduleDelta {
         existing: &ScheduledNode,
         desired: &ScheduledNode,
         allow_schema_fingerprint_change: bool,
+        allow_model_derived_residue_change: bool,
         allow_ingestor_schedule_residue_change: bool,
     ) -> bool {
         let ScheduledNode {
@@ -122,9 +128,11 @@ impl ScheduleDelta {
             return true;
         }
 
-        existing_effective_branching == desired_effective_branching
-            && existing_effective_branching_schema == desired_effective_branching_schema
+        (allow_model_derived_residue_change
+            || (existing_effective_branching == desired_effective_branching
+                && existing_effective_branching_schema == desired_effective_branching_schema))
             && (allow_schema_fingerprint_change
+                || allow_model_derived_residue_change
                 || existing_schema_fingerprint == desired_schema_fingerprint)
             && existing_kafka_partition_schedule == desired_kafka_partition_schedule
             && existing_primary_node == desired_primary_node
@@ -280,15 +288,15 @@ mod tests {
                 assigned_nodes: vec!["node-1".to_string()],
             }],
         };
-        let mut dynamic_config = junction.clone();
+        let mut dynamic_config = junction;
         dynamic_config.filter_where = Some(Expression::Literal(Literal::Bool(true)));
         let mut desired = existing.clone();
-        desired.nodes[0].config = Box::new(Model::Junction(dynamic_config.clone()));
+        desired.nodes[0].config = Box::new(Model::Junction(dynamic_config));
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
-            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Junction {
-                junction: identifier("route_events"),
-                config: dynamic_config,
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Processor {
+                kind: ModelKind::Junction,
+                processor: identifier("route_events"),
             }])
         );
 

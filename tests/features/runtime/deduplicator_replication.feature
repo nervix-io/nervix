@@ -2,6 +2,7 @@ Feature: Deduplicator state replication
   Scenario Outline: Deduplicator suppression survives a cluster restart from persisted snapshots
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -15,7 +16,7 @@ Feature: Deduplicator state replication
         transaction_id STRING,
         amount I64
       );
-        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         transaction_id string,
         amount integer
       );

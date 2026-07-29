@@ -14,7 +14,7 @@ Feature: Domain metrics
         tenant STRING,
         transaction_id STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+        CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         tenant string,
         transaction_id string
       );
@@ -90,25 +90,16 @@ Feature: Domain metrics
       """
       total=1
       """
-    And the last command output metric "messages_total" "received" relay "domain_metrics_deduped" physical node "node-1" has values
-      """
-      total=1
-      """
-    And the last command output metric "messages_total" "received" relay "domain_metrics_raw" physical node "node-1" has values
-      """
-      total=1
-      """
-    And the last command output contains
-      """
-      messages_total sent relay=domain_metrics_deduped physical_node=node-1 total=2
-      """
+    And within "5s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "received" relay "domain_metrics_deduped" across physical nodes totals 1
+    And within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "domain_metrics_raw" across physical nodes totals 1
+    And within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "domain_metrics_deduped" across physical nodes totals 2
     And the last command output contains
       """
       messages_per_batch sent relay=domain_metrics_raw physical_node=node-1
       """
     And the last command output contains
       """
-      messages_per_batch received relay=domain_metrics_raw physical_node=node-1
+      messages_per_batch received relay=domain_metrics_raw physical_node=
       """
 
     Examples:

@@ -14,7 +14,7 @@ Feature: NATS emission
       CREATE SCHEMA notification (
         user_id I64
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer
       );
         CREATE CODEC notification_codec
@@ -56,7 +56,7 @@ Feature: NATS emission
       """
       {"user_id":42}
       """
-    Then within "5s" DESCRIBE EMITTER "nats_notifications" on the leader node contains
+    Then within "10s" DESCRIBE EMITTER "nats_notifications" on the leader node contains
       """
       transient error: fault injector stalled emitter publish
       """

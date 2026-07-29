@@ -201,7 +201,7 @@ impl Runtime {
         domain: &Domain,
         codec: &CreateCodec,
         schema: Arc<CompiledSchema>,
-        wire_schema: Option<&CreateWireSchemaStmt>,
+        wire_schema: Option<&WireSchemaDefinition>,
     ) -> Result<Arc<CompiledCodec>, RuntimeError> {
         let protobuf_descriptor = if let CodecWireFormat::Protobuf(config) = &codec.wire_format {
             Some(
@@ -336,6 +336,7 @@ impl Runtime {
             message_error_routes: Arc::new(DashMap::default()),
             compiled_domain_udfs: Arc::new(DashMap::default()),
             schedule_apply_lock: Arc::new(Mutex::new(())),
+            applied_cluster_revision: Arc::new(AtomicU64::new(u64::MAX)),
             domain_instantiation_errors: Arc::new(DashMap::default()),
             domains: Arc::new(DashMap::default()),
             domain_status_changed,
@@ -412,20 +413,34 @@ impl Runtime {
         let Some(execution) = self.executions.get(domain) else {
             return Vec::new();
         };
+        Self::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
+    }
+
+    fn entity_pause_relays_for_schedule(
+        schedule: &DomainSchedule,
+        affected_entities: &[RegistryEntity],
+    ) -> Vec<Identifier> {
+        let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let mut relays = affected_entities
             .iter()
             .flat_map(|entity| {
                 if entity.kind == ModelKind::Relay {
                     return vec![entity.identifier.clone()];
                 }
-                execution
-                    .schedule
+                if let Some(processor) = processor_specs.processor(entity.kind, &entity.identifier)
+                {
+                    return processor.spec.input_relays.clone();
+                }
+                schedule
                     .nodes
                     .iter()
                     .find(|node| node.kind == entity.kind && node.identifier == entity.identifier)
                     .and_then(|node| match node.config.as_ref() {
-                        Model::Junction(junction) => Some(junction.from.relays().to_vec()),
                         Model::Emitter(emitter) => Some(vec![emitter.from_relay.clone()]),
+                        Model::Reingestor(reingestor) => Some(reingestor.from.from.clone()),
+                        Model::Generator(generator) => {
+                            Some(vec![generator.materialized_relay.clone()])
+                        }
                         _ => None,
                     })
                     .unwrap_or_default()
@@ -637,6 +652,43 @@ impl Runtime {
                     reason: format!(
                         "failed to purge materialized state for relay '{}': {error}",
                         relay.as_str()
+                    ),
+                })?;
+        }
+        Ok(())
+    }
+
+    fn purge_deduplicator_state(
+        &self,
+        domain: &Domain,
+        deduplicator: &Identifier,
+    ) -> Result<(), RuntimeError> {
+        let placements = self
+            .replicated_deduplicator_states
+            .iter()
+            .filter(|entry| {
+                entry.key().domain == *domain
+                    && entry.key().kind == ModelKind::Deduplicator
+                    && entry.key().identifier == *deduplicator
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for placement in placements {
+            self.replicated_deduplicator_states.remove(&placement);
+        }
+        if let Some(store) = &self.state_store {
+            store
+                .purge_entity(
+                    domain,
+                    RuntimeStateKind::Deduplicator,
+                    ModelKind::Deduplicator,
+                    deduplicator,
+                )
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "failed to purge state for deduplicator '{}': {error}",
+                        deduplicator.as_str()
                     ),
                 })?;
         }
@@ -1114,9 +1166,7 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         after_lsm: u64,
     ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
-        if let RuntimeStateKind::MaterializedRelay = placement.state
-            && placement.branch_key.is_none()
-        {
+        if let RuntimeStateKind::MaterializedRelay = placement.state {
             let mut entries = Vec::new();
             let mut latest_lsm = 0;
             let mut found = false;
@@ -1127,6 +1177,7 @@ impl Runtime {
                     || concrete.state != placement.state
                     || concrete.kind != placement.kind
                     || concrete.identifier != placement.identifier
+                    || concrete.schema_fingerprint != placement.schema_fingerprint
                 {
                     continue;
                 }
@@ -1136,7 +1187,14 @@ impl Runtime {
                     metrics_snapshot = state.metrics_snapshot(&self.metrics);
                 }
                 entries.extend(
-                    self.visible_materialized_stream_remote_entries(concrete, state.value()),
+                    self.visible_materialized_stream_remote_entries(concrete, state.value())
+                        .into_iter()
+                        .filter(|(key, _)| {
+                            placement
+                                .branch_key
+                                .as_ref()
+                                .is_none_or(|requested| key.as_ref() == Some(requested))
+                        }),
                 );
             }
             if found {
@@ -1245,6 +1303,22 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         after_lsm: u64,
     ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
+        self.request_state_sync_with_timeout(
+            target_node_id,
+            placement,
+            after_lsm,
+            Duration::from_secs(5),
+        )
+        .await
+    }
+
+    async fn request_state_sync_with_timeout(
+        &self,
+        target_node_id: &str,
+        placement: &RuntimeStatePlacement,
+        after_lsm: u64,
+        response_timeout: Duration,
+    ) -> Result<Option<PersistedRuntimeStateEntry>, String> {
         let Some(dispatcher) = self.remote_dispatcher.read().clone() else {
             return Err("remote dispatcher unavailable".to_string());
         };
@@ -1269,10 +1343,17 @@ impl Runtime {
             self.pending_state_syncs.remove(&correlation_id);
             return Err(error);
         }
-        tokio::time::timeout(Duration::from_secs(5), rx)
-            .await
-            .map_err(|_| "timed out waiting for state sync response".to_string())?
-            .map_err(|_| "state sync response channel closed".to_string())?
+        match tokio::time::timeout(response_timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.pending_state_syncs.remove(&correlation_id);
+                Err("state sync response channel closed".to_string())
+            }
+            Err(_) => {
+                self.pending_state_syncs.remove(&correlation_id);
+                Err("timed out waiting for state sync response".to_string())
+            }
+        }
     }
 
     pub(in crate::runtime) async fn wait_for_replica_quorum(
@@ -1800,6 +1881,59 @@ impl Runtime {
         }))
     }
 
+    pub(in crate::runtime) fn spawn_materialized_stream_snapshot_task(
+        &self,
+        shutdown_tx: &watch::Sender<bool>,
+        state: Arc<ReplicatedMaterializedRelayState>,
+    ) -> Option<JoinHandle<()>> {
+        let store = self.state_store.as_ref()?.clone();
+        let metrics = self.metrics.clone();
+        let snapshot_interval = self.state_snapshot_interval;
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            let flush_latest_snapshot =
+                |state: &ReplicatedMaterializedRelayState,
+                 metrics: &RuntimeMetrics,
+                 store: &RuntimeStateStore| {
+                    if !state.dirty.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    let snapshot = state.latest_snapshot(metrics)?;
+                    if snapshot.lsm <= state.last_persisted_lsm.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    store.persist_latest_snapshot(
+                        &state.placement,
+                        snapshot.lsm,
+                        &snapshot.payload,
+                    )?;
+                    state
+                        .last_persisted_lsm
+                        .store(snapshot.lsm, Ordering::SeqCst);
+                    state.dirty.store(false, Ordering::SeqCst);
+                    Ok::<(), RuntimePersistenceError>(())
+                };
+            loop {
+                tokio::task::consume_budget().await;
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            if let Err(error) = flush_latest_snapshot(&state, &metrics, &store) {
+                                warn!(error = %error, "failed to flush materialized relay snapshot during shutdown");
+                            }
+                            break;
+                        }
+                    }
+                    _ = sleep(snapshot_interval) => {
+                        if let Err(error) = flush_latest_snapshot(&state, &metrics, &store) {
+                            warn!(error = %error, "failed to persist materialized relay snapshot");
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
     pub(in crate::runtime) fn spawn_branch_aggregated_snapshot_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
@@ -1880,7 +2014,12 @@ impl Runtime {
                 }
                 let after_lsm = state.current_lsm.load(Ordering::SeqCst);
                 match runtime
-                    .request_state_sync(&primary_node, &state.placement, after_lsm)
+                    .request_state_sync_with_timeout(
+                        &primary_node,
+                        &state.placement,
+                        after_lsm,
+                        poll_interval,
+                    )
                     .await
                 {
                     Ok(Some(snapshot)) => {
@@ -1921,6 +2060,82 @@ impl Runtime {
         }))
     }
 
+    pub(in crate::runtime) fn spawn_materialized_stream_replica_poll_task(
+        &self,
+        shutdown_tx: &watch::Sender<bool>,
+        state: Arc<ReplicatedMaterializedRelayState>,
+    ) -> Option<JoinHandle<()>> {
+        let primary_node = state.primary_node.clone()?;
+        let poll_interval = self.state_replication_poll_interval;
+        let runtime = self.clone();
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            let mut initial_sync_pending = true;
+            loop {
+                tokio::task::consume_budget().await;
+                if initial_sync_pending {
+                    initial_sync_pending = false;
+                } else {
+                    tokio::select! {
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                        _ = sleep(poll_interval) => {}
+                    }
+                }
+                let after_lsm = state.current_lsm.load(Ordering::SeqCst);
+                match runtime
+                    .request_state_sync_with_timeout(
+                        &primary_node,
+                        &state.placement,
+                        after_lsm,
+                        poll_interval,
+                    )
+                    .await
+                {
+                    Ok(Some(snapshot)) => {
+                        if let Err(error) =
+                            state.apply_snapshot(&runtime.metrics, snapshot.lsm, &snapshot.payload)
+                        {
+                            warn!(error = %error, "failed to apply replicated materialized relay snapshot");
+                            continue;
+                        }
+                        runtime.materialized_state_changed.notify_waiters();
+                        let dispatcher = runtime.remote_dispatcher.read().clone();
+                        if let Some(dispatcher) = dispatcher {
+                            let local_node_id = runtime.local_node_id.read().clone();
+                            let Some(local_node_id) = local_node_id else {
+                                continue;
+                            };
+                            if let Err(error) = dispatcher
+                                .dispatch(
+                                    &primary_node,
+                                    Envelope::Control(
+                                        nervix_interconnect::ControlEnvelope::StateReplicationAck(
+                                            nervix_interconnect::StateReplicationAck {
+                                                placement: state.placement.to_remote(),
+                                                lsm: snapshot.lsm,
+                                            },
+                                        ),
+                                    ),
+                                )
+                                .await
+                            {
+                                warn!(node_id = local_node_id, error = %error, "failed to acknowledge replicated materialized relay snapshot");
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(error = %error, "failed to sync replicated materialized relay state");
+                    }
+                }
+            }
+        }))
+    }
+
     pub(in crate::runtime) fn spawn_branch_aggregated_replica_poll_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
@@ -1948,7 +2163,12 @@ impl Runtime {
                 }
                 let after_lsm = state.current_lsm.load(Ordering::SeqCst);
                 match runtime
-                    .request_state_sync(&primary_node, &state.placement, after_lsm)
+                    .request_state_sync_with_timeout(
+                        &primary_node,
+                        &state.placement,
+                        after_lsm,
+                        poll_interval,
+                    )
                     .await
                 {
                     Ok(Some(snapshot)) => {
@@ -2351,6 +2571,12 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         };
+        if execution.passive_only {
+            return Err(RuntimeError::RelayNotInstantiated {
+                domain: domain.as_str().to_string(),
+                relay: relay.as_str().to_string(),
+            });
+        }
         let Some(registry) = execution.relay_registries.get(relay).cloned() else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
@@ -4186,6 +4412,37 @@ impl Runtime {
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
         let _lock = self.schedule_apply_lock.lock().await;
+        self.apply_cluster_schedule_locked(local_node_id, schedule, true)
+            .await
+    }
+
+    pub async fn apply_cluster_state(
+        &self,
+        local_node_id: &str,
+        revision: u64,
+        domains: &BTreeMap<Domain, DomainState>,
+        schedule: &ClusterSchedule,
+    ) -> Result<(), RuntimeError> {
+        let _lock = self.schedule_apply_lock.lock().await;
+        let applied_revision = self.applied_cluster_revision.load(Ordering::Acquire);
+        if applied_revision != u64::MAX && revision <= applied_revision {
+            return Ok(());
+        }
+
+        self.sync_domains(domains);
+        self.apply_cluster_schedule_locked(local_node_id, schedule, false)
+            .await?;
+        self.applied_cluster_revision
+            .store(revision, Ordering::Release);
+        Ok(())
+    }
+
+    async fn apply_cluster_schedule_locked(
+        &self,
+        local_node_id: &str,
+        schedule: &ClusterSchedule,
+        start_ingestors: bool,
+    ) -> Result<(), RuntimeError> {
         let scheduled_domains = schedule
             .domains
             .iter()
@@ -4209,10 +4466,16 @@ impl Runtime {
                 .map(|entry| (entry.key().clone(), entry.value().passive_only))
                 .collect::<HashMap<_, _>>()
         };
+        let existing_start_versions = {
+            self.executions
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().start_version))
+                .collect::<HashMap<_, _>>()
+        };
 
         for domain in existing_domains.difference(&scheduled_domains) {
             match self
-                .rebuild_domain_from_schedule(local_node_id, domain, None)
+                .rebuild_domain_from_schedule(local_node_id, domain, None, start_ingestors)
                 .await
             {
                 Ok(()) => {
@@ -4227,22 +4490,25 @@ impl Runtime {
         }
 
         for domain in &schedule.domains {
-            if self
-                .domains
-                .get(&domain.domain)
-                .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Paused))
-            {
+            let Some(domain_state) = self.domains.get(&domain.domain) else {
+                continue;
+            };
+            let domain_status = domain_state.status.clone();
+            let desired_start_version = domain_state.start_version;
+            drop(domain_state);
+
+            if let nervix_models::DomainStatus::Paused = domain_status {
                 self.stop_domain_ingestors(&domain.domain).await;
             }
-            let desired_passive_only = self
-                .domains
-                .get(&domain.domain)
-                .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
+            let desired_passive_only =
+                matches!(domain_status, nervix_models::DomainStatus::Stopped);
             if existing_schedules.get(&domain.domain) != Some(domain)
                 || existing_passive_only.get(&domain.domain) != Some(&desired_passive_only)
+                || existing_start_versions.get(&domain.domain) != Some(&desired_start_version)
             {
                 if !desired_passive_only
                     && existing_passive_only.get(&domain.domain) == Some(&desired_passive_only)
+                    && existing_start_versions.get(&domain.domain) == Some(&desired_start_version)
                     && let Some(existing_schedule) = existing_schedules.get(&domain.domain)
                 {
                     match ScheduleDelta::classify(existing_schedule, domain) {
@@ -4278,6 +4544,7 @@ impl Runtime {
                                     local_node_id,
                                     &domain.domain,
                                     Some(domain.clone()),
+                                    start_ingestors,
                                 )
                                 .await?;
                             }
@@ -4291,6 +4558,7 @@ impl Runtime {
                         local_node_id,
                         &domain.domain,
                         Some(domain.clone()),
+                        start_ingestors,
                     )
                     .await
                 {
@@ -4305,31 +4573,33 @@ impl Runtime {
                 }
             }
 
-            if self
-                .domains
-                .get(&domain.domain)
-                .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Running))
-            {
+            if let nervix_models::DomainStatus::Running = domain_status {
                 self.purge_stale_runtime_state(&domain.domain)
                     .map_err(|error| RuntimeError::BuildDomainExecution {
                         domain: domain.domain.as_str().to_string(),
                         reason: error.to_string(),
                     })?;
-                self.start_missing_domain_ingestors(&domain.domain).await?;
+                if start_ingestors {
+                    self.start_missing_domain_ingestors(&domain.domain).await?;
+                }
             }
         }
 
         Ok(())
     }
 
-    async fn swap_scheduled_nodes(
+    pub(super) async fn swap_scheduled_nodes(
         &self,
         domain: &Domain,
         schedule: DomainSchedule,
         entities: &[RegistryEntity],
         dynamic_updates: &[nervix_models::DynamicModelUpdate],
     ) -> Result<(), RuntimeError> {
-        let relays = self.entity_pause_relays(domain, entities);
+        let desired_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
+        let mut relays = self.entity_pause_relays(domain, entities);
+        relays.extend(Self::entity_pause_relays_for_schedule(&schedule, entities));
+        relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        relays.dedup();
         let local_gate_hold = self.engage_entity_gates(
             domain,
             &relays,
@@ -4345,7 +4615,6 @@ impl Runtime {
             },
         )?);
         let graph_handle = self.domain_graph_handle(domain).await;
-        let desired_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
         let desired_model_index = schedule
             .nodes
             .iter()
@@ -4623,15 +4892,349 @@ impl Runtime {
                 }
                 continue;
             }
-            if entity.kind != ModelKind::Junction {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "entity swap for {} '{}' is not implemented",
-                        entity.kind.as_str(),
-                        entity.identifier.as_str()
-                    ),
-                });
+            if entity.kind == ModelKind::Reingestor {
+                let desired_node = schedule
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.kind == ModelKind::Reingestor && node.identifier == entity.identifier
+                    })
+                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing desired reingestor '{}'",
+                            entity.identifier.as_str()
+                        ),
+                    })?;
+                let Model::Reingestor(desired_reingestor) = desired_node.config.as_ref() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "desired reingestor '{}' has the wrong model kind",
+                            entity.identifier.as_str()
+                        ),
+                    });
+                };
+                let desired_reingestor = desired_reingestor.clone();
+                let (old_tasks, old_entrypoints, shutdown) = {
+                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution is unavailable for reingestor swap"
+                                .to_string(),
+                        }
+                    })?;
+                    let old_reingestor = execution
+                        .schedule
+                        .nodes
+                        .iter()
+                        .find(|node| {
+                            node.kind == ModelKind::Reingestor
+                                && node.identifier == entity.identifier
+                        })
+                        .and_then(|node| {
+                            if let Model::Reingestor(reingestor) = node.config.as_ref() {
+                                Some(reingestor.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing existing reingestor '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                    let old_tasks = execution
+                        .reingestor_tasks
+                        .remove(entity)
+                        .unwrap_or_default();
+                    if !old_tasks.is_empty() {
+                        for relay in old_reingestor.from.relays() {
+                            if let Some(services) = execution.relay_services.get(relay) {
+                                services.remove_local_runtime_consumer(old_reingestor.mode);
+                            }
+                        }
+                    }
+                    let old_entrypoints = execution
+                        .branched_entrypoints
+                        .remove(&entity.identifier)
+                        .unwrap_or_default();
+                    execution.branched_ingestors.remove(&entity.identifier);
+                    (old_tasks, old_entrypoints, execution.shutdown.clone())
+                };
+                for task in old_tasks {
+                    tokio::task::consume_budget().await;
+                    task.abort();
+                    let _ = task.await;
+                }
+                for runtime in old_entrypoints {
+                    tokio::task::consume_budget().await;
+                    runtime.shutdown().await;
+                }
+
+                graph_handle.store(Some(desired_graph.clone()));
+                if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
+                    let desired_entrypoint_specs = desired_specs
+                        .entrypoints
+                        .iter()
+                        .filter(|spec| {
+                            spec.kind == ModelKind::Reingestor
+                                && spec.identifier == entity.identifier
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let templates = {
+                        let execution = self.executions.get(domain).ok_or_else(|| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "domain execution disappeared during reingestor swap"
+                                    .to_string(),
+                            }
+                        })?;
+                        desired_entrypoint_specs
+                            .iter()
+                            .map(|spec| {
+                                materialize_ingestor_route_template(
+                                    spec,
+                                    &desired_model_index,
+                                    &execution.relay_registries,
+                                    &execution.relay_services,
+                                )
+                                .map(|template| (spec.clone(), template))
+                                .map_err(|reason| {
+                                    RuntimeError::BuildDomainExecution {
+                                        domain: domain.as_str().to_string(),
+                                        reason,
+                                    }
+                                })
+                            })
+                            .collect::<Result<Vec<_>, RuntimeError>>()?
+                    };
+                    let mut entrypoints = Vec::with_capacity(templates.len());
+                    let mut entrypoint_senders = HashMap::default();
+                    for (spec, template) in templates {
+                        tokio::task::consume_budget().await;
+                        let Some(runtime) = self.start_branched_entrypoint_runtime(
+                            domain,
+                            &entity.identifier,
+                            Some((graph_handle.clone(), template)),
+                        ) else {
+                            continue;
+                        };
+                        entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
+                        entrypoints.push(runtime);
+                    }
+
+                    let receivers = {
+                        let execution = self.executions.get(domain).ok_or_else(|| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "domain execution disappeared before reingestor spawn"
+                                    .to_string(),
+                            }
+                        })?;
+                        desired_reingestor
+                            .from
+                            .relays()
+                            .iter()
+                            .map(|relay| {
+                                execution
+                                    .relay_services
+                                    .get(relay)
+                                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                        domain: domain.as_str().to_string(),
+                                        reason: format!(
+                                            "missing reingestor input relay services '{}'",
+                                            relay.as_str()
+                                        ),
+                                    })
+                                    .map(|services| {
+                                        (
+                                            relay.clone(),
+                                            services.add_local_runtime_consumer(
+                                                desired_reingestor.mode,
+                                            ),
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, RuntimeError>>()?
+                    };
+                    let mut tasks = Vec::with_capacity(receivers.len());
+                    for (from_relay, receiver) in receivers {
+                        tokio::task::consume_budget().await;
+                        tasks.push(self.spawn_reingestor_task(
+                            domain,
+                            &shutdown,
+                            &entrypoint_senders,
+                            desired_reingestor.clone(),
+                            from_relay,
+                            receiver,
+                        )?);
+                    }
+                    let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                        RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution disappeared after reingestor spawn"
+                                .to_string(),
+                        }
+                    })?;
+                    execution
+                        .branched_ingestors
+                        .insert(entity.identifier.clone(), desired_entrypoint_specs);
+                    execution
+                        .branched_entrypoints
+                        .insert(entity.identifier.clone(), entrypoints);
+                    execution.reingestor_tasks.insert(entity.clone(), tasks);
+                }
+                continue;
+            }
+            if entity.kind == ModelKind::Generator {
+                let desired_node = schedule
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.kind == ModelKind::Generator && node.identifier == entity.identifier
+                    })
+                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "missing desired generator '{}'",
+                            entity.identifier.as_str()
+                        ),
+                    })?;
+                let Model::Generator(desired_generator) = desired_node.config.as_ref() else {
+                    return Err(RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!(
+                            "desired generator '{}' has the wrong model kind",
+                            entity.identifier.as_str()
+                        ),
+                    });
+                };
+                let desired_generator = desired_generator.clone();
+                let old_task = self
+                    .executions
+                    .get_mut(domain)
+                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: "domain execution is unavailable for generator swap".to_string(),
+                    })?
+                    .generator_tasks
+                    .remove(entity);
+                if let Some(task) = old_task {
+                    task.abort();
+                    let _ = task.await;
+                }
+
+                graph_handle.store(Some(desired_graph.clone()));
+                if Self::scheduled_node_executes_locally(desired_node, local_node_id.as_deref()) {
+                    let (shutdown, spec) = {
+                        let execution = self.executions.get(domain).ok_or_else(|| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "domain execution disappeared during generator swap"
+                                    .to_string(),
+                            }
+                        })?;
+                        let source_schema = execution
+                            .relay_schemas
+                            .get(&desired_generator.materialized_relay)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing generator source relay schema '{}'",
+                                    desired_generator.materialized_relay.as_str()
+                                ),
+                            })?;
+                        let source_branch_schema = execution
+                            .relay_branching_schemas
+                            .get(&desired_generator.materialized_relay)
+                            .cloned()
+                            .flatten();
+                        let source_branching = execution
+                            .relay_branchings
+                            .get(&desired_generator.materialized_relay)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut routes =
+                            Vec::with_capacity(desired_generator.output_routes.routes.len());
+                        for output in desired_generator.output_routes.outputs() {
+                            let output_schema = execution
+                                .relay_schemas
+                                .get(&output.relay)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: format!(
+                                        "missing generator output relay schema '{}'",
+                                        output.relay.as_str()
+                                    ),
+                                })?;
+                            let output_registry = execution
+                                .relay_registries
+                                .get(&output.relay)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: format!(
+                                        "missing generator output relay '{}'",
+                                        output.relay.as_str()
+                                    ),
+                                })?;
+                            let output_services = execution
+                                .relay_services
+                                .get(&output.relay)
+                                .cloned()
+                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: format!(
+                                        "missing generator output relay services '{}'",
+                                        output.relay.as_str()
+                                    ),
+                                })?;
+                            let program = compile_generator_set_program(
+                                domain,
+                                &desired_generator,
+                                output,
+                                output_schema.arrow_schema(),
+                                output_schema.vm_sensitivity(),
+                                source_schema.arrow_schema(),
+                                source_branch_schema.clone(),
+                                Some(&execution.udfs),
+                            )?;
+                            routes.push(GeneratorTaskRouteSpec {
+                                output: output.clone(),
+                                program,
+                                output_schema,
+                                output_registry,
+                                output_services,
+                            });
+                        }
+                        (
+                            execution.shutdown.clone(),
+                            GeneratorTaskSpec {
+                                source_relay: desired_generator.materialized_relay.clone(),
+                                generator: desired_generator.clone(),
+                                source_branching,
+                                routes,
+                            },
+                        )
+                    };
+                    let task = self.spawn_generator_task(domain, &shutdown, spec)?;
+                    self.executions
+                        .get_mut(domain)
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: "domain execution disappeared after generator spawn"
+                                .to_string(),
+                        })?
+                        .generator_tasks
+                        .insert(entity.clone(), task);
+                }
+                continue;
             }
             let desired_node = schedule
                 .nodes
@@ -4646,35 +5249,38 @@ impl Runtime {
                     ),
                 })?;
             let desired_spec = desired_specs
-                .processors
-                .iter()
-                .find(|node| {
-                    node.spec.kind == entity.kind && node.spec.processor == entity.identifier
-                })
+                .processor(entity.kind, &entity.identifier)
                 .cloned()
                 .ok_or_else(|| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!(
-                        "missing desired processor spec for '{}'",
+                        "entity swap for {} '{}' has no scheduled processor spec",
+                        entity.kind.as_str(),
                         entity.identifier.as_str()
                     ),
                 })?;
+            if !desired_spec.spec.operation.supports_entity_handoff() {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "{} '{}' cannot hand off node-local processor state",
+                        entity.kind.as_str(),
+                        entity.identifier.as_str()
+                    ),
+                });
+            }
 
-            let (old_spec, old_task, mut template) = {
-                let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+            let old_spec = {
+                let execution = self.executions.get(domain).ok_or_else(|| {
                     RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: "domain execution is unavailable for entity swap".to_string(),
                     }
                 })?;
-                let old_specs =
-                    branched_ingestor_specs_from_scheduled_nodes(&execution.schedule.nodes);
+                let old_specs = branched_node_specs_from_scheduled_nodes(&execution.schedule.nodes);
                 let old_spec = old_specs
-                    .processors
-                    .into_iter()
-                    .find(|node| {
-                        node.spec.kind == entity.kind && node.spec.processor == entity.identifier
-                    })
+                    .processor(entity.kind, &entity.identifier)
+                    .cloned()
                     .ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
@@ -4682,6 +5288,33 @@ impl Runtime {
                             entity.identifier.as_str()
                         ),
                     })?;
+                old_spec
+            };
+            let deduplicator_keyspace_changed =
+                match (&old_spec.spec.operation, &desired_spec.spec.operation) {
+                    (
+                        BranchedProcessorOperationSpec::Deduplicator {
+                            deduplicate_on: old,
+                            ..
+                        },
+                        BranchedProcessorOperationSpec::Deduplicator {
+                            deduplicate_on: desired,
+                            ..
+                        },
+                    ) => old != desired,
+                    _ => false,
+                };
+            if deduplicator_keyspace_changed {
+                self.purge_deduplicator_state(domain, &entity.identifier)?;
+            }
+
+            let (old_task, mut template) = {
+                let mut execution = self.executions.get_mut(domain).ok_or_else(|| {
+                    RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: "domain execution is unavailable for entity swap".to_string(),
+                    }
+                })?;
                 let template = materialize_processor_instance_template(
                     &desired_spec,
                     &desired_model_index,
@@ -4695,7 +5328,7 @@ impl Runtime {
                     reason,
                 })?;
                 let old_task = execution.node_tasks.remove(entity);
-                (old_spec, old_task, template)
+                (old_task, template)
             };
 
             template
@@ -4791,7 +5424,7 @@ impl Runtime {
         local_node_id: &str,
     ) -> HashMap<Identifier, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<Identifier, Vec<RemoteRuntimeConsumer>>::new();
-        let processor_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
+        let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         for spec in processor_specs.processors {
             let Some(node) = schedule
                 .nodes
@@ -4888,7 +5521,7 @@ impl Runtime {
                     };
                     self.set_relay_capacity(domain, relay, capacity);
                 }
-                nervix_models::DynamicModelUpdate::Junction { .. } => {}
+                nervix_models::DynamicModelUpdate::Processor { .. } => {}
                 nervix_models::DynamicModelUpdate::Emitter { emitter, config } => {
                     let commands = self.executions.get(domain).and_then(|execution| {
                         execution
@@ -4987,12 +5620,22 @@ impl Runtime {
         local_node_id: &str,
         domain: &Domain,
         schedule: Option<DomainSchedule>,
+        start_ingestors: bool,
     ) -> Result<(), RuntimeError> {
         self.stop_domain_ingestors(domain).await;
 
-        if let Some((_, existing)) = self.executions.remove(domain) {
+        let desired_start_version = self
+            .domains
+            .get(domain)
+            .map_or(0, |state| state.start_version);
+        let reset_for_start = if let Some((_, existing)) = self.executions.remove(domain) {
+            let reset_for_start =
+                existing.passive_only || existing.start_version != desired_start_version;
             self.stop_domain_execution(domain, existing).await;
-        }
+            reset_for_start
+        } else {
+            false
+        };
 
         let Some(schedule) = schedule else {
             self.compiled_domain_udfs.remove(domain);
@@ -5016,6 +5659,9 @@ impl Runtime {
             self.clear_domain_graph_handle(domain).await;
             return Ok(());
         }
+        if reset_for_start {
+            self.purge_stopped_domain_runtime_state(domain)?;
+        }
 
         let domain_graph = self.domain_graph_handle(domain).await;
         domain_graph.store(None);
@@ -5026,6 +5672,8 @@ impl Runtime {
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
+        let mut materialized_stream_branch_ttls = HashMap::new();
+        let mut materialized_stream_branch_capacities = HashMap::new();
         let mut schemas = HashMap::new();
         let mut wire_schemas = HashMap::new();
         let mut codecs = HashMap::new();
@@ -5036,18 +5684,49 @@ impl Runtime {
         let mut endpoint_routes = HashMap::new();
         let mut generator_specs = Vec::new();
         let mut lookup_specs = Vec::new();
+        let mut materializer_specs = Vec::new();
         let mut emitter_specs = Vec::new();
         let mut reingestor_specs = Vec::new();
         let mut ingestor_specs = Vec::new();
         let mut tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
+        let mut generator_tasks = HashMap::new();
+        let mut reingestor_tasks = HashMap::new();
         let remote_dispatcher = self.remote_dispatcher.read().clone();
         let model_index = schedule
             .nodes
             .iter()
             .map(|node| ((node.kind, node.identifier.clone()), (*node.config).clone()))
             .collect::<HashMap<_, _>>();
+        for node in &schedule.nodes {
+            match node.config.as_ref() {
+                Model::Ingestor(ingestor) => {
+                    if let Err(error) = Self::validate_ingestor_start_settings(domain, ingestor) {
+                        self.record_ingestor_transient_error(
+                            domain,
+                            &ingestor.name,
+                            error.to_string(),
+                        );
+                        return Err(error);
+                    }
+                }
+                Model::WasmProcessor(processor) => {
+                    self.compile_wasm_processor_module(
+                        &processor.name,
+                        &processor.resource,
+                        processor.resource_version,
+                        &processor.file,
+                    )
+                    .await
+                    .map_err(|reason| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason,
+                    })?;
+                }
+                _ => {}
+            }
+        }
         let udf_executor = self
             .compile_domain_udfs(
                 domain,
@@ -5067,7 +5746,7 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: format!("failed to compile domain UDFs: {error}"),
             })?;
-        let all_branched_specs = branched_ingestor_specs_from_scheduled_nodes(&schedule.nodes);
+        let all_branched_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
         let branched_specs = all_branched_specs
             .entrypoints
@@ -5087,8 +5766,23 @@ impl Runtime {
                 Model::Schema(schema) => {
                     schemas.insert(node.identifier.clone(), Arc::new(compile_schema(schema)));
                 }
-                Model::WireSchema(wire_schema) => {
-                    wire_schemas.insert(node.identifier.clone(), wire_schema.clone());
+                Model::WireJsonSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Json(wire_schema.clone()),
+                    );
+                }
+                Model::WireCborSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Cbor(wire_schema.clone()),
+                    );
+                }
+                Model::WireAvroSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Avro(wire_schema.clone()),
+                    );
                 }
                 Model::ClientKafka(_)
                 | Model::ClientPulsar(_)
@@ -5176,15 +5870,22 @@ impl Runtime {
                     .wire_schema
                     .as_ref()
                     .map(|wire_schema| {
-                        wire_schemas.get(wire_schema).ok_or_else(|| {
+                        let kind = codec.wire_format.wire_schema_kind().ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "codec wire format cannot reference a wire schema"
+                                    .to_string(),
+                            }
+                        })?;
+                        wire_schemas
+                            .get(&(kind, wire_schema.clone()))
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: format!(
                                     "missing compiled wire schema '{}'",
                                     wire_schema.as_str()
                                 ),
-                            }
-                        })
+                            })
                     })
                     .transpose()?;
                 let compiled = self
@@ -5246,6 +5947,55 @@ impl Runtime {
                 relay_branching_schemas.insert(node.identifier.clone(), branching_schema);
                 relay_schemas.insert(node.identifier.clone(), schema);
                 if relay.materialized_state.is_some() {
+                    if let Some(branch) = relay.branching.branch() {
+                        let branch_model = schedule
+                            .nodes
+                            .iter()
+                            .find_map(|node| {
+                                let Model::Branch(candidate) = node.config.as_ref() else {
+                                    return None;
+                                };
+                                (&candidate.name == branch).then_some(candidate)
+                            })
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing branch '{}' for materialized relay '{}'",
+                                    branch.as_str(),
+                                    node.identifier.as_str()
+                                ),
+                            })?;
+                        let branch_ttl =
+                            humantime::parse_duration(&branch_model.ttl).map_err(|error| {
+                                RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: format!(
+                                        "invalid branch ttl '{}' for materialized relay '{}': \
+                                         {error}",
+                                        branch_model.ttl,
+                                        node.identifier.as_str()
+                                    ),
+                                }
+                            })?;
+                        materialized_stream_branch_ttls.insert(node.identifier.clone(), branch_ttl);
+                        if let Some(eviction) = branch_model.eviction.as_ref() {
+                            let capacity =
+                                usize::try_from(eviction.max_instances()).map_err(|_| {
+                                    RuntimeError::BuildDomainExecution {
+                                        domain: domain.as_str().to_string(),
+                                        reason: format!(
+                                            "branch '{}' max instances {} does not fit usize for \
+                                             materialized relay '{}'",
+                                            branch.as_str(),
+                                            eviction.max_instances(),
+                                            node.identifier.as_str()
+                                        ),
+                                    }
+                                })?;
+                            materialized_stream_branch_capacities
+                                .insert(node.identifier.clone(), capacity);
+                        }
+                    }
                     materialized_stream_specs.insert(
                         node.identifier.clone(),
                         RuntimeMaterializedRelaySpec {
@@ -5267,7 +6017,94 @@ impl Runtime {
 
         for node in &schedule.nodes {
             match node.config.as_ref() {
-                Model::Materializer(_) => {}
+                Model::Materializer(materializer) => {
+                    let primary_node = node.execution_node().map(str::to_string);
+                    materialized_stream_owner_nodes
+                        .insert(materializer.relay.clone(), primary_node.clone());
+                    let Some(relay) = relay_builders.get_mut(&materializer.relay) else {
+                        return Err(RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing materialized relay '{}'",
+                                materializer.relay.as_str()
+                            ),
+                        });
+                    };
+                    let replica_nodes = node
+                        .replica_nodes()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    let placement = self.state_placement(
+                        domain,
+                        RuntimeStateKind::MaterializedRelay,
+                        ModelKind::Materializer,
+                        &materializer.relay,
+                        None,
+                    );
+                    if node.executes_on(local_node_id) {
+                        let state = self
+                            .replicated_materialized_stream_state(
+                                placement,
+                                primary_node,
+                                replica_nodes.clone(),
+                                replica_nodes.len(),
+                            )
+                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: error.to_string(),
+                            })?;
+                        if let Some(task) = self
+                            .spawn_materialized_stream_snapshot_task(&shutdown_tx, state.clone())
+                        {
+                            tasks.push(task);
+                        }
+                        materializer_specs.push((
+                            materializer.relay.clone(),
+                            state,
+                            materialized_stream_branch_ttls
+                                .get(&materializer.relay)
+                                .copied(),
+                            materialized_stream_branch_capacities
+                                .get(&materializer.relay)
+                                .copied(),
+                            relay.runtime_consumer_fan_in_for_mode(AckMode::Detached),
+                        ));
+                    } else {
+                        if let Some(primary_node) = node.execution_node() {
+                            push_remote_runtime_consumer(
+                                &mut relay.remote_runtime_consumers,
+                                primary_node,
+                                &materializer.relay,
+                                AckMode::Detached,
+                            );
+                        }
+                        if node.is_assigned_to(local_node_id) {
+                            let state = self
+                                .replicated_materialized_stream_state(
+                                    placement,
+                                    primary_node,
+                                    replica_nodes.clone(),
+                                    replica_nodes.len(),
+                                )
+                                .map_err(|error| RuntimeError::BuildDomainExecution {
+                                    domain: domain.as_str().to_string(),
+                                    reason: error.to_string(),
+                                })?;
+                            if let Some(task) = self.spawn_materialized_stream_snapshot_task(
+                                &shutdown_tx,
+                                state.clone(),
+                            ) {
+                                tasks.push(task);
+                            }
+                            if let Some(task) = self
+                                .spawn_materialized_stream_replica_poll_task(&shutdown_tx, state)
+                            {
+                                tasks.push(task);
+                            }
+                        }
+                    }
+                }
                 Model::Generator(generator) if node.executes_on(local_node_id) => {
                     let Some(source_schema) =
                         relay_schemas.get(&generator.materialized_relay).cloned()
@@ -5717,16 +6554,35 @@ impl Runtime {
                     output_services,
                 });
             }
-            tasks.push(self.spawn_generator_task(
+            let entity = RegistryEntity {
+                kind: ModelKind::Generator,
+                identifier: generator.name.clone(),
+            };
+            generator_tasks.insert(
+                entity,
+                self.spawn_generator_task(
+                    domain,
+                    &shutdown_tx,
+                    GeneratorTaskSpec {
+                        source_relay: generator.materialized_relay.clone(),
+                        generator,
+                        source_branching,
+                        routes,
+                    },
+                )?,
+            );
+        }
+
+        for (relay, state, branch_ttl, branch_capacity, receiver) in materializer_specs {
+            tasks.push(self.spawn_materializer_task(
                 domain,
                 &shutdown_tx,
-                GeneratorTaskSpec {
-                    source_relay: generator.materialized_relay.clone(),
-                    generator,
-                    source_branching,
-                    routes,
-                },
-            )?);
+                relay,
+                state,
+                branch_ttl,
+                branch_capacity,
+                receiver,
+            ));
         }
 
         for (emitter, receiver) in emitter_specs {
@@ -5751,14 +6607,21 @@ impl Runtime {
         }
 
         for (reingestor, from_relay, receiver) in reingestor_specs {
-            tasks.push(self.spawn_reingestor_task(
-                domain,
-                &shutdown_tx,
-                &branched_entrypoint_senders,
-                reingestor,
-                from_relay,
-                receiver,
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Reingestor,
+                identifier: reingestor.name.clone(),
+            };
+            reingestor_tasks
+                .entry(entity)
+                .or_insert_with(Vec::new)
+                .push(self.spawn_reingestor_task(
+                    domain,
+                    &shutdown_tx,
+                    &branched_entrypoint_senders,
+                    reingestor,
+                    from_relay,
+                    receiver,
+                )?);
         }
 
         self.executions.insert(
@@ -5766,6 +6629,7 @@ impl Runtime {
             DomainExecution {
                 schedule: schedule.clone(),
                 passive_only: false,
+                start_version: desired_start_version,
                 shutdown: shutdown_tx,
                 graph: domain_graph.clone(),
                 relay_registries,
@@ -5784,6 +6648,8 @@ impl Runtime {
                 endpoint_routes,
                 node_tasks,
                 emitter_tasks,
+                generator_tasks,
+                reingestor_tasks,
                 clients: transports,
                 tasks,
             },
@@ -5793,6 +6659,7 @@ impl Runtime {
             .domains
             .get(domain)
             .is_some_and(|state| !matches!(state.status, nervix_models::DomainStatus::Running))
+            || !start_ingestors
         {
             return Ok(());
         }
@@ -5832,14 +6699,27 @@ impl Runtime {
 
     pub(in crate::runtime) fn install_state_schema_fingerprints(&self, schedule: &DomainSchedule) {
         self.clear_state_schema_fingerprints(&schedule.domain);
+        let start_version = self
+            .domains
+            .get(&schedule.domain)
+            .map_or(0, |state| state.start_version);
         for node in &schedule.nodes {
+            let schema_fingerprint = if node.kind == ModelKind::Materializer {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"nervix/materialized-state/start-version");
+                hasher.update(&node.schema_fingerprint);
+                hasher.update(&start_version.to_be_bytes());
+                *hasher.finalize().as_bytes()
+            } else {
+                node.schema_fingerprint
+            };
             self.state_schema_fingerprints.insert(
                 RuntimeStateSchemaKey::new(
                     schedule.domain.clone(),
                     node.kind,
                     node.identifier.clone(),
                 ),
-                node.schema_fingerprint,
+                schema_fingerprint,
             );
         }
     }
@@ -6559,6 +7439,23 @@ impl Runtime {
         self.local_materialized_stream_state_for_branch(domain, relay, &None)
     }
 
+    pub(in crate::runtime) fn materialized_relay_is_scheduled(
+        &self,
+        domain: &Domain,
+        relay: &Identifier,
+    ) -> bool {
+        self.executions
+            .get(domain)
+            .and_then(|execution| {
+                execution
+                    .materialized_stream_owner_nodes
+                    .get(relay)
+                    .cloned()
+            })
+            .flatten()
+            .is_some()
+    }
+
     pub(in crate::runtime) fn local_materialized_stream_state_for_branch(
         &self,
         domain: &Domain,
@@ -6573,7 +7470,7 @@ impl Runtime {
             branch_key.clone(),
         );
         if let Some(state) = self.replicated_materialized_stream_states.get(&placement) {
-            return Ok(self
+            let entries = self
                 .visible_materialized_stream_remote_entries(&placement, &state)
                 .into_iter()
                 .map(|(key, record)| {
@@ -6582,7 +7479,32 @@ impl Runtime {
                         RuntimeRecord::from_remote(record),
                     )
                 })
-                .collect());
+                .collect::<Vec<_>>();
+            if !entries.is_empty() || branch_key.is_none() {
+                return Ok(entries);
+            }
+        }
+        if branch_key.is_some() {
+            let aggregate_placement = RuntimeStatePlacement {
+                branch_key: None,
+                ..placement.clone()
+            };
+            if let Some(state) = self
+                .replicated_materialized_stream_states
+                .get(&aggregate_placement)
+            {
+                return Ok(self
+                    .visible_materialized_stream_remote_entries(&aggregate_placement, &state)
+                    .into_iter()
+                    .filter(|(key, _)| key == branch_key)
+                    .map(|(key, record)| {
+                        (
+                            branch_key_display(&key).to_string(),
+                            RuntimeRecord::from_remote(record),
+                        )
+                    })
+                    .collect());
+            }
         }
         if let Some(store) = &self.state_store
             && let Some(snapshot) = store
@@ -6605,6 +7527,34 @@ impl Runtime {
                 })
                 .map_err(|error| error.to_string());
         }
+        if branch_key.is_some() {
+            let aggregate_placement = RuntimeStatePlacement {
+                branch_key: None,
+                ..placement
+            };
+            if let Some(store) = &self.state_store
+                && let Some(snapshot) = store
+                    .latest_snapshot(&aggregate_placement)
+                    .map_err(|error| error.to_string())?
+            {
+                return decode_materialized_stream_snapshot(&snapshot.payload)
+                    .map(|entries| {
+                        let mut visible = entries
+                            .into_iter()
+                            .filter(|(key, _)| key == branch_key)
+                            .map(|(key, record)| {
+                                (
+                                    branch_key_display(&key).to_string(),
+                                    RuntimeRecord::from_remote(record),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        visible.sort_by(|left, right| left.0.cmp(&right.0));
+                        visible
+                    })
+                    .map_err(|error| error.to_string());
+            }
+        }
         Ok(Vec::new())
     }
 
@@ -6620,24 +7570,36 @@ impl Runtime {
             &placement.identifier,
             None,
         );
-        let mut entries =
-            if let Some(expiring_state) = self.expiring_stream_states.get(&expiring_placement) {
-                state
-                    .entries
-                    .iter()
-                    .filter_map(|entry| {
-                        expiring_state
-                            .contains_key(entry.key())
-                            .then(|| (entry.key().clone(), entry.value().clone()))
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                state
-                    .entries
-                    .iter()
-                    .map(|entry| (entry.key().clone(), entry.value().clone()))
-                    .collect::<Vec<_>>()
-            };
+        let scheduled = self
+            .executions
+            .get(&placement.domain)
+            .and_then(|execution| {
+                execution
+                    .materialized_stream_owner_nodes
+                    .get(&placement.identifier)
+                    .cloned()
+            })
+            .flatten()
+            .is_some();
+        let mut entries = if !scheduled
+            && let Some(expiring_state) = self.expiring_stream_states.get(&expiring_placement)
+        {
+            state
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    expiring_state
+                        .contains_key(entry.key())
+                        .then(|| (entry.key().clone(), entry.value().clone()))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            state
+                .entries
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect::<Vec<_>>()
+        };
         entries
             .sort_by(|left, right| branch_key_display(&left.0).cmp(branch_key_display(&right.0)));
         entries
@@ -6651,6 +7613,32 @@ impl Runtime {
     ) -> Result<Vec<(String, RuntimeRecord)>, String> {
         self.remote_materialized_stream_state_for_branch(target_node_id, domain, relay, &None)
             .await
+    }
+
+    async fn materialized_stream_state_from_owner(
+        &self,
+        domain: &Domain,
+        relay: &Identifier,
+    ) -> Result<Vec<(String, RuntimeRecord)>, String> {
+        let owner = self
+            .executions
+            .get(domain)
+            .and_then(|execution| {
+                execution
+                    .materialized_stream_owner_nodes
+                    .get(relay)
+                    .cloned()
+            })
+            .flatten();
+        let local_node_id = self.local_node_id.read().clone();
+        if let Some(owner) = owner
+            && local_node_id.as_deref() != Some(owner.as_str())
+        {
+            return self
+                .remote_materialized_stream_state(&owner, domain, relay)
+                .await;
+        }
+        self.local_materialized_stream_state(domain, relay)
     }
 
     pub(in crate::runtime) async fn remote_materialized_stream_state_for_branch(
@@ -7147,10 +8135,12 @@ impl Runtime {
         let mut lookup_specs = Vec::new();
         let mut emitter_specs = Vec::new();
         let mut reingestor_specs = Vec::new();
-        let mut tasks = Vec::new();
+        let tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
-        let branched_specs = branched_ingestor_specs_from_active_graph(&graph);
+        let mut generator_tasks = HashMap::new();
+        let mut reingestor_tasks = HashMap::new();
+        let branched_specs = branched_node_specs_from_active_graph(&graph);
         let branch_relays = branch_relays_from_branched_specs(&branched_specs);
         let model_index = graph
             .nodes()
@@ -7182,8 +8172,23 @@ impl Runtime {
                 Model::Schema(schema) => {
                     schemas.insert(node.identifier.clone(), Arc::new(compile_schema(schema)));
                 }
-                Model::WireSchema(wire_schema) => {
-                    wire_schemas.insert(node.identifier.clone(), wire_schema.clone());
+                Model::WireJsonSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Json(wire_schema.clone()),
+                    );
+                }
+                Model::WireCborSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Cbor(wire_schema.clone()),
+                    );
+                }
+                Model::WireAvroSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Avro(wire_schema.clone()),
+                    );
                 }
                 Model::ClientKafka(_)
                 | Model::ClientPulsar(_)
@@ -7270,15 +8275,22 @@ impl Runtime {
                     .wire_schema
                     .as_ref()
                     .map(|wire_schema| {
-                        wire_schemas.get(wire_schema).ok_or_else(|| {
+                        let kind = codec.wire_format.wire_schema_kind().ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "codec wire format cannot reference a wire schema"
+                                    .to_string(),
+                            }
+                        })?;
+                        wire_schemas
+                            .get(&(kind, wire_schema.clone()))
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: format!(
                                     "missing compiled wire schema '{}'",
                                     wire_schema.as_str()
                                 ),
-                            }
-                        })
+                            })
                     })
                     .transpose()?;
                 let compiled = self
@@ -7605,16 +8617,23 @@ impl Runtime {
                     output_services,
                 });
             }
-            tasks.push(self.spawn_generator_task(
-                domain,
-                &shutdown_tx,
-                GeneratorTaskSpec {
-                    source_relay: generator.materialized_relay.clone(),
-                    generator,
-                    source_branching,
-                    routes,
-                },
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Generator,
+                identifier: generator.name.clone(),
+            };
+            generator_tasks.insert(
+                entity,
+                self.spawn_generator_task(
+                    domain,
+                    &shutdown_tx,
+                    GeneratorTaskSpec {
+                        source_relay: generator.materialized_relay.clone(),
+                        generator,
+                        source_branching,
+                        routes,
+                    },
+                )?,
+            );
         }
 
         for (emitter, receiver) in emitter_specs {
@@ -7639,14 +8658,21 @@ impl Runtime {
         }
 
         for (reingestor, from_relay, receiver) in reingestor_specs {
-            tasks.push(self.spawn_reingestor_task(
-                domain,
-                &shutdown_tx,
-                &branched_entrypoint_senders,
-                reingestor,
-                from_relay,
-                receiver,
-            )?);
+            let entity = RegistryEntity {
+                kind: ModelKind::Reingestor,
+                identifier: reingestor.name.clone(),
+            };
+            reingestor_tasks
+                .entry(entity)
+                .or_insert_with(Vec::new)
+                .push(self.spawn_reingestor_task(
+                    domain,
+                    &shutdown_tx,
+                    &branched_entrypoint_senders,
+                    reingestor,
+                    from_relay,
+                    receiver,
+                )?);
         }
 
         self.executions.insert(
@@ -7673,6 +8699,10 @@ impl Runtime {
                         .collect(),
                 },
                 passive_only: false,
+                start_version: self
+                    .domains
+                    .get(domain)
+                    .map_or(0, |state| state.start_version),
                 shutdown: shutdown_tx,
                 graph: domain_graph.clone(),
                 relay_registries,
@@ -7691,6 +8721,8 @@ impl Runtime {
                 endpoint_routes,
                 node_tasks,
                 emitter_tasks,
+                generator_tasks,
+                reingestor_tasks,
                 clients: transports,
                 tasks,
             },
@@ -7738,8 +8770,23 @@ impl Runtime {
                 Model::Schema(schema) => {
                     schemas.insert(node.identifier.clone(), Arc::new(compile_schema(schema)));
                 }
-                Model::WireSchema(wire_schema) => {
-                    wire_schemas.insert(node.identifier.clone(), wire_schema.clone());
+                Model::WireJsonSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Json(wire_schema.clone()),
+                    );
+                }
+                Model::WireCborSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Cbor(wire_schema.clone()),
+                    );
+                }
+                Model::WireAvroSchema(wire_schema) => {
+                    wire_schemas.insert(
+                        (node.kind, node.identifier.clone()),
+                        WireSchemaDefinition::Avro(wire_schema.clone()),
+                    );
                 }
                 _ => {}
             }
@@ -7805,15 +8852,22 @@ impl Runtime {
                     .wire_schema
                     .as_ref()
                     .map(|wire_schema| {
-                        wire_schemas.get(wire_schema).ok_or_else(|| {
+                        let kind = codec.wire_format.wire_schema_kind().ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: "codec wire format cannot reference a wire schema"
+                                    .to_string(),
+                            }
+                        })?;
+                        wire_schemas
+                            .get(&(kind, wire_schema.clone()))
+                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: format!(
                                     "missing compiled wire schema '{}'",
                                     wire_schema.as_str()
                                 ),
-                            }
-                        })
+                            })
                     })
                     .transpose()?;
                 let compiled = self
@@ -7870,6 +8924,10 @@ impl Runtime {
         Ok(DomainExecution {
             schedule: schedule.clone(),
             passive_only: true,
+            start_version: self
+                .domains
+                .get(domain)
+                .map_or(0, |state| state.start_version),
             shutdown,
             graph,
             relay_registries,
@@ -7888,6 +8946,8 @@ impl Runtime {
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
             emitter_tasks: HashMap::default(),
+            generator_tasks: HashMap::default(),
+            reingestor_tasks: HashMap::default(),
             clients: HashMap::default(),
             tasks: Vec::new(),
         })
@@ -7936,6 +8996,18 @@ impl Runtime {
             .collect::<Result<Vec<_>, RuntimeError>>()?;
         let task_domain = domain.clone();
         let task_generator = generator.name.clone();
+        let source_gate = self
+            .relay_boundary_fanouts
+            .get(&(domain.clone(), source_relay.clone()))
+            .map(|fanout| fanout.dispatch_gate())
+            .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!(
+                    "missing generator source relay gate '{}'",
+                    source_relay.as_str()
+                ),
+            })?;
+        let quiesce_counters = self.node_quiesce_counters(domain, &generator.name);
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.domain_status_changed.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
@@ -7944,12 +9016,60 @@ impl Runtime {
 
         Ok(tokio::spawn(async move {
             let mut activity = DomainActivityGuard::new(generator_activity);
+            let mut quiesce_activity = Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
             let mut next_state_refresh = None::<Timestamp>;
             let mut branch_states =
                 HashMap::<Option<BranchKey>, GeneratorBranchTaskState>::default();
 
             loop {
                 tokio::task::consume_budget().await;
+                if source_gate.is_closed() {
+                    for (route_index, (route, _)) in routes.iter().enumerate() {
+                        tokio::task::consume_budget().await;
+                        let mut pending_groups = Vec::new();
+                        for (branch_key, state) in &mut branch_states {
+                            let route_state = &mut state.routes[route_index];
+                            route_state.next_flush = None;
+                            if !route_state.pending.is_empty() {
+                                pending_groups.push((
+                                    branch_key.clone(),
+                                    std::mem::take(&mut route_state.pending),
+                                ));
+                            }
+                        }
+                        if !pending_groups.is_empty() {
+                            flush_generator_groups(
+                                GeneratorFlushContext {
+                                    runtime: &runtime,
+                                    domain: &task_domain,
+                                    generator: &task_generator,
+                                    output_relay: &route.output.relay,
+                                    output_schema: &route.output_schema,
+                                    output_registry: &route.output_registry,
+                                    output_services: &route.output_services,
+                                    task_events: &task_events,
+                                },
+                                &mut pending_groups,
+                            )
+                            .await;
+                        }
+                    }
+                    quiesce_activity.take();
+                    activity.set_active(false);
+                    tokio::select! {
+                        _ = source_gate.wait_open() => {}
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                    if quiesce_activity.is_none() {
+                        quiesce_activity =
+                            Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
+                    }
+                    continue;
+                }
                 if runtime.domains.get(&task_domain).is_some_and(|state| {
                     matches!(state.status, nervix_models::DomainStatus::Paused)
                 }) {
@@ -7995,6 +9115,7 @@ impl Runtime {
                                 break;
                             }
                         }
+                        _ = source_gate.wait_closed() => {}
                     }
                     continue;
                 }
@@ -8027,6 +9148,7 @@ impl Runtime {
                                 }
                             }
                             _ = sleep(Duration::from_millis(50)) => {}
+                            _ = source_gate.wait_closed() => {}
                         }
                         continue;
                     };
@@ -8048,6 +9170,7 @@ impl Runtime {
                                         }
                                     }
                                     _ = sleep(Duration::from_millis(100)) => {}
+                                    _ = source_gate.wait_closed() => {}
                                 }
                                 continue;
                             }
@@ -8067,16 +9190,10 @@ impl Runtime {
                     advance_scheduled_timestamp(&mut next_state_refresh, interval, execution_now);
                     did_scheduled_work = true;
 
-                    let local_node_id = runtime.local_node_id.read().clone();
                     let mut state_load_failed = false;
-                    let remote_dispatcher = { runtime.remote_dispatcher.read().clone() };
-                    let remote_nodes = if let Some(dispatcher) = remote_dispatcher {
-                        dispatcher.cluster.live_node_ids().await
-                    } else {
-                        Vec::new()
-                    };
-                    let mut state = match runtime
-                        .local_materialized_stream_state(&task_domain, &source_relay)
+                    let state = match runtime
+                        .materialized_stream_state_from_owner(&task_domain, &source_relay)
+                        .await
                     {
                         Ok(state) => state,
                         Err(error) => {
@@ -8092,37 +9209,6 @@ impl Runtime {
                             Vec::new()
                         }
                     };
-                    if !state_load_failed {
-                        for remote_node in &remote_nodes {
-                            tokio::task::consume_budget().await;
-                            if local_node_id.as_deref() == Some(remote_node.as_str()) {
-                                continue;
-                            }
-                            match runtime
-                                .remote_materialized_stream_state(
-                                    remote_node,
-                                    &task_domain,
-                                    &source_relay,
-                                )
-                                .await
-                            {
-                                Ok(remote_state) => state.extend(remote_state),
-                                Err(error) => {
-                                    state_load_failed = true;
-                                    let _ = task_events.send(RuntimeEvent::Error(format!(
-                                        "failed to read materialized state for generator '{}' \
-                                         from relay '{}' on node '{}' in domain '{}': {}",
-                                        task_generator.as_str(),
-                                        source_relay.as_str(),
-                                        remote_node,
-                                        task_domain.as_str(),
-                                        error
-                                    )));
-                                    break;
-                                }
-                            }
-                        }
-                    }
 
                     let mut source_state_by_branch =
                         HashMap::<Option<BranchKey>, Vec<RuntimeRecord>>::default();
@@ -8436,6 +9522,7 @@ impl Runtime {
                         }
                     }
                     _ = sleep(sleep_duration) => {}
+                    _ = source_gate.wait_closed() => {}
                 }
             }
         }))
@@ -9288,26 +10375,44 @@ impl Runtime {
         let task_materialized_state = reingestor.materialized_state.clone();
         let task_mode = reingestor.mode;
         let task_error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
+        let quiesce_counters = self.node_quiesce_counters(domain, &reingestor.name);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let mut force_flush_rx = self.force_flush_receiver(domain);
 
         Ok(tokio::spawn(async move {
             let mut input = receiver;
-            let mut input_collection = RuntimeTaskInputCollection::new(input_collect_policy);
+            let mut input_collection = RuntimeTaskInputCollection::with_quiesce_counters(
+                input_collect_policy,
+                quiesce_counters.clone(),
+            );
             let mut compiled_from_where = None;
             loop {
                 tokio::task::consume_budget().await;
-                match Self::recv_runtime_collected_input(
-                    &mut input,
-                    &mut shutdown_rx,
-                    &mut input_collection,
-                    None,
-                )
-                .await
-                {
+                let event = tokio::select! {
+                    event = Self::recv_runtime_collected_input(
+                        &mut input,
+                        &mut shutdown_rx,
+                        &mut input_collection,
+                        None,
+                    ) => event,
+                    changed = force_flush_rx.changed() => {
+                        if changed.is_err() {
+                            BatchedInput::Shutdown
+                        } else {
+                            input_collection
+                                .take_any()
+                                .expect("same-relay input batches must concatenate")
+                                .map(BatchedInput::Batch)
+                                .unwrap_or(BatchedInput::Wake)
+                        }
+                    }
+                };
+                match event {
                     BatchedInput::Shutdown | BatchedInput::Closed => break,
                     BatchedInput::Wake => continue,
                     BatchedInput::Batch(batch) => {
+                        let _work = NodeQuiesceWorkGuard::begin(quiesce_counters.clone());
                         runtime
                             .metrics
                             .observe_global_node_received(NodeBatchObservation {
@@ -9407,6 +10512,157 @@ impl Runtime {
         emitters::EmitterTask::spawn(self, build, emitter, receiver)
     }
 
+    fn spawn_materializer_task(
+        &self,
+        domain: &Domain,
+        shutdown_tx: &watch::Sender<bool>,
+        relay: Identifier,
+        state: Arc<ReplicatedMaterializedRelayState>,
+        branch_ttl: Option<Duration>,
+        branch_capacity: Option<usize>,
+        mut receiver: RelayRuntimeFanIn,
+    ) -> JoinHandle<()> {
+        let runtime = self.clone();
+        let domain = domain.clone();
+        let expiration_scan_interval = self.branch_instance_expiration_scan_interval;
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut branch_instances = BranchInstanceRegistry::<Option<BranchKey>, ()>::new();
+            let mut restored_branches = state
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.key().clone(),
+                        entry.value().metadata.ingested_at_high_watermark,
+                    )
+                })
+                .collect::<Vec<_>>();
+            restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
+            for (key, last_ingestion) in restored_branches {
+                branch_instances.insert_restored(key, last_ingestion, ());
+            }
+            let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
+            loop {
+                tokio::task::consume_budget().await;
+                if let Some(branch_ttl) = branch_ttl
+                    && Instant::now() >= next_expiration_scan
+                {
+                    let now = runtime
+                        .current_stream_expiration_time(&domain)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(current_timestamp);
+                    for (key, _) in branch_instances.expire(now, branch_ttl) {
+                        tokio::task::consume_budget().await;
+                        runtime.remove_stream_key_presence(&domain, &relay, &key);
+                        if let Err(error) =
+                            runtime.delete_materialized_stream_key(&state, &key).await
+                        {
+                            warn!(
+                                domain = domain.as_str(),
+                                relay = relay.as_str(),
+                                branch = branch_key_display(&key),
+                                error = %error,
+                                "failed to expire scheduled materialized relay state"
+                            );
+                        }
+                    }
+                    next_expiration_scan = Instant::now() + expiration_scan_interval;
+                    continue;
+                }
+                let expiration_sleep = branch_ttl.map(|_| {
+                    next_expiration_scan
+                        .checked_duration_since(Instant::now())
+                        .unwrap_or(Duration::ZERO)
+                });
+                let batch = tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    batch = receiver.recv() => {
+                        let Some(batch) = batch else {
+                            break;
+                        };
+                        batch
+                    }
+                    _ = sleep(expiration_sleep.unwrap_or(Duration::ZERO)),
+                        if expiration_sleep.is_some() =>
+                    {
+                        continue;
+                    }
+                };
+                let branch_key = batch.key.clone();
+                let now = runtime
+                    .current_stream_expiration_time(&domain)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(current_timestamp);
+                branch_instances
+                    .get_or_try_create_with(branch_key.clone(), now, |_| {
+                        Ok::<(), std::convert::Infallible>(())
+                    })
+                    .expect("infallible materialized branch tracking must succeed");
+                if let Some(branch_capacity) = branch_capacity {
+                    for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
+                    {
+                        tokio::task::consume_budget().await;
+                        runtime.remove_stream_key_presence(&domain, &relay, &evicted_key);
+                        if let Err(error) = runtime
+                            .delete_materialized_stream_key(&state, &evicted_key)
+                            .await
+                        {
+                            warn!(
+                                domain = domain.as_str(),
+                                relay = relay.as_str(),
+                                branch = branch_key_display(&evicted_key),
+                                error = %error,
+                                "failed to evict scheduled materialized relay state by lru"
+                            );
+                        }
+                    }
+                }
+                runtime.touch_stream_key(&domain, &relay, &branch_key, now);
+                let messages = match batch.try_into_messages() {
+                    Ok(messages) => messages,
+                    Err(error_and_batch) => {
+                        let (error, _) = *error_and_batch;
+                        warn!(
+                            domain = domain.as_str(),
+                            relay = relay.as_str(),
+                            branch = branch_key_display(&branch_key),
+                            error = %error,
+                            "failed to decode scheduled materialized relay batch"
+                        );
+                        continue;
+                    }
+                };
+                for message in messages {
+                    tokio::task::consume_budget().await;
+                    if let Err(error) = runtime
+                        .update_materialized_stream_last_by_timestamp(
+                            &state,
+                            &branch_key,
+                            &message.record,
+                        )
+                        .await
+                    {
+                        warn!(
+                            domain = domain.as_str(),
+                            relay = relay.as_str(),
+                            branch = branch_key_display(&branch_key),
+                            error = %error,
+                            "failed to update scheduled materialized relay state"
+                        );
+                    }
+                }
+            }
+        })
+    }
+
     pub(in crate::runtime) async fn start_scheduled_ingestor(
         &self,
         domain: &Domain,
@@ -9484,6 +10740,24 @@ impl Runtime {
             return Ok(());
         }
         while let Some(spec) = self.next_scheduled_ingestor_start_spec(Some(domain)) {
+            tokio::task::consume_budget().await;
+            self.start_scheduled_ingestor(
+                &spec.domain,
+                spec.source_model,
+                spec.ingestor,
+                spec.kafka_offset_state,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
+        let _lock = self.schedule_apply_lock.lock().await;
+        if self.ingestors_paused_for_memory_pressure() {
+            return Ok(());
+        }
+        while let Some(spec) = self.next_scheduled_ingestor_start_spec(None) {
             tokio::task::consume_budget().await;
             self.start_scheduled_ingestor(
                 &spec.domain,
@@ -9661,6 +10935,15 @@ impl Runtime {
                 "scheduled emitter",
             )
             .await;
+        }
+        for (entity, task) in execution.generator_tasks {
+            Self::await_shutdown_task(task, domain, Some(&entity.identifier), "generator").await;
+        }
+        for (entity, tasks) in execution.reingestor_tasks {
+            for task in tasks {
+                Self::await_shutdown_task(task, domain, Some(&entity.identifier), "reingestor")
+                    .await;
+            }
         }
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
@@ -9974,6 +11257,82 @@ impl Runtime {
             ingestor: ingestor.as_str().to_string(),
             reason: format!("invalid ack timeout '{timeout}': {source}"),
         })
+    }
+
+    fn validate_ingestor_start_settings(
+        domain: &Domain,
+        ingestor: &CreateIngestor,
+    ) -> Result<(), RuntimeError> {
+        match &ingestor.source {
+            IngestSource::Kafka { mode, .. } | IngestSource::Pulsar { mode, .. } => match mode {
+                KafkaIngestMode::AckParallel {
+                    batch_timeout,
+                    timeout,
+                    retry_policy,
+                    ..
+                } => {
+                    Self::parse_duration_setting(
+                        domain,
+                        &ingestor.name,
+                        "batch timeout",
+                        batch_timeout,
+                    )?;
+                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
+                    Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
+                }
+                KafkaIngestMode::AckSequential {
+                    timeout,
+                    retry_policy,
+                } => {
+                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
+                    Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
+                }
+                KafkaIngestMode::NoAckParallel { .. } => {}
+            },
+            IngestSource::Mqtt { mode, .. } => match mode {
+                MqttIngestMode::AckParallel {
+                    batch_timeout,
+                    timeout,
+                    retry_policy,
+                    ..
+                } => {
+                    Self::parse_duration_setting(
+                        domain,
+                        &ingestor.name,
+                        "batch timeout",
+                        batch_timeout,
+                    )?;
+                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
+                    Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
+                }
+                MqttIngestMode::AckSequential {
+                    timeout,
+                    retry_policy,
+                } => {
+                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
+                    Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
+                }
+                MqttIngestMode::NoAckParallel { .. } | MqttIngestMode::NoAckSequential { .. } => {}
+            },
+            IngestSource::RabbitMq { mode, .. } => match mode {
+                RabbitMqIngestMode::AckSequential { timeout, .. } => {
+                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
+                }
+            },
+            IngestSource::Sqs { mode, .. } => match mode {
+                SqsIngestMode::AckSequential { timeout, .. } => {
+                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
+                }
+            },
+            IngestSource::Http { .. }
+            | IngestSource::Prometheus { .. }
+            | IngestSource::RedisPubSub { .. }
+            | IngestSource::Nats { .. }
+            | IngestSource::ZeroMq { .. }
+            | IngestSource::Websockets { .. }
+            | IngestSource::Endpoint { .. } => {}
+        }
+        Ok(())
     }
 
     pub(in crate::runtime) fn parse_duration_setting(

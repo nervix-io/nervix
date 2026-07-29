@@ -12,7 +12,7 @@ Feature: HTTP codec ingestion
         tenant STRING,
         user_id I64
       );
-        CREATE STRICT WIRE <wire_format> SCHEMA notification_wire (
+        CREATE WIRE <wire_format> SCHEMA notification_wire MODE STRICT (
         tenant <tenant_wire_type>,
         user_id <user_id_wire_type>
       );
@@ -73,7 +73,7 @@ Feature: HTTP codec ingestion
         cpu_last_64 <cpu_type>,
         labels <labels_type> OPTIONAL
       );
-        CREATE STRICT WIRE <wire_format> SCHEMA metrics_wire (
+        CREATE WIRE <wire_format> SCHEMA metrics_wire MODE STRICT (
         device STRING,
         cpu_last_64 ARRAY,
         labels ARRAY OPTIONAL
@@ -133,7 +133,7 @@ Feature: HTTP codec ingestion
         matrix <matrix_type>,
         samples <samples_type>
       );
-      CREATE STRICT WIRE JSON SCHEMA shaped_metrics_wire (
+      CREATE WIRE JSON SCHEMA shaped_metrics_wire MODE STRICT (
         device STRING,
         matrix ARRAY,
         samples ARRAY
@@ -187,12 +187,12 @@ Feature: HTTP codec ingestion
         user_id I64
       );
 
-      CREATE STRICT WIRE <wire_format> SCHEMA strict_notification_wire (
+      CREATE WIRE <wire_format> SCHEMA strict_notification_wire MODE STRICT (
         tenant <tenant_wire_type>,
         user_id <user_id_wire_type>
       );
 
-      CREATE LOOSE WIRE <wire_format> SCHEMA loose_notification_wire (
+      CREATE WIRE <wire_format> SCHEMA loose_notification_wire MODE LOOSE (
         tenant <tenant_wire_type>,
         user_id <user_id_wire_type>
       );
@@ -283,7 +283,7 @@ Feature: HTTP codec ingestion
         CREATE CODEC metrics_codec
         FROM <wire_format>
         TO SCHEMA metrics
-        WITH JAQ TRANSFORMATION '.';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
         CREATE IF NOT EXISTS SCHEMA device_branch ( device STRING );
         CREATE IF NOT EXISTS BRANCH by_metrics_ingestor SCHEMA device_branch TTL 5m;
         CREATE RELAY metrics_stream SCHEMA metrics BRANCHED BY by_metrics_ingestor;
@@ -336,7 +336,7 @@ Feature: HTTP codec ingestion
         CREATE CODEC notification_codec
         FROM <wire_format>
         TO SCHEMA notification
-        WITH JAQ TRANSFORMATION '.';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
