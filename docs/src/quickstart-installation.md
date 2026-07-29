@@ -10,5 +10,5 @@ cargo install --locked \
 
 Ensure Cargo's binary directory, `$HOME/.cargo/bin` by default, is on your `PATH`.
 
-See [Installation](installation.md) for prerequisites, reproducible Git revisions, and the
-Kubernetes Operator installation.
+See [Installation](installation.md) for prerequisites, reproducible Git revisions, a three-node
+Docker deployment, and the Kubernetes Operator installation.
