@@ -90,6 +90,11 @@ class TransformTests(unittest.TestCase):
             '<p><a href="https://docs.nervix.io/v1/processors.html#junction">Junction</a></p>'
             '<p><a href="https://example.com/spec.html#section">External</a></p>'
             "<pre><code>.foo ⟼ 😀🙂🧑🔬🤔☀️</code></pre>"
+            # the print page carries every chapter, so the rewritten fragments
+            # have targets to land on
+            '<h2 id="roto-column-operations">Roto Column Operations</h2>'
+            '<h2 id="jaq-reference">JAQ Reference</h2>'
+            '<h2 id="junction">Junction</h2>'
             "</main>"
         )
 
@@ -127,6 +132,50 @@ class TransformTests(unittest.TestCase):
                 "<html><body>no main</body></html>",
                 [True],
             )
+
+
+class LinkVerificationTests(unittest.TestCase):
+    """The PDF must resolve its own links instead of sending readers to the site."""
+
+    def transform_body(self, body: str) -> str:
+        return transform(f'<main><h1 id="quickstart">Quickstart</h1>{body}</main>', [True])
+
+    def test_accepts_external_urls_and_in_document_fragments(self) -> None:
+        result = self.transform_body(
+            '<p><a href="https://example.test/page">external</a>'
+            '<a href="mailto:docs@example.test">mail</a>'
+            '<a href="#quickstart">internal</a></p>'
+        )
+        self.assertIn('href="#quickstart"', result)
+
+    def test_rejects_cross_page_website_links(self) -> None:
+        # mdBook rewrites these on the print page; a survivor means the reader
+        # would be sent to the website for a chapter the PDF already contains.
+        with self.assertRaises(SystemExit) as raised:
+            self.transform_body('<p><a href="./quickstart-installation.html">Installation</a></p>')
+
+        self.assertIn("quickstart-installation.html", str(raised.exception))
+
+    def test_rejects_bare_relative_links(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            self.transform_body('<p><a href="generate_cli">generated CLI</a></p>')
+
+        self.assertIn("generate_cli", str(raised.exception))
+
+    def test_rejects_fragments_with_no_target(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            self.transform_body('<p><a href="#nowhere">missing</a></p>')
+
+        self.assertIn("#nowhere", str(raised.exception))
+
+    def test_percent_encoded_fragments_resolve(self) -> None:
+        result = transform(
+            '<main><h1 id="quickstart">Quickstart</h1>'
+            '<h2 id="café">Café</h2>'
+            '<p><a href="#caf%C3%A9">encoded</a></p></main>',
+            [True],
+        )
+        self.assertIn('href="#caf%C3%A9"', result)
 
 
 if __name__ == "__main__":

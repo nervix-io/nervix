@@ -43,7 +43,6 @@
   - [Sessions](./sessions.md)
   - [Rust Client Library](./client-library.md)
   - [Examples](./examples.md)
-  - [Roadmap](./roadmap.md)
 - [Rust WASM Guest SDK](./wasm-guest-sdk.md)
 - [Architecture And Internals](./architecture-and-internals.md)
   - [Architecture Overview](./architecture.md)

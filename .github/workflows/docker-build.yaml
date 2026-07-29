@@ -159,10 +159,17 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --locked
 
+      - name: Resolve pinned mdBook version
+        id: mdbook
+        run: |
+          version="$(uv run --locked python -c \
+            'from scripts.build_book import MDBOOK_VERSION; print(MDBOOK_VERSION)')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Install mdBook
         uses: peaceiris/actions-mdbook@v2
         with:
-          mdbook-version: "0.4.40"
+          mdbook-version: ${{ steps.mdbook.outputs.version }}
 
       - name: Install Pandoc and PDF engine
         run: |

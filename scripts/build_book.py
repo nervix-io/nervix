@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import urllib.request
@@ -17,6 +18,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT / "docs"
 OUTPUT_DIR = DOCS_DIR / "book"
+# The rendered theme and the PDF's in-document links both depend on this exact
+# release, so local builds and CI must agree on it. CI reads this constant.
+MDBOOK_VERSION = "0.5.3"
+MDBOOK_LLMS_COMMAND = ROOT / "scripts" / "mdbook_llms.py"
 ROTO_UPSTREAM_PATH = "docs/source/reference/language_reference.md"
 ROTO_REFERENCE_NAME = "roto-language-reference.md"
 ROTO_LICENSE_PATH = "LICENSE"
@@ -26,7 +31,11 @@ ROTO_CODE_ATTRIBUTE = re.compile(
 )
 ROTO_FENCE_OPEN = re.compile(r"^:{3,}\{(\w+)\}\s*$")
 ROTO_FENCE_CLOSE = re.compile(r"^:{3,}\s*$")
-ROTO_IN_PAGE_LINK = re.compile(r"\[([^][]+)\]\(#[A-Za-z0-9_-]+\)")
+# Upstream MyST cross-references, either in-page (`](#anchor)`) or to a Roto
+# documentation page Nervix does not bundle (`](generate_cli)`). Both resolve to
+# nothing here, so the link text is kept and the target dropped. Relative links
+# such as `](udfs.md)` and absolute URLs are left alone.
+ROTO_UNRESOLVED_LINK = re.compile(r"\[([^][]+)\]\((?:#[A-Za-z0-9_-]+|[A-Za-z0-9_]+)\)")
 ROTO_ROLE = re.compile(r"\{roto:ref\}`([^`]+)`")
 ROTO_INTERPRETED_REF = re.compile(r'`([^`]+)`\{\.interpreted-text\s+role="ref"\}')
 ROTO_DOC_ROLE = re.compile(r"\{doc\}`([^`]+)`")
@@ -59,7 +68,6 @@ GOOGLE_FONTS_CSS = (
     "?family=Open+Sans:ital,wght@0,300;0,400;0,600;0,700;0,800;1,300;1,400;1,600;1,700;1,800"
     "&family=Source+Code+Pro:wght@500&display=swap"
 )
-FONT_AWESOME_CSS = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css"
 NERVIX_LOGO_SVG = "theme/nervix-mark.svg"
 MDBOOK_FAVICON_SVG = re.compile(
     r'<link rel="icon" href="favicon(?:-[0-9a-f]+)?\.svg">'
@@ -67,12 +75,12 @@ MDBOOK_FAVICON_SVG = re.compile(
 MDBOOK_FAVICON_PNG = re.compile(
     r'<link rel="shortcut icon" href="favicon(?:-[0-9a-f]+)?\.png">'
 )
-MDBOOK_FONT_AWESOME = re.compile(
-    r'<link rel="stylesheet" href="FontAwesome/css/font-awesome'
-    r'(?:-[0-9a-f]+)?\.css">'
-)
 MDBOOK_FONTS = re.compile(
     r'<link rel="stylesheet" href="fonts/fonts(?:-[0-9a-f]+)?\.css">'
+)
+MDBOOK_EDIT_LINK = re.compile(
+    r'<a href="[^"]*" title="Suggest an edit".*?</a>\s*',
+    re.S,
 )
 
 
@@ -146,7 +154,7 @@ def bundle_roto_reference(upstream_text: str, license_text: str, version: str) -
             lines.append(f"> {line}".rstrip())
         else:
             lines.append(line)
-    body = ROTO_IN_PAGE_LINK.sub(r"\1", "\n".join(lines))
+    body = ROTO_UNRESOLVED_LINK.sub(r"\1", "\n".join(lines))
     body = ROTO_ROLE.sub(roto_role, body)
     body = ROTO_INTERPRETED_REF.sub(roto_interpreted_ref, body)
     body = ROTO_DOC_ROLE.sub(roto_doc_role, body)
@@ -239,31 +247,107 @@ def generate_upstream_references(source_dir: Path) -> None:
     )
 
 
+def stage_book(staging_dir: Path) -> Path:
+    """Assemble a complete book root that carries the generated chapters.
+
+    The whole root is staged rather than only redirecting `book.src`, because
+    mdBook renders `edit-url-template`'s `{path}` as the configured source
+    directory joined with the chapter path. Pointing `book.src` at a temporary
+    directory therefore leaks that path into every "Suggest an edit" link,
+    while a staged `src` keeps the links pointing at `docs/src` in the
+    repository.
+    """
+    staging_dir.mkdir(parents=True)
+    shutil.copy2(DOCS_DIR / "book.toml", staging_dir / "book.toml")
+    shutil.copytree(DOCS_DIR / "theme", staging_dir / "theme")
+    source_dir = staging_dir / "src"
+    shutil.copytree(DOCS_DIR / "src", source_dir)
+    generate_upstream_references(source_dir)
+    return staging_dir
+
+
+def verify_mdbook_version() -> None:
+    try:
+        reported = subprocess.run(
+            ["mdbook", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except OSError as error:
+        raise SystemExit(f"mdBook {MDBOOK_VERSION} is required but could not be run: {error}")
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"mdbook --version failed: {error}")
+
+    installed = reported.strip().removeprefix("mdbook").strip().removeprefix("v")
+    if installed != MDBOOK_VERSION:
+        raise SystemExit(
+            f"mdBook {MDBOOK_VERSION} is required, found {installed or 'nothing'}. "
+            "The rendered theme and the PDF's in-document links depend on this exact release."
+        )
+
+
+def run_mdbook(book_dir: Path, rendered_dir: Path, build_env: dict[str, str]) -> None:
+    # mdBook reports a rejected renderer configuration on stderr and still exits
+    # zero, which silently renders the book with default settings. Treat any
+    # logged error as fatal so a bad `book.toml` cannot ship.
+    result = subprocess.run(
+        ["mdbook", "build", str(book_dir), "--dest-dir", str(rendered_dir)],
+        check=True,
+        cwd=ROOT,
+        env=build_env,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    sys.stderr.write(result.stderr)
+    errors = [line for line in result.stderr.splitlines() if line.strip().startswith("ERROR")]
+    if errors:
+        raise SystemExit("mdBook reported errors while building the book:\n" + "\n".join(errors))
+
+
 def rewrite_external_assets(book_dir: Path) -> None:
-    html_files = list(book_dir.rglob("*.html"))
-    for html_file in html_files:
+    replacements = (
+        (MDBOOK_FAVICON_SVG, f'<link rel="icon" href="{NERVIX_LOGO_SVG}">'),
+        (MDBOOK_FAVICON_PNG, f'<link rel="shortcut icon" href="{NERVIX_LOGO_SVG}">'),
+        (MDBOOK_FONTS, f'<link rel="stylesheet" href="{GOOGLE_FONTS_CSS}">'),
+    )
+    rewritten = {pattern.pattern: 0 for pattern, _ in replacements}
+    for html_file in book_dir.rglob("*.html"):
         content = html_file.read_text(encoding="utf-8")
-        content = MDBOOK_FAVICON_SVG.sub(
-            f'<link rel="icon" href="{NERVIX_LOGO_SVG}">',
-            content,
-        )
-        content = MDBOOK_FAVICON_PNG.sub(
-            f'<link rel="shortcut icon" href="{NERVIX_LOGO_SVG}">',
-            content,
-        )
-        content = MDBOOK_FONT_AWESOME.sub(
-            f'<link rel="stylesheet" href="{FONT_AWESOME_CSS}">',
-            content,
-        )
-        content = MDBOOK_FONTS.sub(
-            f'<link rel="stylesheet" href="{GOOGLE_FONTS_CSS}">',
-            content,
-        )
+        for pattern, target in replacements:
+            content, count = pattern.subn(target, content)
+            rewritten[pattern.pattern] += count
         html_file.write_text(content, encoding="utf-8")
 
-    for bundled_dir in (book_dir / "fonts", book_dir / "FontAwesome"):
-        if bundled_dir.exists():
-            shutil.rmtree(bundled_dir)
+    # A pattern that stops matching, as happened when mdBook began hashing
+    # asset filenames, would silently leave the bundled link in place while the
+    # bundled directory below is removed, publishing a dead reference.
+    unmatched = [pattern for pattern, count in rewritten.items() if count == 0]
+    if unmatched:
+        raise SystemExit(
+            "no rendered page matched these mdBook asset links: " + ", ".join(unmatched)
+        )
+
+    bundled_fonts = book_dir / "fonts"
+    if bundled_fonts.exists():
+        shutil.rmtree(bundled_fonts)
+
+
+def remove_generated_edit_links(book_dir: Path) -> None:
+    """Drop "Suggest an edit" from chapters that have no file to edit.
+
+    The upstream references are rendered at build time, so their source never
+    exists in the repository and mdBook's edit link would resolve to nothing.
+    """
+    for reference_name in (ROTO_REFERENCE_NAME, JAQ_REFERENCE_NAME):
+        page = book_dir / f"{Path(reference_name).stem}.html"
+        if not page.is_file():
+            raise SystemExit(f"mdBook did not render the generated chapter {page.name}")
+        content = page.read_text(encoding="utf-8")
+        stripped, removed = MDBOOK_EDIT_LINK.subn("", content)
+        if removed == 0:
+            raise SystemExit(f"{page.name} has no edit link to remove")
+        page.write_text(stripped, encoding="utf-8")
 
 
 def copy_theme_assets(source_theme_dir: Path, book_dir: Path) -> None:
@@ -302,29 +386,27 @@ def main() -> int:
     if args.version == "":
         raise SystemExit("--version must be non-empty")
 
+    verify_mdbook_version()
+
     with tempfile.TemporaryDirectory(prefix="nervix-book-") as tmp_dir:
-        source_dir = Path(tmp_dir) / "source"
+        staged_book = Path(tmp_dir) / "book"
         rendered_dir = Path(tmp_dir) / "rendered"
         publication_dir = Path(tmp_dir) / "publication"
-        shutil.copytree(DOCS_DIR / "src", source_dir)
-        generate_upstream_references(source_dir)
+        stage_book(staged_book)
 
         build_env = os.environ.copy()
-        build_env["MDBOOK_BOOK__SRC"] = json.dumps(str(source_dir))
         build_env["MDBOOK_BOOK__TITLE"] = json.dumps(render_title(args.version))
+        # Renderer commands resolve against the book root, which is now staged.
+        build_env["MDBOOK_OUTPUT__LLMS__COMMAND"] = json.dumps(str(MDBOOK_LLMS_COMMAND))
         build_env["MDBOOK_OUTPUT__LLMS__VERSION"] = json.dumps(args.version)
 
-        subprocess.run(
-            ["mdbook", "build", str(DOCS_DIR), "--dest-dir", str(rendered_dir)],
-            check=True,
-            cwd=ROOT,
-            env=build_env,
-        )
+        run_mdbook(staged_book, rendered_dir, build_env)
 
         html_dir = rendered_dir / "html"
         markdown_dir = rendered_dir / "markdown"
         llms_path = rendered_dir / "llms" / "llms.txt"
         copy_theme_assets(DOCS_DIR / "theme", html_dir)
+        remove_generated_edit_links(html_dir)
         rewrite_external_assets(html_dir)
         shutil.copytree(html_dir, publication_dir)
         shutil.copytree(markdown_dir, publication_dir / "markdown")

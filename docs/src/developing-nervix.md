@@ -179,3 +179,23 @@ For test runs:
 ```bash
 just test
 ```
+
+## Building The Documentation
+
+`just book <version>` renders this book, and `just book-pdf <version>` additionally produces
+`nervix.pdf` through pandoc and XeLaTeX.
+
+Both recipes require the exact mdBook release pinned by `MDBOOK_VERSION` in
+`scripts/build_book.py`, and they fail with that version in the message when a different one is
+installed. CI resolves the same constant, so a local build always matches what is published. The
+pin is exact because the rendered theme targets mdBook's internal element IDs and because the PDF
+relies on mdBook rewriting print-page links into in-document anchors — on an older release every
+cross-chapter link in the PDF would point back at the website instead.
+
+Install the pinned release with:
+
+```bash
+cargo install mdbook --version <MDBOOK_VERSION> --locked
+```
+
+Building the PDF also needs `pandoc` and a XeLaTeX installation on `PATH`.
