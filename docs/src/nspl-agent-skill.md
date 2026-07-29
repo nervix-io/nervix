@@ -8,7 +8,7 @@ NSPL. The maintained source is
 The skill contains guidance and references, not a Nervix client or server. Review its contents
 before installing it, just as you would review any third-party instructions supplied to an agent.
 It is distributed under the repository's
-[FCL-1.0-ALv2 license](https://github.com/nervix-io/nervix/blob/main/LICENSE.md).
+[FCL-1.0-ALv2 license](license.md).
 
 The skill discovers public language documentation through the versioned
 [`llms.txt`](https://docs.nervix.io/llms.txt) index. That endpoint selects the latest published
