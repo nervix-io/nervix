@@ -153,8 +153,7 @@ not persisted or replicated.
 Concrete branch-local inspection remains available through `DESCRIBE RELAY <relay> WHERE (...)`.
 `DESCRIBE` does not provide a common branch inventory or eviction history. Prometheus deliberately
 has no branch-key label. See
-[Capacity Planning For Branched Graphs](capacity-planning.md) for the cost model and
-[Roadmap](roadmap.md) for remaining signals.
+[Capacity Planning For Branched Graphs](capacity-planning.md) for the cost model.
 
 ## Wall Clock And Domain Clock
 
