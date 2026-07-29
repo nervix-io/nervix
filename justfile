@@ -136,7 +136,6 @@ book-pdf version="" output="":
     python3 scripts/prepare_pdf_html.py \
         --print-html docs/book/print.html \
         --summary docs/src/SUMMARY.md \
-        --src-dir docs/src \
         --output "${tmp_html}"
     pandoc \
         --from=html \

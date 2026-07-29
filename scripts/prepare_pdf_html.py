@@ -1,10 +1,10 @@
 """Prepare mdbook's print.html for the pandoc PDF build.
 
 Extracts the ``<main>`` content, removes mdbook's self-referencing heading
-anchors, and demotes every heading one level except the H1s of top-level
-SUMMARY chapters. With pandoc's ``--top-level-division=chapter`` and the
-``report`` document class, the surviving H1s become ``\\chapter`` headings that
-start on a fresh page, while nested book chapters render as sections.
+anchors, and applies the chapter hierarchy from SUMMARY.md to the page H1s.
+With pandoc's ``--top-level-division=chapter`` and the ``report`` document
+class, top-level H1s become ``\\chapter`` headings that start on a fresh page,
+while nested book chapters render as sections.
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-SUMMARY_TOP_LEVEL = re.compile(r"^- \[(?P<title>[^\]]+)\]\((?P<path>[^)]+)\)\s*$")
+SUMMARY_CHAPTER = re.compile(
+    r"^(?P<indent>\s*)- \[(?P<title>[^\]]+)\]\((?P<path>[^)]+)\)\s*$"
+)
 HEADER_ANCHOR = re.compile(r'<a class="header" href="[^"]*">(.*?)</a>', re.S)
 HEADING = re.compile(r"<h([1-6])([^>]*)>(.*?)</h\1>", re.S)
-TAG = re.compile(r"<[^>]+>")
 MAIN = re.compile(r"<main>(.*)</main>", re.S)
 TABLE = re.compile(
     r"(?P<open><table\b[^>]*>)(?P<body>.*?)(?P<close></table>)",
@@ -43,27 +44,18 @@ PDF_GLYPH_SUBSTITUTIONS = {
 }
 
 
-def top_level_titles(summary: Path, src_dir: Path) -> set[str]:
-    """Return the H1 titles of the chapters listed at SUMMARY's top level."""
-    titles: set[str] = set()
+def chapter_hierarchy(summary: Path) -> list[bool]:
+    """Return whether each SUMMARY chapter is at the top level."""
+    hierarchy: list[bool] = []
     for line in summary.read_text(encoding="utf-8").splitlines():
-        match = SUMMARY_TOP_LEVEL.match(line)
-        if not match:
-            continue
-        chapter = src_dir / match.group("path").removeprefix("./")
-        for chapter_line in chapter.read_text(encoding="utf-8").splitlines():
-            if chapter_line.startswith("# "):
-                titles.add(chapter_line[2:].strip())
-                break
-        else:
-            raise SystemExit(f"top-level chapter {chapter} has no H1 title")
-    if not titles:
+        match = SUMMARY_CHAPTER.match(line)
+        if match:
+            hierarchy.append(not match.group("indent"))
+    if not hierarchy:
+        raise SystemExit(f"no chapters found in {summary}")
+    if not any(hierarchy):
         raise SystemExit(f"no top-level chapters found in {summary}")
-    return titles
-
-
-def heading_text(inner_html: str) -> str:
-    return " ".join(html.unescape(TAG.sub("", inner_html)).split())
+    return hierarchy
 
 
 def rewrite_pdf_links(main_html: str) -> str:
@@ -118,25 +110,39 @@ def add_pdf_table_column_widths(main_html: str) -> str:
     return TABLE.sub(add_columns, main_html)
 
 
-def transform(print_html: str, titles: set[str]) -> str:
+def transform(
+    print_html: str,
+    hierarchy: list[bool],
+) -> str:
     match = MAIN.search(print_html)
     if not match:
         raise SystemExit("failed to extract <main> from print.html")
     main = HEADER_ANCHOR.sub(r"\1", match.group(1))
+    chapter_index = 0
     main = rewrite_pdf_links(main)
     main = substitute_unsupported_pdf_glyphs(main)
     main = add_pdf_table_column_widths(main)
 
     def demote(heading: re.Match[str]) -> str:
+        nonlocal chapter_index
         level = int(heading.group(1))
         attrs, inner = heading.group(2), heading.group(3)
-        if level == 1 and heading_text(inner) in titles:
-            new_level = 1
+        if level == 1:
+            if chapter_index >= len(hierarchy):
+                raise SystemExit("print.html contains more H1 chapters than SUMMARY.md")
+            top_level = hierarchy[chapter_index]
+            chapter_index += 1
+            new_level = 1 if top_level else 2
         else:
             new_level = min(level + 1, 6)
         return f"<h{new_level}{attrs}>{inner}</h{new_level}>"
 
     main = HEADING.sub(demote, main)
+    if chapter_index != len(hierarchy):
+        raise SystemExit(
+            f"print.html contains {chapter_index} H1 chapters, "
+            f"but SUMMARY.md contains {len(hierarchy)}"
+        )
     return (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"></head>'
         f"<body><main>{main}</main></body></html>"
@@ -147,12 +153,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--print-html", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
-    parser.add_argument("--src-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    titles = top_level_titles(args.summary, args.src_dir)
-    result = transform(args.print_html.read_text(encoding="utf-8"), titles)
+    hierarchy = chapter_hierarchy(args.summary)
+    result = transform(args.print_html.read_text(encoding="utf-8"), hierarchy)
     args.output.write_text(result, encoding="utf-8")
 
 
