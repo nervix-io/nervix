@@ -20,7 +20,7 @@ permissions:
 jobs:
   meta:
     name: metadata
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     timeout-minutes: 40
     outputs:
       timestamp: ${{ steps.meta.outputs.timestamp }}
@@ -109,7 +109,7 @@ jobs:
     name: manifest-${{ matrix.image }}
     needs: [meta, build-arch]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     timeout-minutes: 40
     strategy:
       fail-fast: false
