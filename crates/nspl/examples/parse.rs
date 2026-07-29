@@ -123,7 +123,7 @@ fn main() -> ExitCode {
     println!("NSPL interactive parser");
     println!("Supported now:");
     println!("  CREATE SCHEMA <name> (<field defs>) [;]");
-    println!("  CREATE STRICT|LOOSE WIRE JSON|CBOR|AVRO SCHEMA <name> (<field defs>) [;]");
+    println!("  CREATE WIRE JSON|CBOR|AVRO SCHEMA <name> MODE STRICT|LOOSE (<field defs>) [;]");
     println!(
         "  CREATE CODEC <name> FROM WIRE JSON|CBOR|AVRO SCHEMA <wire_schema> TO SCHEMA <schema> \
          [;]"

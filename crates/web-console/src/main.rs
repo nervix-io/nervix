@@ -1671,6 +1671,17 @@ fn Sidebar(
             .filter(move |entity| entity.kind == kind)
             .collect::<Vec<_>>()
     };
+    let wire_schema_entities = move || {
+        active_entities()
+            .into_iter()
+            .filter(|entity| {
+                matches!(
+                    entity.kind.as_str(),
+                    "wire_json_schema" | "wire_cbor_schema" | "wire_avro_schema"
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     let selected_domain = move || {
         let active = active_domain.get();
         let found = domains
@@ -1783,11 +1794,11 @@ fn Sidebar(
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="schemas" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Wire Schemas" count=move || entities_for("wire_schema").len().to_string() kind="wire" open=wire_open />
+                <NavHeader title="Wire Schemas" count=move || wire_schema_entities().len().to_string() kind="wire" open=wire_open />
                 <Show when=move || wire_open.get() fallback=|| ()>
                     <For
-                        each=move || entities_for("wire_schema")
-                        key=|entity| entity.name.clone()
+                        each=wire_schema_entities
+                        key=|entity| format!("{}:{}", entity.kind, entity.name)
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="wire" on_click=|| () /> }}
                     />
                 </Show>

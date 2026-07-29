@@ -57,7 +57,7 @@ CREATE SCHEMA order_record (
   quantity I64
 );
 
-CREATE STRICT WIRE JSON SCHEMA order_wire (
+CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
   order_id string,
   customer string,
   status string,
@@ -188,7 +188,7 @@ CREATE SCHEMA order_record (
   quantity I64
 );
 
-CREATE STRICT WIRE JSON SCHEMA order_wire (
+CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
   order_id string,
   customer string,
   status string,

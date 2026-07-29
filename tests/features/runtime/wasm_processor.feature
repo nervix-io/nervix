@@ -27,7 +27,7 @@ Feature: WASM processor runtime behavior
         occurred_at DATETIME,
         bucket STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA event_wire (
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
         value integer,
         tenant string,
         message string,
@@ -114,7 +114,7 @@ Feature: WASM processor runtime behavior
         note STRING OPTIONAL,
         untouched STRING OPTIONAL
       );
-      CREATE STRICT WIRE JSON SCHEMA wasm_input_wire (
+      CREATE WIRE JSON SCHEMA wasm_input_wire MODE STRICT (
         value integer
       );
       CREATE CODEC wasm_input_codec
@@ -184,7 +184,7 @@ Feature: WASM processor runtime behavior
       CREATE SCHEMA required_event (
         value I32
       );
-      CREATE STRICT WIRE JSON SCHEMA required_event_wire (
+      CREATE WIRE JSON SCHEMA required_event_wire MODE STRICT (
         value integer
       );
       CREATE CODEC required_event_codec
@@ -250,7 +250,7 @@ Feature: WASM processor runtime behavior
         value I32
       );
 
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         value integer
       );
 
@@ -351,7 +351,7 @@ Feature: WASM processor runtime behavior
         value I32,
         message STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA buffered_metric_wire (
+      CREATE WIRE JSON SCHEMA buffered_metric_wire MODE STRICT (
         value integer,
         message string
       );
@@ -427,7 +427,7 @@ Feature: WASM processor runtime behavior
         classification STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         value integer,
         tenant string
       );
@@ -530,7 +530,7 @@ Feature: WASM processor runtime behavior
         bucket STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         value integer
       );
 
@@ -653,7 +653,7 @@ Feature: WASM processor runtime behavior
         value I32
       );
 
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         value integer
       );
 
@@ -736,7 +736,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
@@ -797,7 +797,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
@@ -860,7 +860,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
@@ -950,7 +950,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1029,7 +1029,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1090,7 +1090,7 @@ Feature: WASM processor runtime behavior
         operation STRING,
         source_value I32
       );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1157,7 +1157,7 @@ Feature: WASM processor runtime behavior
     And these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1214,7 +1214,7 @@ Feature: WASM processor runtime behavior
     And these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1271,7 +1271,7 @@ Feature: WASM processor runtime behavior
     And these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1329,7 +1329,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
@@ -1378,7 +1378,7 @@ Feature: WASM processor runtime behavior
       """
 
       CREATE SCHEMA metric ( value I32 );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire ( value integer );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;

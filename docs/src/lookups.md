@@ -46,7 +46,7 @@ CREATE SCHEMA zip_code_entry (
   region STRING OPTIONAL
 );
 
-CREATE STRICT WIRE JSON SCHEMA zip_code_entry_wire (
+CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT (
   zip string,
   city string,
   region string OPTIONAL

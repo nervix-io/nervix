@@ -6,17 +6,10 @@ use thiserror::Error;
 use crate::Identifier;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CreateWireSchemaStmt {
+pub enum WireSchemaDefinition {
     Json(CreateWireSchema<JsonType>),
     Cbor(CreateWireSchema<CborType>),
     Avro(CreateWireSchema<AvroType>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AlterWireSchemaStmt {
-    Json(AlterWireSchema<JsonType>),
-    Cbor(AlterWireSchema<CborType>),
-    Avro(AlterWireSchema<AvroType>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,12 +60,12 @@ pub struct AlterWireSchema<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterWireSchemaOperation<T> {
+    SetMode { mode: WireSchemaStrictness },
     AddField { field: WireSchemaField<T> },
     DropField { field: Identifier },
     RenameField { field: Identifier, to: Identifier },
     SetFieldType { field: Identifier, ty: T },
     SetFieldOptional { field: Identifier, optional: bool },
-    SetStrictness { strictness: WireSchemaStrictness },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,27 +95,6 @@ pub enum AlterSchemaError {
     RenameTargetAlreadyExists { field: Identifier },
     #[error("a schema must retain at least one field")]
     CannotDropLastField,
-    #[error(
-        "wire schema format mismatch: stored format is {stored}, but ALTER requested {requested}"
-    )]
-    WireFormatMismatch {
-        stored: WireSchemaFormat,
-        requested: WireSchemaFormat,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum WireSchemaFormat {
-    Json,
-    Cbor,
-    Avro,
-}
-
-impl std::fmt::Display for WireSchemaFormat {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_ref())
-    }
 }
 
 impl CreateSchema {
@@ -216,57 +188,11 @@ impl CreateSchema {
     }
 }
 
-impl CreateWireSchemaStmt {
-    pub fn apply_alter(&mut self, alter: &AlterWireSchemaStmt) -> Result<(), AlterSchemaError> {
-        match (self, alter) {
-            (Self::Json(schema), AlterWireSchemaStmt::Json(alter))
-            | (Self::Cbor(schema), AlterWireSchemaStmt::Cbor(alter)) => schema.apply_alter(alter),
-            (Self::Avro(schema), AlterWireSchemaStmt::Avro(alter)) => schema.apply_alter(alter),
-            (stored, requested) => Err(AlterSchemaError::WireFormatMismatch {
-                stored: stored.format(),
-                requested: requested.format(),
-            }),
-        }
-    }
-
-    pub fn format(&self) -> WireSchemaFormat {
-        match self {
-            Self::Json(_) => WireSchemaFormat::Json,
-            Self::Cbor(_) => WireSchemaFormat::Cbor,
-            Self::Avro(_) => WireSchemaFormat::Avro,
-        }
-    }
-}
-
-impl AlterWireSchemaStmt {
-    pub fn schema(&self) -> &Identifier {
-        match self {
-            Self::Json(alter) | Self::Cbor(alter) => &alter.schema,
-            Self::Avro(alter) => &alter.schema,
-        }
-    }
-
-    pub fn operations_len(&self) -> usize {
-        match self {
-            Self::Json(alter) | Self::Cbor(alter) => alter.operations.len(),
-            Self::Avro(alter) => alter.operations.len(),
-        }
-    }
-
-    pub fn format(&self) -> WireSchemaFormat {
-        match self {
-            Self::Json(_) => WireSchemaFormat::Json,
-            Self::Cbor(_) => WireSchemaFormat::Cbor,
-            Self::Avro(_) => WireSchemaFormat::Avro,
-        }
-    }
-}
-
 impl<T> CreateWireSchema<T>
 where
     T: Clone,
 {
-    fn apply_alter(&mut self, alter: &AlterWireSchema<T>) -> Result<(), AlterSchemaError> {
+    pub fn apply_alter(&mut self, alter: &AlterWireSchema<T>) -> Result<(), AlterSchemaError> {
         if self.name != alter.schema {
             return Err(AlterSchemaError::SchemaNameMismatch {
                 stored: self.name.clone(),
@@ -287,6 +213,9 @@ where
         operation: &AlterWireSchemaOperation<T>,
     ) -> Result<(), AlterSchemaError> {
         match operation {
+            AlterWireSchemaOperation::SetMode { mode } => {
+                self.strictness = *mode;
+            }
             AlterWireSchemaOperation::AddField { field } => {
                 self.ensure_field_absent(&field.name)?;
                 self.fields.push(field.clone());
@@ -310,9 +239,6 @@ where
             AlterWireSchemaOperation::SetFieldOptional { field, optional } => {
                 let index = self.field_index(field)?;
                 self.fields[index].optional = *optional;
-            }
-            AlterWireSchemaOperation::SetStrictness { strictness } => {
-                self.strictness = *strictness;
             }
         }
         Ok(())
@@ -657,8 +583,8 @@ mod tests {
     }
 
     #[test]
-    fn applies_wire_schema_operations_and_rejects_format_mismatch() {
-        let mut schema = CreateWireSchemaStmt::Json(CreateWireSchema {
+    fn applies_exact_wire_schema_operations() {
+        let mut schema = CreateWireSchema {
             name: identifier("payload"),
             strictness: WireSchemaStrictness::Strict,
             fields: vec![WireSchemaField {
@@ -666,10 +592,13 @@ mod tests {
                 ty: JsonType::Integer,
                 optional: false,
             }],
-        });
-        let alter = AlterWireSchemaStmt::Json(AlterWireSchema {
+        };
+        let alter = AlterWireSchema {
             schema: identifier("payload"),
             operations: vec![
+                AlterWireSchemaOperation::SetMode {
+                    mode: WireSchemaStrictness::Loose,
+                },
                 AlterWireSchemaOperation::AddField {
                     field: WireSchemaField {
                         name: identifier("note"),
@@ -689,16 +618,10 @@ mod tests {
                     field: identifier("message"),
                     optional: true,
                 },
-                AlterWireSchemaOperation::SetStrictness {
-                    strictness: WireSchemaStrictness::Loose,
-                },
             ],
-        });
+        };
 
         schema.apply_alter(&alter).expect("alter should apply");
-        let CreateWireSchemaStmt::Json(schema) = &schema else {
-            panic!("expected JSON schema");
-        };
         assert_eq!(schema.strictness, WireSchemaStrictness::Loose);
         assert_eq!(
             schema.fields[1],
@@ -706,22 +629,6 @@ mod tests {
                 name: identifier("message"),
                 ty: JsonType::Object,
                 optional: true,
-            }
-        );
-
-        let error = CreateWireSchemaStmt::Json(schema.clone())
-            .apply_alter(&AlterWireSchemaStmt::Avro(AlterWireSchema {
-                schema: identifier("payload"),
-                operations: vec![AlterWireSchemaOperation::SetStrictness {
-                    strictness: WireSchemaStrictness::Strict,
-                }],
-            }))
-            .expect_err("format mismatch should fail");
-        assert_eq!(
-            error,
-            AlterSchemaError::WireFormatMismatch {
-                stored: WireSchemaFormat::Json,
-                requested: WireSchemaFormat::Avro,
             }
         );
     }

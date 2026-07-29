@@ -13,7 +13,7 @@ Feature: Reorderer
         sequence I64,
         payload STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         sequence integer,
         payload string
@@ -101,7 +101,7 @@ Feature: Reorderer
         priority I32,
         payload STRING
       );
-        CREATE STRICT WIRE JSON SCHEMA notification_wire (
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         category string,
         priority integer,

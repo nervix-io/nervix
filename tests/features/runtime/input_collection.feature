@@ -13,7 +13,7 @@ Feature: Runtime node input collection
         tenant STRING,
         sequence I64
       );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         tenant string,
         sequence integer
       );
@@ -102,7 +102,7 @@ Feature: Runtime node input collection
       CREATE SCHEMA notification (
         sequence I64
       );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         sequence integer
       );
       CREATE CODEC notification_codec

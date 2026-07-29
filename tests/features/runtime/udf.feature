@@ -25,7 +25,7 @@ Feature: Roto user-defined functions
         id STRING,
         result I64
       );
-      CREATE STRICT WIRE JSON SCHEMA udf_input_wire (
+      CREATE WIRE JSON SCHEMA udf_input_wire MODE STRICT (
         id string,
         value integer
       );
@@ -140,7 +140,7 @@ Feature: Roto user-defined functions
         id STRING,
         pan STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA card_event_wire (
+      CREATE WIRE JSON SCHEMA card_event_wire MODE STRICT (
         id string,
         pan string
       );

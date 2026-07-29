@@ -17,7 +17,7 @@ Feature: Conditional expressions
         source_id STRING,
         error_code STRING
       );
-      CREATE STRICT WIRE JSON SCHEMA calculation_wire (
+      CREATE WIRE JSON SCHEMA calculation_wire MODE STRICT (
         id string,
         divisor integer,
         result integer OPTIONAL
@@ -91,7 +91,7 @@ Feature: Conditional expressions
       CREATE SCHEMA conditional_summary (
         result I64
       );
-      CREATE STRICT WIRE JSON SCHEMA conditional_sample_wire (
+      CREATE WIRE JSON SCHEMA conditional_sample_wire MODE STRICT (
         value integer
       );
       CREATE CODEC conditional_sample_codec
@@ -167,7 +167,7 @@ Feature: Conditional expressions
         first_result I64,
         maybe_result I64 OPTIONAL
       );
-      CREATE STRICT WIRE JSON SCHEMA conditional_input_wire (
+      CREATE WIRE JSON SCHEMA conditional_input_wire MODE STRICT (
         id string,
         kind string OPTIONAL,
         active boolean,

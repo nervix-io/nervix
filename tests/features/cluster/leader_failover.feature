@@ -50,20 +50,20 @@ Feature: Cluster leader failover
       CREATE SCHEMA scored (
         score <score_type>
       );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         tenant string,
         level string
       );
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         transaction_id string,
         amount integer
       );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
-      CREATE STRICT WIRE JSON SCHEMA features_wire (
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         tenant string,
         vector array
       );
@@ -235,20 +235,20 @@ Feature: Cluster leader failover
       CREATE SCHEMA scored (
         score <score_type>
       );
-      CREATE STRICT WIRE JSON SCHEMA notification_wire (
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
         user_id integer,
         tenant string,
         level string
       );
-      CREATE STRICT WIRE JSON SCHEMA transaction_wire (
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
         transaction_id string,
         amount integer
       );
-      CREATE STRICT WIRE JSON SCHEMA metric_wire (
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
         tenant string,
         latency integer
       );
-      CREATE STRICT WIRE JSON SCHEMA features_wire (
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT (
         tenant string,
         vector array
       );

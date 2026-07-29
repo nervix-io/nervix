@@ -35,10 +35,10 @@ use jaq_fmts::{
 use jaq_json::{Num as JaqNum, Val as JaqVal};
 use nervix_models::{
     AvroType, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
-    CreateWireSchema, CreateWireSchemaStmt, Identifier, JsonType, ParseAsType, RemoteDecodedRecord,
+    CreateWireSchema, Identifier, JsonType, ParseAsType, RemoteDecodedRecord,
     RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, Timestamp, WireSchemaField,
-    WireSchemaStrictness,
+    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, Timestamp, WireSchemaDefinition,
+    WireSchemaField, WireSchemaStrictness,
 };
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
@@ -1318,7 +1318,7 @@ pub fn compile_schema(schema: &CreateSchema) -> CompiledSchema {
 pub fn compile_codec(
     codec: &CreateCodec,
     schema: Arc<CompiledSchema>,
-    wire_schema: Option<&CreateWireSchemaStmt>,
+    wire_schema: Option<&WireSchemaDefinition>,
 ) -> Result<Arc<CompiledCodec>, CodecError> {
     compile_codec_with_protobuf(codec, schema, wire_schema, None)
 }
@@ -1326,17 +1326,17 @@ pub fn compile_codec(
 pub fn compile_codec_with_protobuf(
     codec: &CreateCodec,
     schema: Arc<CompiledSchema>,
-    wire_schema: Option<&CreateWireSchemaStmt>,
+    wire_schema: Option<&WireSchemaDefinition>,
     protobuf_descriptor: Option<ProtobufCodecDescriptor>,
 ) -> Result<Arc<CompiledCodec>, CodecError> {
     let wire_schema = match (&codec.wire_format, wire_schema) {
-        (CodecWireFormat::Json, Some(CreateWireSchemaStmt::Json(schema_def))) => {
+        (CodecWireFormat::Json, Some(WireSchemaDefinition::Json(schema_def))) => {
             CompiledWireSchema::Json(compile_json_wire_schema(schema_def))
         }
-        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Cbor(schema_def))) => {
+        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Cbor(schema_def))) => {
             CompiledWireSchema::Cbor(compile_json_wire_schema(schema_def))
         }
-        (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Avro(schema_def))) => {
+        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Avro(schema_def))) => {
             let schema_json = avro_schema_json(schema_def, schema.fields());
             let parsed =
                 AvroSchema::parse_str(&schema_json).map_err(|source| CodecError::InvalidCodec {
@@ -1407,42 +1407,42 @@ pub fn compile_codec_with_protobuf(
                 transformations: config.transformations.clone(),
             })
         }
-        (CodecWireFormat::Json, Some(CreateWireSchemaStmt::Avro(_))) => {
+        (CodecWireFormat::Json, Some(WireSchemaDefinition::Avro(_))) => {
             return Err(CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "codec declares JSON wire format but references an avro wire schema"
                     .to_string(),
             });
         }
-        (CodecWireFormat::Json, Some(CreateWireSchemaStmt::Cbor(_))) => {
+        (CodecWireFormat::Json, Some(WireSchemaDefinition::Cbor(_))) => {
             return Err(CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "codec declares JSON wire format but references a cbor wire schema"
                     .to_string(),
             });
         }
-        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Json(_))) => {
+        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Json(_))) => {
             return Err(CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "codec declares CBOR wire format but references a json wire schema"
                     .to_string(),
             });
         }
-        (CodecWireFormat::Cbor, Some(CreateWireSchemaStmt::Avro(_))) => {
+        (CodecWireFormat::Cbor, Some(WireSchemaDefinition::Avro(_))) => {
             return Err(CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "codec declares CBOR wire format but references an avro wire schema"
                     .to_string(),
             });
         }
-        (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Json(_))) => {
+        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Json(_))) => {
             return Err(CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "codec declares AVRO wire format but references a json wire schema"
                     .to_string(),
             });
         }
-        (CodecWireFormat::Avro, Some(CreateWireSchemaStmt::Cbor(_))) => {
+        (CodecWireFormat::Avro, Some(WireSchemaDefinition::Cbor(_))) => {
             return Err(CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "codec declares AVRO wire format but references a cbor wire schema"
@@ -3008,8 +3008,8 @@ mod tests {
         }
     }
 
-    fn json_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Json(CreateWireSchema {
+    fn json_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Json(CreateWireSchema {
             name: identifier("notification_wire"),
             strictness: Default::default(),
             fields: vec![
@@ -3042,17 +3042,17 @@ mod tests {
         })
     }
 
-    fn json_wire_schema_with_strictness(strictness: WireSchemaStrictness) -> CreateWireSchemaStmt {
+    fn json_wire_schema_with_strictness(strictness: WireSchemaStrictness) -> WireSchemaDefinition {
         let mut wire_schema = json_wire_schema();
-        let CreateWireSchemaStmt::Json(schema) = &mut wire_schema else {
+        let WireSchemaDefinition::Json(schema) = &mut wire_schema else {
             unreachable!("json_wire_schema returns JSON");
         };
         schema.strictness = strictness;
         wire_schema
     }
 
-    fn cbor_wire_schema(strictness: WireSchemaStrictness) -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Cbor(CreateWireSchema {
+    fn cbor_wire_schema(strictness: WireSchemaStrictness) -> WireSchemaDefinition {
+        WireSchemaDefinition::Cbor(CreateWireSchema {
             name: identifier("notification_wire"),
             strictness,
             fields: vec![
@@ -3085,8 +3085,8 @@ mod tests {
         })
     }
 
-    fn avro_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Avro(CreateWireSchema {
+    fn avro_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Avro(CreateWireSchema {
             name: identifier("notification_avro"),
             strictness: Default::default(),
             fields: vec![
@@ -3139,8 +3139,8 @@ mod tests {
         }
     }
 
-    fn optional_json_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Json(CreateWireSchema {
+    fn optional_json_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Json(CreateWireSchema {
             name: identifier("optional_notification_wire"),
             strictness: Default::default(),
             fields: vec![
@@ -3158,8 +3158,8 @@ mod tests {
         })
     }
 
-    fn optional_avro_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Avro(CreateWireSchema {
+    fn optional_avro_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Avro(CreateWireSchema {
             name: identifier("optional_notification_avro"),
             strictness: Default::default(),
             fields: vec![
@@ -3202,8 +3202,8 @@ mod tests {
         }
     }
 
-    fn array_json_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Json(CreateWireSchema {
+    fn array_json_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Json(CreateWireSchema {
             name: identifier("metrics_json"),
             strictness: Default::default(),
             fields: vec![
@@ -3221,8 +3221,8 @@ mod tests {
         })
     }
 
-    fn array_avro_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Avro(CreateWireSchema {
+    fn array_avro_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Avro(CreateWireSchema {
             name: identifier("metrics_avro"),
             strictness: Default::default(),
             fields: vec![
@@ -3326,8 +3326,8 @@ mod tests {
         ])
     }
 
-    fn multidimensional_avro_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Avro(CreateWireSchema {
+    fn multidimensional_avro_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Avro(CreateWireSchema {
             name: identifier("shaped_metrics_wire"),
             strictness: Default::default(),
             fields: ["matrix", "samples"]
@@ -3473,8 +3473,8 @@ mod tests {
         }
     }
 
-    fn primitive_arrays_json_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Json(CreateWireSchema {
+    fn primitive_arrays_json_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Json(CreateWireSchema {
             name: identifier("primitive_arrays_wire"),
             strictness: Default::default(),
             fields: primitive_arrays_schema()
@@ -3489,8 +3489,8 @@ mod tests {
         })
     }
 
-    fn primitive_arrays_avro_wire_schema() -> CreateWireSchemaStmt {
-        CreateWireSchemaStmt::Avro(CreateWireSchema {
+    fn primitive_arrays_avro_wire_schema() -> WireSchemaDefinition {
+        WireSchemaDefinition::Avro(CreateWireSchema {
             name: identifier("primitive_arrays_wire"),
             strictness: Default::default(),
             fields: primitive_arrays_schema()
@@ -4384,7 +4384,7 @@ mod tests {
             decode_with_codec(&compiled_codec, br#"[1,2,3]"#).expect_err("arrays must be rejected");
         assert!(matches!(err, CodecError::ExpectedObject { .. }));
 
-        let missing_wire_schema = CreateWireSchemaStmt::Json(CreateWireSchema {
+        let missing_wire_schema = WireSchemaDefinition::Json(CreateWireSchema {
             name: identifier("notification_wire_partial"),
             strictness: WireSchemaStrictness::Loose,
             fields: vec![

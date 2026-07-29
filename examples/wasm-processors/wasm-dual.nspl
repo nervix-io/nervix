@@ -45,7 +45,7 @@ CREATE SCHEMA metric (
   value I32
 );
 
-CREATE STRICT WIRE JSON SCHEMA metric_wire (
+CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
   value integer
 );
 

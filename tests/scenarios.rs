@@ -1346,14 +1346,14 @@ fn build_ingestor_logic_commands(
         last_label STRING
       );
 
-      CREATE STRICT WIRE JSON SCHEMA logic_notification_ingest_wire (
+      CREATE WIRE JSON SCHEMA logic_notification_ingest_wire MODE STRICT (
         tenant string,
         active boolean,
         amount integer,
         raw string
       );
 
-      CREATE STRICT WIRE JSON SCHEMA logic_notification_internal_types_ingest_wire (
+      CREATE WIRE JSON SCHEMA logic_notification_internal_types_ingest_wire MODE STRICT (
         tenant string,
         active boolean,
         u8 integer,
@@ -1370,7 +1370,7 @@ fn build_ingestor_logic_commands(
         raw string
       );
 
-      CREATE STRICT WIRE JSON SCHEMA logic_notification_list_operations_ingest_wire (
+      CREATE WIRE JSON SCHEMA logic_notification_list_operations_ingest_wire MODE STRICT (
         tenant string,
         values array,
         fixed array,
@@ -2921,7 +2921,7 @@ fn commands_update_subscription_state(current: bool, commands: &str) -> bool {
 fn record_avro_wire_optional_fields(world: &mut ScenarioWorld, commands: &str) {
     for statement in nspl_statements(commands) {
         let normalized = statement.trim_start().to_ascii_uppercase();
-        if !normalized.starts_with("CREATE STRICT WIRE AVRO SCHEMA ") {
+        if !normalized.starts_with("CREATE WIRE AVRO SCHEMA ") {
             continue;
         }
         let Some((_, fields)) = statement.split_once('(') else {

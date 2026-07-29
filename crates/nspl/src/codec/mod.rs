@@ -9,7 +9,8 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, codec_name, current_word_prefix, field_ref,
         if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref, schema_ref,
-        string_lit, suggestions_from_errors, tok, u64_value, wire_schema_ref,
+        string_lit, suggestions_from_errors, tok, u64_value, wire_avro_schema_ref,
+        wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -92,15 +93,15 @@ pub fn create_codec_parser<'src>()
 
     let json_wire = kw(Identifier::Json)
         .ignore_then(kw(Identifier::Schema))
-        .ignore_then(wire_schema_ref())
+        .ignore_then(wire_json_schema_ref())
         .map(|wire_schema| (CodecWireFormat::Json, Some(wire_schema)));
     let cbor_wire = kw(Identifier::Cbor)
         .ignore_then(kw(Identifier::Schema))
-        .ignore_then(wire_schema_ref())
+        .ignore_then(wire_cbor_schema_ref())
         .map(|wire_schema| (CodecWireFormat::Cbor, Some(wire_schema)));
     let avro_wire = kw(Identifier::Avro)
         .ignore_then(kw(Identifier::Schema))
-        .ignore_then(wire_schema_ref())
+        .ignore_then(wire_avro_schema_ref())
         .map(|wire_schema| (CodecWireFormat::Avro, Some(wire_schema)));
     let schemaful_codec = kw(Identifier::Wire)
         .ignore_then(choice((json_wire, cbor_wire, avro_wire)))

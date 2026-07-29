@@ -305,9 +305,19 @@ pub fn schema_name<'src>()
     parse_identifier("schema_name")
 }
 
-pub fn wire_schema_ref<'src>()
+pub fn wire_json_schema_ref<'src>()
 -> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
-    parse_identifier("ref:wire_schema")
+    parse_identifier("ref:wire_json_schema")
+}
+
+pub fn wire_cbor_schema_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:wire_cbor_schema")
+}
+
+pub fn wire_avro_schema_ref<'src>()
+-> impl Parser<'src, &'src [Token], ModelIdentifier, extra::Err<ParseError<'src>>> + Clone {
+    parse_identifier("ref:wire_avro_schema")
 }
 
 pub fn wire_schema_name<'src>()
