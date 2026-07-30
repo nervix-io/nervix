@@ -12,11 +12,11 @@ use crate::{
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, alter_op_separator, boxed_choice,
         byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, current_word_prefix,
-        duration_lit, emitter_name, emitter_ref, flush_each, general_error_policy,
-        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
+        duration_lit, emitter_name, emitter_ref, flush_each, from_relay_clauses,
+        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
         materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
         render_vm_program_tokens, route_construction, string_lit, suggestions_from_errors,
-        table_ref, tok, topic_ref,
+        table_ref, tok, topic_ref, where_expression,
     },
 };
 
@@ -522,6 +522,36 @@ fn emit_sink_parser<'src>()
 
 pub fn alter_emitter_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterEmitter, extra::Err<ParseError<'src>>> + Clone {
+    let add_from = kw(Identifier::Add)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .then(where_expression(alter_op_separator()).or_not())
+        .map(|(relay, where_clause)| AlterEmitterOperation::AddFrom {
+            relay,
+            where_clause,
+        });
+    let drop_from = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .map(|relay| AlterEmitterOperation::DropFrom { relay });
+    let alter_from = kw(Identifier::Alter)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(relay_ref())
+        .then(choice((
+            kw(Identifier::Set)
+                .ignore_then(where_expression(alter_op_separator()))
+                .map(Some),
+            kw(Identifier::Drop)
+                .ignore_then(kw(Identifier::Where))
+                .to(None),
+        )))
+        .map(|(relay, where_clause)| match where_clause {
+            Some(where_clause) => AlterEmitterOperation::AlterFromSetWhere {
+                relay,
+                where_clause,
+            },
+            None => AlterEmitterOperation::AlterFromDropWhere { relay },
+        });
     let set_sink = kw(Identifier::Set)
         .ignore_then(kw(Identifier::To))
         .ignore_then(emit_sink_parser())
@@ -562,6 +592,9 @@ pub fn alter_emitter_parser<'src>()
         },
     );
     let operation = choice((
+        add_from,
+        drop_from,
+        alter_from,
         set_sink,
         set_client,
         set_encode,
@@ -600,8 +633,7 @@ pub fn create_emitter_parser<'src>()
         .then_ignore(kw(Identifier::Emitter))
         .then(emitter_name())
         .then_ignore(kw(Identifier::From))
-        .then(relay_ref())
-        .then(collect_for().or_not())
+        .then(from_relay_clauses())
         .boxed()
         .then(
             kw_phrase2(Identifier::Encode, Identifier::Using)
@@ -619,197 +651,174 @@ pub fn create_emitter_parser<'src>()
         .then(message_error_policy())
         .then(general_error_policy())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .try_map(
-            |(
-                (
-                    (
-                        (
-                            (
-                                (
-                                    (
-                                        (
-                                            (
-                                                (((if_not_exists, mode), name), from_relay),
-                                                collect_policy,
-                                            ),
-                                            encode_using_codec,
-                                        ),
-                                        materialized_state,
-                                    ),
-                                    sink,
-                                ),
-                                construction,
-                            ),
-                            sink_flush_each,
-                        ),
-                        sink_commit_each,
-                    ),
-                    message_error_policy,
-                ),
-                general_error_policy,
-            ),
-             span| {
-                if let EmitSink::Iceberg { .. } = &sink
-                    && encode_using_codec.is_some()
-                {
-                    return Err(Rich::custom(
-                        span,
-                        "Iceberg emitters write typed records and do not support ENCODE USING",
-                    ));
-                }
-                if sink.requires_codec() && encode_using_codec.is_none() {
-                    return Err(Rich::custom(
-                        span,
-                        "encoded emitters require ENCODE USING <codec>",
-                    ));
-                }
-                let construction = construction.unwrap_or_default();
-                if encode_using_codec.is_none()
-                    && (construction.inherit.is_some()
-                        || !construction.assignments.is_empty()
-                        || !construction.invocations.is_empty())
-                {
-                    return Err(Rich::custom(
-                        span,
-                        "direct emitter routes support VALUES and WHERE only",
-                    ));
-                }
-                let iceberg_commit_each = if let Some(commit_each) = sink_commit_each {
-                    if let EmitSink::Iceberg { .. } = &sink {
-                        Some(commit_each)
-                    } else {
-                        return Err(Rich::custom(
-                            span,
-                            "COMMIT EACH is only supported by Iceberg emitters",
-                        ));
-                    }
+        .try_map(|(parsed, general_error_policy), span| {
+            let (parsed, message_error_policy) = parsed;
+            let (parsed, sink_commit_each) = parsed;
+            let (parsed, sink_flush_each) = parsed;
+            let (parsed, construction) = parsed;
+            let (parsed, sink) = parsed;
+            let (parsed, materialized_state) = parsed;
+            let (parsed, encode_using_codec) = parsed;
+            let (((if_not_exists, mode), name), from) = parsed;
+            if let EmitSink::Iceberg { .. } = &sink
+                && encode_using_codec.is_some()
+            {
+                return Err(Rich::custom(
+                    span,
+                    "Iceberg emitters write typed records and do not support ENCODE USING",
+                ));
+            }
+            if sink.requires_codec() && encode_using_codec.is_none() {
+                return Err(Rich::custom(
+                    span,
+                    "encoded emitters require ENCODE USING <codec>",
+                ));
+            }
+            let construction = construction.unwrap_or_default();
+            if encode_using_codec.is_none()
+                && (construction.inherit.is_some()
+                    || !construction.assignments.is_empty()
+                    || !construction.invocations.is_empty())
+            {
+                return Err(Rich::custom(
+                    span,
+                    "direct emitter routes support VALUES and WHERE only",
+                ));
+            }
+            let iceberg_commit_each = if let Some(commit_each) = sink_commit_each {
+                if let EmitSink::Iceberg { .. } = &sink {
+                    Some(commit_each)
                 } else {
-                    None
-                };
-                let sink = match (sink, sink_flush_each.clone()) {
-                    (
-                        EmitSink::ClickHouse {
-                            client,
-                            table,
-                            values,
-                            ..
-                        },
-                        (flush_each, _max_batch_size),
-                    ) => EmitSink::ClickHouse {
+                    return Err(Rich::custom(
+                        span,
+                        "COMMIT EACH is only supported by Iceberg emitters",
+                    ));
+                }
+            } else {
+                None
+            };
+            let sink = match (sink, sink_flush_each.clone()) {
+                (
+                    EmitSink::ClickHouse {
                         client,
                         table,
                         values,
-                        flush_each,
+                        ..
                     },
-                    (
-                        EmitSink::Postgres {
-                            client,
-                            table,
-                            values,
-                            conflict_action,
-                            max_batch,
-                            ..
-                        },
-                        (flush_each, _max_batch_size),
-                    ) => EmitSink::Postgres {
-                        client,
-                        table,
-                        values,
-                        conflict_action,
-                        max_batch,
-                        flush_each,
-                    },
-                    (
-                        EmitSink::MySql {
-                            client,
-                            table,
-                            values,
-                            conflict_action,
-                            max_batch,
-                            ..
-                        },
-                        (flush_each, _max_batch_size),
-                    ) => EmitSink::MySql {
+                    (flush_each, _max_batch_size),
+                ) => EmitSink::ClickHouse {
+                    client,
+                    table,
+                    values,
+                    flush_each,
+                },
+                (
+                    EmitSink::Postgres {
                         client,
                         table,
                         values,
                         conflict_action,
                         max_batch,
-                        flush_each,
+                        ..
                     },
-                    (
-                        EmitSink::MongoDb {
-                            client,
-                            collection,
-                            values,
-                            conflict_action,
-                            max_batch,
-                            ..
-                        },
-                        (flush_each, _max_batch_size),
-                    ) => EmitSink::MongoDb {
+                    (flush_each, _max_batch_size),
+                ) => EmitSink::Postgres {
+                    client,
+                    table,
+                    values,
+                    conflict_action,
+                    max_batch,
+                    flush_each,
+                },
+                (
+                    EmitSink::MySql {
+                        client,
+                        table,
+                        values,
+                        conflict_action,
+                        max_batch,
+                        ..
+                    },
+                    (flush_each, _max_batch_size),
+                ) => EmitSink::MySql {
+                    client,
+                    table,
+                    values,
+                    conflict_action,
+                    max_batch,
+                    flush_each,
+                },
+                (
+                    EmitSink::MongoDb {
                         client,
                         collection,
                         values,
                         conflict_action,
                         max_batch,
-                        flush_each,
+                        ..
                     },
-                    (
-                        EmitSink::Iceberg {
-                            backend,
-                            client,
-                            table,
-                            values,
-                            location,
-                            catalog,
-                            ..
-                        },
-                        (flush_each, max_batch_size),
-                    ) => {
-                        let Some((commit_each, max_commit_size)) = iceberg_commit_each else {
-                            return Err(Rich::custom(
-                                span,
-                                "Iceberg emitters require COMMIT EACH <duration> MAX SIZE <bytes>",
-                            ));
-                        };
-                        EmitSink::Iceberg {
-                            backend,
-                            client,
-                            table,
-                            values,
-                            location,
-                            catalog,
-                            flush_each,
-                            max_batch_size,
-                            commit_each,
-                            max_commit_size,
-                        }
-                    }
-                    (sink, _) => sink,
-                };
-                let (flush_each, max_batch_size) = sink_flush_each;
-                Ok(CreateStatement::new(
-                    CreateEmitter {
-                        name,
-                        from_relay,
-                        collect_policy,
-                        encode_using_codec,
-                        sink,
+                    (flush_each, _max_batch_size),
+                ) => EmitSink::MongoDb {
+                    client,
+                    collection,
+                    values,
+                    conflict_action,
+                    max_batch,
+                    flush_each,
+                },
+                (
+                    EmitSink::Iceberg {
+                        backend,
+                        client,
+                        table,
+                        values,
+                        location,
+                        catalog,
+                        ..
+                    },
+                    (flush_each, max_batch_size),
+                ) => {
+                    let Some((commit_each, max_commit_size)) = iceberg_commit_each else {
+                        return Err(Rich::custom(
+                            span,
+                            "Iceberg emitters require COMMIT EACH <duration> MAX SIZE <bytes>",
+                        ));
+                    };
+                    EmitSink::Iceberg {
+                        backend,
+                        client,
+                        table,
+                        values,
+                        location,
+                        catalog,
                         flush_each,
                         max_batch_size,
-                        error_policies: nervix_models::ErrorPolicies {
-                            message: message_error_policy,
-                            general: general_error_policy,
-                        },
-                        mode: mode.unwrap_or(AckMode::Attached),
-                        construction,
-                        materialized_state,
+                        commit_each,
+                        max_commit_size,
+                    }
+                }
+                (sink, _) => sink,
+            };
+            let (flush_each, max_batch_size) = sink_flush_each;
+            Ok(CreateStatement::new(
+                CreateEmitter {
+                    name,
+                    from,
+                    encode_using_codec,
+                    sink,
+                    flush_each,
+                    max_batch_size,
+                    error_policies: nervix_models::ErrorPolicies {
+                        message: message_error_policy,
+                        general: general_error_policy,
                     },
-                    if_not_exists,
-                ))
-            },
-        )
+                    mode: mode.unwrap_or(AckMode::Attached),
+                    construction,
+                    materialized_state,
+                },
+                if_not_exists,
+            ))
+        })
         .boxed()
 }
 
@@ -907,41 +916,59 @@ mod tests {
     #[test]
     fn parses_alter_emitter_operations_in_written_order() {
         let parsed = parse_alter_emitter(
-            "ALTER EMITTER event_sink SET TO ZEROMQ sink_b, SET CLIENT sink_c, SET ENCODE USING \
-             event_codec, DROP ENCODE, SET COLLECT FOR 10ms MAX BATCH SIZE 1MiB, DROP COLLECT, \
-             SET DETACHED, SET FLUSH IMMEDIATE;",
+            "ALTER EMITTER event_sink ADD FROM backup WHERE input.kind = 'backup', ALTER FROM \
+             backup SET WHERE input.kind = 'current', ALTER FROM backup DROP WHERE, DROP FROM \
+             backup, SET TO ZEROMQ sink_b, SET CLIENT sink_c, SET ENCODE USING event_codec, DROP \
+             ENCODE, SET COLLECT FOR 10ms MAX BATCH SIZE 1MiB, DROP COLLECT, SET DETACHED, SET \
+             FLUSH IMMEDIATE;",
         )
         .expect("ALTER EMITTER should parse");
 
-        assert_eq!(parsed.operations.len(), 8);
+        assert_eq!(parsed.operations.len(), 12);
         assert!(matches!(
             parsed.operations[0],
+            AlterEmitterOperation::AddFrom { .. }
+        ));
+        assert!(matches!(
+            parsed.operations[1],
+            AlterEmitterOperation::AlterFromSetWhere { .. }
+        ));
+        assert!(matches!(
+            parsed.operations[2],
+            AlterEmitterOperation::AlterFromDropWhere { .. }
+        ));
+        assert!(matches!(
+            parsed.operations[3],
+            AlterEmitterOperation::DropFrom { .. }
+        ));
+        assert!(matches!(
+            parsed.operations[4],
             AlterEmitterOperation::SetSink {
                 sink: EmitSink::ZeroMq { .. }
             }
         ));
         assert!(matches!(
-            parsed.operations[1],
+            parsed.operations[5],
             AlterEmitterOperation::SetClient { .. }
         ));
         assert!(matches!(
-            parsed.operations[2],
+            parsed.operations[6],
             AlterEmitterOperation::SetEncodeUsing { .. }
         ));
-        assert_eq!(parsed.operations[3], AlterEmitterOperation::DropEncode);
+        assert_eq!(parsed.operations[7], AlterEmitterOperation::DropEncode);
         assert!(matches!(
-            parsed.operations[4],
+            parsed.operations[8],
             AlterEmitterOperation::SetCollect { .. }
         ));
-        assert_eq!(parsed.operations[5], AlterEmitterOperation::DropCollect);
+        assert_eq!(parsed.operations[9], AlterEmitterOperation::DropCollect);
         assert_eq!(
-            parsed.operations[6],
+            parsed.operations[10],
             AlterEmitterOperation::SetMode {
                 mode: AckMode::Detached
             }
         );
         assert_eq!(
-            parsed.operations[7],
+            parsed.operations[11],
             AlterEmitterOperation::SetFlush {
                 flush_each: "IMMEDIATE".to_string(),
                 max_batch_size: None,
@@ -980,7 +1007,7 @@ mod tests {
     #[test]
     fn alter_emitter_completion_comes_from_its_operation_grammar() {
         let suggestions = suggest_alter_emitter("ALTER EMITTER event_sink ", usize::MAX);
-        for expected in ["SET", "DROP"] {
+        for expected in ["ADD", "ALTER", "SET", "DROP"] {
             assert!(
                 suggestions.contains(&expected.to_string()),
                 "missing {expected}: {suggestions:?}"
@@ -1006,7 +1033,14 @@ mod tests {
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), "emit");
-        assert_eq!(parsed.from_relay.as_str(), "p99");
+        assert_eq!(
+            parsed
+                .from
+                .first()
+                .expect("emitter must have an input")
+                .as_str(),
+            "p99"
+        );
         assert_eq!(
             parsed
                 .encode_using_codec
@@ -1035,6 +1069,7 @@ mod tests {
         )
         .expect("emitter input collection must parse");
         let policy = parsed
+            .from
             .collect_policy
             .as_ref()
             .expect("emitter collection policy must be structured");
@@ -1047,6 +1082,54 @@ mod tests {
         let input = "CREATE EMITTER emit FROM p99 COL";
         let suggestions = suggest_create_emitter(input, input.len());
         assert!(suggestions.contains(&"COLLECT FOR".to_string()));
+    }
+
+    #[test]
+    fn parses_multiple_emitter_inputs_with_source_where() {
+        let parsed = parse_create_emitter(
+            "CREATE EMITTER emit FROM source_a WHERE input.kind = 'a', source_b WHERE input.kind \
+             = 'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB ENCODE USING my_codec TO ZEROMQ sink \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        )
+        .expect("multiple emitter inputs should parse");
+
+        assert_eq!(
+            parsed
+                .from
+                .relays()
+                .iter()
+                .map(|relay| relay.as_str())
+                .collect::<Vec<_>>(),
+            vec!["source_a", "source_b"]
+        );
+        assert_eq!(parsed.from.where_clauses().len(), 2);
+        assert!(parsed.from.collect_policy.is_some());
+    }
+
+    #[test]
+    fn rejects_incomplete_multiple_emitter_inputs() {
+        assert!(
+            parse_create_emitter(
+                "CREATE EMITTER emit FROM source_a, ENCODE USING my_codec TO ZEROMQ sink FLUSH \
+                 IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_create_emitter(
+                "CREATE EMITTER emit FROM source_a WHERE, source_b ENCODE USING my_codec TO \
+                 ZEROMQ sink FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn emitter_input_completion_does_not_leak_unrelated_grammar() {
+        let input = "CREATE EMITTER emit FROM source_a WHE";
+        let suggestions = suggest_create_emitter(input, input.len());
+        assert!(suggestions.contains(&"WHERE".to_string()));
+        assert!(!suggestions.contains(&"SCHEMA".to_string()));
     }
 
     #[test]

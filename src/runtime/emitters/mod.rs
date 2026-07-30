@@ -58,8 +58,9 @@ struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
     domain: &'a Domain,
     emitter: &'a Identifier,
-    input_relay: &'a Identifier,
+    metric_relay: Option<&'a Identifier>,
     error_policies: &'a ErrorPolicies,
+    source_filters: &'a HashMap<Identifier, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
     materialized_stream_owner_nodes: &'a HashMap<Identifier, Option<String>>,
@@ -121,6 +122,168 @@ impl EmitterPublishBatch {
 
     fn ack_success(&self) {
         self.batch.ack_success();
+    }
+}
+
+type EmitterTaggedInputStream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = (Identifier, RelayRecordBatch)> + Send>>;
+
+enum EmitterInputEvent {
+    Batch {
+        relay: Identifier,
+        batch: RelayRecordBatch,
+    },
+    Wake,
+    Shutdown,
+    Closed,
+}
+
+struct EmitterTaskInputs {
+    receiver: futures_util::stream::SelectAll<EmitterTaggedInputStream>,
+    collections: Vec<(Identifier, RuntimeTaskInputCollection)>,
+}
+
+impl EmitterTaskInputs {
+    fn new(
+        inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
+        collect_policy: Option<RuntimeInputCollectPolicy>,
+        quiesce_counters: Arc<NodeQuiesceCounters>,
+    ) -> Self {
+        let collections = inputs
+            .iter()
+            .map(|(relay, _receiver)| {
+                (
+                    relay.clone(),
+                    RuntimeTaskInputCollection::with_quiesce_counters(
+                        collect_policy,
+                        quiesce_counters.clone(),
+                    ),
+                )
+            })
+            .collect();
+        let receiver = futures_util::stream::select_all(inputs.into_iter().map(
+            |(relay, fan_in)| -> EmitterTaggedInputStream {
+                Box::pin(futures_util::stream::unfold(
+                    (relay, fan_in),
+                    |(relay, mut fan_in)| async move {
+                        fan_in
+                            .recv()
+                            .await
+                            .map(|batch| ((relay.clone(), batch), (relay, fan_in)))
+                    },
+                ))
+            },
+        ));
+        Self {
+            receiver,
+            collections,
+        }
+    }
+
+    fn collection_mut(
+        &mut self,
+        relay: &Identifier,
+    ) -> Result<&mut RuntimeTaskInputCollection, String> {
+        self.collections
+            .iter_mut()
+            .find_map(|(candidate, collection)| (candidate == relay).then_some(collection))
+            .ok_or_else(|| {
+                format!(
+                    "emitter received undeclared input relay '{}'",
+                    relay.as_str()
+                )
+            })
+    }
+
+    fn take_any(&mut self) -> Result<Option<(Identifier, RelayRecordBatch)>, String> {
+        for (relay, collection) in &mut self.collections {
+            if let Some(batch) = collection.take_any()? {
+                return Ok(Some((relay.clone(), batch)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn take_due(&mut self) -> Result<Option<(Identifier, RelayRecordBatch)>, String> {
+        for (relay, collection) in &mut self.collections {
+            if let Some(batch) = collection.take_due()? {
+                return Ok(Some((relay.clone(), batch)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.collections
+            .iter()
+            .filter_map(|(_relay, collection)| collection.next_deadline())
+            .min()
+    }
+
+    async fn recv(
+        &mut self,
+        shutdown_rx: &mut watch::Receiver<bool>,
+        wake_at: Option<Instant>,
+    ) -> EmitterInputEvent {
+        loop {
+            tokio::task::consume_budget().await;
+            if *shutdown_rx.borrow() {
+                return self
+                    .take_any()
+                    .expect("same-source emitter batches must concatenate")
+                    .map(|(relay, batch)| EmitterInputEvent::Batch { relay, batch })
+                    .unwrap_or(EmitterInputEvent::Shutdown);
+            }
+            if let Some((relay, batch)) = self
+                .take_due()
+                .expect("same-source emitter batches must concatenate")
+            {
+                return EmitterInputEvent::Batch { relay, batch };
+            }
+            let collect_at = self.next_deadline();
+            tokio::select! {
+                biased;
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        return self
+                            .take_any()
+                            .expect("same-source emitter batches must concatenate")
+                            .map(|(relay, batch)| EmitterInputEvent::Batch { relay, batch })
+                            .unwrap_or(EmitterInputEvent::Shutdown);
+                    }
+                }
+                _ = async {
+                    if let Some(deadline) = wake_at {
+                        sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => return EmitterInputEvent::Wake,
+                _ = async {
+                    if let Some(deadline) = collect_at {
+                        sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+                message = self.receiver.next() => {
+                    let Some((relay, batch)) = message else {
+                        return self
+                            .take_any()
+                            .expect("same-source emitter batches must concatenate")
+                            .map(|(relay, batch)| EmitterInputEvent::Batch { relay, batch })
+                            .unwrap_or(EmitterInputEvent::Closed);
+                    };
+                    if let Some(batch) = self
+                        .collection_mut(&relay)
+                        .and_then(|collection| collection.push(batch))
+                        .expect("same-source emitter batches must concatenate")
+                    {
+                        return EmitterInputEvent::Batch { relay, batch };
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1449,7 +1612,7 @@ impl EmitterTask {
         runtime: &Runtime,
         build: EmitterTaskBuildDeps<'_>,
         emitter: CreateEmitter,
-        receiver: RelayRuntimeFanIn,
+        inputs: Vec<(Identifier, RelayRuntimeFanIn)>,
     ) -> Result<ScheduledEmitterTask, RuntimeError> {
         let EmitterTaskBuildDeps {
             domain,
@@ -1461,7 +1624,6 @@ impl EmitterTask {
         let EmitterTaskDeps {
             input_schema,
             input_branching,
-            input_branching_schema,
             materialized_relay_specs: materialized_stream_specs,
             materialized_relay_owner_nodes: materialized_stream_owner_nodes,
             lookups,
@@ -1492,11 +1654,41 @@ impl EmitterTask {
                 available_materialized_streams: &materialized_stream_specs,
                 available_lookups: &lookups,
                 current_branching: &input_branching,
-                current_branch_schema: input_branching_schema.as_ref(),
+                current_branch_schema: None,
                 current_branch_sensitivity: None,
                 udfs: udfs.as_ref(),
             },
         )?;
+        let mut source_filters = HashMap::default();
+        for source_filter in emitter.from.where_clauses() {
+            let program = compile_scoped_filter_program(
+                RuntimeCompileTarget {
+                    domain,
+                    identifier: &emitter.name,
+                },
+                Some(&source_filter.where_clause),
+                RuntimeVmSchema {
+                    schema: input_schema.arrow_schema(),
+                    sensitivity: input_schema.vm_sensitivity(),
+                },
+                MessageErrorOperation::SourceWhere,
+                RuntimeVmCompileContext {
+                    available_materialized_streams: &materialized_stream_specs,
+                    available_lookups: &lookups,
+                    current_branching: &input_branching,
+                    current_branch_schema: None,
+                    current_branch_sensitivity: None,
+                    udfs: udfs.as_ref(),
+                },
+                RuntimeFilterScope::Source {
+                    namespace: "input",
+                    allow_header_reads: false,
+                    allow_metadata: false,
+                },
+            )?
+            .expect("an emitter FROM WHERE expression must compile to a program");
+            source_filters.insert(source_filter.relay.clone(), program);
+        }
         let client = clients.get(emitter.sink.client()).cloned();
         let catalog_client = emitter
             .sink
@@ -1505,7 +1697,11 @@ impl EmitterTask {
             .cloned();
         let task_domain = domain.clone();
         let task_emitter = emitter.name.clone();
-        let task_from_relay = emitter.from_relay.clone();
+        let task_metric_relay = if emitter.from.relays().len() == 1 {
+            emitter.from.first().cloned()
+        } else {
+            None
+        };
         let task_sink = emitter.sink.clone();
         let task_flush_each = emitter.flush_each.clone();
         let task_max_batch_size = emitter.max_batch_size.clone();
@@ -1533,7 +1729,7 @@ impl EmitterTask {
             domain,
             "emitter",
             &emitter.name,
-            emitter.collect_policy.as_ref(),
+            emitter.from.collect_policy.as_ref(),
         )?;
         let quiesce_counters = runtime.node_quiesce_counters(domain, &emitter.name);
         let (commands, mut command_rx) = mpsc::channel(4);
@@ -1542,11 +1738,8 @@ impl EmitterTask {
             let _client_mounts = resolved_client
                 .as_ref()
                 .and_then(|config| config.mounts.clone());
-            let mut input = receiver;
-            let mut input_collection = RuntimeTaskInputCollection::with_quiesce_counters(
-                input_collect_policy,
-                quiesce_counters.clone(),
-            );
+            let mut inputs =
+                EmitterTaskInputs::new(inputs, input_collect_policy, quiesce_counters.clone());
             let context = EmitterSinkContext {
                 domain: task_domain.clone(),
                 emitter: task_emitter.clone(),
@@ -1585,8 +1778,9 @@ impl EmitterTask {
                 runtime: &runtime,
                 domain: &task_domain,
                 emitter: &task_emitter,
-                input_relay: &task_from_relay,
+                metric_relay: task_metric_relay.as_ref(),
                 error_policies: &task_error_policies,
+                source_filters: &source_filters,
                 filter_map: filter_map.as_ref(),
                 materialized_state: &task_materialized_state,
                 materialized_stream_owner_nodes: &materialized_stream_owner_nodes,
@@ -1597,8 +1791,8 @@ impl EmitterTask {
             loop {
                 tokio::task::consume_budget().await;
                 let input_event = if force_flush_pending {
-                    match input_collection.take_any() {
-                        Ok(Some(batch)) => Some(BatchedInput::Batch(batch)),
+                    match inputs.take_any() {
+                        Ok(Some((relay, batch))) => Some(EmitterInputEvent::Batch { relay, batch }),
                         Ok(None) => {
                             force_flush_pending = false;
                             None
@@ -1649,10 +1843,8 @@ impl EmitterTask {
                                 None => break,
                             }
                         }
-                        event = Runtime::recv_runtime_collected_input(
-                            &mut input,
+                        event = inputs.recv(
                             &mut shutdown_rx,
-                            &mut input_collection,
                             sink.flush_deadline(&emitter_buffer),
                         ) => Some(event),
                         changed = force_flush_rx.changed() => {
@@ -1685,7 +1877,7 @@ impl EmitterTask {
                 };
                 let _work = NodeQuiesceWorkGuard::begin(quiesce_counters.clone());
                 match input_event {
-                    BatchedInput::Shutdown | BatchedInput::Closed => {
+                    EmitterInputEvent::Shutdown | EmitterInputEvent::Closed => {
                         let mut control = EmitterPublishControl {
                             runtime: &runtime,
                             fault_injector: &fault_injector,
@@ -1703,7 +1895,7 @@ impl EmitterTask {
                             .await;
                         break;
                     }
-                    BatchedInput::Wake => {
+                    EmitterInputEvent::Wake => {
                         let mut control = EmitterPublishControl {
                             runtime: &runtime,
                             fault_injector: &fault_injector,
@@ -1723,23 +1915,7 @@ impl EmitterTask {
                             Ok(Some(report)) => {
                                 publish_backoff.reset();
                                 runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                                runtime
-                                    .metrics
-                                    .observe_global_node_sent(NodeBatchObservation {
-                                        domain: &task_domain,
-                                        kind: ModelKind::Emitter,
-                                        node: &task_emitter,
-                                        relay: &task_from_relay,
-                                        physical_node_id: runtime.local_node_id.read().as_deref(),
-                                        messages: report.messages,
-                                        bytes: report.bytes,
-                                        domain_timestamp: Some(report.domain_timestamp),
-                                    });
-                                runtime.mark_branch_aggregated_metrics_updated(
-                                    &task_domain,
-                                    ModelKind::Emitter,
-                                    &task_emitter,
-                                );
+                                batch_context.observe_sent(&report);
                             }
                             Ok(None) => {}
                             Err(error) if emitter_publish_error_is_retryable(&error) => {
@@ -1771,14 +1947,17 @@ impl EmitterTask {
                             }
                         }
                     }
-                    BatchedInput::Batch(batch) => {
+                    EmitterInputEvent::Batch {
+                        relay: input_relay,
+                        batch,
+                    } => {
                         runtime
                             .metrics
                             .observe_global_node_received(NodeBatchObservation {
                                 domain: &task_domain,
                                 kind: ModelKind::Emitter,
                                 node: &task_emitter,
-                                relay: &task_from_relay,
+                                relay: &input_relay,
                                 physical_node_id: runtime.local_node_id.read().as_deref(),
                                 messages: batch.message_count(),
                                 bytes: batch.estimated_bytes(),
@@ -1799,7 +1978,7 @@ impl EmitterTask {
                                         domain: &task_domain,
                                         kind: ModelKind::Emitter,
                                         node: &task_emitter,
-                                        relay: &task_from_relay,
+                                        relay: &input_relay,
                                         physical_node_id: runtime.local_node_id.read().as_deref(),
                                         seconds,
                                         domain_timestamp: batch.domain_timestamp(),
@@ -1811,11 +1990,13 @@ impl EmitterTask {
                                 &task_emitter,
                             );
                         }
-                        let publish_batch =
-                            match batch_context.process(batch, &mut shutdown_rx).await {
-                                Some(batch) => batch,
-                                None => continue,
-                            };
+                        let publish_batch = match batch_context
+                            .process(&input_relay, batch, &mut shutdown_rx)
+                            .await
+                        {
+                            Some(batch) => batch,
+                            None => continue,
+                        };
 
                         {
                             let mut pending_batch = Some(publish_batch);
@@ -1895,26 +2076,7 @@ impl EmitterTask {
                                             &task_domain,
                                             &task_emitter,
                                         );
-                                        runtime.metrics.observe_global_node_sent(
-                                            NodeBatchObservation {
-                                                domain: &task_domain,
-                                                kind: ModelKind::Emitter,
-                                                node: &task_emitter,
-                                                relay: &task_from_relay,
-                                                physical_node_id: runtime
-                                                    .local_node_id
-                                                    .read()
-                                                    .as_deref(),
-                                                messages: report.messages,
-                                                bytes: report.bytes,
-                                                domain_timestamp: Some(report.domain_timestamp),
-                                            },
-                                        );
-                                        runtime.mark_branch_aggregated_metrics_updated(
-                                            &task_domain,
-                                            ModelKind::Emitter,
-                                            &task_emitter,
-                                        );
+                                        batch_context.observe_sent(&report);
                                         pending_batch.take();
                                         break;
                                     }
@@ -2135,6 +2297,40 @@ fn resolve_emitter_catalog_client(
 }
 
 impl EmitterBatchContext<'_> {
+    fn observe_sent(&self, report: &PublishReport) {
+        if let Some(relay) = self.metric_relay {
+            self.runtime
+                .metrics
+                .observe_global_node_sent(NodeBatchObservation {
+                    domain: self.domain,
+                    kind: ModelKind::Emitter,
+                    node: self.emitter,
+                    relay,
+                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    messages: report.messages,
+                    bytes: report.bytes,
+                    domain_timestamp: Some(report.domain_timestamp),
+                });
+        } else {
+            self.runtime
+                .metrics
+                .observe_global_node_without_stream_sent(NodeWithoutRelayObservation {
+                    domain: self.domain,
+                    kind: ModelKind::Emitter,
+                    node: self.emitter,
+                    physical_node_id: self.runtime.local_node_id.read().as_deref(),
+                    messages: report.messages,
+                    bytes: report.bytes,
+                    domain_timestamp: Some(report.domain_timestamp),
+                });
+        }
+        self.runtime.mark_branch_aggregated_metrics_updated(
+            self.domain,
+            ModelKind::Emitter,
+            self.emitter,
+        );
+    }
+
     async fn handle_publish_error_batches(
         &self,
         batches: impl IntoIterator<Item = EmitterPublishBatch>,
@@ -2194,6 +2390,7 @@ impl EmitterBatchContext<'_> {
 
     async fn process(
         &self,
+        input_relay: &Identifier,
         batch: RelayRecordBatch,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> Option<EmitterPublishBatch> {
@@ -2202,7 +2399,7 @@ impl EmitterBatchContext<'_> {
             .runtime
             .resolve_materialized_dependencies_for_batch(
                 self.domain,
-                self.input_relay,
+                input_relay,
                 self.materialized_state,
                 batch,
                 shutdown_rx,
@@ -2226,6 +2423,7 @@ impl EmitterBatchContext<'_> {
                 return None;
             }
         };
+        let batch = self.filter_source_batch(input_relay, batch).await?;
         let Some(filter_map) = self.filter_map else {
             return Some(EmitterPublishBatch::from_batch(batch));
         };
@@ -2330,5 +2528,81 @@ impl EmitterBatchContext<'_> {
                 None
             }
         }
+    }
+
+    async fn filter_source_batch(
+        &self,
+        input_relay: &Identifier,
+        batch: RelayRecordBatch,
+    ) -> Option<RelayRecordBatch> {
+        let Some(program) = self.source_filters.get(input_relay) else {
+            return Some(batch);
+        };
+        let side_inputs = match self
+            .runtime
+            .load_materialized_side_inputs(
+                self.domain,
+                &batch.key,
+                &program.materialized_interest,
+                self.materialized_stream_owner_nodes,
+            )
+            .await
+        {
+            Ok(values) => values,
+            Err(error) => {
+                self.runtime.handle_general_error_for_acks(
+                    self.domain,
+                    "emitter",
+                    self.emitter,
+                    self.error_policies,
+                    batch.acks.iter(),
+                    format!(
+                        "emitter '{}' failed to load FROM WHERE side inputs for relay '{}': {}",
+                        self.emitter.as_str(),
+                        input_relay.as_str(),
+                        error
+                    ),
+                );
+                return None;
+            }
+        };
+        let plan = match plan_filter_map_messages(
+            "emitter",
+            self.emitter,
+            "FROM WHERE",
+            program,
+            batch,
+            self.runtime
+                .current_stream_expiration_time(self.domain)
+                .ok()
+                .flatten()
+                .unwrap_or_else(current_timestamp),
+            &side_inputs,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.runtime.handle_general_error_for_acks(
+                    self.domain,
+                    "emitter",
+                    self.emitter,
+                    self.error_policies,
+                    error.acks.iter(),
+                    format!("input relay '{}': {}", input_relay.as_str(), error.reason),
+                );
+                return None;
+            }
+        };
+        self.runtime
+            .handle_planned_message_errors(
+                self.domain,
+                "emitter",
+                self.emitter,
+                self.error_policies,
+                plan.message_errors,
+            )
+            .await;
+        plan.batch
     }
 }

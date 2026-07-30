@@ -121,6 +121,9 @@ relay. Do not use them to scan across branches.
   order.
 - Every relay declares a schema and explicit branch selection.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
+- Every multi-input emitter source declares the same payload schema. Its sources may use different
+  branch names, but each source retains its own branch through collection and external publish;
+  node-wide materialized dependencies and message-error relays match every source branch exactly.
 - Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
   duration, and is absent when immediate input execution is intended. Correlator sides are checked
   independently; ingestors never declare input collection.

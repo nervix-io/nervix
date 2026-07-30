@@ -803,9 +803,7 @@ pub enum CodecEncoding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateEmitter {
     pub name: Identifier,
-    pub from_relay: Identifier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collect_policy: Option<InputCollectPolicy>,
+    pub from: ProcessorInputs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encode_using_codec: Option<Identifier>,
     pub sink: EmitSink,
@@ -846,6 +844,62 @@ impl CreateEmitter {
         operation: &AlterEmitterOperation,
     ) -> Result<(), AlterEmitterError> {
         match operation {
+            AlterEmitterOperation::AddFrom {
+                relay,
+                where_clause,
+            } => {
+                self.ensure_input_absent(relay)?;
+                self.from.from.push(relay.clone());
+                if let Some(where_clause) = where_clause {
+                    self.from.r#where.push(ProcessorInputWhere {
+                        relay: relay.clone(),
+                        where_clause: where_clause.clone(),
+                    });
+                }
+            }
+            AlterEmitterOperation::DropFrom { relay } => {
+                let index = self.input_index(relay)?;
+                if self.from.from.len() == 1 {
+                    return Err(AlterEmitterError::CannotDropLastInput);
+                }
+                self.from.from.remove(index);
+                self.from
+                    .r#where
+                    .retain(|input_where| input_where.relay != *relay);
+            }
+            AlterEmitterOperation::AlterFromSetWhere {
+                relay,
+                where_clause,
+            } => {
+                self.input_index(relay)?;
+                if let Some(input_where) = self
+                    .from
+                    .r#where
+                    .iter_mut()
+                    .find(|input_where| input_where.relay == *relay)
+                {
+                    input_where.where_clause = where_clause.clone();
+                } else {
+                    self.from.r#where.push(ProcessorInputWhere {
+                        relay: relay.clone(),
+                        where_clause: where_clause.clone(),
+                    });
+                }
+            }
+            AlterEmitterOperation::AlterFromDropWhere { relay } => {
+                self.input_index(relay)?;
+                let Some(index) = self
+                    .from
+                    .r#where
+                    .iter()
+                    .position(|input_where| input_where.relay == *relay)
+                else {
+                    return Err(AlterEmitterError::InputWhereNotConfigured {
+                        relay: relay.clone(),
+                    });
+                };
+                self.from.r#where.remove(index);
+            }
             AlterEmitterOperation::SetSink { sink } => {
                 let mut sink = sink.clone();
                 sink.copy_flush_policy_from(self);
@@ -879,10 +933,10 @@ impl CreateEmitter {
                 }
             }
             AlterEmitterOperation::SetCollect { policy } => {
-                self.collect_policy = Some(policy.clone());
+                self.from.collect_policy = Some(policy.clone());
             }
             AlterEmitterOperation::DropCollect => {
-                self.collect_policy = None;
+                self.from.collect_policy = None;
             }
             AlterEmitterOperation::SetMode { mode } => {
                 self.mode = *mode;
@@ -915,6 +969,26 @@ impl CreateEmitter {
         }
         Ok(())
     }
+
+    fn input_index(&self, relay: &Identifier) -> Result<usize, AlterEmitterError> {
+        self.from
+            .from
+            .iter()
+            .position(|candidate| candidate == relay)
+            .ok_or_else(|| AlterEmitterError::InputNotFound {
+                relay: relay.clone(),
+            })
+    }
+
+    fn ensure_input_absent(&self, relay: &Identifier) -> Result<(), AlterEmitterError> {
+        if self.from.from.iter().any(|candidate| candidate == relay) {
+            Err(AlterEmitterError::InputAlreadyExists {
+                relay: relay.clone(),
+            })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -925,6 +999,20 @@ pub struct AlterEmitter {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterEmitterOperation {
+    AddFrom {
+        relay: Identifier,
+        where_clause: Option<crate::Expression>,
+    },
+    DropFrom {
+        relay: Identifier,
+    },
+    AlterFromSetWhere {
+        relay: Identifier,
+        where_clause: crate::Expression,
+    },
+    AlterFromDropWhere {
+        relay: Identifier,
+    },
     SetSink {
         sink: EmitSink,
     },
@@ -959,6 +1047,14 @@ pub enum AlterEmitterError {
         stored: Identifier,
         requested: Identifier,
     },
+    #[error("input relay `{relay}` is already configured")]
+    InputAlreadyExists { relay: Identifier },
+    #[error("input relay `{relay}` is not configured")]
+    InputNotFound { relay: Identifier },
+    #[error("input relay `{relay}` has no WHERE clause")]
+    InputWhereNotConfigured { relay: Identifier },
+    #[error("an emitter must retain at least one input")]
+    CannotDropLastInput,
     #[error("emitter encoding is not configured")]
     EncodeNotConfigured,
     #[error("COMMIT policy is only supported by Iceberg emitters")]
@@ -4264,8 +4360,7 @@ mod tests {
     fn emitter_alter_applies_operations_in_order_and_is_atomic() {
         let mut emitter = CreateEmitter {
             name: identifier("event_sink"),
-            from_relay: identifier("events"),
-            collect_policy: None,
+            from: ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("event_codec")),
             sink: EmitSink::ZeroMq {
                 client: identifier("sink_a"),
@@ -4281,6 +4376,13 @@ mod tests {
             .apply_alter(&AlterEmitter {
                 emitter: identifier("event_sink"),
                 operations: vec![
+                    AlterEmitterOperation::AddFrom {
+                        relay: identifier("backup_events"),
+                        where_clause: Some(Expression::Literal(Literal::Bool(true))),
+                    },
+                    AlterEmitterOperation::AlterFromDropWhere {
+                        relay: identifier("backup_events"),
+                    },
                     AlterEmitterOperation::SetClient {
                         client: identifier("sink_b"),
                     },
@@ -4301,6 +4403,11 @@ mod tests {
         assert_eq!(emitter.sink.client(), &identifier("sink_b"));
         assert_eq!(emitter.flush_policy(), ("IMMEDIATE", None));
         assert_eq!(emitter.mode, AckMode::Detached);
+        assert_eq!(
+            emitter.from.relays(),
+            &[identifier("events"), identifier("backup_events")]
+        );
+        assert!(emitter.from.where_clauses().is_empty());
 
         let before = emitter.clone();
         let error = emitter
@@ -4323,8 +4430,7 @@ mod tests {
     fn emitter_alter_reports_name_and_commit_policy_errors() {
         let emitter = CreateEmitter {
             name: identifier("event_sink"),
-            from_relay: identifier("events"),
-            collect_policy: None,
+            from: ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("event_codec")),
             sink: EmitSink::ZeroMq {
                 client: identifier("sink"),
@@ -4356,6 +4462,38 @@ mod tests {
                     }],
                 },
                 AlterEmitterError::CommitPolicyUnsupported,
+            ),
+            (
+                AlterEmitter {
+                    emitter: identifier("event_sink"),
+                    operations: vec![AlterEmitterOperation::AddFrom {
+                        relay: identifier("events"),
+                        where_clause: None,
+                    }],
+                },
+                AlterEmitterError::InputAlreadyExists {
+                    relay: identifier("events"),
+                },
+            ),
+            (
+                AlterEmitter {
+                    emitter: identifier("event_sink"),
+                    operations: vec![AlterEmitterOperation::DropFrom {
+                        relay: identifier("missing"),
+                    }],
+                },
+                AlterEmitterError::InputNotFound {
+                    relay: identifier("missing"),
+                },
+            ),
+            (
+                AlterEmitter {
+                    emitter: identifier("event_sink"),
+                    operations: vec![AlterEmitterOperation::DropFrom {
+                        relay: identifier("events"),
+                    }],
+                },
+                AlterEmitterError::CannotDropLastInput,
             ),
         ];
         for (alter, expected) in cases {

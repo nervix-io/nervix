@@ -342,8 +342,7 @@ mod tests {
     fn emitter_flush_is_dynamic_and_client_changes_swap_despite_fingerprint_changes() {
         let emitter = CreateEmitter {
             name: identifier("event_sink"),
-            from_relay: identifier("events"),
-            collect_policy: None,
+            from: nervix_models::ProcessorInputs::single(identifier("events")),
             encode_using_codec: Some(identifier("event_codec")),
             sink: EmitSink::ZeroMq {
                 client: identifier("sink_a"),
