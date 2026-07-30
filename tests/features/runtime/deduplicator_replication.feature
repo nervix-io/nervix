@@ -55,7 +55,7 @@ Feature: Deduplicator state replication
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-        CREATE EMITTER kafka_notifications FROM ss2 ENCODE USING transaction_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_notifications FROM ss2 TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING transaction_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

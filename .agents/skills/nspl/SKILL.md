@@ -57,11 +57,12 @@ relay, junction, deduplicator, reorderer, emitter, ingestor, reingestor, or gene
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
 changes pause the domain; structural junction, emitter sink/client/codec/collect/mode, ingestor,
-and relay materialized-state changes gate and drain only affected entities. Deduplicator key and
-reorderer ordering changes also use entity pause; their `MAX TIME` changes are dynamic. In `ALTER
-INGESTOR`, use a complete transport-specific source body after `SET FROM`. Every reingestor and
-generator ALTER uses entity pause; reingestor route bodies retain their per-route branch selection,
-while generator route bodies remain set-only.
+emitter source-predicate, and relay materialized-state changes gate and drain only affected
+entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
+Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
+dynamic. In `ALTER INGESTOR`, use a complete transport-specific source body after `SET FROM`.
+Every reingestor and generator ALTER uses entity pause; reingestor route bodies retain their
+per-route branch selection, while generator route bodies remain set-only.
 
 ## Preserve NSPL semantics
 
@@ -91,6 +92,11 @@ while generator route bodies remain set-only.
   the UDF without persisting it when any test rejects.
 - Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch; use a reingestor when the graph must repartition or remove branch grouping.
+- An emitter may list multiple `FROM <relay> [WHERE <expr>]` inputs when every relay declares the
+  same payload schema. Unlike ordinary processors, those inputs may use differently named
+  branches. Keep collection separate per source relay and concrete branch, and remember that one
+  node-wide materialized dependency or message-error relay must be exact-branch compatible with
+  every source.
 - Treat every route as a newly constructed output. Add `INHERIT` only where that node permits it,
   and initialize every required output field on set-only routes.
 - Add a route-local message error policy. Add the required general/global policy for the chosen

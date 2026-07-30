@@ -161,7 +161,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -221,7 +221,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -282,7 +282,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -397,7 +397,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE DETACHED EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -457,7 +457,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -529,7 +529,7 @@ Feature: Kafka ingestion
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM forwarded_notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_forward FROM forwarded_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -602,7 +602,7 @@ Feature: Kafka ingestion
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM forwarded_notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_forward FROM forwarded_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

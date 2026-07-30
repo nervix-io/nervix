@@ -2079,7 +2079,6 @@ struct ExecutionBuildDeps<'a> {
     domain: &'a Domain,
     relay_schemas: &'a HashMap<Identifier, Arc<CompiledSchema>>,
     relay_branchings: &'a HashMap<Identifier, Vec<Identifier>>,
-    relay_branching_schemas: &'a HashMap<Identifier, Option<StdArc<arrow_schema::Schema>>>,
     materialized_relay_specs: &'a HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_relay_owner_nodes: &'a HashMap<Identifier, Option<String>>,
     lookups: &'a HashMap<Identifier, Arc<LookupRuntime>>,
@@ -2089,7 +2088,6 @@ struct ExecutionBuildDeps<'a> {
 struct EmitterTaskDeps {
     input_schema: Arc<CompiledSchema>,
     input_branching: Vec<Identifier>,
-    input_branching_schema: Option<StdArc<arrow_schema::Schema>>,
     materialized_relay_specs: HashMap<Identifier, RuntimeMaterializedRelaySpec>,
     materialized_relay_owner_nodes: HashMap<Identifier, Option<String>>,
     lookups: HashMap<Identifier, Arc<LookupRuntime>>,

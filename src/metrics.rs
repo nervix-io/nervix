@@ -1858,6 +1858,30 @@ impl RuntimeMetrics {
         );
     }
 
+    pub fn observe_global_node_without_stream_sent(
+        &self,
+        observation: NodeWithoutRelayObservation<'_>,
+    ) {
+        let messages_key = MetricKey::node_without_stream(
+            observation.domain,
+            observation.kind,
+            observation.node,
+            observation.physical_node_id,
+            "sent",
+            MESSAGES_TOTAL,
+        );
+        self.increment(
+            messages_key.clone(),
+            observation.messages,
+            observation.domain_timestamp,
+        );
+        self.increment(
+            with_metric(&messages_key, BYTES_TOTAL),
+            observation.bytes,
+            observation.domain_timestamp,
+        );
+    }
+
     pub fn observe_branch_node_without_stream_received(
         &self,
         branch_key: &str,

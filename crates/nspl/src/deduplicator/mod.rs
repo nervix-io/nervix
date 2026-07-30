@@ -7,11 +7,11 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, alter_expression_list, alter_op_separator,
-        alter_processor_operation, branch_selection, current_word_prefix, deduplicator_name,
+        alter_processor_operation, branch_selection, completion_context, deduplicator_name,
         deduplicator_ref, duration_lit, filter_where_clause, flushed_processor_outputs,
         from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, render_vm_program_tokens, suggestions_from_errors, tok,
-        vm_program_error_message,
+        materialized_state_dependencies, render_vm_program_tokens, suggest_from,
+        suggestions_from_errors, tok, vm_program_error_message,
     },
 };
 
@@ -181,30 +181,12 @@ pub fn parse_alter_deduplicator(input: &str) -> Result<AlterDeduplicator, ParseF
 }
 
 pub fn suggest_create_deduplicator(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_deduplicator_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_deduplicator_parser())
 }
 
 pub fn suggest_alter_deduplicator(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (source, prefix) = completion_context(input, cursor);
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };

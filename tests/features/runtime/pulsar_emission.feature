@@ -37,7 +37,7 @@ Feature: Pulsar emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER pulsar_notifications FROM notifications ENCODE USING notification_codec TO PULSAR pulsar_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER pulsar_notifications FROM notifications TO PULSAR pulsar_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

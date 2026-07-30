@@ -7,7 +7,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, domain_name, duration_lit,
+        ParseError, ParseFromSourceError, completion_context, domain_name, duration_lit,
         if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, string_lit,
         suggestions_from_errors, tok, word_raw,
     },
@@ -135,10 +135,8 @@ pub fn parse_create_domain(
 }
 
 pub fn suggest_domain_statement(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (source, prefix) = completion_context(input, cursor);
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };

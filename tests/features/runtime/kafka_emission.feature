@@ -77,8 +77,7 @@ Feature: Kafka emission
 
       CREATE EMITTER kafka_notifications
         FROM notifications
-        ENCODE USING emitted_notification_codec
-        TO KAFKA kafka_main TOPIC notifications_headers_out_{{test_id}}
+        TO KAFKA kafka_main TOPIC notifications_headers_out_{{test_id}} ENCODE USING emitted_notification_codec
         INHERIT ALL EXCEPT raw, active
         SET amount = amount + 1,
             normalized = lower(input.raw)
@@ -156,7 +155,7 @@ Feature: Kafka emission
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-        CREATE EMITTER kafka_notifications FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

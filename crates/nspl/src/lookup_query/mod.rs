@@ -4,8 +4,8 @@ use nervix_models::LookupQuery;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, into_parse_error, kw, lex_input,
-        lookup_ref, suggestions_from_errors, tok,
+        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, lookup_ref,
+        suggest_from, tok,
     },
     subscribe::subscription_literal_parser,
 };
@@ -38,23 +38,7 @@ pub fn parse_lookup_query(input: &str) -> Result<LookupQuery, ParseFromSourceErr
 }
 
 pub fn suggest_lookup_query(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = lookup_query_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, lookup_query_parser())
 }
 
 #[cfg(test)]

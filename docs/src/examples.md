@@ -163,8 +163,7 @@ independent task, and every route sees the same immutable state snapshot for a t
 ```nspl
 CREATE EMITTER kafka_notifications
   FROM notifications
-  ENCODE USING notification_codec
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
   INHERIT ALL EXCEPT secret
   SET secret = leak_sensitive(input.secret)
   WHERE output.active

@@ -2739,6 +2739,57 @@ async fn branch_preserving_processors_build_standalone_schedule_nodes() {
         .expect("domain teardown must stop processor runtimes");
 }
 
+#[test]
+fn emitter_entity_pause_gates_every_input_relay() {
+    let emitter = CreateEmitter {
+        name: identifier("combined_sink"),
+        from: ProcessorInputs::new(
+            vec![identifier("source_b"), identifier("source_a")],
+            Vec::new(),
+        ),
+        encode_using_codec: Some(identifier("event_codec")),
+        sink: EmitSink::ZeroMq {
+            client: identifier("sink"),
+        },
+        flush_each: "IMMEDIATE".to_string(),
+        max_batch_size: None,
+        error_policies: ErrorPolicies::handled_by_log(),
+        mode: AckMode::Attached,
+        construction: nervix_models::RouteConstruction::default(),
+        materialized_state: Vec::new(),
+    };
+    let mut schedule = DomainSchedule {
+        domain: domain("testing"),
+        nodes: vec![scheduled_model(
+            ModelKind::Emitter,
+            emitter.name.clone(),
+            nervix_models::Model::Emitter(emitter.clone()),
+        )],
+    };
+    schedule.nodes[0].primary_node = Some("node-2".to_string());
+    schedule.nodes[0].assigned_nodes = vec!["node-2".to_string()];
+    let entity = crate::registry::RegistryEntity {
+        kind: ModelKind::Emitter,
+        identifier: emitter.name,
+    };
+
+    assert_eq!(
+        super::Runtime::entity_pause_relays_for_schedule(&schedule, &[entity]),
+        vec![identifier("source_a"), identifier("source_b")]
+    );
+    let remote_consumers =
+        super::Runtime::remote_runtime_consumers_for_schedule(&schedule, "node-1");
+    assert_eq!(remote_consumers.len(), 2);
+    for relay in [identifier("source_a"), identifier("source_b")] {
+        let consumers = remote_consumers
+            .get(&relay)
+            .expect("every emitter input needs a remote consumer");
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(consumers[0].relay, relay);
+        assert_eq!(consumers[0].node_id, "node-2");
+    }
+}
+
 #[tokio::test]
 async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     let runtime = super::Runtime::default();
@@ -6144,8 +6195,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                 identifier("orders_emitter"),
                 nervix_models::Model::Emitter(CreateEmitter {
                     name: identifier("orders_emitter"),
-                    from_relay: identifier("aggregated_orders"),
-                    collect_policy: None,
+                    from: ProcessorInputs::single(identifier("aggregated_orders")),
                     encode_using_codec: Some(identifier("orders_codec")),
                     sink: EmitSink::ZeroMq {
                         client: identifier("zmq_client"),
@@ -8544,8 +8594,7 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     ]);
     let emitter = CreateEmitter {
         name: identifier("kafka_notifications"),
-        from_relay: identifier("notifications"),
-        collect_policy: None,
+        from: ProcessorInputs::single(identifier("notifications")),
         encode_using_codec: Some(identifier("notification_codec")),
         sink: EmitSink::Kafka {
             client: identifier("kafka_main"),

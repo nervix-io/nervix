@@ -4,8 +4,8 @@ use nervix_models::DescribeWindowProcessor;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, into_parse_error, kw, lex_input,
-        suggestions_from_errors, tok, window_processor_ref,
+        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, suggest_from, tok,
+        window_processor_ref,
     },
 };
 
@@ -43,23 +43,7 @@ pub fn parse_describe_window_processor(
 }
 
 pub fn suggest_describe_window_processor(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = describe_window_processor_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, describe_window_processor_parser())
 }
 
 #[cfg(test)]

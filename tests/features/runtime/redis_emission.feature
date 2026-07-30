@@ -44,7 +44,7 @@ Feature: Redis emission
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE EMITTER redis_notifications FROM notifications ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL notifications_out_{{test_id}}
+        CREATE EMITTER redis_notifications FROM notifications TO REDIS PUBSUB redis_main CHANNEL notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

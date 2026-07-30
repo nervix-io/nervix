@@ -6,15 +6,17 @@ use nervix_models::{AckMode, CreateStatement, CreateWindowProcessor, WindowBound
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        duration_lit, explicit_processor_outputs, filter_where_clause, from_relay_clauses,
-        if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
-        suggestions_from_errors, tok, window_processor_name,
+        ParseError, ParseFromSourceError, ack_mode, boxed_choice, branch_selection, duration_lit,
+        explicit_processor_outputs, filter_where_clause, from_relay_clauses, if_not_exists_clause,
+        into_parse_error, kw, lex_input, materialized_state_dependencies, suggest_from, tok,
+        window_processor_name,
     },
 };
 
-fn u64_value<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone
-{
+/// The count in a `<n> MESSAGES` window bound. Narrower than the shared integer parser: a window
+/// bound is always a numeric literal, never a bare word.
+fn message_count<'src>()
+-> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
     select! { Token::NumberLiteral(value) => value }
         .try_map(|raw, span| {
             raw.parse::<u64>()
@@ -23,57 +25,105 @@ fn u64_value<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseEr
         .labelled("message_count")
 }
 
-fn bound_part<'src>()
--> impl Parser<'src, &'src [Token], WindowBound, extra::Err<ParseError<'src>>> + Clone {
-    let messages = u64_value()
+fn message_bound<'src>()
+-> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
+    message_count()
         .then_ignore(kw(Identifier::Messages))
-        .map(|messages| WindowBound {
-            messages: Some(messages),
-            duration: None,
-        });
-    let duration = duration_lit()
-        .then_ignore(kw(Identifier::Duration))
-        .map(|duration| WindowBound {
-            messages: None,
-            duration: Some(duration),
-        });
-    choice((messages, duration))
+        .boxed()
 }
 
-fn merge_bound_parts<'src>(
-    parts: Vec<WindowBound>,
-    span: chumsky::span::SimpleSpan,
-) -> Result<WindowBound, Rich<'src, Token>> {
-    let mut bound = WindowBound {
-        messages: None,
-        duration: None,
-    };
-    for part in parts {
-        if let Some(messages) = part.messages
-            && bound.messages.replace(messages).is_some()
-        {
-            return Err(Rich::custom(span, "message bound may appear at most once"));
-        }
-        if let Some(duration) = part.duration
-            && bound.duration.replace(duration).is_some()
-        {
-            return Err(Rich::custom(span, "duration bound may appear at most once"));
-        }
-    }
-    if bound.is_empty() {
-        return Err(Rich::custom(span, "window bound must not be empty"));
-    }
-    Ok(bound)
+fn duration_bound<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    duration_lit().then_ignore(kw(Identifier::Duration)).boxed()
 }
 
-fn window_bound<'src>()
+/// A window bound is a message count, a duration, or one of each — never two of the same kind.
+///
+/// Spelling that out in the grammar rather than checking it after a `repeated()` is what stops
+/// completion offering `DURATION` again once a duration bound is already present, and then
+/// rejecting the statement the user just built from its own suggestion.
+
+/// `WIDTH <bound> STEP <bound>`, checked as one unit.
+///
+/// The step is constrained by the width that precedes it, so the two are validated where both are
+/// known. Checking against the finished statement instead reports the failure at the statement's
+/// first token, where every other `CREATE` alternative outranks it and the user is told
+/// `expected ... found WINDOW`.
+fn width_and_step<'src>()
+-> impl Parser<'src, &'src [Token], (WindowBound, WindowBound), extra::Err<ParseError<'src>>> + Clone
+{
+    // The step is enumerated per width shape rather than parsed freely and checked afterwards. A
+    // step may only use the kinds the width declared, and the width is already known by the time
+    // the step is read, so the grammar can say so: after `WIDTH 10s DURATION STEP` the only thing
+    // offered is a duration.
+    let messages_only = message_bound()
+        .then_ignore(kw(Identifier::Step))
+        .then(message_bound())
+        .map(|(width, step)| {
+            (
+                WindowBound::of_messages(width),
+                WindowBound::of_messages(step),
+            )
+        });
+    let duration_only = duration_bound()
+        .then_ignore(kw(Identifier::Step))
+        .then(duration_bound())
+        .map(|(width, step)| {
+            (
+                WindowBound::of_duration(width),
+                WindowBound::of_duration(step),
+            )
+        });
+    // Either order, as before: `10 MESSAGES 1s DURATION` and `1s DURATION 10 MESSAGES` are the
+    // same bound.
+    let both = boxed_choice!(
+        message_bound()
+            .then(duration_bound())
+            .map(|(messages, duration)| (messages, duration)),
+        duration_bound()
+            .then(message_bound())
+            .map(|(duration, messages)| (messages, duration)),
+    )
+    .then_ignore(kw(Identifier::Step))
+    .then(step_within_both())
+    .map(|((messages, duration), step)| {
+        (
+            WindowBound {
+                messages: Some(messages),
+                duration: Some(duration),
+            },
+            step,
+        )
+    });
+
+    kw(Identifier::Width)
+        .ignore_then(boxed_choice!(both, messages_only, duration_only))
+        .try_map(|(width, step), span| {
+            validate_step(&width, &step, span)?;
+            Ok((width, step))
+        })
+        .boxed()
+}
+
+/// A step for a width that declared both kinds: either kind, or both.
+fn step_within_both<'src>()
 -> impl Parser<'src, &'src [Token], WindowBound, extra::Err<ParseError<'src>>> + Clone {
-    bound_part()
-        .repeated()
-        .at_least(1)
-        .at_most(2)
-        .collect::<Vec<_>>()
-        .try_map(merge_bound_parts)
+    boxed_choice!(
+        message_bound()
+            .then(duration_bound())
+            .map(|(messages, duration)| WindowBound {
+                messages: Some(messages),
+                duration: Some(duration),
+            }),
+        duration_bound()
+            .then(message_bound())
+            .map(|(duration, messages)| WindowBound {
+                messages: Some(messages),
+                duration: Some(duration),
+            }),
+        message_bound().map(WindowBound::of_messages),
+        duration_bound().map(WindowBound::of_duration),
+    )
 }
 
 fn validate_step<'src>(
@@ -129,10 +179,8 @@ pub fn create_window_processor_parser<'src>()
         .then(from_relay_clauses())
         .then(filter_where_clause().or_not())
         .boxed()
-        .then_ignore(kw(Identifier::Width))
-        .then(window_bound())
-        .then_ignore(kw(Identifier::Step))
-        .then(window_bound())
+        .then(width_and_step())
+        .map(|(head, (width, step))| ((head, width), step))
         .boxed()
         .then(branch_selection())
         .then(materialized_state_dependencies())
@@ -152,8 +200,7 @@ pub fn create_window_processor_parser<'src>()
                 ),
                 outputs,
             ),
-             span| {
-                validate_step(&width, &step, span)?;
+             _span| {
                 Ok(CreateStatement::new(
                     CreateWindowProcessor {
                         name,
@@ -197,23 +244,7 @@ pub fn parse_create_window_processor(
 }
 
 pub fn suggest_create_window_processor(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_window_processor_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_window_processor_parser())
 }
 
 #[cfg(test)]

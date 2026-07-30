@@ -117,6 +117,10 @@ ALTER REORDERER <name>
   [, ...];
 
 ALTER EMITTER <name>
+  ADD FROM <relay> [WHERE <expr>] |
+  DROP FROM <relay> |
+  ALTER FROM <relay> SET WHERE <expr> |
+  ALTER FROM <relay> DROP WHERE |
   SET TO <sink> |
   SET CLIENT <client> |
   SET ENCODE USING <codec> | DROP ENCODE |
@@ -238,8 +242,11 @@ to ingestors, which read external sources rather than relays. When omitted, each
 batch proceeds directly to node execution. When present, Nervix maintains an input batch
 independently for each source relay and concrete branch, then executes the node when the duration
 expires or the optional size boundary is reached. Correlators configure the clause independently
-after each `LEFT FROM` and `RIGHT FROM` relay list. Emitters place it directly after their single
-`FROM` relay. Generators do not read a `FROM` relay and therefore have no input collection clause.
+after each `LEFT FROM` and `RIGHT FROM` relay list. Emitters place it after their complete
+`FROM <relay> [WHERE ...] [, ...]` list. All emitter inputs declare the same payload schema, but
+they may belong to differently named branches; collection remains independent for each source
+relay and concrete branch. Generators do not read a `FROM` relay and therefore have no input
+collection clause.
 
 `FROM ... WHERE` runs first. `FILTER WHERE` runs next, before the node accepts rows into its state,
 buffer, inferencer, or guest. Every route then creates a new empty output, performs its own ordered
@@ -385,8 +392,7 @@ Another example showing nested conditions and chained calls:
 ```nspl
 CREATE EMITTER outbound
   FROM notifications
-  ENCODE USING notification_codec
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
   INHERIT ALL EXCEPT raw
   SET normalized = lower(trim(input.raw)), magnitude = abs(input.amount)
   WHERE (output.active AND output.amount > 5) OR contains(lower(trim(input.raw)), 'urgent')

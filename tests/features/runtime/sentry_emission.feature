@@ -45,8 +45,7 @@ Feature: Sentry emission
       };
       CREATE EMITTER sentry_errors
       FROM errors
-      ENCODE USING error_event_codec
-      TO SENTRY sentry_main
+      TO SENTRY sentry_main ENCODE USING error_event_codec
       INHERIT ALL
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG

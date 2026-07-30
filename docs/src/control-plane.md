@@ -71,14 +71,16 @@ that produced it. The batch uses the highest level contributed by any changed en
   tasks and hands pending materialized-state work to their replacements. Deduplicator key changes
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
   old ordering buffers before swapping. Relay materialized-state changes update membership in
-  place. Emitter sink, client, codec, input-collection, and attachment changes drain and replace
-  only the affected emitter task. Every current ingestor alteration stops and drains only the
-  affected ingestor instances, then starts their desired source configuration from the published
-  schedule. Reingestor alterations replace their relay consumers and branch-entrypoint wiring;
-  generator alterations quiesce and replace their timed task after flushing pending route output.
+  place. Emitter source-predicate, sink, client, codec, input-collection, and attachment changes
+  drain and replace only the affected emitter task. Every current ingestor alteration stops and
+  drains only the affected ingestor instances, then starts their desired source configuration from
+  the published schedule. Reingestor alterations replace their relay consumers and
+  branch-entrypoint wiring; generator alterations quiesce and replace their timed task after
+  flushing pending route output.
 - `DOMAIN_PAUSE` changes stop ingestion and generators across the domain and fully drain attached
   work before commit. Relay schema or branching changes and schema or wire-schema definition
-  changes use this level.
+  changes use this level. Changing the membership of an emitter's `FROM` relay list also uses this
+  level because it changes graph topology.
 
 Entity holds are transient and deadline-bound. A relay gate self-releases if the leader disappears;
 an ingestor hold restarts the old source when it expires. Schedule application re-engages a local

@@ -4,8 +4,8 @@ use nervix_models::DescribeReorderer;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, into_parse_error, kw, lex_input,
-        reorderer_ref, suggestions_from_errors, tok,
+        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, reorderer_ref,
+        suggest_from, tok,
     },
 };
 
@@ -38,23 +38,7 @@ pub fn parse_describe_reorderer(input: &str) -> Result<DescribeReorderer, ParseF
 }
 
 pub fn suggest_describe_reorderer(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = describe_reorderer_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, describe_reorderer_parser())
 }
 
 #[cfg(test)]

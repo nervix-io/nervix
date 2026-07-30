@@ -19,7 +19,7 @@ Feature: Runtime node error policies
       | deduplicator     | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                        |
       | window processor | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION UNBRANCHED TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency)                                                                                                |
       | generator        | CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms UNBRANCHED TO alerts SET user_id = relay_state.notifications.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                         |
-      | emitter          | CREATE EMITTER kafka_emit FROM notifications ENCODE USING notification_codec TO KAFKA kafka_main TOPIC notifications_out INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG                                                                                             |
+      | emitter          | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG                                                                                             |
       | inferencer       | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE                  |
 
   Scenario Outline: Pure runtime processors reject general error policies
@@ -55,8 +55,7 @@ Feature: Runtime node error policies
       """
       CREATE EMITTER kafka_emit
         FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main TOPIC notifications_out
+        TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -116,8 +115,7 @@ Feature: Runtime node error policies
         };
         CREATE EMITTER zeromq_notifications
         FROM notifications
-        ENCODE USING notification_codec
-        TO ZEROMQ zeromq_main
+        TO ZEROMQ zeromq_main ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR SEND TO error_stream
@@ -188,8 +186,7 @@ Feature: Runtime node error policies
         ON GENERAL ERROR LOG;
         CREATE EMITTER kafka_forward
         FROM notifications
-        ENCODE USING notification_codec
-        TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR IGNORE

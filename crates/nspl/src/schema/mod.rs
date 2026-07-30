@@ -10,9 +10,8 @@ pub use crate::parser_support::{Diagnostic, ParseFromSourceError};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, boxed_choice, current_word_prefix, field_ref, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, schema_name, suggestions_from_errors, tok,
-        wire_schema_name,
+        ParseError, boxed_choice, field_ref, if_not_exists_clause, into_parse_error, kw,
+        kw_phrase2, lex_input, schema_name, suggest_from, tok, wire_schema_name,
     },
 };
 
@@ -72,15 +71,17 @@ pub(crate) fn nervix_type<'src>()
             kw(Identifier::F64).to(ParseAsType::F64),
         );
 
-        let array_len = select! { Token::NumberLiteral(raw) => raw }.try_map(|raw, span| {
-            let len = raw
-                .parse::<u32>()
-                .map_err(|_| Rich::custom(span, "array length must be an unsigned integer"))?;
-            if len == 0 {
-                return Err(Rich::custom(span, "array length must be greater than zero"));
-            }
-            Ok(len)
-        });
+        let array_len = select! { Token::NumberLiteral(raw) => raw }
+            .try_map(|raw, span| {
+                let len = raw
+                    .parse::<u32>()
+                    .map_err(|_| Rich::custom(span, "array length must be an unsigned integer"))?;
+                if len == 0 {
+                    return Err(Rich::custom(span, "array length must be greater than zero"));
+                }
+                Ok(len)
+            })
+            .labelled("array_length");
 
         let array = kw(Identifier::Array).ignore_then(
             ty.clone()
@@ -142,41 +143,30 @@ struct InternalSchemaFieldModifiers {
     sensitive: bool,
 }
 
+/// Each modifier may appear at most once, in either order.
+///
+/// This is expressed in the grammar rather than validated after a `repeated()`, because completion
+/// is derived from what the grammar still expects: a `repeated()` keeps offering a modifier that is
+/// already present, and accepting it only to reject the statement afterwards.
 fn internal_schema_field_modifiers<'src>()
 -> impl Parser<'src, &'src [Token], InternalSchemaFieldModifiers, extra::Err<ParseError<'src>>> + Clone
 {
     choice((
-        kw(Identifier::Optional).to(Identifier::Optional),
-        kw(Identifier::Sensitive).to(Identifier::Sensitive),
+        kw(Identifier::Optional)
+            .ignore_then(kw(Identifier::Sensitive).or_not())
+            .map(|sensitive| InternalSchemaFieldModifiers {
+                optional: true,
+                sensitive: sensitive.is_some(),
+            }),
+        kw(Identifier::Sensitive)
+            .ignore_then(kw(Identifier::Optional).or_not())
+            .map(|optional| InternalSchemaFieldModifiers {
+                optional: optional.is_some(),
+                sensitive: true,
+            }),
     ))
-    .repeated()
-    .collect::<Vec<_>>()
-    .try_map(|modifiers, span| {
-        let optional_count = modifiers
-            .iter()
-            .filter(|modifier| **modifier == Identifier::Optional)
-            .count();
-        let sensitive_count = modifiers
-            .iter()
-            .filter(|modifier| **modifier == Identifier::Sensitive)
-            .count();
-        if optional_count > 1 {
-            return Err(Rich::custom(
-                span,
-                "schema field modifier OPTIONAL may appear at most once",
-            ));
-        }
-        if sensitive_count > 1 {
-            return Err(Rich::custom(
-                span,
-                "schema field modifier SENSITIVE may appear at most once",
-            ));
-        }
-        Ok(InternalSchemaFieldModifiers {
-            optional: optional_count == 1,
-            sensitive: sensitive_count == 1,
-        })
-    })
+    .or_not()
+    .map(Option::unwrap_or_default)
 }
 
 fn internal_schema_field<'src>()
@@ -518,83 +508,19 @@ pub fn parse_alter_wire_schema(input: &str) -> Result<Statement, ParseFromSource
 }
 
 pub fn suggest_create_wire_schema(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_wire_schema_parser_any()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_wire_schema_parser_any())
 }
 
 pub fn suggest_create_schema(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_schema_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_schema_parser())
 }
 
 pub fn suggest_alter_schema(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = alter_schema_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, alter_schema_parser())
 }
 
 pub fn suggest_alter_wire_schema(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = alter_wire_schema_parser_any()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, alter_wire_schema_parser_any())
 }
 
 #[cfg(test)]

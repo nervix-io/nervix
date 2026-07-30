@@ -7,10 +7,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, field_ref, into_parse_error, kw,
-        kw_phrase2, lex_input, relay_ref, render_vm_program_tokens, session_subscription_name,
-        session_subscription_ref, string_lit, suggestions_from_errors, tok,
-        vm_program_error_message, word_raw,
+        ParseError, ParseFromSourceError, field_ref, into_parse_error, kw, kw_phrase2, lex_input,
+        relay_ref, render_vm_program_tokens, session_subscription_name, session_subscription_ref,
+        string_lit, suggest_from, tok, vm_program_error_message, word_raw,
     },
 };
 
@@ -184,29 +183,16 @@ pub fn parse_create_subscription(input: &str) -> Result<CreateSubscription, Pars
 }
 
 pub fn suggest_create_subscription(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_subscription_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_subscription_parser())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::lex;
+    use crate::{
+        lexer::lex,
+        parser_support::{current_word_prefix, suggestions_from_errors},
+    };
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)

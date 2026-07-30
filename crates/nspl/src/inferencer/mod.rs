@@ -8,21 +8,13 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
-        inferencer_name, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, render_vm_program_tokens, resource_ref, string_lit,
-        suggestions_from_errors, tok, vm_program_error_message, word_raw,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, filter_where_clause,
+        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, inferencer_name,
+        into_parse_error, kw, kw_phrase2, lex_input, materialized_state_dependencies,
+        render_vm_program_tokens, resource_ref, string_lit, suggest_from, tok, u64_value,
+        vm_program_error_message,
     },
 };
-
-fn u64_value<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone
-{
-    choice((select! { Token::NumberLiteral(v) => v }, word_raw())).try_map(|raw, span| {
-        raw.parse::<u64>()
-            .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
-    })
-}
 
 fn field_mapping<'src>()
 -> impl Parser<'src, &'src [Token], InferencerTensorMapping, extra::Err<ParseError<'src>>> + Clone {
@@ -84,7 +76,9 @@ fn balanced_expression_group<'src>()
                 )
             })
             .map(|token| vec![token]);
-        choice((parens, brackets, braces, leaf))
+        // Naming the slot stops the raw delimiters leaking out as suggestions: a bare "("
+        // offered here cannot be completed into anything the expression grammar accepts.
+        choice((parens, brackets, braces, leaf)).labelled("value_expression")
     })
 }
 
@@ -261,23 +255,7 @@ pub fn parse_create_inferencer(
 }
 
 pub fn suggest_create_inferencer(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_inferencer_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_inferencer_parser())
 }
 
 #[cfg(test)]

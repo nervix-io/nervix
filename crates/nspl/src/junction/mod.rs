@@ -7,10 +7,10 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, alter_flushed_route_body, alter_op_separator,
-        branch_selection, collect_for, current_word_prefix, filter_where_clause,
-        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error,
-        junction_name, junction_ref, kw, lex_input, materialized_state_dependencies,
-        materialized_state_policy, relay_ref, suggestions_from_errors, tok, where_expression,
+        branch_selection, collect_for, filter_where_clause, flushed_processor_outputs,
+        from_relay_clauses, if_not_exists_clause, into_parse_error, junction_name, junction_ref,
+        kw, lex_input, materialized_state_dependencies, materialized_state_policy, relay_ref,
+        suggest_from, tok, where_expression,
     },
 };
 
@@ -218,43 +218,11 @@ pub fn parse_alter_junction(input: &str) -> Result<AlterJunction, ParseFromSourc
 }
 
 pub fn suggest_create_junction(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_junction_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_junction_parser())
 }
 
 pub fn suggest_alter_junction(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = alter_junction_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, alter_junction_parser())
 }
 
 #[cfg(test)]

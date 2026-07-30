@@ -5,8 +5,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, branch_definition_header, branch_name,
-        current_word_prefix, if_not_exists_clause, into_parse_error, kw, lex_input,
-        suggestions_from_errors, tok, u64_value,
+        if_not_exists_clause, into_parse_error, kw, lex_input, suggest_from, tok, u64_value,
     },
 };
 
@@ -71,23 +70,7 @@ pub fn parse_create_branch(
 }
 
 pub fn suggest_create_branch(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_branch_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_branch_parser())
 }
 
 #[cfg(test)]
