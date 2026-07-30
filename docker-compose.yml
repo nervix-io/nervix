@@ -338,7 +338,7 @@ services:
       - quickwit-data:/quickwit/qwdata
 
   jaeger:
-    image: jaegertracing/jaeger-query:1.60
+    image: jaegertracing/jaeger-query:1.76
     container_name: nervix-jaeger
     depends_on:
       - quickwit

@@ -1147,7 +1147,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let network = self.network_name("observability-stack");
         let container = self
             .start_container("jaeger", 16686.tcp(), "Jaeger", || {
-                GenericImage::new("jaegertracing/jaeger-query", "1.60")
+                GenericImage::new("jaegertracing/jaeger-query", "1.76")
                     .with_exposed_port(16686.tcp())
                     .with_wait_for(WaitFor::message_on_either_std("Query server started"))
                     .with_network(&network)
