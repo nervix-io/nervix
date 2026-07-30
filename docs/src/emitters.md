@@ -17,7 +17,7 @@ CREATE [IF NOT EXISTS] EMITTER kafka_notifications
 
 An emitter defines:
 
-- the source relay
+- one or more source relays that declare the same payload schema
 - an optional input collection policy
 - the codec used for encoding
 - the transport-specific sink
@@ -29,14 +29,36 @@ An emitter defines:
 
 ## Branch Semantics
 
-An emitter is the terminal consumer for its source relay.
+An emitter is the terminal consumer for its source relays. The `FROM` list uses the same
+source-local predicate form as other relay-consuming nodes:
+
+```nspl
+CREATE EMITTER combined_notifications
+  FROM primary_notifications WHERE input.source = 'primary',
+       replayed_notifications WHERE input.source = 'replay'
+  ENCODE USING notification_codec
+  TO KAFKA kafka_main TOPIC notifications_out
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+Every listed relay must declare the exact same schema name. Unlike ordinary multi-input
+processors, emitter inputs may be unbranched or use differently named branches. Each source keeps
+its own branch identity until its records cross the successful external boundary.
 
 That means:
 
-- the emitter consumes from all concrete branches of its source relay
+- the emitter consumes from all concrete branches of every source relay
+- each optional source `WHERE` is evaluated only for that relay
 - the current branch remains available internally for compatible materialized-state lookup
 - `branch.field` is unavailable to successful emitter expressions
 - branch identity collapses only after successful external publication
+
+A node-wide materialized-state dependency and an `ON MESSAGE ERROR SEND TO` route must be
+exact-branch compatible with every source. Consequently, an emitter whose inputs use differently
+named branches cannot configure one branch-bound dependency or error relay across those inputs.
 
 All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`. `FLUSH`
 means Nervix collects an in-memory Arrow batch before handing it to the external sink. The
@@ -47,12 +69,13 @@ writes local Arrow IPC staging files, and commit appends the staged data to obje
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary.
 
-An emitter may place `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` immediately after `FROM
-<relay>`. This input policy runs before emitter filtering, construction, encoding, and the required
-output `FLUSH` policy. Omission means no additional input collection: each incoming relay batch
-enters emitter execution directly. When configured, collection is independent for each concrete
-source branch and releases on the timer or optional size boundary. Branch identity still collapses
-only after successful publication.
+An emitter may place `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` immediately after the
+complete `FROM <relay> [WHERE ...] [, ...]` list. This input policy runs before emitter filtering,
+construction, encoding, and the required output `FLUSH` policy. Omission means no additional input
+collection: each incoming relay batch enters emitter execution directly. When configured,
+collection is independent for each source relay and concrete branch and releases on the timer or
+optional size boundary. Equal keys from differently named branches are never collected together.
+Branch identity still collapses only after successful publication.
 
 ## Altering emitters
 
@@ -60,7 +83,11 @@ only after successful publication.
 
 ```nspl
 ALTER EMITTER <emitter>
-    SET TO <full sink clause>
+    ADD FROM <relay> [WHERE <expr>]
+  | DROP FROM <relay>
+  | ALTER FROM <relay> SET WHERE <expr>
+  | ALTER FROM <relay> DROP WHERE
+  | SET TO <full sink clause>
   | SET CLIENT <client>
   | SET ENCODE USING <codec>
   | DROP ENCODE
@@ -80,13 +107,18 @@ current sink kind. `SET COMMIT` is valid only for Iceberg. Changing to Iceberg f
 therefore requires a later `SET COMMIT` operation in the same statement or transaction. `DROP
 ENCODE` fails if the emitter has no codec configured.
 
+`ADD FROM` rejects an already configured relay. `DROP FROM` cannot remove the final input.
+`ALTER FROM ... SET WHERE` adds or replaces that source's predicate; `ALTER FROM ... DROP WHERE`
+fails when the source has no predicate.
+
 Changing only `FLUSH` is a `DYNAMIC` update. The live emitter keeps its pending Arrow batches,
 installs the new cadence, and receives a force-flush kick, so buffered output is neither discarded
-nor re-encoded. Sink, client, codec, collection, and attachment changes use `ENTITY_PAUSE`: Nervix
-gates the emitter's source relay, drains collected input and pending sink output, replaces that
-emitter task, and releases the gate. Other relays continue flowing; sibling consumers of the gated
-source may see bounded backpressure until the gate is released. The complete candidate graph is
-validated before any change is committed.
+nor re-encoded. Source-predicate, sink, client, codec, collection, and attachment changes use
+`ENTITY_PAUSE`: Nervix gates all of the emitter's source relays, drains collected input and pending
+sink output, replaces that emitter task, and releases the gates. Changing source membership uses
+`DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
+pause; sibling consumers of a gated source may see bounded backpressure until the gate is released.
+The complete candidate graph is validated before any change is committed.
 
 ## Codec-emitter construction
 

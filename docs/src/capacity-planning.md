@@ -6,8 +6,7 @@ through branch `TTL` and optional `MAX INSTANCES <n> EVICT LRU`. The capacity-pl
 also requires observable eviction and resource consumption. Current signals cover process memory,
 traffic, latency, relay-buffer occupancy, branch population, eviction counts, and branch-local
 relay inspection, but not per-node state size. Remaining signals are stated in
-[Branch Lifecycle Signals](metrics-and-observability.md#branch-lifecycle-signals) and the
-[Roadmap](roadmap.md).
+[Branch Lifecycle Signals](metrics-and-observability.md#branch-lifecycle-signals).
 
 Sizing inside those mechanisms is the operator's responsibility. There is no universal
 branches-per-node figure. Data rate, flush policy, graph shape, and stateful-node configuration
@@ -80,7 +79,7 @@ defaults.
 
 Prometheus does not currently expose branch-creation counters, deduplication entry counts, or
 open-window counts. `DESCRIBE` also does not provide a branch-population inventory or eviction
-history. Future signal work is listed only in the [Roadmap](roadmap.md).
+history.
 
 For runtime ownership and snapshot boundaries, see [Data Plane](data-plane.md). For the current
 metric families and cardinality policy, see

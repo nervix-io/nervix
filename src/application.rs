@@ -11216,7 +11216,16 @@ fn format_emitter_describe_output(
         ]);
     }
     lines.extend([
-        format!("from: {}", emitter.from_relay.as_str()),
+        format!(
+            "from: {}",
+            emitter
+                .from
+                .relays()
+                .iter()
+                .map(Identifier::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         format!(
             "codec: {}",
             emitter

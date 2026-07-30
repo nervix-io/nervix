@@ -1496,14 +1496,10 @@ impl CreateEmitter {
         // The codec and the commit cadence are written with the sink they belong to: whether either
         // is legal is a property of the sink, so they follow it rather than precede it.
         Ok(format!(
-            "CREATE {} EMITTER {} FROM {}{}{} TO {}{}{}{}{} {} {};",
+            "CREATE {} EMITTER {} FROM {}{} TO {}{}{}{}{} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
-            self.from_relay.as_str(),
-            self.collect_policy
-                .as_ref()
-                .map(|policy| format!(" {}", collect_policy_to_nspl(policy)))
-                .unwrap_or_default(),
+            processor_inputs_to_nspl(&self.from)?,
             materialized_state_dependencies_suffix(&self.materialized_state)?,
             emit_sink_to_nspl(&self.sink)?,
             commit_policy,
@@ -1950,6 +1946,30 @@ fn alter_emitter_operation_to_nspl(
     operation: &AlterEmitterOperation,
 ) -> Result<String, CanonicalNsplError> {
     match operation {
+        AlterEmitterOperation::AddFrom {
+            relay,
+            where_clause,
+        } => {
+            let where_clause = where_clause
+                .as_ref()
+                .map(expression_to_nspl)
+                .transpose()?
+                .map(|where_clause| format!(" WHERE {where_clause}"))
+                .unwrap_or_default();
+            Ok(format!("ADD FROM {}{where_clause}", relay.as_str()))
+        }
+        AlterEmitterOperation::DropFrom { relay } => Ok(format!("DROP FROM {}", relay.as_str())),
+        AlterEmitterOperation::AlterFromSetWhere {
+            relay,
+            where_clause,
+        } => Ok(format!(
+            "ALTER FROM {} SET WHERE {}",
+            relay.as_str(),
+            expression_to_nspl(where_clause)?
+        )),
+        AlterEmitterOperation::AlterFromDropWhere { relay } => {
+            Ok(format!("ALTER FROM {} DROP WHERE", relay.as_str()))
+        }
         AlterEmitterOperation::SetSink { sink } => {
             Ok(format!("SET TO {}", emit_sink_to_nspl(sink)?))
         }
@@ -2822,15 +2842,14 @@ mod tests {
         CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf,
         CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink, EndpointIngestMode,
         EndpointType, ErrorPolicies, Expression, FieldScope, GeneralErrorPolicy, HttpConfigEntry,
-        Identifier, IngestSource, InputCollectPolicy, JsonType, KafkaConfigEntry, KafkaIngestMode,
-        KafkaOffsetMode, Literal, MessageErrorPolicy, Model, MongoDbConflictAction,
-        MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-        MySqlValueMapping, NatsIngestMode, OutputBranch, ParseAsType, PostgresConflictAction,
-        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        PrometheusConfigEntry, RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching,
-        RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry, SqsIngestMode, UdfArgument,
-        UdfLanguage, UdfReturn, WebsocketsIngestMode, WindowBound, WireSchemaDefinition,
-        WireSchemaField, ZeroMqIngestMode,
+        Identifier, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+        Literal, MessageErrorPolicy, Model, MongoDbConflictAction, MongoDbValueMapping,
+        MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping,
+        NatsIngestMode, OutputBranch, ParseAsType, PostgresConflictAction, PostgresValueMapping,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
+        RabbitMqIngestMode, RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction,
+        SchemaField, SentryConfigEntry, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
+        WebsocketsIngestMode, WindowBound, WireSchemaDefinition, WireSchemaField, ZeroMqIngestMode,
     };
 
     fn identifier(raw: &str) -> Identifier {
@@ -3679,11 +3698,8 @@ mod tests {
         for (sink, rendered_sink) in sinks {
             let emitter = CreateEmitter {
                 name: identifier("emit_orders"),
-                from_relay: identifier("orders_stream"),
-                collect_policy: Some(InputCollectPolicy {
-                    collect_for: "50ms".to_string(),
-                    max_batch_size: Some("4MiB".to_string()),
-                }),
+                from: ProcessorInputs::single(identifier("orders_stream"))
+                    .with_collect_policy("50ms".to_string(), Some("4MiB".to_string())),
                 encode_using_codec: Some(identifier("orders_codec")),
                 sink,
                 flush_each: "100ms".to_string(),
@@ -3709,8 +3725,7 @@ mod tests {
     fn renders_postgres_conflict_action_canonical() {
         let emitter = CreateEmitter {
             name: identifier("emit_notifications"),
-            from_relay: identifier("notifications"),
-            collect_policy: None,
+            from: ProcessorInputs::single(identifier("notifications")),
             encode_using_codec: None,
             sink: EmitSink::Postgres {
                 client: identifier("postgres_main"),
@@ -3754,8 +3769,7 @@ mod tests {
     fn renders_mysql_conflict_action_canonical() {
         let emitter = CreateEmitter {
             name: identifier("emit_notifications"),
-            from_relay: identifier("notifications"),
-            collect_policy: None,
+            from: ProcessorInputs::single(identifier("notifications")),
             encode_using_codec: None,
             sink: EmitSink::MySql {
                 client: identifier("mysql_main"),
@@ -3796,8 +3810,7 @@ mod tests {
     fn renders_mongodb_conflict_action_canonical() {
         let emitter = CreateEmitter {
             name: identifier("emit_notifications"),
-            from_relay: identifier("notifications"),
-            collect_policy: None,
+            from: ProcessorInputs::single(identifier("notifications")),
             encode_using_codec: None,
             sink: EmitSink::MongoDb {
                 client: identifier("mongodb_main"),

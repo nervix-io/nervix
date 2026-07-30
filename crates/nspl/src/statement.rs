@@ -737,8 +737,7 @@ mod tests {
 
                     Model::Emitter(CreateEmitter {
                         name: g.ident(),
-                        from_relay: g.ident(),
-                        collect_policy: None,
+                        from: ProcessorInputs::single(g.ident()),
                         encode_using_codec: Some(g.ident()),
                         sink,
                         flush_each: "100ms".to_string(),
@@ -799,8 +798,7 @@ mod tests {
             }),
             18 => Model::Emitter(CreateEmitter {
                 name: g.ident(),
-                from_relay: g.ident(),
-                collect_policy: None,
+                from: ProcessorInputs::single(g.ident()),
                 encode_using_codec: Some(g.ident()),
                 sink: EmitSink::ZeroMq { client: g.ident() },
                 flush_each: "100ms".to_string(),
@@ -828,8 +826,7 @@ mod tests {
             }),
             20 => Model::Emitter(CreateEmitter {
                 name: g.ident(),
-                from_relay: g.ident(),
-                collect_policy: None,
+                from: ProcessorInputs::single(g.ident()),
                 encode_using_codec: Some(g.ident()),
                 sink: EmitSink::Nats {
                     client: g.ident(),

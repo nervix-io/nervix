@@ -166,5 +166,4 @@ Roto source is persisted; native JIT output is rebuilt in memory during domain a
 server that does not support a stored language tag rejects activation rather than reinterpreting
 the source.
 
-Nervix does not currently expose per-UDF invocation, latency, or row-error metrics. Future work is
-listed only in the [Roadmap](roadmap.md).
+Nervix does not currently expose per-UDF invocation, latency, or row-error metrics.

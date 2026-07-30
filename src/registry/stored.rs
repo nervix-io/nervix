@@ -975,8 +975,7 @@ pub struct StoredWindowBound {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct StoredCreateEmitter {
     pub name: String,
-    pub from_relay: String,
-    pub collect_policy: Option<StoredInputCollectPolicy>,
+    pub from: StoredProcessorInputs,
     pub encode_using_codec: Option<String>,
     pub sink: StoredEmitSink,
     pub flush_each: String,
@@ -3963,8 +3962,7 @@ impl From<CreateEmitter> for StoredCreateEmitter {
     fn from(value: CreateEmitter) -> Self {
         Self {
             name: value.name.to_string(),
-            from_relay: value.from_relay.to_string(),
-            collect_policy: value.collect_policy.map(Into::into),
+            from: value.from.into(),
             encode_using_codec: value.encode_using_codec.map(|codec| codec.to_string()),
             sink: value.sink.into(),
             flush_each: value.flush_each,
@@ -3983,8 +3981,7 @@ impl TryFrom<StoredCreateEmitter> for CreateEmitter {
     fn try_from(value: StoredCreateEmitter) -> Result<Self, Self::Error> {
         Ok(Self {
             name: Identifier::parse(&value.name)?,
-            from_relay: Identifier::parse(&value.from_relay)?,
-            collect_policy: value.collect_policy.map(Into::into),
+            from: value.from.try_into()?,
             encode_using_codec: value
                 .encode_using_codec
                 .map(|codec| Identifier::parse(&codec))
@@ -4532,11 +4529,8 @@ mod tests {
             }),
             Model::Emitter(CreateEmitter {
                 name: identifier("events_emitter"),
-                from_relay: identifier("events_stream"),
-                collect_policy: Some(InputCollectPolicy {
-                    collect_for: "50ms".to_string(),
-                    max_batch_size: None,
-                }),
+                from: ProcessorInputs::single(identifier("events_stream"))
+                    .with_collect_policy("50ms".to_string(), None),
                 encode_using_codec: Some(identifier("events_codec")),
                 sink: EmitSink::Nats {
                     client: identifier("nats_client"),
@@ -4608,8 +4602,11 @@ mod tests {
     fn stored_model_try_from_rejects_invalid_identifiers() {
         let err = Model::try_from(StoredModelVersioned::Emitter(StoredCreateEmitter {
             name: "events_emitter".to_string(),
-            from_relay: "events_stream".to_string(),
-            collect_policy: None,
+            from: StoredProcessorInputs {
+                from: vec!["events_stream".to_string()],
+                r#where: Vec::new(),
+                collect_policy: None,
+            },
             encode_using_codec: Some("events_codec".to_string()),
             sink: StoredEmitSink::Kafka {
                 client: "bad client".to_string(),
