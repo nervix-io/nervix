@@ -204,7 +204,8 @@ jobs:
 
       - name: Install playwright
         run: |
-          npm install -g playwright
+          npm install -g playwright@1.61.1
+          npx --yes playwright@1.61.1 install chromium --with-deps
 
       - name: Install apt deps
         run: |
