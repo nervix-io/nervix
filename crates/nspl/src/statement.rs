@@ -1152,7 +1152,11 @@ mod tests {
         assert!(!suggestions.contains(&"string_literal".to_string()));
     }
 
-    /// A duration is checked where it is written, not by whatever consumes it later.
+    /// A keyword is never a duration, so it cannot be swallowed as one.
+    ///
+    /// Whether a value is a *valid* duration is left to whatever consumes it: an ordinary
+    /// identifier still parses here and is rejected by the runtime, which has to check it anyway
+    /// because models also arrive from persisted state.
     #[test]
     fn a_bare_keyword_is_not_accepted_as_a_duration() {
         let error = parse_statement(
@@ -1161,9 +1165,15 @@ mod tests {
         )
         .expect_err("a keyword is not a duration");
         assert!(
-            format!("{error:?}").contains("invalid duration"),
-            "expected a duration diagnostic, got {error:?}"
+            format!("{error:?}").contains("duration_literal"),
+            "expected the duration slot to be named, got {error:?}"
         );
+
+        parse_statement(
+            "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = 1 FLUSH EACH oops MAX BATCH SIZE \
+             1MiB ON MESSAGE ERROR LOG",
+        )
+        .expect("an identifier parses and is validated where it is consumed");
     }
 
     /// A codec is required by the sink, so the grammar asks for it right after the sink.

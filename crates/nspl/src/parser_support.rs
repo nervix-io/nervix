@@ -200,6 +200,19 @@ pub fn word_raw<'src>()
     .boxed()
 }
 
+/// A word that is not a language keyword.
+///
+/// Where a value is written as a bare word, accepting keywords too lets the value swallow whatever
+/// follows it: `STEP 1s UNBRANCHED` reads `UNBRANCHED` as the start of another bound, and the
+/// statement then fails somewhere far from the real mistake.
+pub fn unknown_word<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    select! {
+        Token::Word(Word::UnknownWord(raw)) => raw,
+    }
+    .boxed()
+}
+
 pub fn u64_value<'src>()
 -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
     // Each alternative carries the label: chumsky only rewrites an alternative error whose position
@@ -666,21 +679,28 @@ pub fn string_lit<'src>()
 
 pub fn duration_lit<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    // The duration is validated here rather than by whatever consumes it later. Accepting any bare
-    // word means a following keyword is swallowed as a duration — `STEP 1s UNBRANCHED` reads
-    // `UNBRANCHED` as the next bound — and the statement then fails far away from the real mistake.
+    // A number followed by a unit is unambiguously meant as a duration, so it is checked here: the
+    // unit has to match any word — `min` is a keyword — and without the check `WIDTH 100 MESSAGES`
+    // reads as the duration `100MESSAGES` and swallows the bound that follows it.
+    //
+    // A lone word is different. `oops` is an ordinary identifier a user could type, and whichever
+    // setting consumes it validates it; checking it here would take over validation the runtime has
+    // to do anyway, since models also arrive from persisted state. Only keywords are ruled out,
+    // because a keyword is never a value.
     choice((
         select! { Token::NumberLiteral(value) => value }
             .then(word_raw())
-            .map(|(number, unit)| format!("{number}{unit}")),
-        word_raw(),
+            .map(|(number, unit)| format!("{number}{unit}"))
+            .try_map(|raw, span| {
+                humantime::parse_duration(&raw)
+                    .map(|_| raw.clone())
+                    .map_err(|error| {
+                        Rich::custom(span, format!("invalid duration '{raw}': {error}"))
+                    })
+            }),
+        unknown_word(),
     ))
     .labelled("duration_literal")
-    .try_map(|raw, span| {
-        humantime::parse_duration(&raw)
-            .map(|_| raw.clone())
-            .map_err(|error| Rich::custom(span, format!("invalid duration '{raw}': {error}")))
-    })
     .boxed()
 }
 
