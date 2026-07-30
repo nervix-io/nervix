@@ -7,11 +7,11 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, alter_expression_list, alter_op_separator,
-        alter_processor_operation, branch_selection, current_word_prefix, duration_lit,
+        alter_processor_operation, branch_selection, completion_context, duration_lit,
         filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
         into_parse_error, kw, kw_phrase2, lex_input, materialized_state_dependencies,
-        render_vm_program_tokens, reorderer_name, reorderer_ref, suggestions_from_errors, tok,
-        vm_program_error_message,
+        render_vm_program_tokens, reorderer_name, reorderer_ref, suggest_from,
+        suggestions_from_errors, tok, vm_program_error_message,
     },
 };
 
@@ -29,19 +29,22 @@ fn boundary_token(token: &Token) -> bool {
 fn by_exprs<'src>()
 -> impl Parser<'src, &'src [Token], Vec<nervix_models::Expression>, extra::Err<ParseError<'src>>> + Clone
 {
+    // The label covers the expressions only, not the `BY` that introduces them, so it means the
+    // same thing here as in `ALTER REORDERER ... SET BY <expressions>`. Labelling the keyword too
+    // would give one completion label two different contracts.
     kw(Identifier::By)
         .ignore_then(
             any()
                 .filter(|token: &Token| !boundary_token(token))
                 .repeated()
                 .at_least(1)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .labelled("reorder_by"),
         )
         .try_map(|tokens, span| {
             crate::parse_expression_list(&render_vm_program_tokens(&tokens))
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
-        .labelled("reorder_by")
 }
 
 pub fn create_reorderer_parser<'src>()
@@ -170,27 +173,12 @@ pub fn parse_alter_reorderer(input: &str) -> Result<AlterReorderer, ParseFromSou
 }
 
 pub fn suggest_create_reorderer(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let out = create_reorderer_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_reorderer_parser())
 }
 
 pub fn suggest_alter_reorderer(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (source, prefix) = completion_context(input, cursor);
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };

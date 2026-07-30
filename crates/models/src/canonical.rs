@@ -1493,8 +1493,10 @@ impl CreateEmitter {
             .commit_policy()
             .map(|(policy, max_size)| format!(" {}", commit_policy_to_nspl(policy, max_size)))
             .unwrap_or_default();
+        // The codec and the commit cadence are written with the sink they belong to: whether either
+        // is legal is a property of the sink, so they follow it rather than precede it.
         Ok(format!(
-            "CREATE {} EMITTER {} FROM {}{}{}{} TO {}{}{}{} {} {};",
+            "CREATE {} EMITTER {} FROM {}{}{} TO {}{}{}{}{} {} {};",
             self.mode.as_ref(),
             self.name.as_str(),
             self.from_relay.as_str(),
@@ -1502,15 +1504,15 @@ impl CreateEmitter {
                 .as_ref()
                 .map(|policy| format!(" {}", collect_policy_to_nspl(policy)))
                 .unwrap_or_default(),
+            materialized_state_dependencies_suffix(&self.materialized_state)?,
+            emit_sink_to_nspl(&self.sink)?,
+            commit_policy,
             self.encode_using_codec
                 .as_ref()
                 .map(|codec| format!(" ENCODE USING {}", codec.as_str()))
                 .unwrap_or_default(),
-            materialized_state_dependencies_suffix(&self.materialized_state)?,
-            emit_sink_to_nspl(&self.sink)?,
             route_construction_suffix(&self.construction)?,
             flush_policy,
-            commit_policy,
             message_error_policy_to_nspl(&self.error_policies.message)?,
             general_error_policy_to_nspl(&self.error_policies.general)
         ))
@@ -3696,7 +3698,7 @@ mod tests {
                 emitter.to_canonical_nspl().expect("must render"),
                 format!(
                     "CREATE ATTACHED EMITTER emit_orders FROM orders_stream COLLECT FOR 50ms MAX \
-                     BATCH SIZE 4MiB ENCODE USING orders_codec TO {rendered_sink} FLUSH EACH \
+                     BATCH SIZE 4MiB TO {rendered_sink} ENCODE USING orders_codec FLUSH EACH \
                      100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
                 )
             );

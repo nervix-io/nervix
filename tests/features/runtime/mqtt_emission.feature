@@ -44,7 +44,7 @@ Feature: MQTT emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
         };
-        CREATE EMITTER mqtt_notifications_out FROM notifications ENCODE USING notification_codec TO MQTT mqtt_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER mqtt_notifications_out FROM notifications TO MQTT mqtt_main TOPIC notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

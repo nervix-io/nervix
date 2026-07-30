@@ -8,8 +8,7 @@ A typical emitter:
 CREATE [IF NOT EXISTS] EMITTER kafka_notifications
   FROM notifications
   COLLECT FOR 10ms MAX BATCH SIZE 1MiB
-  ENCODE USING notification_codec
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
@@ -43,8 +42,8 @@ All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IM
 means Nervix collects an in-memory Arrow batch before handing it to the external sink. The
 [NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
-additionally supports `COMMIT EACH <duration> MAX SIZE <bytes>`: flush writes local Arrow IPC
-staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
+additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its sink clause: flush
+writes local Arrow IPC staging files, and commit appends the staged data to object storage. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary.
 
@@ -97,8 +96,7 @@ explicit inheritance and ordered assignment:
 ```nspl
 CREATE [IF NOT EXISTS] EMITTER kafka_notifications
   FROM notifications
-  ENCODE USING notification_codec
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
   INHERIT ALL EXCEPT raw, secret
   INHERIT secret LEAK SENSITIVE
   SET normalized = lower(input.raw)
@@ -289,8 +287,7 @@ CREATE CLIENT sentry_main
 
 CREATE EMITTER sentry_errors
   FROM errors
-  ENCODE USING sentry_event_codec
-  TO SENTRY sentry_main
+  TO SENTRY sentry_main ENCODE USING sentry_event_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
@@ -490,9 +487,8 @@ CREATE EMITTER iceberg_notifications
     'action' = input.action
   }
   LOCATION 's3://nervix-iceberg/tables/notifications'
-  CATALOG iceberg_catalog
+  CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
@@ -524,9 +520,8 @@ CREATE EMITTER iceberg_notifications
     'action' = input.action
   }
   LOCATION 'gs://nervix-iceberg/tables/notifications'
-  CATALOG iceberg_catalog
+  CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
@@ -556,9 +551,8 @@ CREATE EMITTER iceberg_notifications
     'action' = input.action
   }
   LOCATION 'wasbs://nervix-iceberg@myaccount.blob.core.windows.net/tables/notifications'
-  CATALOG iceberg_catalog
+  CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
@@ -582,7 +576,10 @@ for the general retry and fan-out rules.
 
 ## Codec Behavior On Emission
 
-Most emitters encode through a codec. ClickHouse, Postgres, MySQL, MongoDB, and Iceberg emitters use `VALUES` expressions instead of `ENCODE USING` and insert or append the mapped row directly.
+`ENCODE USING <codec>` follows the sink it encodes for, because whether a codec applies is a
+property of the sink. Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS and Sentry publish an
+encoded payload and require it. ClickHouse, Postgres, MySQL and MongoDB map columns with `VALUES`
+and take a codec only when the route constructs one. Iceberg writes typed records and takes none.
 
 JAQ-native codecs can reshape outbound payloads with `ON EMITTING` before writing the selected
 format:

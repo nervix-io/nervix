@@ -4,8 +4,7 @@ use nervix_models::ShowClusterStatus;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, into_parse_error, kw, lex_input,
-        suggestions_from_errors, tok,
+        ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, suggest_from, tok,
     },
 };
 
@@ -40,23 +39,7 @@ pub fn parse_show_cluster_status(input: &str) -> Result<ShowClusterStatus, Parse
 }
 
 pub fn suggest_show_cluster_status(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = show_cluster_status_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, show_cluster_status_parser())
 }
 
 #[cfg(test)]

@@ -47,6 +47,18 @@ test-lib *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
+# Walk the NSPL completion graph and fail on any branch that cannot be completed by accepting the
+# suggestions the parser itself offers. Kept out of `just test` because it saturates every core for
+# tens of seconds; CI runs it once the main tests have passed.
+nspl-completion-walk *args:
+    cargo test -p nervix-nspl --test completion_walk -- {{ args }}
+
+# The same walk with deduplication relaxed, reaching branches the gating budget stops short of.
+# Reports without failing: this is for finding new ones, not for gating.
+nspl-completion-walk-deep *args:
+    cargo test -p nervix-nspl --test completion_walk -- \
+      --report-only --signature-window 8 --max-states 1000000 {{ args }}
+
 test-coverage: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

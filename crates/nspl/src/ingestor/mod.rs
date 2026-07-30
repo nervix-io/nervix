@@ -10,31 +10,41 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, alter_ingestor_route_body, alter_op_separator,
-        boxed_choice, channel_ref, client_ref, codec_ref, consumer_group_ref, current_word_prefix,
-        duration_lit, endpoint_ref, filter_where_clause, flushed_ingestor_outputs,
+        boxed_choice, channel_ref, client_ref, codec_ref, consumer_group_ref, duration_lit,
+        endpoint_ref, field_ref, filter_where_clause, flushed_ingestor_outputs,
         general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
         kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref, queue_ref, relay_ref,
-        string_lit, subscription_ref, suggestions_from_errors, tok, topic_ref, where_expression,
-        word_raw,
+        string_lit, subscription_ref, suggest_from, tok, topic_ref, u64_value, where_expression,
     },
 };
 
-fn u64_word<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
-    choice((select! { Token::NumberLiteral(v) => v }, word_raw())).try_map(|raw, span| {
-        raw.parse::<u64>()
-            .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
-    })
-}
-
-fn positive_u64_word<'src>()
--> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
-    u64_word().try_map(|value, span| {
+/// A positive count, labelled so completion can name the slot rather than going silent.
+///
+/// The label goes on the integer itself, not on the range check: labelling the checked parser would
+/// rewrite its custom "must be greater than 0" message into a bare expectation and lose the
+/// explanation.
+fn positive_count<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
+    u64_value().labelled(label).try_map(|value, span| {
         if value == 0 {
             Err(Rich::custom(span, "instances must be greater than 0"))
         } else {
             Ok(value)
         }
     })
+}
+
+/// The count after `INSTANCES`.
+fn instance_count<'src>()
+-> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
+    positive_count("instance_count")
+}
+
+/// The bound after `PARALLEL MAX`.
+fn max_in_flight<'src>()
+-> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
+    positive_count("max_in_flight")
 }
 
 fn ack_timeout_parser<'src>()
@@ -67,11 +77,7 @@ fn retry_policy_parser<'src>()
 
 fn timestamp_source<'src>()
 -> impl Parser<'src, &'src [Token], IngestTimestampSource, extra::Err<ParseError<'src>>> + Clone {
-    let at_field = kw(Identifier::At).ignore_then(word_raw().try_map(|raw, span| {
-        nervix_models::Identifier::try_from(raw.as_str())
-            .map(IngestTimestampSource::At)
-            .map_err(|err| Rich::custom(span, format!("invalid identifier: {err}")))
-    }));
+    let at_field = kw(Identifier::At).ignore_then(field_ref().map(IngestTimestampSource::At));
 
     kw(Identifier::Timestamp).ignore_then(choice((
         kw(Identifier::Now).to(IngestTimestampSource::Now),
@@ -88,7 +94,7 @@ fn mode_parser<'src>()
         kw(Identifier::Ack)
             .ignore_then(kw(Identifier::Parallel))
             .ignore_then(kw(Identifier::Max))
-            .ignore_then(positive_u64_word())
+            .ignore_then(max_in_flight())
             .then(batch_timeout)
             .then(ack_timeout.clone())
             .then(retry_policy.clone())
@@ -111,7 +117,7 @@ fn mode_parser<'src>()
         kw(Identifier::NoAck)
             .ignore_then(kw(Identifier::Parallel))
             .ignore_then(kw(Identifier::Max))
-            .ignore_then(positive_u64_word())
+            .ignore_then(max_in_flight())
             .map(|max| KafkaIngestMode::NoAckParallel { max }),
     ))
 }
@@ -180,13 +186,15 @@ fn mqtt_session_clause<'src>()
 
 fn mqtt_qos_clause<'src>()
 -> impl Parser<'src, &'src [Token], MqttQos, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Qos).ignore_then(select! { Token::NumberLiteral(raw) => raw }.try_map(
-        |raw, span| match raw.as_str() {
-            "0" => Ok(MqttQos::AtMostOnce),
-            "1" => Ok(MqttQos::AtLeastOnce),
-            _ => Err(Rich::custom(span, "MQTT QOS must be 0 or 1")),
-        },
-    ))
+    kw(Identifier::Qos).ignore_then(
+        select! { Token::NumberLiteral(raw) => raw }
+            .try_map(|raw, span| match raw.as_str() {
+                "0" => Ok(MqttQos::AtMostOnce),
+                "1" => Ok(MqttQos::AtLeastOnce),
+                _ => Err(Rich::custom(span, "MQTT QOS must be 0 or 1")),
+            })
+            .labelled("mqtt_qos"),
+    )
 }
 
 fn mqtt_mode_parser<'src>()
@@ -199,7 +207,7 @@ fn mqtt_mode_parser<'src>()
         kw(Identifier::Ack)
             .ignore_then(kw(Identifier::Parallel))
             .ignore_then(kw(Identifier::Max))
-            .ignore_then(positive_u64_word())
+            .ignore_then(max_in_flight())
             .then(batch_timeout)
             .then(ack_timeout.clone())
             .then(retry_policy.clone())
@@ -224,7 +232,7 @@ fn mqtt_mode_parser<'src>()
         kw(Identifier::NoAck)
             .ignore_then(kw(Identifier::Parallel))
             .ignore_then(kw(Identifier::Max))
-            .ignore_then(positive_u64_word())
+            .ignore_then(max_in_flight())
             .map(|max| ParsedMqttIngestMode::NoAckParallel { max }),
         kw(Identifier::NoAck)
             .ignore_then(kw(Identifier::Sequential))
@@ -360,7 +368,7 @@ fn kafka_ingest_source_parser<'src>()
         .then(offset_mode)
         .then(
             kw(Identifier::Instances)
-                .ignore_then(positive_u64_word())
+                .ignore_then(instance_count())
                 .or_not()
                 .map(|instances| instances.unwrap_or(1)),
         )
@@ -387,7 +395,7 @@ fn pulsar_ingest_source_parser<'src>()
         .then(subscription_ref())
         .then(
             kw(Identifier::Instances)
-                .ignore_then(positive_u64_word())
+                .ignore_then(instance_count())
                 .or_not()
                 .map(|instances| instances.unwrap_or(1)),
         )
@@ -412,7 +420,7 @@ fn rabbitmq_ingest_source_parser<'src>()
         .then(queue_ref())
         .then(
             kw(Identifier::Instances)
-                .ignore_then(positive_u64_word())
+                .ignore_then(instance_count())
                 .or_not()
                 .map(|instances| instances.unwrap_or(1)),
         )
@@ -452,7 +460,7 @@ fn mqtt_ingest_source_parser<'src>()
         .then(mqtt_topic_filter())
         .then(
             kw(Identifier::Instances)
-                .ignore_then(positive_u64_word())
+                .ignore_then(instance_count())
                 .or_not()
                 .map(|instances| instances.unwrap_or(1)),
         )
@@ -506,7 +514,7 @@ fn nats_ingest_source_parser<'src>()
         .then_ignore(kw_phrase2(Identifier::Queue, Identifier::Group))
         .then(nats_queue_group_ref())
         .then_ignore(kw(Identifier::Instances))
-        .then(positive_u64_word())
+        .then(instance_count())
         .then_ignore(kw(Identifier::Mode))
         .then(nats_mode_parser())
         .map(
@@ -537,7 +545,7 @@ fn sqs_ingest_source_parser<'src>()
         .then(queue_ref())
         .then(
             kw(Identifier::Instances)
-                .ignore_then(positive_u64_word())
+                .ignore_then(instance_count())
                 .or_not()
                 .map(|instances| instances.unwrap_or(1)),
         )
@@ -749,43 +757,11 @@ pub fn parse_alter_ingestor(input: &str) -> Result<AlterIngestor, ParseFromSourc
 }
 
 pub fn suggest_create_ingestor(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_ingestor_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_ingestor_parser())
 }
 
 pub fn suggest_alter_ingestor(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = alter_ingestor_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, alter_ingestor_parser())
 }
 
 #[cfg(test)]

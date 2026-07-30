@@ -6503,11 +6503,15 @@ dependencies = [
  "arrow-schema",
  "bolero",
  "chumsky",
+ "clap",
  "humantime",
  "nervix-models",
  "rustyline",
+ "serde",
+ "serde_json",
  "sorted-vec",
  "strum 0.26.3",
+ "thiserror 2.0.19",
  "ubyte",
 ]
 

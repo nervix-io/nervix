@@ -228,8 +228,7 @@ CREATE REINGESTOR site_critical_repartition
 
 CREATE EMITTER nats_signal_windows
   FROM signal_windows
-  ENCODE USING signal_window_codec
-  TO NATS nats_edge SUBJECT factory_signal_windows
+  TO NATS nats_edge SUBJECT factory_signal_windows ENCODE USING signal_window_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
@@ -237,8 +236,7 @@ CREATE EMITTER nats_signal_windows
 
 CREATE EMITTER nats_site_critical_signals
   FROM site_critical_signals
-  ENCODE USING machine_signal_codec
-  TO NATS nats_edge SUBJECT factory_site_critical_signals
+  TO NATS nats_edge SUBJECT factory_site_critical_signals ENCODE USING machine_signal_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
@@ -246,8 +244,7 @@ CREATE EMITTER nats_site_critical_signals
 
 CREATE EMITTER nats_battery_alerts
   FROM battery_alerts
-  ENCODE USING machine_signal_codec
-  TO NATS nats_edge SUBJECT factory_battery_alerts
+  TO NATS nats_edge SUBJECT factory_battery_alerts ENCODE USING machine_signal_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG

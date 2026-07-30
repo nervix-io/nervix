@@ -3539,6 +3539,22 @@ pub struct WindowBound {
 }
 
 impl WindowBound {
+    /// A bound counted in messages alone.
+    pub fn of_messages(messages: u64) -> Self {
+        Self {
+            messages: Some(messages),
+            duration: None,
+        }
+    }
+
+    /// A bound measured in time alone.
+    pub fn of_duration(duration: String) -> Self {
+        Self {
+            messages: None,
+            duration: Some(duration),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.messages.is_none() && self.duration.is_none()
     }

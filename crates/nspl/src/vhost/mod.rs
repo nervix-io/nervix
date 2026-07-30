@@ -4,8 +4,8 @@ use nervix_models::{CreateStatement, CreateVhost, VhostTlsResource};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, hostname_lit, if_not_exists_clause,
-        into_parse_error, kw, lex_input, resource_ref, suggestions_from_errors, tok, vhost_name,
+        ParseError, ParseFromSourceError, hostname_lit, if_not_exists_clause, into_parse_error, kw,
+        lex_input, resource_ref, suggest_from, tok, vhost_name,
     },
 };
 
@@ -74,23 +74,7 @@ pub fn parse_create_vhost(
 }
 
 pub fn suggest_create_vhost(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_vhost_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_vhost_parser())
 }
 
 #[cfg(test)]

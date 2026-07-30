@@ -4,9 +4,8 @@ use nervix_models::{CreateEndpoint, CreateStatement, EndpointType};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, endpoint_name, if_not_exists_clause,
-        into_parse_error, kw, lex_input, signaling_protocol_clause, string_lit,
-        suggestions_from_errors, tok, vhost_ref,
+        ParseError, ParseFromSourceError, endpoint_name, if_not_exists_clause, into_parse_error,
+        kw, lex_input, signaling_protocol_clause, string_lit, suggest_from, tok, vhost_ref,
     },
 };
 
@@ -28,16 +27,22 @@ pub fn create_endpoint_parser<'src>()
         .then_ignore(kw(Identifier::On))
         .then(vhost_ref())
         .then_ignore(kw(Identifier::Path))
-        .then(string_lit().try_map(|path, span| {
-            if path.starts_with('/') {
-                Ok(path)
-            } else {
-                Err(Rich::custom(
-                    span,
-                    format!("invalid endpoint path '{path}': must start with '/'"),
-                ))
-            }
-        }))
+        .then(
+            // Labelled for what it is: `string_literal` invites any string, and most strings are
+            // rejected here because an endpoint path must be rooted.
+            string_lit()
+                .labelled("endpoint_path")
+                .try_map(|path, span| {
+                    if path.starts_with('/') {
+                        Ok(path)
+                    } else {
+                        Err(Rich::custom(
+                            span,
+                            format!("invalid endpoint path '{path}': must start with '/'"),
+                        ))
+                    }
+                }),
+        )
         .then_ignore(kw(Identifier::Type))
         .then(endpoint_type_parser())
         .then(signaling_protocol_clause().or_not())
@@ -96,23 +101,7 @@ pub fn parse_create_endpoint(
 }
 
 pub fn suggest_create_endpoint(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_endpoint_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_endpoint_parser())
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ Feature: SQS emission
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
-        CREATE EMITTER sqs_notifications FROM notifications ENCODE USING notification_codec TO SQS sqs_main QUEUE notifications_out_{{test_id}}
+        CREATE EMITTER sqs_notifications FROM notifications TO SQS sqs_main QUEUE notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

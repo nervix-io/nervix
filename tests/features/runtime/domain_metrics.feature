@@ -51,7 +51,7 @@ Feature: Domain metrics
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER domain_metrics_sink FROM domain_metrics_deduped ENCODE USING transaction_codec TO ZEROMQ zeromq_main
+        CREATE EMITTER domain_metrics_sink FROM domain_metrics_deduped TO ZEROMQ zeromq_main ENCODE USING transaction_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

@@ -6,7 +6,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, if_not_exists_clause,
+        ParseError, ParseFromSourceError, completion_context, if_not_exists_clause,
         into_parse_error, kw, lex_input, string_lit, suggestions_from_errors, tok, udf_name,
         udf_ref,
     },
@@ -133,10 +133,8 @@ pub fn parse_create_udf(input: &str) -> Result<CreateStatement<CreateUdf>, Parse
 }
 
 pub fn suggest_create_udf(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (source, prefix) = completion_context(input, cursor);
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };

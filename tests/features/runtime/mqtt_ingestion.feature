@@ -407,7 +407,7 @@ Feature: MQTT ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER mqtt_forward FROM notifications ENCODE USING notification_codec TO MQTT mqtt_out TOPIC notifications_ack_out_{{test_id}}
+        CREATE EMITTER mqtt_forward FROM notifications TO MQTT mqtt_out TOPIC notifications_ack_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

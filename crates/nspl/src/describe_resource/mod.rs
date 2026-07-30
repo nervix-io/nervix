@@ -4,8 +4,8 @@ use nervix_models::DescribeResource;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, into_parse_error, kw, lex_input,
-        resource_ref, suggestions_from_errors,
+        ParseError, ParseFromSourceError, completion_context, filter_by_prefix, into_parse_error,
+        kw, lex_input, resource_ref, suggestions_from_errors,
     },
 };
 
@@ -16,7 +16,9 @@ pub fn describe_resource_parser<'src>()
         .ignore_then(resource_ref())
         .then(
             kw(Identifier::Version)
-                .ignore_then(select! { Token::NumberLiteral(value) => value })
+                .ignore_then(
+                    select! { Token::NumberLiteral(value) => value }.labelled("resource_version"),
+                )
                 .try_map(|version, span| {
                     version.parse::<u64>().map_or_else(
                         |_| {
@@ -57,11 +59,9 @@ pub fn parse_describe_resource(input: &str) -> Result<DescribeResource, ParseFro
 }
 
 pub fn suggest_describe_resource(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
+    let (source, prefix) = completion_context(input, cursor);
 
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
@@ -70,16 +70,18 @@ pub fn suggest_describe_resource(input: &str, cursor: usize) -> Vec<String> {
         .then_ignore(end())
         .parse(tokens.as_slice());
     if !out.has_errors() {
-        let trimmed = prefix_src.trim_end();
-        if prefix_src.len() > trimmed.len()
-            && trimmed
-                .to_ascii_uppercase()
-                .starts_with("DESCRIBE RESOURCE ")
-            && !trimmed.to_ascii_uppercase().contains(" VERSION ")
+        let trimmed = source.trim_end();
+        let normalized = trimmed.to_ascii_uppercase();
+        let optional_tail = if source.len() > trimmed.len()
+            && !trimmed.ends_with(';')
+            && normalized.starts_with("DESCRIBE RESOURCE ")
+            && !normalized.contains(" VERSION ")
         {
-            return vec!["VERSION".to_string()];
-        }
-        return Vec::new();
+            vec!["VERSION".to_string()]
+        } else {
+            Vec::new()
+        };
+        return filter_by_prefix(optional_tail, &prefix);
     }
 
     suggestions_from_errors(out.into_errors(), &prefix)

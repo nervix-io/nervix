@@ -4,7 +4,7 @@ use nervix_models::{CreateSubscription, DeleteSubscription, Domain, Statement, U
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
-        ParseError, ParseFromSourceError, current_word_prefix, domain_name, into_parse_error, kw,
+        ParseError, ParseFromSourceError, completion_context, domain_name, into_parse_error, kw,
         lex_input, suggestions_from_errors, tok,
     },
 };
@@ -237,11 +237,9 @@ fn starts_with_server_command_keyword(tokens: &[Token]) -> bool {
 }
 
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
+    let (source, prefix) = completion_context(input, cursor);
 
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };

@@ -25,4 +25,23 @@ ubyte = { workspace = true }
 [dev-dependencies]
 ariadne = { workspace = true }
 bolero = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 rustyline = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Excluded from the default test run: the walk saturates every core for tens of seconds, which is
+# not what belongs in a suite people run while working. It is a gate of its own, run by
+# `just nspl-completion-walk` and by CI once the main tests have passed.
+[[test]]
+harness = false
+name = "completion_walk"
+path = "tests/completion_walk/main.rs"
+test = false
+
+# The walker above prints a report and takes CLI arguments, so it runs without a harness, and cargo
+# does not collect `#[test]` functions in such a target. Its own tests live here.
+[[test]]
+name = "completion_walk_units"
+path = "tests/completion_walk/units.rs"

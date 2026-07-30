@@ -1017,7 +1017,7 @@ Feature: Window processor runtime behavior
         TO metric_summaries
         SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency)
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM metric_summaries ENCODE USING metric_summary_codec TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}}
+        CREATE EMITTER kafka_forward FROM metric_summaries TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}} ENCODE USING metric_summary_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1105,7 +1105,7 @@ Feature: Window processor runtime behavior
         TO metric_summaries
         SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency)
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM metric_summaries ENCODE USING metric_summary_codec TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}}
+        CREATE EMITTER kafka_forward FROM metric_summaries TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}} ENCODE USING metric_summary_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, alter_op_separator, alter_reingestor_operation,
-        current_word_prefix, filter_where_clause, flushed_ingestor_outputs, from_relay_clauses,
+        completion_context, filter_where_clause, flushed_ingestor_outputs, from_relay_clauses,
         if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
-        reingestor_name, reingestor_ref, suggestions_from_errors, tok,
+        reingestor_name, reingestor_ref, suggest_from, suggestions_from_errors, tok,
     },
 };
 
@@ -105,30 +105,12 @@ pub fn parse_alter_reingestor(input: &str) -> Result<AlterReingestor, ParseFromS
 }
 
 pub fn suggest_create_reingestor(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_reingestor_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_reingestor_parser())
 }
 
 pub fn suggest_alter_reingestor(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (source, prefix) = completion_context(input, cursor);
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };

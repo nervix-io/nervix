@@ -4,8 +4,8 @@ use nervix_models::{Model, Statement};
 use crate::{
     lexer::Token,
     parser_support::{
-        ParseError, ParseFromSourceError, boxed_choice, current_word_prefix, into_parse_error,
-        lex_input, suggestions_from_errors,
+        ParseError, ParseFromSourceError, boxed_choice, completion_context, filter_by_prefix,
+        into_parse_error, lex_input, suggestions_from_errors,
     },
 };
 
@@ -191,11 +191,9 @@ pub fn parse_statement(input: &str) -> Result<Statement, ParseFromSourceError> {
 }
 
 pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
+    let (source, prefix) = completion_context(input, cursor);
 
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
@@ -204,24 +202,27 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
         .then_ignore(end())
         .parse(tokens.as_slice());
     if !out.has_errors() {
-        let trimmed = prefix_src.trim_end();
+        // A statement that already parses has no expectations left to derive suggestions from,
+        // because end of input is not representable as one. These few continuations are optional
+        // tails of an otherwise complete statement, so they are named here.
+        let trimmed = source.trim_end();
         let normalized = trimmed.to_ascii_uppercase();
-        if prefix_src.len() > trimmed.len() && normalized == "START" {
-            return vec![";".to_string(), "AT".to_string()];
-        }
-        if prefix_src.len() > trimmed.len()
-            && normalized.starts_with("START AT ")
-            && !normalized.contains(" TIME RATE ")
+        // Nothing may follow a terminated statement, so a trailing `;` ends the offers.
+        let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
+        let optional_tail = if open && normalized == "START" {
+            vec![";".to_string(), "AT".to_string()]
+        } else if open && normalized.starts_with("START AT ") && !normalized.contains(" TIME RATE ")
         {
-            return vec![";".to_string(), "TIME RATE".to_string()];
-        }
-        if prefix_src.len() > trimmed.len()
+            vec![";".to_string(), "TIME RATE".to_string()]
+        } else if open
             && normalized.starts_with("DESCRIBE RESOURCE ")
             && !normalized.contains(" VERSION ")
         {
-            return vec!["VERSION".to_string()];
-        }
-        return Vec::new();
+            vec!["VERSION".to_string()]
+        } else {
+            Vec::new()
+        };
+        return filter_by_prefix(optional_tail, &prefix);
     }
 
     suggestions_from_errors(out.into_errors(), &prefix)
@@ -1005,6 +1006,188 @@ mod tests {
         assert!(!suggestions.contains(&"AVRO".to_string()));
     }
 
+    /// Every numeric slot in the language names itself.
+    ///
+    /// An unlabelled `select!` reports `SomethingElse`, which the suggestion mapping discards, so
+    /// completion goes silent at a position that is otherwise perfectly valid — the user is left
+    /// with a half-written statement and nothing to accept.
+    #[test]
+    fn numeric_slots_offer_a_named_placeholder_rather_than_nothing() {
+        for (input, expected) in [
+            ("CREATE SCHEMA s ( f ARRAY < U8 , ", "array_length"),
+            ("DESCRIBE RESOURCE r VERSION ", "resource_version"),
+            (
+                "CREATE INFERENCER i FROM r USING RESOURCE res VERSION ",
+                "integer_literal",
+            ),
+            (
+                "CREATE INGESTOR i FROM KAFKA c TOPIC t OFFSET BY DOMAIN INSTANCES ",
+                "instance_count",
+            ),
+            (
+                "CREATE INGESTOR i FROM MQTT c TOPIC t MODE ACK PARALLEL MAX ",
+                "max_in_flight",
+            ),
+            ("CREATE INGESTOR i FROM MQTT c TOPIC t QOS ", "mqtt_qos"),
+            (
+                "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES ",
+                "integer_literal",
+            ),
+        ] {
+            let suggestions = suggest_statement(input, input.len());
+            assert!(
+                suggestions.contains(&expected.to_string()),
+                "{input:?} should offer {expected}, got {suggestions:?}"
+            );
+        }
+    }
+
+    /// A modifier that is already present must stop being offered, not be accepted and then
+    /// rejected by a validation pass.
+    #[test]
+    fn schema_field_modifiers_are_offered_at_most_once() {
+        let input = "CREATE SCHEMA s ( f BOOL OPTIONAL ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(!suggestions.contains(&"OPTIONAL".to_string()));
+        assert!(suggestions.contains(&"SENSITIVE".to_string()));
+
+        let input = "CREATE SCHEMA s ( f BOOL SENSITIVE ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(!suggestions.contains(&"SENSITIVE".to_string()));
+        assert!(suggestions.contains(&"OPTIONAL".to_string()));
+
+        assert!(parse_statement("CREATE SCHEMA s (f BOOL OPTIONAL OPTIONAL)").is_err());
+    }
+
+    /// A window bound is one message count and one duration at most.
+    #[test]
+    fn a_window_bound_offers_each_kind_at_most_once() {
+        let input = "CREATE WINDOW PROCESSOR w FROM r WIDTH 1s DURATION ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(!suggestions.contains(&"duration_literal".to_string()));
+        assert!(suggestions.contains(&"message_count".to_string()));
+    }
+
+    /// The clause head is offered first, then the body it introduces — not the body in its place.
+    #[test]
+    fn route_construction_offers_its_head_then_names_the_body() {
+        let input = "CREATE JUNCTION j FROM r UNBRANCHED TO o ";
+        let suggestions = suggest_statement(input, input.len());
+        for head in ["INHERIT", "SET", "WHERE", "INVOKE"] {
+            assert!(
+                suggestions.contains(&head.to_string()),
+                "{head} should be offered, got {suggestions:?}"
+            );
+        }
+        assert!(!suggestions.contains(&"set_assignments".to_string()));
+
+        let input = "CREATE JUNCTION j FROM r UNBRANCHED TO o SET ";
+        assert_eq!(
+            suggest_statement(input, input.len()),
+            vec!["set_assignments".to_string()]
+        );
+    }
+
+    /// Contexts that accept only `SET` must not offer the clauses they will reject.
+    #[test]
+    fn set_only_route_contexts_offer_only_set() {
+        let input = "CREATE INGESTOR i FROM ENDPOINT e MODE NO_ACK SEQUENTIAL DECODE USING c TO s \
+                     BRANCHED BY b ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"SET".to_string()));
+        for rejected in ["INHERIT", "INVOKE", "WHERE"] {
+            assert!(
+                !suggestions.contains(&rejected.to_string()),
+                "{rejected} is rejected by branch construction and must not be offered, got \
+                 {suggestions:?}"
+            );
+        }
+    }
+
+    /// Typing the first characters of a suggestion must not make it disappear.
+    ///
+    /// The partial word is removed before parsing: left in place it is swallowed by whichever
+    /// free-form expression region it lands in, and the expression grammar then fails with a
+    /// custom error that carries no expectations at all.
+    #[test]
+    fn typing_a_prefix_after_an_expression_region_keeps_the_suggestion() {
+        let base = "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = 1";
+        let offered = suggest_statement(&format!("{base} "), base.len() + 1);
+        assert!(offered.contains(&"FLUSH EACH".to_string()));
+
+        let typed = format!("{base} FL");
+        let still_offered = suggest_statement(&typed, typed.len());
+        assert!(
+            still_offered.contains(&"FLUSH EACH".to_string()),
+            "typing FL must keep FLUSH EACH, got {still_offered:?}"
+        );
+    }
+
+    /// Once the partial word is removed the statement may be complete, and a complete statement has
+    /// no expectations, so the grammar has to be asked again with the word in place.
+    #[test]
+    fn a_prefix_typed_after_a_complete_statement_still_completes() {
+        let input = "DESCRIBE RESOURCE r VE";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(
+            suggestions.contains(&"VERSION".to_string()),
+            "got {suggestions:?}"
+        );
+
+        let input = "START A";
+        let suggestions = suggest_statement(input, input.len());
+        assert_eq!(suggestions, vec!["AT".to_string()]);
+    }
+
+    /// Nothing follows a terminated statement.
+    #[test]
+    fn a_terminated_statement_offers_no_continuation() {
+        let input = "START AT NOW ; ";
+        assert!(suggest_statement(input, input.len()).is_empty());
+    }
+
+    /// A slot with a real constraint should say what it wants.
+    #[test]
+    fn constrained_slots_do_not_hide_behind_a_generic_literal_label() {
+        let input = "CREATE ENDPOINT e ON v PATH ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"endpoint_path".to_string()));
+        assert!(!suggestions.contains(&"string_literal".to_string()));
+    }
+
+    /// A duration is checked where it is written, not by whatever consumes it later.
+    #[test]
+    fn a_bare_keyword_is_not_accepted_as_a_duration() {
+        let error = parse_statement(
+            "CREATE JUNCTION j FROM r UNBRANCHED TO o SET x = 1 FLUSH EACH UNBRANCHED MAX BATCH \
+             SIZE 1MiB ON MESSAGE ERROR LOG",
+        )
+        .expect_err("a keyword is not a duration");
+        assert!(
+            format!("{error:?}").contains("invalid duration"),
+            "expected a duration diagnostic, got {error:?}"
+        );
+    }
+
+    /// A codec is required by the sink, so the grammar asks for it right after the sink.
+    ///
+    /// Written before `TO`, the requirement could only be checked once the whole statement was
+    /// read, and a `try_map` over the whole statement reports its failure at the statement's first
+    /// token — where every other `CREATE` alternative outranks it and the user is told
+    /// `expected ... found EMITTER`.
+    #[test]
+    fn a_cross_clause_constraint_is_reported_where_it_was_broken() {
+        let error = parse_statement(
+            "CREATE EMITTER e FROM r TO KAFKA c TOPIC t FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+             GENERAL ERROR LOG",
+        )
+        .expect_err("an encoded sink needs a codec");
+        assert!(
+            format!("{error:?}").contains("expected ENCODE USING"),
+            "the codec is required by the sink, so the grammar should ask for it: {error:?}"
+        );
+    }
+
     #[test]
     fn create_if_not_exists_completion_suggests_compound_keyword_without_leakage() {
         let input = "CREATE ";
@@ -1082,7 +1265,7 @@ mod tests {
 
     #[test]
     fn emitter_context_suggestions_do_not_leak_schema_keywords() {
-        let input = "CREATE EMITTER emit FROM p99 ENCODE USING my_codec TO ";
+        let input = "CREATE EMITTER emit FROM p99 TO ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"KAFKA".to_string()));
         assert!(suggestions.contains(&"RABBITMQ".to_string()));
@@ -1632,8 +1815,8 @@ mod tests {
     #[test]
     fn parses_emitter_statement_with_implicit_attached_mode() {
         let parsed = parse_statement(
-            "CREATE EMITTER emit FROM notifications ENCODE USING notification_codec TO KAFKA \
-             kafka_main TOPIC notifications_out FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
+            "CREATE EMITTER emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out \
+             ENCODE USING notification_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
              ERROR LOG ON GENERAL ERROR LOG;",
         )
         .expect("parse should succeed");
@@ -1660,9 +1843,9 @@ mod tests {
             ),
             (
                 "emitter",
-                "CREATE EMITTER kafka_emit FROM notifications ENCODE USING notification_codec TO \
-                 KAFKA kafka_main TOPIC notifications_out FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-                 MESSAGE ERROR LOG",
+                "CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC \
+                 notifications_out ENCODE USING notification_codec FLUSH EACH 100ms MAX BATCH \
+                 SIZE 1MiB ON MESSAGE ERROR LOG",
                 " ON GENERAL ERROR LOG;",
             ),
         ];
@@ -2425,8 +2608,7 @@ mod tests {
             CREATE EMITTER emit
                 FROM p99
                 COLLECT FOR 50ms
-                ENCODE USING my_codec
-                TO KAFKA broker1 TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                TO KAFKA broker1 TOPIC topic ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2444,8 +2626,7 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                ENCODE USING my_codec
-                TO PULSAR pulsar_main TOPIC topic FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                TO PULSAR pulsar_main TOPIC topic ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2463,8 +2644,7 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                ENCODE USING my_codec
-                TO RABBITMQ broker1 QUEUE outbox FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                TO RABBITMQ broker1 QUEUE outbox ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2482,8 +2662,7 @@ mod tests {
         let input = r#"
             CREATE EMITTER emit
                 FROM p99
-                ENCODE USING my_codec
-                TO REDIS PUBSUB broker1 CHANNEL outbox FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+                TO REDIS PUBSUB broker1 CHANNEL outbox ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 

@@ -98,17 +98,17 @@ Feature: Multi-source DAG routing
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_out FROM kafka_projected ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}}
+        CREATE EMITTER kafka_out FROM kafka_projected TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER rabbit_out FROM rabbit_projected ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}}
+        CREATE EMITTER rabbit_out FROM rabbit_projected TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER shared_out FROM shared_dispatch ENCODE USING notification_codec TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}}
+        CREATE EMITTER shared_out FROM shared_dispatch TO REDIS PUBSUB redis_main CHANNEL dag_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

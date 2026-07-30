@@ -385,8 +385,7 @@ Another example showing nested conditions and chained calls:
 ```nspl
 CREATE EMITTER outbound
   FROM notifications
-  ENCODE USING notification_codec
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
   INHERIT ALL EXCEPT raw
   SET normalized = lower(trim(input.raw)), magnitude = abs(input.amount)
   WHERE (output.active AND output.amount > 5) OR contains(lower(trim(input.raw)), 'urgent')
