@@ -998,8 +998,7 @@ CREATE JUNCTION distance_alert_junction
 
 CREATE EMITTER kafka_security_events
   FROM security_events
-  ENCODE USING security_event_json_codec
-  TO KAFKA kafka_auth TOPIC datalake_security_events
+  TO KAFKA kafka_auth TOPIC datalake_security_events ENCODE USING security_event_json_codec
     INHERIT ALL
     FLUSH EACH 1s MAX BATCH SIZE 1MiB
     ON MESSAGE ERROR LOG
@@ -1007,8 +1006,8 @@ CREATE EMITTER kafka_security_events
 
 CREATE EMITTER redis_distance_alerts
   FROM distance_alerts
-  ENCODE USING distance_alert_json_codec
   TO REDIS PUBSUB redis_security_alerts CHANNEL datalake_distance_alerts
+    ENCODE USING distance_alert_json_codec
     INHERIT ALL
     FLUSH EACH 1s MAX BATCH SIZE 512kb
     ON MESSAGE ERROR LOG
@@ -1045,9 +1044,8 @@ CREATE DETACHED EMITTER iceberg_connected_sessions
     'risk_score' = input.risk_score
   }
   LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions'
-  CATALOG lakehouse_catalog
+  CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
@@ -1085,9 +1083,8 @@ CREATE DETACHED EMITTER iceberg_device_locations
     'distance_to_edge_km' = input.distance_to_edge_km
   }
   LOCATION 's3://nervix-iceberg/tables/datalake_device_locations'
-  CATALOG lakehouse_catalog
+  CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
@@ -1118,9 +1115,8 @@ CREATE DETACHED EMITTER iceberg_disconnect_matched_events
     'edge_lon' = input.edge_lon
   }
   LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_matched_events'
-  CATALOG lakehouse_catalog
+  CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
@@ -1151,9 +1147,8 @@ CREATE DETACHED EMITTER iceberg_disconnect_device_only_events
     'edge_lon' = input.edge_lon
   }
   LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_device_only_events'
-  CATALOG lakehouse_catalog
+  CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
@@ -1184,9 +1179,8 @@ CREATE DETACHED EMITTER iceberg_disconnect_edge_only_events
     'edge_lon' = input.edge_lon
   }
   LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_edge_only_events'
-  CATALOG lakehouse_catalog
+  CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
@@ -1207,9 +1201,8 @@ CREATE DETACHED EMITTER iceberg_security_events
     'source_event_id' = input.source_event_id
   }
   LOCATION 's3://nervix-iceberg/tables/datalake_security_events'
-  CATALOG lakehouse_catalog
+  CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
@@ -1234,9 +1227,8 @@ CREATE DETACHED EMITTER iceberg_distance_alerts
     'edge_lon' = input.edge_lon
   }
   LOCATION 's3://nervix-iceberg/tables/datalake_distance_alerts'
-  CATALOG lakehouse_catalog
+  CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
-  COMMIT EACH 1m MAX SIZE 512MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 

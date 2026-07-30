@@ -4,9 +4,9 @@ use nervix_models::{CreateLookup, CreateStatement};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, codec_ref, current_word_prefix, field_ref,
-        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, lookup_name,
-        resource_ref, string_lit, suggestions_from_errors, tok,
+        ParseError, ParseFromSourceError, codec_ref, field_ref, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, lex_input, lookup_name, resource_ref, string_lit,
+        suggest_from, tok,
     },
 };
 
@@ -66,23 +66,7 @@ pub fn parse_create_lookup(
 }
 
 pub fn suggest_create_lookup(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_lookup_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_lookup_parser())
 }
 
 #[cfg(test)]

@@ -24,6 +24,50 @@ macro_rules! boxed_choice {
 }
 pub(crate) use boxed_choice;
 
+/// Derive completion suggestions for `input` at `cursor` from a statement grammar.
+///
+/// Two parses can be needed, and each covers a case the other gets wrong.
+///
+/// The partial word under the cursor is removed first. A half-typed word is not something the
+/// grammar can make sense of, and inside a free-form expression region it is swallowed into the
+/// region and handed to the expression grammar, which fails with a custom error carrying no
+/// expectations at all — so completion falls silent the moment the user starts typing.
+///
+/// But with that word gone the statement may already be complete, and a complete statement has no
+/// expectations either: end of input is not representable as a suggestion. So when the stripped
+/// source offers nothing and a partial word exists, the grammar is asked again with the word in
+/// place, because the alternatives that could still continue the statement are exactly the ones
+/// that fail at that token.
+macro_rules! suggest_from {
+    ($input:expr, $cursor:expr, $parser:expr $(,)?) => {{
+        let input: &str = $input;
+        let cursor: usize = $cursor;
+        let (source, prefix) = $crate::parser_support::completion_context(input, cursor);
+
+        let offer = |source: &str| match $crate::parser_support::lex_input(source) {
+            Ok((_, _, tokens)) => {
+                let out = $parser
+                    .then_ignore(chumsky::prelude::end())
+                    .parse(tokens.as_slice());
+                if out.has_errors() {
+                    $crate::parser_support::suggestions_from_errors(out.into_errors(), &prefix)
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(_) => Vec::new(),
+        };
+
+        let suggestions = offer(&source);
+        if suggestions.is_empty() && !prefix.is_empty() {
+            offer(&input[..cursor.min(input.len())])
+        } else {
+            suggestions
+        }
+    }};
+}
+pub(crate) use suggest_from;
+
 pub type ParseError<'src> = Rich<'src, Token>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,14 +200,33 @@ pub fn word_raw<'src>()
     .boxed()
 }
 
+/// A word that is not a language keyword.
+///
+/// Where a value is written as a bare word, accepting keywords too lets the value swallow whatever
+/// follows it: `STEP 1s UNBRANCHED` reads `UNBRANCHED` as the start of another bound, and the
+/// statement then fails somewhere far from the real mistake.
+pub fn unknown_word<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    select! {
+        Token::Word(Word::UnknownWord(raw)) => raw,
+    }
+    .boxed()
+}
+
 pub fn u64_value<'src>()
 -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
-    choice((select! { Token::NumberLiteral(v) => v }, word_raw()))
-        .try_map(|raw, span| {
-            raw.parse::<u64>()
-                .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
-        })
-        .boxed()
+    // Each alternative carries the label: chumsky only rewrites an alternative error whose position
+    // matches the start of the labelled parser, so labelling the choice as a whole leaves the
+    // branches' own expectations in place and completion has nothing to offer here.
+    choice((
+        select! { Token::NumberLiteral(v) => v }.labelled("integer_literal"),
+        word_raw().labelled("integer_literal"),
+    ))
+    .try_map(|raw, span| {
+        raw.parse::<u64>()
+            .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
+    })
+    .boxed()
 }
 
 pub fn schema_ref<'src>()
@@ -195,7 +258,7 @@ pub fn output_branch<'src>()
 -> impl Parser<'src, &'src [Token], OutputBranch, extra::Err<ParseError<'src>>> + Clone {
     let branched = kw_phrase2(Identifier::Branched, Identifier::By)
         .ignore_then(branch_ref())
-        .then(route_construction().or_not())
+        .then(set_only_route_construction().or_not())
         .try_map(|(branch, construction), span| {
             let construction = construction.unwrap_or_default();
             if construction.inherit.is_some()
@@ -233,6 +296,7 @@ fn materialized_default_assignments<'src>()
                 .repeated()
                 .at_least(1)
                 .collect::<Vec<_>>()
+                .labelled("default_assignments")
                 .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
         )
         .try_map(|tokens, span| {
@@ -615,11 +679,26 @@ pub fn string_lit<'src>()
 
 pub fn duration_lit<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    // A number followed by a unit is unambiguously meant as a duration, so it is checked here: the
+    // unit has to match any word — `min` is a keyword — and without the check `WIDTH 100 MESSAGES`
+    // reads as the duration `100MESSAGES` and swallows the bound that follows it.
+    //
+    // A lone word is different. `oops` is an ordinary identifier a user could type, and whichever
+    // setting consumes it validates it; checking it here would take over validation the runtime has
+    // to do anyway, since models also arrive from persisted state. Only keywords are ruled out,
+    // because a keyword is never a value.
     choice((
         select! { Token::NumberLiteral(value) => value }
             .then(word_raw())
-            .map(|(number, unit)| format!("{number}{unit}")),
-        word_raw(),
+            .map(|(number, unit)| format!("{number}{unit}"))
+            .try_map(|raw, span| {
+                humantime::parse_duration(&raw)
+                    .map(|_| raw.clone())
+                    .map_err(|error| {
+                        Rich::custom(span, format!("invalid duration '{raw}': {error}"))
+                    })
+            }),
+        unknown_word(),
     ))
     .labelled("duration_literal")
     .boxed()
@@ -685,7 +764,7 @@ pub fn message_error_policy<'src>()
             kw(Identifier::Log).to(MessageErrorPolicy::Log),
             kw_phrase2(Identifier::Send, Identifier::To)
                 .ignore_then(message_error_relay_ref())
-                .then(route_construction())
+                .then(set_only_route_construction())
                 .try_map(|(relay, construction), span| {
                     if construction.inherit.is_some()
                         || construction.where_clause.is_some()
@@ -719,7 +798,7 @@ fn alter_message_error_policy<'src>()
             kw(Identifier::Log).to(MessageErrorPolicy::Log),
             kw_phrase2(Identifier::Send, Identifier::To)
                 .ignore_then(message_error_relay_ref())
-                .then(alter_route_construction())
+                .then(set_only_alter_route_construction())
                 .try_map(|(relay, construction), span| {
                     if construction.inherit.is_some()
                         || construction.where_clause.is_some()
@@ -771,21 +850,23 @@ pub fn alter_generator_route_body<'src>()
 -> impl Parser<'src, &'src [Token], ProcessorOutput, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::To)
         .ignore_then(relay_ref())
-        .then(alter_route_construction().try_map(|construction, span| {
-            if construction.assignments.is_empty() {
-                Err(Rich::custom(
-                    span,
-                    "output route must contain SET assignments and may contain WHERE",
-                ))
-            } else if construction.inherit.is_some() || !construction.invocations.is_empty() {
-                Err(Rich::custom(
-                    span,
-                    "set-only output route may contain SET assignments and WHERE only",
-                ))
-            } else {
-                Ok(construction)
-            }
-        }))
+        .then(
+            set_only_alter_route_construction().try_map(|construction, span| {
+                if construction.assignments.is_empty() {
+                    Err(Rich::custom(
+                        span,
+                        "output route must contain SET assignments and may contain WHERE",
+                    ))
+                } else if construction.inherit.is_some() || !construction.invocations.is_empty() {
+                    Err(Rich::custom(
+                        span,
+                        "set-only output route may contain SET assignments and WHERE only",
+                    ))
+                } else {
+                    Ok(construction)
+                }
+            }),
+        )
         .then(flush_each())
         .then(alter_message_error_policy())
         .map(
@@ -973,17 +1054,6 @@ pub fn general_error_policy<'src>()
         .boxed()
 }
 
-fn route_construction_head<'src>()
--> impl Parser<'src, &'src [Token], Identifier, extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        kw(Identifier::Inherit).to(Identifier::Inherit),
-        kw(Identifier::Set).to(Identifier::Set),
-        kw(Identifier::Where).to(Identifier::Where),
-        kw(Identifier::Invoke).to(Identifier::Invoke),
-    ))
-    .boxed()
-}
-
 fn processor_output_boundary_token(token: &Token) -> bool {
     matches!(
         token,
@@ -1036,63 +1106,129 @@ pub(crate) fn from_where_boundary_token(token: &Token) -> bool {
         )
 }
 
-pub fn route_construction<'src>()
--> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    route_construction_head()
-        .then(
-            any()
-                .filter(|token: &Token| !route_boundary_token(token))
-                .repeated()
-                .collect::<Vec<_>>(),
-        )
-        .try_map(|(head, tail), span| {
+/// The body of a route-construction clause: every token up to a boundary, handed to the expression
+/// grammar as one unit.
+///
+/// The run is labelled, and required to be non-empty, because completion is derived from what the
+/// grammar still expects. Left unlabelled and optional, a bare `SET` parses far enough to fail in
+/// the expression grammar with a custom error that carries no expectations at all, so completion
+/// falls silent exactly where the user needs it. Each clause head gets its own label so the offer
+/// names what belongs there.
+fn route_construction_body<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
+    any()
+        .filter(|token: &Token| !route_boundary_token(token))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .labelled(label)
+        .boxed()
+}
+
+/// One `<head> <body>` clause. Only the body carries a label: labelling the clause as a whole would
+/// replace the head keyword's own expectation, and completion would offer the body placeholder
+/// before the user has typed the keyword that introduces it.
+fn route_construction_clause<'src>(
+    head: Identifier,
+    body: impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    kw(head)
+        .ignore_then(body)
+        .try_map(move |tail, span| {
             let head: &'static str = head.into();
-            let tail = render_vm_program_tokens(&tail);
-            let source = if tail.is_empty() {
-                head.to_string()
-            } else {
-                format!("{head} {tail}")
-            };
+            let source = format!("{head} {}", render_vm_program_tokens(&tail));
             crate::semantic_program::parse_route_construction(&source)
                 .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
         })
+        .boxed()
+}
+
+/// A construction limited to `SET`, for contexts that accept no other clause.
+///
+/// Offering `INHERIT`, `WHERE` or `INVOKE` here and rejecting them afterwards makes completion
+/// propose clauses the position cannot hold. `WHERE` is still reachable inside the `SET` body,
+/// where the expression grammar handles it.
+fn set_only_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    route_construction_clause(Identifier::Set, route_construction_body("set_assignments"))
+}
+
+/// A construction limited to `SET` or `WHERE`, for contexts that reject `INHERIT` and `INVOKE`.
+pub fn set_or_where_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    boxed_choice!(
+        route_construction_clause(Identifier::Set, route_construction_body("set_assignments")),
+        route_construction_clause(
+            Identifier::Where,
+            route_construction_body("where_expression")
+        ),
+    )
+}
+
+fn set_only_alter_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    route_construction_clause(
+        Identifier::Set,
+        alter_route_construction_body("set_assignments"),
+    )
+}
+
+pub fn route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    boxed_choice!(
+        route_construction_clause(
+            Identifier::Inherit,
+            route_construction_body("inherit_targets"),
+        ),
+        route_construction_clause(Identifier::Set, route_construction_body("set_assignments"),),
+        route_construction_clause(
+            Identifier::Where,
+            route_construction_body("where_expression"),
+        ),
+        route_construction_clause(Identifier::Invoke, route_construction_body("invocations"),),
+    )
+}
+
+fn alter_route_construction_body<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
+    any()
+        .and_is(alter_op_separator().not())
+        .filter(|token: &Token| !route_boundary_token(token))
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .labelled(label)
         .boxed()
 }
 
 fn alter_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    route_construction_head()
-        .then(
-            any()
-                .and_is(alter_op_separator().not())
-                .filter(|token: &Token| !route_boundary_token(token))
-                .repeated()
-                .collect::<Vec<_>>(),
-        )
-        .try_map(|(head, tail), span| {
-            let head: &'static str = head.into();
-            let tail = render_vm_program_tokens(&tail);
-            let source = if tail.is_empty() {
-                head.to_string()
-            } else {
-                format!("{head} {tail}")
-            };
-            crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, vm_program_error_message(error)))
-        })
-        .boxed()
+    boxed_choice!(
+        route_construction_clause(
+            Identifier::Inherit,
+            alter_route_construction_body("inherit_targets"),
+        ),
+        route_construction_clause(
+            Identifier::Set,
+            alter_route_construction_body("set_assignments"),
+        ),
+        route_construction_clause(
+            Identifier::Where,
+            alter_route_construction_body("where_expression"),
+        ),
+        route_construction_clause(
+            Identifier::Invoke,
+            alter_route_construction_body("invocations"),
+        ),
+    )
 }
 
 fn explicit_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Set)
-        .ignore_then(
-            any()
-                .filter(|token: &Token| !route_boundary_token(token))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>(),
-        )
+        .ignore_then(route_construction_body("set_assignments"))
         .try_map(|tokens, span| {
             let source = format!("SET {}", render_vm_program_tokens(&tokens));
             crate::semantic_program::parse_route_construction(&source)
@@ -1125,7 +1261,8 @@ fn source_where_clause_with_boundary<'src>(
                 .filter(move |token: &Token| !boundary(token))
                 .repeated()
                 .at_least(1)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
             let source = render_vm_program_tokens(&tokens);
@@ -1148,7 +1285,8 @@ where
                 .filter(|token: &Token| !matches!(token, Token::Semicolon))
                 .repeated()
                 .at_least(1)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
             let source = render_vm_program_tokens(&tokens);
@@ -1241,7 +1379,8 @@ pub fn filter_where_clause<'src>()
                 .filter(|token: &Token| !processor_output_boundary_token(token))
                 .repeated()
                 .at_least(1)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .labelled("where_expression"),
         )
         .try_map(|tokens, span| {
             let source = render_vm_program_tokens(&tokens);
@@ -1520,6 +1659,21 @@ pub fn into_parse_error(
     }
 }
 
+/// Split completion input at the cursor into the source the grammar should parse and the partial
+/// word the user is part-way through typing.
+///
+/// The partial word is removed before parsing rather than left in place. A half-typed word is not a
+/// token the grammar can make sense of, and inside a free-form expression region it is swallowed
+/// into the region and re-parsed by the expression grammar, which fails with a custom error that
+/// carries no expectations — so completion falls silent the moment the user starts typing. The
+/// prefix comes back separately and only filters the result.
+pub fn completion_context(input: &str, cursor: usize) -> (String, String) {
+    let safe_cursor = cursor.min(input.len());
+    let head = &input[..safe_cursor];
+    let prefix = current_word_prefix(head);
+    (head[..head.len() - prefix.len()].to_string(), prefix)
+}
+
 pub fn current_word_prefix(input: &str) -> String {
     let mut out = String::new();
     for ch in input.chars().rev() {
@@ -1555,20 +1709,24 @@ pub fn suggestions_from_errors(mut errors: Vec<ParseError<'_>>, prefix: &str) ->
     )
     .into_vec();
 
+    filter_by_prefix(candidates, prefix)
+}
+
+/// Keep only the suggestions the partial word could still grow into.
+///
+/// Semantic references survive regardless: the server expands them into concrete object names and
+/// filters those by the same prefix itself.
+pub fn filter_by_prefix(suggestions: Vec<String>, prefix: &str) -> Vec<String> {
     if prefix.is_empty() {
-        candidates
-    } else {
-        candidates
-            .into_iter()
-            .filter(|s| {
-                if s.starts_with("ref:") {
-                    return true;
-                }
-                s.to_ascii_lowercase()
-                    .starts_with(&prefix.to_ascii_lowercase())
-            })
-            .collect()
+        return suggestions;
     }
+    let prefix = prefix.to_ascii_lowercase();
+    suggestions
+        .into_iter()
+        .filter(|suggestion| {
+            suggestion.starts_with("ref:") || suggestion.to_ascii_lowercase().starts_with(&prefix)
+        })
+        .collect()
 }
 
 fn token_span_to_source_span(

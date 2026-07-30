@@ -11,8 +11,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, client_name, current_word_prefix, if_not_exists_clause, into_parse_error, kw,
-        lex_input, signaling_protocol_clause, string_lit, suggestions_from_errors, tok, word_raw,
+        ParseError, client_name, if_not_exists_clause, into_parse_error, kw, lex_input,
+        signaling_protocol_clause, string_lit, suggest_from, tok, word_raw,
     },
     schema::ParseFromSourceError,
 };
@@ -361,23 +361,7 @@ pub fn parse_create_client_kafka(
 }
 
 pub fn suggest_create_client_kafka(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_client_kafka_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_client_kafka_parser())
 }
 
 #[cfg(test)]

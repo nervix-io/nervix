@@ -36,8 +36,7 @@ Feature: Model alteration quiesce classification
         ON GENERAL ERROR LOG;
       CREATE EMITTER alter_out
         FROM alter_events
-        ENCODE USING alter_event_codec
-        TO ZEROMQ alter_sink
+        TO ZEROMQ alter_sink ENCODE USING alter_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

@@ -31,9 +31,8 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
 
-      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON GCS gcs_main TABLE gcs_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'gs://nervix-iceberg/tables/gcs_notifications_{{test_id}}' CATALOG iceberg_catalog
+      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON GCS gcs_main TABLE gcs_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'gs://nervix-iceberg/tables/gcs_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
@@ -81,9 +80,8 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
 
-      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON AZURE_BLOB azure_main TABLE azure_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'wasb://nervix-iceberg@input.input.input.input.net/tables/azure_notifications_{{test_id}}' CATALOG iceberg_catalog
+      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON AZURE_BLOB azure_main TABLE azure_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'wasb://nervix-iceberg@input.input.input.input.net/tables/azure_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
@@ -164,9 +162,8 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action, 'created_at' = input.created_at } LOCATION 's3://nervix-iceberg/tables/notifications_{{test_id}}' CATALOG iceberg_catalog
+        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action, 'created_at' = input.created_at } LOCATION 's3://nervix-iceberg/tables/notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -251,9 +248,8 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE missing_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/missing_notifications_{{test_id}}' CATALOG iceberg_catalog
+        CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE missing_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/missing_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -352,24 +348,20 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications_a FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_a_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_a_{{test_id}}' CATALOG iceberg_catalog
+        CREATE EMITTER iceberg_notifications_a FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_a_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_a_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications_b FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_b_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_b_{{test_id}}' CATALOG iceberg_catalog
+        CREATE EMITTER iceberg_notifications_b FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_b_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_b_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications_c FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_c_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_c_{{test_id}}' CATALOG iceberg_catalog
+        CREATE EMITTER iceberg_notifications_c FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_c_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_c_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications_d FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_d_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_d_{{test_id}}' CATALOG iceberg_catalog
+        CREATE EMITTER iceberg_notifications_d FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_d_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_d_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -462,9 +454,8 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE temp_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/temp_notifications_{{test_id}}' CATALOG iceberg_catalog
+        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE temp_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/temp_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 10s MAX SIZE 512MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 10s MAX SIZE 512MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -552,9 +543,8 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE shutdown_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}' CATALOG iceberg_catalog
+        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE shutdown_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 512MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 1h MAX SIZE 512MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -635,9 +625,8 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE init_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'http://nervix-iceberg/tables/init_notifications_{{test_id}}' CATALOG iceberg_catalog
+        CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE init_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'http://nervix-iceberg/tables/init_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -721,9 +710,8 @@ Feature: Iceberg emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE ack_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/ack_notifications_{{test_id}}' CATALOG iceberg_catalog
+        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE ack_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/ack_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        COMMIT EACH 100ms MAX SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;

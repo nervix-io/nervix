@@ -154,9 +154,8 @@ fn main() -> ExitCode {
          [ ON GENERAL ERROR LOG;]"
     );
     println!(
-        "  CREATE EMITTER <name> FROM <s> ENCODE USING <codec> TO \
-         KAFKA|PULSAR|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS ... [ ON MESSAGE ERROR LOG ON GENERAL \
-         ERROR LOG;]"
+        "  CREATE EMITTER <name> FROM <s> TO KAFKA|PULSAR|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS ... \
+         ENCODE USING <codec> ... [ ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;]"
     );
     println!("  SHOW CREATE SCHEMA|CODEC|CLIENT|VHOST|ENDPOINT|INGESTOR|RELAY|EMITTER <name> [;]");
     println!("  SHOW CLUSTER STATUS [;]");

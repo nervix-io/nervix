@@ -1,0 +1,11 @@
+# Accepted NSPL completion-walk findings, one signature per line.
+# Format: kind<TAB>label<TAB>context. Regenerate with --update-baseline.
+#
+# Empty is the intended state: every branch completion offers can be completed. A new
+# entry is a defect -- fix it rather than accept it.
+#
+# `just nspl-completion-walk` digs past this budget and reports one more, where a
+# MongoDB conflict target has to name a column the VALUES record maps and still leave
+# another field to update. That constraint relates the values at two positions rather
+# than their shapes, so the grammar cannot express it and no naming scheme the walk
+# can apply satisfies both halves at once.

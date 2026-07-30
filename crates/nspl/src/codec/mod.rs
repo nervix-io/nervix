@@ -7,10 +7,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, codec_name, current_word_prefix, field_ref,
-        if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref, schema_ref,
-        string_lit, suggestions_from_errors, tok, u64_value, wire_avro_schema_ref,
-        wire_cbor_schema_ref, wire_json_schema_ref,
+        ParseError, ParseFromSourceError, codec_name, field_ref, if_not_exists_clause,
+        into_parse_error, kw, lex_input, resource_ref, schema_ref, string_lit, suggest_from, tok,
+        u64_value, wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -224,23 +223,7 @@ pub fn parse_create_codec(
 }
 
 pub fn suggest_create_codec(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_codec_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_codec_parser())
 }
 
 #[cfg(test)]

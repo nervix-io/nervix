@@ -44,7 +44,7 @@ Feature: RabbitMQ emission
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE EMITTER rabbit_notifications FROM notifications ENCODE USING notification_codec TO RABBITMQ rabbit_main QUEUE notifications_out_{{test_id}}
+        CREATE EMITTER rabbit_notifications FROM notifications TO RABBITMQ rabbit_main QUEUE notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

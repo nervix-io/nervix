@@ -5,9 +5,9 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, alter_generator_route_body, alter_op_separator,
-        branch_selection, current_word_prefix, duration_lit, flushed_explicit_processor_outputs,
+        branch_selection, completion_context, duration_lit, flushed_explicit_processor_outputs,
         generator_name, generator_ref, if_not_exists_clause, into_parse_error, kw, kw_phrase3,
-        lex_input, relay_ref, suggestions_from_errors, tok,
+        lex_input, relay_ref, suggest_from, suggestions_from_errors, tok,
     },
 };
 
@@ -143,30 +143,12 @@ pub fn parse_alter_generator(input: &str) -> Result<AlterGenerator, ParseFromSou
 }
 
 pub fn suggest_create_generator(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_generator_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_generator_parser())
 }
 
 pub fn suggest_alter_generator(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-    let (_, _, tokens) = match lex_input(prefix_src) {
+    let (source, prefix) = completion_context(input, cursor);
+    let (_, _, tokens) = match lex_input(&source) {
         Ok(value) => value,
         Err(_) => return Vec::new(),
     };

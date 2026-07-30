@@ -180,7 +180,7 @@ Feature: Relay capacity
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER zeromq_capacity_shrink_out FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_capacity_shrink
+      CREATE EMITTER zeromq_capacity_shrink_out FROM notifications TO ZEROMQ zeromq_capacity_shrink ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

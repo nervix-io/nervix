@@ -44,7 +44,7 @@ Feature: NATS emission
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
-        CREATE EMITTER nats_notifications FROM notifications ENCODE USING notification_codec TO NATS nats_main SUBJECT notifications_out_{{test_id}}
+        CREATE EMITTER nats_notifications FROM notifications TO NATS nats_main SUBJECT notifications_out_{{test_id}} ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

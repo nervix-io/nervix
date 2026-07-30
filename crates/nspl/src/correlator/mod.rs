@@ -8,11 +8,10 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         ParseError, ParseFromSourceError, ack_mode, branch_selection, collect_for, correlator_name,
-        current_word_prefix, duration_lit, flushed_explicit_processor_outputs,
-        from_relay_clause_with_boundary, from_where_boundary_token, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies,
-        relay_ref, render_vm_program_tokens, suggestions_from_errors, tok,
-        vm_program_error_message,
+        duration_lit, flushed_explicit_processor_outputs, from_relay_clause_with_boundary,
+        from_where_boundary_token, if_not_exists_clause, into_parse_error, kw, kw_phrase2,
+        kw_phrase3, lex_input, materialized_state_dependencies, relay_ref,
+        render_vm_program_tokens, suggest_from, tok, vm_program_error_message,
     },
 };
 
@@ -35,7 +34,8 @@ fn correlate_where_clause<'src>()
                 .filter(|token: &Token| !correlate_where_boundary_token(token))
                 .repeated()
                 .at_least(1)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+                .labelled("correlate_expression"),
         )
         .try_map(|tokens, span| {
             let source = render_vm_program_tokens(&tokens);
@@ -202,23 +202,7 @@ pub fn parse_create_correlator(
 }
 
 pub fn suggest_create_correlator(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_correlator_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_correlator_parser())
 }
 
 #[cfg(test)]

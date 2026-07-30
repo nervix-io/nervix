@@ -126,7 +126,7 @@ Feature: JAQ native codec
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-        CREATE EMITTER kafka_notifications FROM notifications ENCODE USING xml_notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+        CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING xml_notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -228,7 +228,7 @@ Feature: JAQ native codec
           'bootstrap.servers' = '{{kafka_addr}}'
         };
 
-      CREATE EMITTER kafka_notifications FROM notifications ENCODE USING json_notification_codec TO KAFKA kafka_main TOPIC notifications_out_{{test_id}}
+      CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} ENCODE USING json_notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

@@ -5,11 +5,10 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref, correlator_ref,
-        current_word_prefix, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref,
-        inferencer_ref, ingestor_ref, into_parse_error, junction_ref, kw, kw_phrase2, lex_input,
-        lookup_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref, suggestions_from_errors,
-        tok, udf_ref, vhost_ref, window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref,
-        wire_json_schema_ref,
+        deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref, ingestor_ref,
+        into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref, reingestor_ref,
+        relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref,
+        window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
 
@@ -174,23 +173,7 @@ pub fn parse_show_create(input: &str) -> Result<ShowCreate, ParseFromSourceError
 }
 
 pub fn suggest_show_create(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = show_create_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, show_create_parser())
 }
 
 #[cfg(test)]

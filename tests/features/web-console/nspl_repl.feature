@@ -753,7 +753,7 @@ Feature: Web console NSPL REPL
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
       CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };
-      CREATE EMITTER zeromq_notifications FROM notifications ENCODE USING notification_codec TO ZEROMQ zeromq_main INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE EMITTER zeromq_notifications FROM notifications TO ZEROMQ zeromq_main ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -943,14 +943,12 @@ Feature: Web console NSPL REPL
         INHERIT ALL
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE EMITTER kafka_security_events FROM security_events ENCODE USING activity_codec TO KAFKA kafka_auth TOPIC datalake_security_events
+      CREATE EMITTER kafka_security_events FROM security_events TO KAFKA kafka_auth TOPIC datalake_security_events ENCODE USING activity_codec
         INHERIT ALL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER iceberg_connected_sessions FROM connected_sessions TO ICEBERG ON S3 s3_lakehouse TABLE datalake_connected_sessions VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog
-        FLUSH EACH 10s MAX BATCH SIZE 8MiB
-        COMMIT EACH 1m MAX SIZE 512MiB
+      CREATE DETACHED EMITTER iceberg_connected_sessions FROM connected_sessions TO ICEBERG ON S3 s3_lakehouse TABLE datalake_connected_sessions VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB FLUSH EACH 10s MAX BATCH SIZE 8MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
@@ -1247,12 +1245,12 @@ Feature: Web console NSPL REPL
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-      CREATE EMITTER redis_battery_alerts FROM battery_alerts ENCODE USING telemetry_codec TO REDIS PUBSUB redis_alerts CHANNEL battery_alerts
+      CREATE EMITTER redis_battery_alerts FROM battery_alerts TO REDIS PUBSUB redis_alerts CHANNEL battery_alerts ENCODE USING telemetry_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER redis_maintenance_alerts FROM maintenance_alerts ENCODE USING telemetry_codec TO REDIS PUBSUB redis_alerts CHANNEL maintenance_alerts
+      CREATE EMITTER redis_maintenance_alerts FROM maintenance_alerts TO REDIS PUBSUB redis_alerts CHANNEL maintenance_alerts ENCODE USING telemetry_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

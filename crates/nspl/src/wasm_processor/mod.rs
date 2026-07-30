@@ -7,24 +7,13 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, branch_selection, current_word_prefix,
-        filter_where_clause, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
-        lex_input, materialized_state_dependencies, message_error_policy, relay_ref, resource_ref,
-        route_construction, string_lit, suggestions_from_errors, tok, wasm_processor_name,
+        ParseError, ParseFromSourceError, ack_mode, branch_selection, filter_where_clause,
+        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, lex_input,
+        materialized_state_dependencies, message_error_policy, relay_ref, resource_ref,
+        set_or_where_route_construction, string_lit, suggest_from, tok, u64_value,
+        wasm_processor_name,
     },
 };
-
-fn u64_value<'src>() -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone
-{
-    choice((
-        select! { Token::NumberLiteral(v) => v },
-        crate::parser_support::word_raw(),
-    ))
-    .try_map(|raw, span| {
-        raw.parse::<u64>()
-            .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
-    })
-}
 
 fn global_error_policy<'src>()
 -> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
@@ -39,7 +28,7 @@ fn global_error_policy<'src>()
 
 fn wasm_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
-    route_construction().try_map(|construction, span| {
+    set_or_where_route_construction().try_map(|construction, span| {
         if construction.inherit.is_some() {
             return Err(Rich::custom(
                 span,
@@ -172,23 +161,7 @@ pub fn parse_create_wasm_processor(
 }
 
 pub fn suggest_create_wasm_processor(input: &str, cursor: usize) -> Vec<String> {
-    let safe_cursor = cursor.min(input.len());
-    let prefix_src = &input[..safe_cursor];
-    let prefix = current_word_prefix(prefix_src);
-
-    let (_, _, tokens) = match lex_input(prefix_src) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-
-    let out = create_wasm_processor_parser()
-        .then_ignore(end())
-        .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Vec::new();
-    }
-
-    suggestions_from_errors(out.into_errors(), &prefix)
+    suggest_from!(input, cursor, create_wasm_processor_parser())
 }
 
 #[cfg(test)]

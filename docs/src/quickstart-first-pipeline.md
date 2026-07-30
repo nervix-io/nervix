@@ -151,8 +151,7 @@ the input encodes it back to JSON:
 ```nspl
 CREATE EMITTER redis_orders
   FROM orders
-  ENCODE USING order_codec
-  TO REDIS PUBSUB redis_local CHANNEL orders_out
+  TO REDIS PUBSUB redis_local CHANNEL orders_out ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
@@ -229,8 +228,7 @@ CREATE INGESTOR kafka_orders
 
 CREATE EMITTER redis_orders
   FROM orders
-  ENCODE USING order_codec
-  TO REDIS PUBSUB redis_local CHANNEL orders_out
+  TO REDIS PUBSUB redis_local CHANNEL orders_out ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG

@@ -46,8 +46,7 @@ Feature: Altering schemas on a running domain
 
       CREATE EMITTER running_event_out
         FROM running_events
-        ENCODE USING running_event_codec
-        TO ZEROMQ running_event_sink
+        TO ZEROMQ running_event_sink ENCODE USING running_event_codec
         INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -69,8 +68,7 @@ Feature: Altering schemas on a running domain
       DROP EMITTER running_event_out;
       CREATE EMITTER running_event_out
         FROM running_events
-        ENCODE USING running_event_codec
-        TO ZEROMQ running_event_sink
+        TO ZEROMQ running_event_sink ENCODE USING running_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -138,8 +136,7 @@ Feature: Altering schemas on a running domain
         ON GENERAL ERROR LOG;
       CREATE EMITTER timeout_out
         FROM timeout_events
-        ENCODE USING timeout_event_codec
-        TO ZEROMQ timeout_sink
+        TO ZEROMQ timeout_sink ENCODE USING timeout_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
