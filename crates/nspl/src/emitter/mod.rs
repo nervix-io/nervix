@@ -1126,7 +1126,7 @@ mod tests {
     fn parses_multiple_emitter_inputs_with_source_where() {
         let parsed = parse_create_emitter(
             "CREATE EMITTER emit FROM source_a WHERE input.kind = 'a', source_b WHERE input.kind \
-             = 'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB ENCODE USING my_codec TO ZEROMQ sink \
+             = 'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB TO ZEROMQ sink ENCODE USING my_codec \
              FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         )
         .expect("multiple emitter inputs should parse");
@@ -1148,15 +1148,15 @@ mod tests {
     fn rejects_incomplete_multiple_emitter_inputs() {
         assert!(
             parse_create_emitter(
-                "CREATE EMITTER emit FROM source_a, ENCODE USING my_codec TO ZEROMQ sink FLUSH \
+                "CREATE EMITTER emit FROM source_a, TO ZEROMQ sink ENCODE USING my_codec FLUSH \
                  IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
             )
             .is_err()
         );
         assert!(
             parse_create_emitter(
-                "CREATE EMITTER emit FROM source_a WHERE, source_b ENCODE USING my_codec TO \
-                 ZEROMQ sink FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+                "CREATE EMITTER emit FROM source_a WHERE, source_b TO ZEROMQ sink ENCODE USING \
+                 my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
             )
             .is_err()
         );
@@ -1475,7 +1475,7 @@ mod tests {
         let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
         assert!(
             errs.iter()
-                .any(|err| format!("{err:?}").contains("expected COLLECT FOR, USING, or TO")),
+                .any(|err| format!("{err:?}").contains("iden: Encode")),
             "Iceberg takes no codec, so ENCODE USING must not be accepted before TO: {errs:?}"
         );
     }

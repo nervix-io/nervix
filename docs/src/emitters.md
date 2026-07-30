@@ -36,8 +36,7 @@ source-local predicate form as other relay-consuming nodes:
 CREATE EMITTER combined_notifications
   FROM primary_notifications WHERE input.source = 'primary',
        replayed_notifications WHERE input.source = 'replay'
-  ENCODE USING notification_codec
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO KAFKA kafka_main TOPIC notifications_out ENCODE USING notification_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
