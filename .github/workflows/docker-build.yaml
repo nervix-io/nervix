@@ -142,7 +142,10 @@ jobs:
     name: build-book
     needs: [meta, build-arch]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # `just book` recaptures the console screenshots and renders the nervix-cli
+    # reference from the current binary, so this job compiles the workspace and
+    # drives a real browser rather than only rendering Markdown.
+    timeout-minutes: 60
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout
@@ -185,11 +188,38 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just,toml-cli,trunk
+
+      # The book build compiles nervix-server and nervix-cli: the screenshot tool
+      # drives a real server, and the nervix-cli reference is rendered from the
+      # binary's own --help.
+      - name: Install apt deps
+        run: |
+          sudo apt-get install --yes --no-install-recommends \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-book-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-book-cargo-
 
       - name: Compute docs target
         id: docs

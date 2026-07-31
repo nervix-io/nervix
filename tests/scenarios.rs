@@ -57,8 +57,7 @@ use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
 use playwright_rs::{
-    BrowserContextOptions, FilePayload, LaunchOptions, Playwright, Viewport, WaitForOptions,
-    WaitForState,
+    FilePayload, LaunchOptions, Playwright, Viewport, WaitForOptions, WaitForState,
 };
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
@@ -79,7 +78,6 @@ use crate::common::{
         MONGODB_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, REDIS_ADDR,
         RUSTFS_ADDR, TestDependencies,
     },
-    docs_screenshots::DocumentationScreenshots,
 };
 
 mod common;
@@ -92,12 +90,7 @@ static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
 static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
 const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
-/// Features whose scenarios drive a rendered console in a real browser and therefore share one
-/// global permit budget.
-const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] = [
-    "Web console NSPL REPL",
-    "Web console documentation screenshots",
-];
+const WEB_CONSOLE_FEATURE_NAME: &str = "Web console NSPL REPL";
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
 
@@ -3226,14 +3219,7 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
     }
 }
 
-/// `context_options` is `None` for every scenario that asserts on console geometry: those
-/// assertions are anchored to Playwright's default context, and emulating a different viewport or
-/// pixel density would silently move them.
-async fn open_web_console_page(
-    world: &mut ScenarioWorld,
-    url: &str,
-    context_options: Option<BrowserContextOptions>,
-) -> Result<(), String> {
+async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(), String> {
     let playwright = Playwright::launch()
         .await
         .map_err(|error| error.to_string())?;
@@ -3242,11 +3228,10 @@ async fn open_web_console_page(
         .launch_with_options(chromium_launch_options())
         .await
         .map_err(|error| error.to_string())?;
-    let context = match context_options {
-        Some(options) => browser.new_context_with_options(options).await,
-        None => browser.new_context().await,
-    }
-    .map_err(|error| error.to_string())?;
+    let context = browser
+        .new_context()
+        .await
+        .map_err(|error| error.to_string())?;
     let page = context
         .new_page()
         .await
@@ -3704,7 +3689,7 @@ async fn when_web_console_is_opened_on_node(world: &mut ScenarioWorld, node_id: 
         .cluster()
         .web_console_url(&node_id)
         .expect("failed to resolve web console URL");
-    open_web_console_page(world, &url, None)
+    open_web_console_page(world, &url)
         .await
         .expect("failed to open web console");
 }
@@ -3730,83 +3715,9 @@ async fn when_web_console_is_opened_on_leader_node_with_password(
         .cluster()
         .web_console_url_with_password(&leader, &password)
         .expect("failed to resolve web console URL");
-    open_web_console_page(world, &url, None)
+    open_web_console_page(world, &url)
         .await
         .expect("failed to open web console");
-}
-
-#[when("the web console is opened on the leader node for documentation screenshots")]
-async fn when_web_console_is_opened_for_documentation_screenshots(world: &mut ScenarioWorld) {
-    world.last_command_error = None;
-    world.last_command_output = None;
-    world.last_server_error = None;
-    close_browser(world).await;
-    let leader = current_leader_node(world).await;
-    let url = world
-        .cluster()
-        .web_console_url(&leader)
-        .expect("failed to resolve web console URL");
-    open_web_console_page(
-        world,
-        &url,
-        Some(DocumentationScreenshots::browser_context_options()),
-    )
-    .await
-    .expect("failed to open web console");
-}
-
-#[when(expr = "the web console is captured as documentation screenshot {string}")]
-async fn when_web_console_is_captured_as_documentation_screenshot(
-    world: &mut ScenarioWorld,
-    name: String,
-) {
-    let screenshots = DocumentationScreenshots::from_environment()
-        .expect("documentation screenshot directory must be usable");
-    let page = world
-        .browser_page
-        .as_ref()
-        .expect("a browser page must be opened before documentation screenshots");
-    screenshots
-        .capture_page(page, &name)
-        .await
-        .expect("web console must be capturable");
-}
-
-#[when(expr = "selector {string} is captured as documentation screenshot {string}")]
-async fn when_selector_is_captured_as_documentation_screenshot(
-    world: &mut ScenarioWorld,
-    selector: String,
-    name: String,
-) {
-    let screenshots = DocumentationScreenshots::from_environment()
-        .expect("documentation screenshot directory must be usable");
-    let selector = expand_placeholders(world, &selector);
-    let page = world
-        .browser_page
-        .as_ref()
-        .expect("a browser page must be opened before documentation screenshots");
-    screenshots
-        .capture_selector(page, &selector, &name)
-        .await
-        .expect("selector must be capturable");
-}
-
-#[then(expr = "documentation screenshot {string} is a PNG at least {int} by {int} pixels")]
-async fn then_documentation_screenshot_is_a_png_at_least(
-    _world: &mut ScenarioWorld,
-    name: String,
-    width: usize,
-    height: usize,
-) {
-    let (captured_width, captured_height) = DocumentationScreenshots::from_environment()
-        .expect("documentation screenshot directory must be usable")
-        .dimensions(&name)
-        .expect("documentation screenshot must be a readable PNG");
-    assert!(
-        captured_width as usize >= width && captured_height as usize >= height,
-        "documentation screenshot '{name}' is {captured_width} by {captured_height} pixels, \
-         expected at least {width} by {height}"
-    );
 }
 
 #[when(expr = "the browser viewport is resized to {int} by {int}")]
@@ -11194,7 +11105,7 @@ async fn run_scenarios() -> Option<String> {
                 append_cucumber_log_line(&format!(
                     "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
                 ));
-                if WEB_CONSOLE_FEATURE_NAMES.contains(&feature_name.as_str()) {
+                if feature_name == WEB_CONSOLE_FEATURE_NAME {
                     // Starting many three-node clusters and optimized WASM consoles together can
                     // starve Chromium renderer event loops under the suite's global concurrency.
                     world.web_console_scenario_permit = Some(

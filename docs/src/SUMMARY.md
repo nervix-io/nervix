@@ -23,6 +23,7 @@
   - [Kubernetes Operator](./installation-kubernetes.md)
 - [Client Tools](./client-tools.md)
   - [Command Line Client](./client-tools-cli.md)
+    - [nervix-cli Reference](./nervix-cli-reference.md)
   - [Web Console](./client-tools-web-console.md)
 - [NSPL Agent Skill](./nspl-agent-skill.md)
 - [Manual](./manual.md)

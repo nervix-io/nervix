@@ -1,0 +1,13 @@
+{
+  "name": "nervix-console-screenshots",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Captures the web console images published in the Nervix book",
+  "scripts": {
+    "capture": "node capture.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

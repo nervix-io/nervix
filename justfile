@@ -41,12 +41,18 @@ test-scenarios-reuse *args: tests-deps
     export NERVIX_TESTCONTAINERS_MODE=reusable
     cargo test --features testing --test scenarios -- {{ args }}
 
-# Regenerate the web console images published under docs/src/images.
-docs-screenshots:
+# Capture the web console images the book publishes. The capture tool starts a real nervix-server,
+# seeds it with nervix-cli, and drives the console in a browser, so the images are build output
+# rather than repository content and the book stages them from target/.
+docs-screenshots: build-web-console
     #!/usr/bin/env bash
     set -euo pipefail
-    export NERVIX_DOCS_SCREENSHOT_DIR="{{ justfile_directory() }}/docs/src/images"
-    just test-scenarios --input tests/features/web-console/docs_screenshots.feature --concurrency 1
+    cargo build --package nervix-server --bin nervix-server --package nervix-cli --bin nervix-cli
+    npm --prefix scripts/console-screenshots ci
+    node scripts/console-screenshots/capture.mjs \
+      --server "{{ cargo_target_dir }}/debug/nervix-server" \
+      --cli "{{ cargo_target_dir }}/debug/nervix-cli" \
+      --output "{{ cargo_target_dir }}/docs-screenshots"
 
 test-lib *args: tests-deps
     #!/usr/bin/env bash
@@ -126,7 +132,9 @@ test-docs:
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
-book version="": test-docs
+# Screenshots are recaptured from the current console and the nervix-cli reference chapter is
+# rendered from the current binary, so a published book can never describe an older build.
+book version="": test-docs docs-screenshots
     python scripts/build_book.py --version {{ version }}
 
 validate-skill:

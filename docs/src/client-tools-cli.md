@@ -43,6 +43,10 @@ There is no configuration file and no `--version` flag. `--server`, `--domain`, 
 have no environment-variable equivalents; only the credentials do, so a password never has to
 appear in shell history.
 
+The table above is the short version. [nervix-cli Reference](nervix-cli-reference.md) is printed by
+the binary itself while this book is built, so it is the authoritative list of every option and
+subcommand for this release.
+
 ## Modes
 
 The client runs in exactly one of three modes, in this order of precedence:
