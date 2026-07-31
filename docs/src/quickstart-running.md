@@ -30,15 +30,15 @@ The server exposes:
 
 - the session gRPC API on `127.0.0.1:47391` (`--addr`), used by `nervix-cli` and the
   [Rust client library](client-library.md)
-- the web console at `http://127.0.0.1:47420/console/`, which combines a command line with a live
-  graph view
+- the [web console](client-tools-web-console.md) at `http://127.0.0.1:47420/console/`, which
+  combines a command line with a live graph view
 - health and metrics endpoints on port `9090`: `/livez`, `/readyz`, and `/metrics`
   ([Metrics And Observability](metrics-and-observability.md#observability-server))
 
 ## Connect A Client
 
-`nervix-cli` is the interactive NSPL client. With no arguments it connects to
-`http://127.0.0.1:47391` as user `default` and prompts for the password:
+[`nervix-cli`](client-tools-cli.md) is the interactive NSPL client. With no arguments it connects
+to `http://127.0.0.1:47391` as user `default` and prompts for the password:
 
 ```bash
 nervix-cli

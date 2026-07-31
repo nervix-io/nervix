@@ -7,8 +7,11 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from scripts.build_book import (
+    IMAGES_DIR_NAME,
     MDBOOK_VERSION,
     bundle_roto_reference,
+    cli_subcommands,
+    render_cli_reference,
     render_jaq_reference,
     remove_generated_edit_links,
     resolve_package_version,
@@ -16,6 +19,7 @@ from scripts.build_book import (
     run_mdbook,
     stage_book,
     verify_mdbook_version,
+    verify_published_images,
 )
 
 
@@ -225,7 +229,15 @@ class BookStagingTests(unittest.TestCase):
         # name would publish "Suggest an edit" links into a build directory.
         with TemporaryDirectory() as tmp:
             staged = Path(tmp) / "book"
-            with patch("scripts.build_book.generate_upstream_references") as generate:
+            captured = Path(tmp) / "captured"
+            captured.mkdir()
+            (captured / "console-overview.png").write_bytes(b"png")
+
+            with (
+                patch("scripts.build_book.generate_upstream_references") as generate,
+                patch("scripts.build_book.generate_cli_reference"),
+                patch("scripts.build_book.SCREENSHOTS_DIR", captured),
+            ):
                 stage_book(staged)
 
             self.assertTrue((staged / "src" / "introduction.md").is_file())
@@ -240,7 +252,7 @@ class BookStagingTests(unittest.TestCase):
                 '<a href="https://github.com/nervix-io/nervix/edit/main/docs/src/x.md"'
                 ' title="Suggest an edit" rel="edit">\n  <span>icon</span>\n</a>\n'
             )
-            for name in ("roto-language-reference", "jaq-reference", "udfs"):
+            for name in ("roto-language-reference", "jaq-reference", "nervix-cli-reference", "udfs"):
                 (book / f"{name}.html").write_text(
                     f"<nav>{edit_link}</nav><p>{name}</p>", encoding="utf-8"
                 )
@@ -249,6 +261,7 @@ class BookStagingTests(unittest.TestCase):
 
             self.assertNotIn("Suggest an edit", (book / "roto-language-reference.html").read_text())
             self.assertNotIn("Suggest an edit", (book / "jaq-reference.html").read_text())
+            self.assertNotIn("Suggest an edit", (book / "nervix-cli-reference.html").read_text())
             # authored chapters keep theirs
             self.assertIn("Suggest an edit", (book / "udfs.html").read_text())
 
@@ -256,6 +269,111 @@ class BookStagingTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             with self.assertRaises(SystemExit):
                 remove_generated_edit_links(Path(tmp))
+
+    def test_staged_source_carries_the_captured_screenshots(self) -> None:
+        with TemporaryDirectory() as tmp:
+            staged = Path(tmp) / "book"
+            captured = Path(tmp) / "captured"
+            captured.mkdir()
+            (captured / "console-overview.png").write_bytes(b"png")
+
+            with (
+                patch("scripts.build_book.generate_upstream_references"),
+                patch("scripts.build_book.generate_cli_reference"),
+                patch("scripts.build_book.SCREENSHOTS_DIR", captured),
+            ):
+                stage_book(staged)
+
+            self.assertTrue((staged / "src" / IMAGES_DIR_NAME / "console-overview.png").is_file())
+
+    def test_a_book_built_without_captured_screenshots_is_an_error(self) -> None:
+        # The chapters reference the images unconditionally, so an uncaptured
+        # build must fail rather than publish broken links.
+        with TemporaryDirectory() as tmp:
+            with (
+                patch("scripts.build_book.generate_upstream_references"),
+                patch("scripts.build_book.generate_cli_reference"),
+                patch("scripts.build_book.SCREENSHOTS_DIR", Path(tmp) / "absent"),
+                self.assertRaises(SystemExit),
+            ):
+                stage_book(Path(tmp) / "book")
+
+
+SAMPLE_CLI_HELP = """\
+Interactive Nervix client
+
+Usage: nervix-cli [OPTIONS] [COMMAND]
+
+Commands:
+  completions    Generate shell completion scripts
+  subscribe      Subscribe to one relay and print events until interrupted
+  drain-node     Move scheduled graph nodes away from a node and keep it
+                 cordoned
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+      --server <SERVER>  Session gRPC endpoint [default: http://127.0.0.1:47391]
+  -h, --help             Print help
+"""
+
+
+class CliReferenceTests(unittest.TestCase):
+    def test_subcommands_are_read_from_the_binarys_own_help(self) -> None:
+        # Enumerating rather than hardcoding is what keeps a newly added
+        # subcommand from silently missing its section.
+        self.assertEqual(
+            cli_subcommands(SAMPLE_CLI_HELP),
+            ["completions", "subscribe", "drain-node"],
+        )
+
+    def test_a_help_without_commands_fails_the_build(self) -> None:
+        with self.assertRaises(SystemExit):
+            cli_subcommands("Usage: nervix-cli [OPTIONS]\n\nOptions:\n  -h, --help  Print help\n")
+
+    def test_reference_renders_a_section_per_command(self) -> None:
+        captured = []
+
+        def fake_help(arguments: list[str]) -> str:
+            captured.append(arguments)
+            return SAMPLE_CLI_HELP if not arguments else f"Usage: nervix-cli {arguments[0]}"
+
+        with patch("scripts.build_book.capture_cli_help", side_effect=fake_help):
+            reference = render_cli_reference()
+
+        self.assertEqual(captured, [[], ["completions"], ["subscribe"], ["drain-node"]])
+        self.assertIn("# nervix-cli Reference", reference)
+        self.assertIn("## nervix-cli subscribe", reference)
+        self.assertIn("](client-tools-cli.md)", reference)
+        # `help` documents itself in the root section rather than getting its own.
+        self.assertNotIn("## nervix-cli help", reference)
+
+
+class PublishedImageTests(unittest.TestCase):
+    def test_a_captured_image_missing_from_the_book_fails_the_build(self) -> None:
+        # mdBook copies non-Markdown files out of `src` verbatim. If that stops,
+        # the build must fail rather than publish chapters with broken images.
+        with TemporaryDirectory() as tmp:
+            captured = Path(tmp) / "captured"
+            captured.mkdir()
+            (captured / "console-overview.png").write_bytes(b"png")
+
+            with (
+                patch("scripts.build_book.SCREENSHOTS_DIR", captured),
+                self.assertRaises(SystemExit),
+            ):
+                verify_published_images(Path(tmp) / "publication")
+
+    def test_a_book_carrying_every_captured_image_passes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            captured = Path(tmp) / "captured"
+            captured.mkdir()
+            (captured / "console-overview.png").write_bytes(b"png")
+            publication = Path(tmp) / "publication" / IMAGES_DIR_NAME
+            publication.mkdir(parents=True)
+            (publication / "console-overview.png").write_bytes(b"png")
+
+            with patch("scripts.build_book.SCREENSHOTS_DIR", captured):
+                verify_published_images(Path(tmp) / "publication")
 
 
 class MdbookVersionTests(unittest.TestCase):

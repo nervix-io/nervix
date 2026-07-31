@@ -118,8 +118,8 @@ Connect the CLI to the gRPC entry point:
 nervix-cli --server http://<node-address>:31390
 ```
 
-The web console is available at `http://<node-address>:31420/console/`. Omit `localAccess` for an
-in-cluster-only deployment.
+The [web console](client-tools-web-console.md) is available at
+`http://<node-address>:31420/console/`. Omit `localAccess` for an in-cluster-only deployment.
 
 ## Production Considerations
 

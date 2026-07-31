@@ -22,6 +22,25 @@ OUTPUT_DIR = DOCS_DIR / "book"
 # release, so local builds and CI must agree on it. CI reads this constant.
 MDBOOK_VERSION = "0.5.3"
 MDBOOK_LLMS_COMMAND = ROOT / "scripts" / "mdbook_llms.py"
+# Chapters reference images as `images/<name>`, and mdBook copies non-Markdown
+# files out of `src` verbatim, so the captured screenshots are staged under this
+# name beside the chapters.
+IMAGES_DIR_NAME = "images"
+# `just docs-screenshots` captures the console images here. They are build output
+# rather than repository content, so the published book always shows the console
+# it was built from. The recipe passes the same directory to the capture tool, so
+# both sides must honour CARGO_TARGET_DIR alike.
+SCREENSHOTS_DIR = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target") / "docs-screenshots"
+CLI_REFERENCE_NAME = "nervix-cli-reference.md"
+CLI_PACKAGE = "nervix-cli"
+# Pin the variables clap consults for width and colour. They are inert while the
+# `wrap_help` and `color` features are off, and keep the rendered chapter from
+# varying with the shell the book was built from once either is enabled.
+CLI_HELP_COLUMNS = "96"
+# clap lists subcommands two-space indented, name first, then the description
+# column. Wrapped description lines are indented past that, so they do not match.
+CLI_COMMANDS_HEADING = re.compile(r"^Commands:$", re.MULTILINE)
+CLI_COMMAND_ENTRY = re.compile(r"^  (?P<name>[a-z][a-z0-9-]*)(?:\s{2,}\S|\s*$)")
 ROTO_UPSTREAM_PATH = "docs/source/reference/language_reference.md"
 ROTO_REFERENCE_NAME = "roto-language-reference.md"
 ROTO_LICENSE_PATH = "LICENSE"
@@ -263,7 +282,92 @@ def stage_book(staging_dir: Path) -> Path:
     source_dir = staging_dir / "src"
     shutil.copytree(DOCS_DIR / "src", source_dir)
     generate_upstream_references(source_dir)
+    generate_cli_reference(source_dir)
+    stage_screenshots(source_dir)
     return staging_dir
+
+
+def stage_screenshots(source_dir: Path) -> None:
+    """Copy the captured console images in beside the chapters that use them."""
+    captured = sorted(SCREENSHOTS_DIR.glob("*.png")) if SCREENSHOTS_DIR.is_dir() else []
+    if not captured:
+        raise SystemExit(
+            f"no console screenshots in {SCREENSHOTS_DIR}; run `just docs-screenshots` "
+            "to capture them, or `just book` which does it for you"
+        )
+    staged_images = source_dir / IMAGES_DIR_NAME
+    staged_images.mkdir()
+    for image in captured:
+        shutil.copy2(image, staged_images / image.name)
+
+
+def capture_cli_help(arguments: list[str]) -> str:
+    """Run `nervix-cli [arguments] --help` and return exactly what it printed."""
+    env = os.environ.copy()
+    env["COLUMNS"] = CLI_HELP_COLUMNS
+    env["NO_COLOR"] = "1"
+    invocation = ["cargo", "run", "--quiet", "--package", CLI_PACKAGE, "--", *arguments, "--help"]
+    try:
+        completed = subprocess.run(
+            invocation,
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            env=env,
+        )
+    except FileNotFoundError as error:
+        raise SystemExit(f"cargo is required to render the {CLI_PACKAGE} reference: {error}") from error
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"`{CLI_PACKAGE} {' '.join([*arguments, '--help'])}` failed with exit code "
+            f"{completed.returncode}: {completed.stderr.strip()}"
+        )
+    return completed.stdout.strip("\n")
+
+
+def cli_subcommands(root_help: str) -> list[str]:
+    """Read the subcommand names out of the top-level help.
+
+    Enumerating them rather than listing them here is what keeps a newly added
+    subcommand from silently missing its section.
+    """
+    heading = CLI_COMMANDS_HEADING.search(root_help)
+    if heading is None:
+        raise SystemExit(f"`{CLI_PACKAGE} --help` no longer prints a Commands section")
+    names = []
+    for line in root_help[heading.end() :].splitlines():
+        if line.strip() == "":
+            continue
+        if not line.startswith("  "):
+            break
+        entry = CLI_COMMAND_ENTRY.match(line)
+        # `help` documents itself; every real subcommand gets its own section.
+        if entry is not None and entry.group("name") != "help":
+            names.append(entry.group("name"))
+    if not names:
+        raise SystemExit(f"`{CLI_PACKAGE} --help` listed no subcommands")
+    return names
+
+
+def render_cli_reference() -> str:
+    root_help = capture_cli_help([])
+    sections = [f"## nervix-cli\n\n```text\n{root_help}\n```"]
+    for name in cli_subcommands(root_help):
+        sections.append(f"## nervix-cli {name}\n\n```text\n{capture_cli_help([name])}\n```")
+    body = "\n\n".join(sections)
+    return f"""# nervix-cli Reference
+
+Every option, subcommand, default, and environment variable `nervix-cli` accepts, printed by the
+binary itself while this book was built. It therefore describes exactly the release you are reading
+about. For how to use the client, see [Command Line Client](client-tools-cli.md).
+
+{body}
+"""
+
+
+def generate_cli_reference(source_dir: Path) -> None:
+    (source_dir / CLI_REFERENCE_NAME).write_text(render_cli_reference(), encoding="utf-8")
 
 
 def verify_mdbook_version() -> None:
@@ -336,10 +440,11 @@ def rewrite_external_assets(book_dir: Path) -> None:
 def remove_generated_edit_links(book_dir: Path) -> None:
     """Drop "Suggest an edit" from chapters that have no file to edit.
 
-    The upstream references are rendered at build time, so their source never
-    exists in the repository and mdBook's edit link would resolve to nothing.
+    The upstream references and the nervix-cli reference are rendered at build
+    time, so their source never exists in the repository and mdBook's edit link
+    would resolve to nothing.
     """
-    for reference_name in (ROTO_REFERENCE_NAME, JAQ_REFERENCE_NAME):
+    for reference_name in (ROTO_REFERENCE_NAME, JAQ_REFERENCE_NAME, CLI_REFERENCE_NAME):
         page = book_dir / f"{Path(reference_name).stem}.html"
         if not page.is_file():
             raise SystemExit(f"mdBook did not render the generated chapter {page.name}")
@@ -360,7 +465,21 @@ def copy_theme_assets(source_theme_dir: Path, book_dir: Path) -> None:
             shutil.copy2(source_file, output_theme_dir / source_file.name)
 
 
+def verify_published_images(publication_dir: Path) -> None:
+    """Fail when a captured image did not reach the rendered book.
+
+    mdBook copies non-Markdown files out of `src` verbatim. If that ever stops,
+    every screenshot in the book would 404 while the build still succeeded.
+    """
+    for image in sorted(SCREENSHOTS_DIR.glob("*.png")):
+        if not (publication_dir / IMAGES_DIR_NAME / image.name).is_file():
+            raise SystemExit(
+                f"the rendered book is missing the captured image {IMAGES_DIR_NAME}/{image.name}"
+            )
+
+
 def verify_publication(publication_dir: Path) -> None:
+    verify_published_images(publication_dir)
     llms_path = publication_dir / "llms.txt"
     if not llms_path.is_file():
         raise SystemExit("mdBook did not generate llms.txt")

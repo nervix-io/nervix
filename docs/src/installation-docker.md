@@ -117,8 +117,8 @@ The host ports are:
 | `node-2` | `47392` | `47422` | `9092` |
 | `node-3` | `47393` | `47423` | `9093` |
 
-Connect an installed CLI to `http://127.0.0.1:47391`, or open
-`http://127.0.0.1:47421/console/`, and run:
+Connect an installed [CLI](client-tools-cli.md) to `http://127.0.0.1:47391`, or open the
+[web console](client-tools-web-console.md) at `http://127.0.0.1:47421/console/`, and run:
 
 ```text
 SHOW CLUSTER STATUS;

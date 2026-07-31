@@ -1,0 +1,112 @@
+BEGIN;
+
+CREATE RESOURCE order_model;
+
+CREATE SCHEMA order_record (
+  order_id STRING,
+  customer STRING,
+  status STRING,
+  amount I64,
+  quantity I64
+);
+
+CREATE SCHEMA order_tiered (
+  order_id STRING,
+  customer STRING,
+  status STRING,
+  amount I64,
+  quantity I64,
+  tier STRING
+);
+
+CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
+  order_id string,
+  customer string,
+  status string,
+  amount integer,
+  quantity integer
+);
+
+CREATE WIRE JSON SCHEMA order_tiered_wire MODE STRICT (
+  order_id string,
+  customer string,
+  status string,
+  amount integer,
+  quantity integer,
+  tier string
+);
+
+CREATE CODEC order_codec
+  FROM WIRE JSON SCHEMA order_wire
+  TO SCHEMA order_record;
+
+CREATE CODEC order_tiered_codec
+  FROM WIRE JSON SCHEMA order_tiered_wire
+  TO SCHEMA order_tiered;
+
+CREATE RELAY orders SCHEMA order_record UNBRANCHED;
+
+CREATE RELAY high_value_orders SCHEMA order_tiered UNBRANCHED;
+
+CREATE RELAY routine_orders SCHEMA order_record UNBRANCHED;
+
+CREATE CLIENT kafka_local
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = '127.0.0.1:9092'
+  };
+
+CREATE CLIENT redis_local
+  TYPE REDIS
+  CONFIG {
+    'addr' = 'redis://127.0.0.1:6379/'
+  };
+
+CREATE INGESTOR kafka_orders
+  FROM KAFKA kafka_local
+  TOPIC orders
+  OFFSET BY CONSUMER GROUP quickstart
+  MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+  DECODE USING order_codec
+  TO orders
+    INHERIT ALL
+    UNBRANCHED
+    FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE JUNCTION route_orders
+  FROM orders
+  UNBRANCHED
+  TO high_value_orders
+    INHERIT ALL
+    SET tier = CASE
+          WHEN input.amount >= 10000 THEN "vip"
+          ELSE "high"
+        END
+    WHERE output.amount >= 1000
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  TO routine_orders
+    INHERIT ALL
+    WHERE output.amount < 1000
+    FLUSH EACH 1s MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG;
+
+CREATE EMITTER redis_orders
+  FROM orders
+  TO REDIS PUBSUB redis_local CHANNEL orders_out ENCODE USING order_codec
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE EMITTER redis_high_value
+  FROM high_value_orders
+  TO REDIS PUBSUB redis_local CHANNEL high_value_out ENCODE USING order_tiered_codec
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

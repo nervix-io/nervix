@@ -106,7 +106,8 @@ fresh.
 
 ## Start The Interactive Client
 
-The separate interactive client crate and executable are both named `nervix-cli`.
+The separate interactive client crate and executable are both named `nervix-cli`. Its options and
+interactive behaviour are documented in [Command Line Client](client-tools-cli.md).
 
 ```bash
 just client

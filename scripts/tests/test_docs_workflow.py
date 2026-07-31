@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from scripts.build_book import MDBOOK_VERSION
+from scripts.build_book import MDBOOK_VERSION, SCREENSHOTS_DIR
 from scripts.publish_docs_alias import update_alias
 
 
@@ -18,6 +19,101 @@ class DocsWorkflowTests(unittest.TestCase):
             "  - [NSPL Agent Skill](./nspl-agent-skill.md)",
             summary.splitlines(),
         )
+
+    def test_client_tools_is_a_top_level_book_section(self) -> None:
+        summary = Path("docs/src/SUMMARY.md").read_text().splitlines()
+
+        self.assertIn("- [Client Tools](./client-tools.md)", summary)
+        self.assertIn("  - [Command Line Client](./client-tools-cli.md)", summary)
+        self.assertIn("  - [Web Console](./client-tools-web-console.md)", summary)
+
+    @staticmethod
+    def captured_screenshots() -> set[str]:
+        capture = Path("scripts/console-screenshots/capture.mjs").read_text()
+        return set(re.findall(r"\"(console-[a-z-]+\.png)\"", capture))
+
+    @staticmethod
+    def referenced_screenshots() -> dict[str, str]:
+        referenced = {}
+        for page in sorted(Path("docs/src").glob("*.md")):
+            for target in re.findall(r"!\[[^]]*]\(images/([^)]+)\)", page.read_text()):
+                referenced.setdefault(target, page.name)
+        return referenced
+
+    def test_every_referenced_screenshot_is_captured_by_the_scenario(self) -> None:
+        # The images are build output, so a chapter can only reference one the
+        # capture scenario actually produces.
+        captured = self.captured_screenshots()
+        referenced = self.referenced_screenshots()
+
+        self.assertTrue(referenced, "no documentation page references a screenshot")
+        for name, page in sorted(referenced.items()):
+            self.assertIn(name, captured, f"{page} references uncaptured screenshot {name}")
+
+    def test_no_captured_screenshot_is_orphaned(self) -> None:
+        referenced = self.referenced_screenshots()
+
+        for name in sorted(self.captured_screenshots()):
+            self.assertIn(name, referenced, f"{name} is captured but no chapter shows it")
+
+    def test_screenshot_output_directory_matches_the_capture_recipe(self) -> None:
+        # build_book.py stages the images from wherever the recipe told the tool
+        # to write them, so both sides must resolve the same directory.
+        justfile = Path("justfile").read_text()
+
+        self.assertIn('--output "{{ cargo_target_dir }}/docs-screenshots"', justfile)
+        self.assertEqual(SCREENSHOTS_DIR, Path("target/docs-screenshots").resolve())
+
+    def test_screenshots_are_build_output_not_repository_content(self) -> None:
+        self.assertFalse(
+            Path("docs/src/images").exists(),
+            "screenshots are captured into target/ by `just book`, not committed",
+        )
+
+    def test_console_screenshots_are_captured_by_a_standalone_tool(self) -> None:
+        # Documentation artifacts are produced by a build tool driving the real
+        # binaries, not by running a test.
+        justfile = Path("justfile").read_text()
+
+        self.assertIn("node scripts/console-screenshots/capture.mjs", justfile)
+        self.assertNotIn("docs_screenshots.feature", justfile)
+        self.assertFalse(Path("tests/features/web-console/docs_screenshots.feature").exists())
+
+    def test_capture_tool_drives_the_shipped_binaries(self) -> None:
+        capture = Path("scripts/console-screenshots/capture.mjs").read_text()
+
+        self.assertIn("NERVIX_WEB_CONSOLE_LISTEN_ADDR", capture)
+        self.assertIn("/readyz", capture)
+        self.assertNotIn("cargo test", capture)
+
+    def test_building_the_book_recaptures_the_console_screenshots(self) -> None:
+        # A published book must never show an older console than it documents.
+        justfile = Path("justfile").read_text()
+
+        self.assertIn('book version="": test-docs docs-screenshots', justfile)
+
+    def test_book_job_can_build_the_console_and_the_binaries(self) -> None:
+        # The book build embeds the console into nervix-server and renders the
+        # reference chapter from nervix-cli, so it needs the workspace toolchain.
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        _, build_book = workflow.split("\n  build-book:", maxsplit=1)
+
+        self.assertIn("wasm32-unknown-unknown", build_book)
+        self.assertIn("trunk", build_book)
+        self.assertIn("protobuf-compiler", build_book)
+
+    def test_cli_reference_is_a_generated_chapter_under_the_command_line_client(self) -> None:
+        # The file is rendered into the staged source at build time, so it is
+        # listed in SUMMARY.md but deliberately absent from the repository.
+        summary = Path("docs/src/SUMMARY.md").read_text().splitlines()
+
+        self.assertIn("    - [nervix-cli Reference](./nervix-cli-reference.md)", summary)
+        self.assertFalse(Path("docs/src/nervix-cli-reference.md").exists())
+
+    def test_cli_page_points_at_the_generated_reference(self) -> None:
+        page = Path("docs/src/client-tools-cli.md").read_text()
+
+        self.assertIn("(nervix-cli-reference.md)", page)
 
     def test_book_job_installs_locked_python_dependencies_with_uv(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()

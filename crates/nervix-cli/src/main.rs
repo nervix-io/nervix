@@ -35,18 +35,25 @@ const HISTORY_FILE: &str = ".nervix_client_history";
 #[command(name = "nervix-cli")]
 #[command(about = "Interactive Nervix client")]
 struct Args {
+    /// Session gRPC endpoint; an https:// URL connects over TLS
     #[arg(long, default_value = "http://127.0.0.1:47391")]
     server: String,
+    /// Whether TLS is required; `required` refuses a server URL that is not https
     #[arg(long, value_enum, default_value_t = CliTlsRequirement::Preferred)]
     tls: CliTlsRequirement,
+    /// PEM certificate authority used to verify the server certificate
     #[arg(long)]
     tls_ca_cert: Option<PathBuf>,
+    /// Domain the session starts in
     #[arg(long, default_value = "default")]
     domain: String,
+    /// Registry user to authenticate as
     #[arg(long, env = "NERVIX_USERNAME", default_value = "default")]
     username: String,
+    /// Password for the registry user; prompted for interactively when unset
     #[arg(long, env = "NERVIX_PASSWORD")]
     password: Option<String>,
+    /// Run NSPL statements once and exit instead of starting the interactive REPL
     #[arg(long)]
     command: Option<String>,
     #[command(subcommand)]
