@@ -3,7 +3,7 @@
 `RELAY` declares a named connection between Nervix runtime nodes.
 
 ```nspl
-CREATE [IF NOT EXISTS] RELAY notifications
+CREATE IF NOT EXISTS RELAY notifications
   SCHEMA notification
   UNBRANCHED
   CAPACITY 1;
@@ -153,8 +153,9 @@ Expiration semantics:
 Materialized relay state is enabled with:
 
 ```nspl
-CREATE [IF NOT EXISTS] RELAY notifications
+CREATE IF NOT EXISTS RELAY notifications
   SCHEMA notification
+  UNBRANCHED
   WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 ```
 

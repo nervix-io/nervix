@@ -18,7 +18,7 @@ The current top-level surface includes:
 
 Core create statements:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] USER <name> WITH PASSWORD '<password>';
 
 CREATE [IF NOT EXISTS] SCHEMA <name> (<field> <type> [OPTIONAL], ...);
@@ -67,7 +67,7 @@ JAQ-backed codecs require at least one direction. When both are present, `ON ING
 
 Core alter statements:
 
-```nspl
+```nspl,ignore
 ALTER RELAY <name>
   SET CAPACITY <n> |
   SET SCHEMA <schema> |
@@ -224,7 +224,7 @@ Ingestors, relay-consuming processors, and generated-output processors use optio
 arrival filters and route-local construction. Relay-consuming processors may also attach a
 source-level filter to `FROM`:
 
-```nspl
+```nspl,ignore
 FROM <relay> [WHERE <expr>], ...
 [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
 [FILTER WHERE <expr>]
@@ -432,7 +432,7 @@ Generator-specific rules:
 
 Every `TO` route on an ingestor or relay-consuming processor must declare its message error policy after that route's construction clauses:
 
-```nspl
+```nspl,ignore
 ON MESSAGE ERROR IGNORE | LOG | SEND TO error_stream
 SET error_reference = error.reference,
     error_code = error.code,
@@ -442,7 +442,7 @@ SET error_reference = error.reference,
 
 An ingestor additionally declares its node-level general policy after the source configuration:
 
-```nspl
+```nspl,ignore
 ON GENERAL ERROR IGNORE | LOG
 ```
 
@@ -462,7 +462,7 @@ and do not inherit a route-local `FLUSH` policy.
 
 Client definitions are key-value based and may optionally mount a resource for file-backed settings such as TLS material:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] CLIENT <name>
   TYPE <client_type>
   [MOUNT <resource>]
@@ -473,7 +473,7 @@ CREATE [IF NOT EXISTS] CLIENT <name>
 
 WebSocket clients and endpoints may also reference a signaling protocol:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] SIGNALING PROTOCOL <name>
   ON CONNECT
   SEND BODY '<text_body>'[, '<text_body>'...]
@@ -506,7 +506,7 @@ Current built-in client transport kinds include:
 
 Resource management commands:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] RESOURCE <name>;
 UPLOAD RESOURCE <name> VERSION '<local_directory>';
 DESCRIBE RESOURCE <name>;
@@ -515,7 +515,7 @@ DESCRIBE RESOURCE <name> VERSION <n>;
 
 TLS-capable VHOSTs:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] VHOST <name> <hostname>, ...
   [WITH TLS <resource> [VERSION <n>]];
 ```
@@ -524,7 +524,7 @@ If `VERSION <n>` is omitted from `WITH TLS`, the VHOST resolves the latest uploa
 
 Session-only commands:
 
-```nspl
+```nspl,ignore
 CREATE SUBSCRIPTION <name> TO <relay> [BLOCKING|DROPPING] [BATCH SAMPLE RATE <rate>] [WHERE ...];
 DELETE SUBSCRIPTION <name>;
 DESCRIBE RELAY <relay> WHERE (...);
@@ -538,7 +538,7 @@ LOOKUP <hash_map> KEY '<key>';
 
 Show commands:
 
-```nspl
+```nspl,ignore
 SHOW CREATE <kind> <name>;
 SHOW RELAY <name> MATERIALIZED STATE;
 SHOW CLUSTER STATUS;

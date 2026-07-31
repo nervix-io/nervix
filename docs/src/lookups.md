@@ -23,7 +23,7 @@ into an arbitrary-key query service.
 
 The current lookup model is a hash map:
 
-```nspl
+```nspl,ignore
 CREATE [IF NOT EXISTS] HASH MAP <name>
   KEY <field>
   FROM RESOURCE <resource>
@@ -65,7 +65,7 @@ CREATE HASH MAP zip_codes_by_zip
 
 Direct lookup commands are session/control commands:
 
-```nspl
+```nspl,ignore
 DESCRIBE HASH MAP <name>;
 LOOKUP <name> KEY '<key>';
 ```
@@ -74,7 +74,7 @@ LOOKUP <name> KEY '<key>';
 
 Expressions can call `LOOKUP_HASH_MAP`:
 
-```nspl
+```nspl,ignore
 LOOKUP_HASH_MAP("<hash_map>", <key_expr>, "<field>")
 ```
 

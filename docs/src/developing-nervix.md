@@ -175,6 +175,11 @@ For repository-wide validation:
 just validate
 ```
 
+`just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
+the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
+are intentionally not complete NSPL scripts; the fence remains identified as NSPL in the rendered
+documentation.
+
 For test runs:
 
 ```bash

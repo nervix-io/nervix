@@ -11,7 +11,7 @@ exact named branch, or all be unbranched.
 
 Relay inputs may optionally collect incoming Arrow batches before node execution:
 
-```nspl
+```nspl,ignore
 FROM <relay> [WHERE <expr>], ...
 COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]
 ```
@@ -29,13 +29,13 @@ generators are scheduled from materialized state and have no `FROM` relay list.
 
 Branch-preserving processors declare one node-wide contract:
 
-```nspl
+```nspl,ignore
 BRANCHED BY <branch>
 ```
 
 or:
 
-```nspl
+```nspl,ignore
 UNBRANCHED
 ```
 
@@ -57,7 +57,7 @@ Processing order is:
 
 A transforming route starts empty and may use `INHERIT` and ordered `SET`:
 
-```nspl
+```nspl,ignore
 TO projected_notifications
   INHERIT tenant, user_id, amount
   SET amount = amount + 1,
@@ -93,7 +93,7 @@ For mechanism selection, including differently keyed data, see
 
 Normal processors declare ordered node-wide dependencies after their branch declaration:
 
-```nspl
+```nspl,ignore
 USING MATERIALIZED STATE profiles REQUIRED WAIT
 USING MATERIALIZED STATE rules REQUIRED SKIP
 USING MATERIALIZED STATE preferences DEFAULT {
@@ -307,10 +307,10 @@ CREATE INFERENCER score_events
   USING RESOURCE scoring VERSION 1
   FILE "score.onnx"
   INPUTS {
-    features DENSE TENSOR<F32>[2] = input.features
+    "features" DENSE TENSOR<F32>[2] = input.features
   }
   OUTPUT SCHEMA {
-    score DENSE TENSOR<F32>[1]
+    "score" DENSE TENSOR<F32>[1]
   }
   BRANCHED BY by_tenant
   TO scores
@@ -470,7 +470,7 @@ deadline expiry backstop, so a failed control-plane operation cannot leave gener
 `ON MESSAGE ERROR` terminates each route. `SEND TO` constructs an error relay record with ordered
 `SET` assignments:
 
-```nspl
+```nspl,ignore
 ON MESSAGE ERROR SEND TO processing_errors
 SET error_reference = error.reference,
     error_code = error.code,
