@@ -2902,6 +2902,114 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
     );
 }
 
+#[tokio::test]
+async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
+    let runtime = super::Runtime::default();
+    *runtime.local_node_id.write() = Some("node-1".to_string());
+    let domain = domain("default");
+    let event_schema = identifier("event");
+    let processor = identifier("deduplicate_events");
+    let schedule = DomainSchedule {
+        domain: domain.clone(),
+        nodes: vec![
+            scheduled_model(
+                ModelKind::Schema,
+                event_schema.clone(),
+                nervix_models::Model::Schema(CreateSchema {
+                    name: event_schema.clone(),
+                    fields: vec![SchemaField {
+                        name: identifier("event_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                }),
+            ),
+            scheduled_model(
+                ModelKind::Relay,
+                identifier("events"),
+                nervix_models::Model::Relay(CreateRelay {
+                    name: identifier("events"),
+                    schema: event_schema.clone(),
+                    buffer: 2,
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+            ),
+            scheduled_model(
+                ModelKind::Relay,
+                identifier("unique_events"),
+                nervix_models::Model::Relay(CreateRelay {
+                    name: identifier("unique_events"),
+                    schema: event_schema,
+                    buffer: 2,
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+            ),
+            scheduled_model(
+                ModelKind::Deduplicator,
+                processor.clone(),
+                nervix_models::Model::Deduplicator(CreateDeduplicator {
+                    name: processor.clone(),
+                    from: ProcessorInputs::single(identifier("events")),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(identifier(
+                        "unique_events",
+                    )))
+                    .with_flush_policy("100ms".to_string(), Some("1MiB".to_string())),
+                    branched_by: BranchSelection::unbranched(),
+                    deduplicate_on: vec![expression("input.event_id")],
+                    max_time: "10m".to_string(),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                }),
+            ),
+        ],
+    };
+
+    runtime
+        .rebuild_domain_from_schedule("node-1", &domain, Some(schedule.clone()), true)
+        .await
+        .expect("scheduled deduplicator must build");
+
+    let mut desired = schedule;
+    let processor_node = desired
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == ModelKind::Deduplicator)
+        .expect("schedule must contain the processor");
+    processor_node.schema_fingerprint = [7; 32];
+    let nervix_models::Model::Deduplicator(config) = processor_node.config.as_mut() else {
+        panic!("scheduled processor must contain a deduplicator model");
+    };
+    config.mode = AckMode::Detached;
+    let entity = crate::registry::RegistryEntity {
+        kind: ModelKind::Deduplicator,
+        identifier: processor.clone(),
+    };
+
+    runtime
+        .swap_scheduled_nodes(&domain, desired, &[entity], &[])
+        .await
+        .expect("entity swap must apply");
+
+    let installed = runtime
+        .state_schema_fingerprints
+        .get(&super::RuntimeStateSchemaKey::new(
+            domain,
+            ModelKind::Deduplicator,
+            processor,
+        ))
+        .map(|entry| *entry.value());
+    assert_eq!(
+        installed,
+        Some([7; 32]),
+        "an entity swap must reinstall the schedule's state schema fingerprints so persisted \
+         runtime state is not stranded under the pre-swap fingerprint"
+    );
+}
+
 #[test]
 fn processor_template_refresh_is_not_junction_specific() {
     let runtime = super::Runtime::default();

@@ -1022,6 +1022,7 @@ pub struct WasmBranchInstance {
     init: TypedFunc<(i32, i32), i32>,
     process_batch: TypedFunc<(i32, i32), i32>,
     on_timeout: TypedFunc<i64, i32>,
+    flush: TypedFunc<(), i32>,
     dump_state: TypedFunc<(), i32>,
     load_state: TypedFunc<(i32, i32), i32>,
     reset_state: TypedFunc<(), i32>,
@@ -1059,6 +1060,7 @@ impl WasmBranchInstance {
             init: typed_export(&mut store, &instance, "nervix_init")?,
             process_batch: typed_export(&mut store, &instance, "nervix_process_batch")?,
             on_timeout: typed_export(&mut store, &instance, "nervix_on_timeout")?,
+            flush: typed_export(&mut store, &instance, "nervix_flush")?,
             dump_state: typed_export(&mut store, &instance, "nervix_dump_state")?,
             load_state: typed_export(&mut store, &instance, "nervix_load_state")?,
             reset_state: typed_export(&mut store, &instance, "nervix_reset_state")?,
@@ -1172,6 +1174,30 @@ impl WasmBranchInstance {
         if let Some(reason) = self.take_global_error().await? {
             return Err(WasmProcessorError::GuestGlobalError(reason));
         }
+        self.read_pending_emit().await
+    }
+
+    /// Asks the guest to release everything it is holding because the host is quiescing this
+    /// branch. Returns the output envelopes the guest emitted, which the caller must dispatch
+    /// before snapshotting so a handoff neither loses nor duplicates them.
+    pub async fn flush(&mut self) -> Result<Vec<WasmEnvelope>, WasmProcessorError> {
+        let call_result = self.flush.call_async(&mut self.store, ()).await;
+        let code = match call_result {
+            Ok(code) => code,
+            Err(source) => {
+                if let Some(reason) = self.take_global_error().await? {
+                    return Err(WasmProcessorError::GuestGlobalError(reason));
+                }
+                return Err(WasmProcessorError::Call {
+                    name: "nervix_flush",
+                    source,
+                });
+            }
+        };
+        if let Some(reason) = self.take_global_error().await? {
+            return Err(WasmProcessorError::GuestGlobalError(reason));
+        }
+        ensure_success("nervix_flush", code)?;
         self.read_pending_emit().await
     }
 
@@ -1623,6 +1649,9 @@ mod tests {
                 global.set $last_timeout
                 i32.const 0)
 
+            (func (export "nervix_flush") (result i32)
+                i32.const 0)
+
             (func (export "nervix_read_emit") (result i32)
                 global.get $emit_len
                 global.set $buffer_len
@@ -1720,6 +1749,9 @@ mod tests {
                 i32.const 0)
 
             (func (export "nervix_on_timeout") (param $handle i64) (result i32)
+                i32.const 0)
+
+            (func (export "nervix_flush") (result i32)
                 i32.const 0)
 
             (func (export "nervix_read_emit") (result i32)
@@ -2149,6 +2181,7 @@ mod tests {
                 (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
                 (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_flush") (result i32) i32.const 0)
                 (func (export "nervix_read_emit") (result i32) i32.const 0)
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const -1)
@@ -2179,6 +2212,14 @@ mod tests {
     }
 
     fn return_code_wasm(process_code: i32, timeout_code: i32) -> String {
+        return_code_wasm_with_flush(process_code, timeout_code, 0)
+    }
+
+    fn return_code_wasm_with_flush(
+        process_code: i32,
+        timeout_code: i32,
+        flush_code: i32,
+    ) -> String {
         format!(
             r#"
             (module
@@ -2189,6 +2230,7 @@ mod tests {
                 (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
                 (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const {process_code})
                 (func (export "nervix_on_timeout") (param i64) (result i32) i32.const {timeout_code})
+                (func (export "nervix_flush") (result i32) i32.const {flush_code})
                 (func (export "nervix_read_emit") (result i32) i32.const 0)
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
@@ -2295,6 +2337,224 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flush_negative_guest_code_is_reported() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(return_code_wasm_with_flush(0, 0, -6).as_bytes())
+            .await
+            .expect("module should compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                None,
+            )
+            .await
+            .expect("guest branch should instantiate");
+
+        let error = branch
+            .flush()
+            .await
+            .expect_err("a guest that refuses to quiesce must be reported, not ignored");
+
+        match error {
+            WasmProcessorError::GuestError { name, code } => {
+                assert_eq!(name, "nervix_flush");
+                assert_eq!(code, -6);
+            }
+            other => panic!("expected flush guest error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_never_buffers_stays_usable_across_a_quiesce_flush() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(return_code_wasm(0, 0).as_bytes())
+            .await
+            .expect("module should compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                None,
+            )
+            .await
+            .expect("guest branch should instantiate");
+
+        assert!(
+            branch
+                .flush()
+                .await
+                .expect("a guest that holds nothing must accept the quiesce flush")
+                .is_empty()
+        );
+        branch
+            .process_batch(b"after")
+            .await
+            .expect("the branch must keep processing after a quiesce flush that emitted nothing");
+    }
+
+    #[tokio::test]
+    async fn flush_trap_is_reported_as_a_call_failure() {
+        let wasm = r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
+                (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+                (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_flush") (result i32) unreachable)
+                (func (export "nervix_read_emit") (result i32) i32.const 0)
+                (func (export "nervix_dump_state") (result i32) i32.const 0)
+                (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_reset_state") (result i32) i32.const 0)
+            )
+        "#;
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(wasm.as_bytes())
+            .await
+            .expect("module should compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                None,
+            )
+            .await
+            .expect("guest branch should instantiate");
+
+        let error = branch
+            .flush()
+            .await
+            .expect_err("a trapping quiesce flush must surface as a call failure");
+
+        match error {
+            WasmProcessorError::Call { name, .. } => assert_eq!(name, "nervix_flush"),
+            other => panic!("expected flush call error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_global_error_raised_while_flushing_is_reported() {
+        let wasm = r#"
+            (module
+                (memory (export "memory") 1)
+                (data (i32.const 2048) "flush refused")
+                (global $err_len (mut i32) (i32.const 0))
+                (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
+                (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+                (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_flush") (result i32)
+                    i32.const 13
+                    global.set $err_len
+                    i32.const 0)
+                (func (export "nervix_read_emit") (result i32) i32.const 0)
+                (func (export "nervix_dump_state") (result i32) i32.const 0)
+                (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_global_error_ptr") (result i32) i32.const 2048)
+                (func (export "nervix_global_error_len") (result i32) global.get $err_len)
+                (func (export "nervix_clear_global_error") (result i32)
+                    i32.const 0
+                    global.set $err_len
+                    i32.const 0)
+            )
+        "#;
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(wasm.as_bytes())
+            .await
+            .expect("module should compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                None,
+            )
+            .await
+            .expect("guest branch should instantiate");
+
+        let error = branch.flush().await.expect_err(
+            "a guest that reports a global error while quiescing must not look drained",
+        );
+
+        match error {
+            WasmProcessorError::GuestGlobalError(reason) => assert_eq!(reason, "flush refused"),
+            other => panic!("expected flush global error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn flushing_a_guest_that_holds_nothing_yields_no_output() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&rust_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+
+        assert!(
+            branch
+                .flush()
+                .await
+                .expect("quiescing a guest that never received input must succeed")
+                .is_empty(),
+            "a branch gated before its first batch has nothing to release"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_without_the_flush_export_cannot_instantiate() {
+        let wasm = r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
+                (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+                (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_read_emit") (result i32) i32.const 0)
+                (func (export "nervix_dump_state") (result i32) i32.const 0)
+                (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_reset_state") (result i32) i32.const 0)
+            )
+        "#;
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(wasm.as_bytes())
+            .await
+            .expect("module should compile");
+        let error = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(0))),
+                None,
+            )
+            .await
+            .expect_err("a guest that cannot be quiesced must be rejected at instantiation");
+
+        match error {
+            WasmProcessorError::MissingExport(name) => assert_eq!(name, "nervix_flush"),
+            other => panic!("expected missing flush export, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn missing_required_export_is_reported() {
         let wasm = r#"
             (module
@@ -2305,6 +2565,7 @@ mod tests {
                 (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
                 (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_flush") (result i32) i32.const 0)
                 (func (export "nervix_dump_state") (result i32) i32.const 0)
                 (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
                 (func (export "nervix_reset_state") (result i32) i32.const 0)
@@ -2556,6 +2817,265 @@ mod tests {
         assert_eq!(reader.schema().fields().len(), 1);
         assert!(reader.schema().field(0).name().is_empty());
         assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn quiesce_flush_releases_the_batch_the_guest_still_buffers() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&rust_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        let buffered = WasmEnvelope::input(
+            sample_arrow_ipc(&[2]),
+            WasmAckSidecar {
+                rows: vec![output_row(10)],
+                ..WasmAckSidecar::default()
+            },
+        );
+
+        assert!(
+            branch
+                .process_envelope(&buffered)
+                .await
+                .expect("input must process")
+                .is_empty(),
+            "the guest buffers this batch instead of emitting it"
+        );
+
+        let flushed = branch
+            .flush()
+            .await
+            .expect("quiesce flush must reach the guest");
+        assert_eq!(
+            flushed.len(),
+            1,
+            "a quiescing host must be able to make the guest release what it holds"
+        );
+        assert!(
+            branch
+                .flush()
+                .await
+                .expect("a second quiesce flush must succeed")
+                .is_empty(),
+            "a drained guest must not re-emit on the next flush"
+        );
+    }
+
+    /// Drives the exact sequence an `ENTITY_PAUSE` handoff performs: gate, flush, snapshot,
+    /// restore. Both halves of the assertion matter — the snapshot must not carry the batch the
+    /// flush already emitted, and skipping the flush must leave it in the snapshot, which is what
+    /// makes the flush call load-bearing rather than decorative.
+    #[tokio::test]
+    async fn a_quiesce_flush_drains_the_guest_before_its_handoff_snapshot() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&rust_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let buffered = WasmEnvelope::input(
+            sample_arrow_ipc(&[2]),
+            WasmAckSidecar {
+                rows: vec![output_row(10)],
+                ..WasmAckSidecar::default()
+            },
+        );
+        let follow_up = WasmEnvelope::input(
+            sample_arrow_ipc(&[4]),
+            WasmAckSidecar {
+                rows: vec![output_row(20)],
+                ..WasmAckSidecar::default()
+            },
+        );
+
+        let mut flushed_branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        flushed_branch
+            .process_envelope(&buffered)
+            .await
+            .expect("input must process");
+        assert_eq!(
+            flushed_branch
+                .flush()
+                .await
+                .expect("quiesce flush must reach the guest")
+                .len(),
+            1,
+            "the flush releases the buffered batch"
+        );
+        let drained_snapshot = flushed_branch
+            .save_state()
+            .await
+            .expect("a flushed guest must still snapshot");
+
+        let mut stranded_branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        stranded_branch
+            .process_envelope(&buffered)
+            .await
+            .expect("input must process");
+        let stranded_snapshot = stranded_branch
+            .save_state()
+            .await
+            .expect("an unflushed guest must snapshot");
+
+        let mut resumed = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(2_345))),
+                Some(&drained_snapshot),
+            )
+            .await
+            .expect("the replacement must restore the drained snapshot");
+        assert_eq!(
+            resumed
+                .process_envelope(&follow_up)
+                .await
+                .expect("the replacement must accept new input")
+                .len(),
+            1,
+            "a replacement restored from a drained snapshot emits only the batch it just \
+             received, never the one the flush already released"
+        );
+
+        let mut resumed_without_flush = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(2_345))),
+                Some(&stranded_snapshot),
+            )
+            .await
+            .expect("the replacement must restore the unflushed snapshot");
+        assert_eq!(
+            resumed_without_flush
+                .process_envelope(&follow_up)
+                .await
+                .expect("the replacement must accept new input")
+                .len(),
+            2,
+            "without the flush the buffered batch rides through the snapshot and only surfaces \
+             once later input happens to arrive, which is exactly what the quiesce contract \
+             exists to avoid"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timeout_after_a_quiesce_flush_emits_nothing() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&rust_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+        branch
+            .process_envelope(&WasmEnvelope::input(
+                sample_arrow_ipc(&[2]),
+                WasmAckSidecar {
+                    rows: vec![output_row(10)],
+                    ..WasmAckSidecar::default()
+                },
+            ))
+            .await
+            .expect("input must process");
+
+        assert_eq!(
+            branch
+                .flush()
+                .await
+                .expect("quiesce flush must reach the guest")
+                .len(),
+            1
+        );
+        let timeout = branch
+            .timeout_requests()
+            .first()
+            .map(|request| request.handle)
+            .expect("the guest requests a flush timeout while processing");
+        assert!(
+            branch
+                .on_timeout(timeout)
+                .await
+                .expect("the guest timeout must still run after a flush")
+                .is_empty(),
+            "a timeout that fires after the host already drained the guest must not duplicate the \
+             flushed output"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_go_guest_releases_its_buffered_batch_on_quiesce_flush() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(read_guest(&go_guest_path()))
+            .await
+            .expect("guest module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                init(),
+                Box::new(FixedDomainClock::new(Timestamp::from_unix_nanos(1_234))),
+                None,
+            )
+            .await
+            .expect("guest branch must instantiate");
+
+        assert!(
+            branch
+                .process_envelope(&WasmEnvelope::input(
+                    sample_arrow_ipc(&[2]),
+                    WasmAckSidecar {
+                        rows: vec![output_row(10)],
+                        ..WasmAckSidecar::default()
+                    },
+                ))
+                .await
+                .expect("input must process")
+                .is_empty(),
+            "the Go guest buffers this batch instead of emitting it"
+        );
+        assert_eq!(
+            branch
+                .flush()
+                .await
+                .expect("quiesce flush must reach the Go guest")
+                .len(),
+            1,
+            "every guest language implements the same quiesce contract"
+        );
+        assert!(
+            branch
+                .flush()
+                .await
+                .expect("a second quiesce flush must succeed")
+                .is_empty(),
+            "a drained Go guest must not re-emit on the next flush"
+        );
     }
 
     #[tokio::test]

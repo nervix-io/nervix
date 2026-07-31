@@ -259,6 +259,20 @@ func nervixOnTimeout(handle int64) int32 {
 	})
 }
 
+// nervix_flush releases everything the guest still buffers because the host is quiescing this
+// branch. Anything not emitted here stays unacknowledged until the branch resumes.
+//
+//export nervix_flush
+func nervixFlush() int32 {
+	return guardedExport(func() int32 {
+		if len(pendingBatch) == 0 {
+			return success
+		}
+		pendingEmit = pendingEmit[:0]
+		return flushPending()
+	})
+}
+
 //export nervix_read_emit
 func nervixReadEmit() int32 {
 	return guardedExport(func() int32 {

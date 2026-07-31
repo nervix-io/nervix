@@ -316,3 +316,88 @@ Feature: Altering schemas on a running domain
       | cluster_size |
       | 1            |
       | 3            |
+
+  @alter_publish_failure_rollback
+  Scenario Outline: A failed schedule publication rolls the committed models back
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA rollback_event ( seq I64 );
+
+      CREATE WIRE JSON SCHEMA rollback_event_wire MODE STRICT ( seq integer );
+
+      CREATE CODEC rollback_event_codec
+        FROM WIRE JSON SCHEMA rollback_event_wire
+        TO SCHEMA rollback_event;
+
+      CREATE RELAY rollback_events SCHEMA rollback_event UNBRANCHED CAPACITY 3;
+
+      CREATE CLIENT rollback_sink
+        TYPE ZEROMQ
+        CONFIG {
+          'addr' = '{{zeromq_emit_addr}}',
+          'bind' = 'false'
+        };
+
+      CREATE VHOST rollback_edge http-{{test_id}}-rollback.example.com;
+      CREATE ENDPOINT rollback_ingress ON rollback_edge PATH '/alter-rollback' TYPE HTTP;
+
+      CREATE INGESTOR rollback_source
+        FROM ENDPOINT rollback_ingress MODE NO_ACK SEQUENTIAL
+        DECODE USING rollback_event_codec
+        TO rollback_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE EMITTER rollback_out
+        FROM rollback_events
+        TO ZEROMQ rollback_sink ENCODE USING rollback_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-rollback.example.com" path "/alter-rollback"
+      """
+      {"seq":1}
+      """
+    Then the observed broker receives a payload
+      """
+      "seq":1
+      """
+    When the next schedule publication for domain "{{domain}}" fails
+    And these NSPL commands fail with "failed to publish schedule for domain"
+      """
+      ALTER RELAY rollback_events SET CAPACITY 7;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE RELAY rollback_events;
+      """
+    Then the last command output contains
+      """
+      CAPACITY 3
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-rollback.example.com" path "/alter-rollback"
+      """
+      {"seq":2}
+      """
+    Then the observed broker receives a payload
+      """
+      "seq":2
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

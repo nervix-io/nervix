@@ -29,6 +29,7 @@ The guest imports these functions from the `env` module:
 | `nervix_current_domain_time_nanos` | `() -> i64` | Returns the current domain-clock time by calling the host import. |
 | `nervix_process_batch` | `(ptr: i32, size: i32) -> i32` | Processes the exact batch-envelope range in the guest buffer. Prototype behavior filters the input batch before emitting a new batch envelope. |
 | `nervix_on_timeout` | `(handle: i64) -> i32` | Host callback when a previously requested timeout fires. |
+| `nervix_flush` | `() -> i32` | Host request to release everything the guest still buffers because the branch is being quiesced for a handoff or shutdown. Queue every buffered output envelope for `nervix_read_emit`. Input the guest keeps past this call stays unacknowledged until the branch resumes. |
 | `nervix_read_emit` | `() -> i32` | If the guest has a pending outgoing batch envelope, writes the next envelope into the reusable buffer, removes it from the pending emit queue, and returns the byte size. Returns `0` when nothing is pending. |
 | `nervix_dump_state` | `() -> i32` | Serializes guest state into the reusable buffer and returns the byte size. |
 | `nervix_load_state` | `(ptr: i32, size: i32) -> i32` | Loads previously dumped guest state bytes. Returns a negative value on rejection. |

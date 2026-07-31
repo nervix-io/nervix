@@ -77,24 +77,41 @@ that produced it. The batch uses the highest level contributed by any changed en
   the published schedule. Reingestor alterations replace their relay consumers and
   branch-entrypoint wiring; generator alterations quiesce and replace their timed task after
   flushing pending route output.
+  Correlator, window-processor, inferencer, and WASM-processor structural changes use this level
+  as well. A WASM processor participates like every other stateful node: the host gates its input
+  relays, asks the guest to release what it buffers, snapshots it, and restores that snapshot into
+  the replacement instance.
 - `DOMAIN_PAUSE` changes stop ingestion and generators across the domain and fully drain attached
   work before commit. Relay schema or branching changes and schema or wire-schema definition
   changes use this level. Changing the membership of an emitter's `FROM` relay list also uses this
-  level because it changes graph topology.
+  level because it changes graph topology. Configuration entities use this level too: codec,
+  client, endpoint, signaling-protocol, hash-map, and UDF definitions, vhost hostnames and TLS
+  bindings, and branch schema, TTL, and eviction settings. Their consumers read that configuration
+  when they are built, so the domain rebuilds around the new models rather than reconfiguring in
+  place.
+
+An entity-paused change also gates everything downstream of it in the dataflow graph, not only the
+models the batch names, so a dependent node cannot observe a half-applied change through its input
+relay.
 
 Entity holds are transient and deadline-bound. A relay gate self-releases if the leader disappears;
 an ingestor hold restarts the old source when it expires. Schedule application re-engages a local
 relay gate before an affected node swaps itself. Sibling consumers of a gated relay can therefore
 see bounded backpressure for at most the gate deadline, but unrelated relays and nodes continue
 flowing. Pending `REQUIRED WAIT` materialized records are carried through a node handoff rather than
-treated as drainable work.
+treated as drainable work. A node that joins the cluster while an entity hold is engaged is not
+covered by that hold; it re-engages its own local relay gate when it applies the new schedule, and
+the hold's deadline bounds the window.
 
 An unchanged candidate contributes no aspect. An all-no-op batch therefore performs no storage
 write or schedule publication and reports `DYNAMIC`, even when the running domain has work that
 could not currently drain. A `DROP` followed by `CREATE` of the same key in one batch is compared as
 one modification, so recreating a relay with a different schema cannot bypass domain quiescing.
-The first mutated statement's result includes the executed quiesce level. If a model kind cannot
-yet satisfy its classified mechanism, Nervix may execute at a higher level and names that
-escalation in the result; it never executes below the classified level.
+The first mutated statement's result includes the quiesce level the batch executed. Nervix always
+executes exactly the classified level.
+
+Persistence and schedule publication are separate steps, so a batch that commits its models but
+fails to publish the resulting schedule restores the previous models and republishes the previous
+schedule at every quiesce level. A domain-paused batch additionally resumes the domain.
 
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.

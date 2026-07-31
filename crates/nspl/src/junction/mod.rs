@@ -1,16 +1,13 @@
 use chumsky::prelude::*;
-use nervix_models::{
-    AckMode, AlterJunction, AlterJunctionOperation, CreateJunction, CreateStatement,
-};
+use nervix_models::{AckMode, AlterJunction, CreateJunction, CreateStatement};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ParseFromSourceError, ack_mode, alter_flushed_route_body, alter_op_separator,
-        branch_selection, collect_for, filter_where_clause, flushed_processor_outputs,
-        from_relay_clauses, if_not_exists_clause, into_parse_error, junction_name, junction_ref,
-        kw, lex_input, materialized_state_dependencies, materialized_state_policy, relay_ref,
-        suggest_from, tok, where_expression,
+        ParseError, ParseFromSourceError, ack_mode, alter_op_separator, alter_processor_operation,
+        branch_selection, filter_where_clause, flushed_processor_outputs, from_relay_clauses,
+        if_not_exists_clause, into_parse_error, junction_name, junction_ref, kw, lex_input,
+        materialized_state_dependencies, suggest_from, tok,
     },
 };
 
@@ -57,116 +54,11 @@ pub fn create_junction_parser<'src>()
 
 pub fn alter_junction_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterJunction, extra::Err<ParseError<'src>>> + Clone {
-    let add_from = kw(Identifier::Add)
-        .ignore_then(kw(Identifier::From))
-        .ignore_then(relay_ref())
-        .then(where_expression(alter_op_separator()).or_not())
-        .map(|(relay, where_clause)| AlterJunctionOperation::AddFrom {
-            relay,
-            where_clause,
-        });
-    let drop_from = kw(Identifier::Drop)
-        .ignore_then(kw(Identifier::From))
-        .ignore_then(relay_ref())
-        .map(|relay| AlterJunctionOperation::DropFrom { relay });
-    let alter_from = kw(Identifier::Alter)
-        .ignore_then(kw(Identifier::From))
-        .ignore_then(relay_ref())
-        .then(choice((
-            kw(Identifier::Set)
-                .ignore_then(where_expression(alter_op_separator()))
-                .map(Some),
-            kw(Identifier::Drop)
-                .ignore_then(kw(Identifier::Where))
-                .to(None),
-        )))
-        .map(|(relay, where_clause)| match where_clause {
-            Some(where_clause) => AlterJunctionOperation::AlterFromSetWhere {
-                relay,
-                where_clause,
-            },
-            None => AlterJunctionOperation::AlterFromDropWhere { relay },
-        });
-    let set_collect = kw(Identifier::Set)
-        .ignore_then(collect_for())
-        .map(|policy| AlterJunctionOperation::SetCollect { policy });
-    let drop_collect = kw(Identifier::Drop)
-        .ignore_then(kw(Identifier::Collect))
-        .to(AlterJunctionOperation::DropCollect);
-    let set_filter = kw(Identifier::Set)
-        .ignore_then(kw(Identifier::Filter))
-        .ignore_then(where_expression(alter_op_separator()))
-        .map(|where_clause| AlterJunctionOperation::SetFilterWhere { where_clause });
-    let drop_filter = kw(Identifier::Drop)
-        .ignore_then(kw(Identifier::Filter))
-        .ignore_then(kw(Identifier::Where))
-        .to(AlterJunctionOperation::DropFilterWhere);
-    let set_mode = kw(Identifier::Set)
-        .ignore_then(ack_mode())
-        .map(|mode| AlterJunctionOperation::SetMode { mode });
-    let set_branching = kw(Identifier::Set)
-        .ignore_then(branch_selection())
-        .map(|branching| AlterJunctionOperation::SetBranching { branching });
-    let add_materialized = kw(Identifier::Add)
-        .ignore_then(kw(Identifier::Materialized))
-        .ignore_then(kw(Identifier::State))
-        .ignore_then(relay_ref())
-        .then(materialized_state_policy())
-        .map(
-            |(relay, policy)| AlterJunctionOperation::AddMaterializedState {
-                dependency: nervix_models::MaterializedStateDependency { relay, policy },
-            },
-        );
-    let drop_materialized = kw(Identifier::Drop)
-        .ignore_then(kw(Identifier::Materialized))
-        .ignore_then(kw(Identifier::State))
-        .ignore_then(relay_ref())
-        .map(|relay| AlterJunctionOperation::DropMaterializedState { relay });
-    let alter_materialized = kw(Identifier::Alter)
-        .ignore_then(kw(Identifier::Materialized))
-        .ignore_then(kw(Identifier::State))
-        .ignore_then(relay_ref())
-        .then_ignore(kw(Identifier::Set))
-        .then(materialized_state_policy())
-        .map(|(relay, policy)| AlterJunctionOperation::AlterMaterializedState { relay, policy });
-    let add_route = kw(Identifier::Add)
-        .ignore_then(kw(Identifier::Route))
-        .ignore_then(alter_flushed_route_body())
-        .map(|route| AlterJunctionOperation::AddRoute { route });
-    let drop_route = kw(Identifier::Drop)
-        .ignore_then(kw(Identifier::Route))
-        .ignore_then(kw(Identifier::To))
-        .ignore_then(relay_ref())
-        .map(|relay| AlterJunctionOperation::DropRoute { relay });
-    let replace_route = kw(Identifier::Replace)
-        .ignore_then(kw(Identifier::Route))
-        .ignore_then(alter_flushed_route_body())
-        .map(|route| AlterJunctionOperation::ReplaceRoute { route });
-
-    let operation = choice((
-        add_from,
-        drop_from,
-        alter_from,
-        set_collect,
-        drop_collect,
-        set_filter,
-        drop_filter,
-        set_mode,
-        set_branching,
-        add_materialized,
-        drop_materialized,
-        alter_materialized,
-        add_route,
-        drop_route,
-        replace_route,
-    ))
-    .boxed();
-
     kw(Identifier::Alter)
         .ignore_then(kw(Identifier::Junction))
         .ignore_then(junction_ref())
         .then(
-            operation
+            alter_processor_operation()
                 .separated_by(alter_op_separator())
                 .at_least(1)
                 .collect::<Vec<_>>(),
@@ -227,6 +119,8 @@ pub fn suggest_alter_junction(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::AlterProcessorOperation;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -278,15 +172,15 @@ mod tests {
         assert_eq!(parsed.operations.len(), 3);
         assert!(matches!(
             parsed.operations[0],
-            AlterJunctionOperation::SetFilterWhere { .. }
+            AlterProcessorOperation::SetFilterWhere { .. }
         ));
         assert!(matches!(
             parsed.operations[1],
-            AlterJunctionOperation::AddRoute { .. }
+            AlterProcessorOperation::AddRoute { .. }
         ));
         assert_eq!(
             parsed.operations[2],
-            AlterJunctionOperation::SetMode {
+            AlterProcessorOperation::SetMode {
                 mode: AckMode::Detached
             }
         );

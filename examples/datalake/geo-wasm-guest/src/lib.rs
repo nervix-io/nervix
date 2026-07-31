@@ -396,6 +396,13 @@ pub extern "C" fn nervix_on_timeout(_handle: i64) -> i32 {
     SUCCESS
 }
 
+/// This guest enriches each batch as it arrives and never holds one back, so a quiescing host has
+/// nothing to collect from it.
+#[unsafe(no_mangle)]
+pub extern "C" fn nervix_flush() -> i32 {
+    SUCCESS
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nervix_read_emit() -> i32 {
     STATE.guarded_export(|state| {

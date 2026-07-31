@@ -64,7 +64,7 @@ Produce orders with amounts `500`, `2500`, and `25000` on the Kafka topic (the j
 Kafka-fed `orders` relay). The `500` order is filtered out by the route `WHERE`; the others arrive
 with `"tier":"high"` and `"tier":"vip"`.
 
-Lifecycle notes: there is no `ALTER UDF` — changing the body means `DROP UDF amount_band;` and
+Lifecycle notes: changing the body means `DROP UDF amount_band;` and
 recreating it, and the drop is rejected while any node still references the function
 ([Introspection And Lifecycle](udfs.md#introspection-and-lifecycle)). For where UDFs sit between
 builtins and WASM processors, see
